@@ -2,10 +2,12 @@ import 'dart:async';
 import 'dart:io';
 import 'package:drift/drift.dart' show Value;
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import '../database/database.dart';
 import 'ytdlp_service.dart';
 import 'log_service.dart';
 import 'metadata_service.dart';
+import 'notification_service.dart';
 
 class DownloadProgress {
   final int playlistId;
@@ -38,6 +40,7 @@ class DownloadService {
   final YtDlpService _ytdlp;
   final LogService _log;
   final MetadataService _metadata;
+  final DownloadNotificationService? _notifications;
 
   final _progressController =
       StreamController<DownloadProgress>.broadcast();
@@ -47,7 +50,25 @@ class DownloadService {
   bool _isDownloading = false;
   bool get isDownloading => _isDownloading;
 
-  DownloadService(this._db, this._ytdlp, this._log, this._metadata);
+  DownloadService(this._db, this._ytdlp, this._log, this._metadata,
+      [this._notifications]);
+
+  static Future<bool> acquireLock() async {
+    final dir = await getApplicationDocumentsDirectory();
+    final lockFile = File('${dir.path}/download.lock');
+    if (lockFile.existsSync()) {
+      final modified = lockFile.lastModifiedSync();
+      if (DateTime.now().difference(modified).inHours < 1) return false;
+    }
+    lockFile.writeAsStringSync(DateTime.now().toIso8601String());
+    return true;
+  }
+
+  static Future<void> releaseLock() async {
+    final dir = await getApplicationDocumentsDirectory();
+    final lockFile = File('${dir.path}/download.lock');
+    if (lockFile.existsSync()) lockFile.deleteSync();
+  }
 
   Future<void> downloadPlaylist(Playlist playlist) async {
     if (_isDownloading) return;
@@ -84,6 +105,12 @@ class DownloadService {
           trackProgress: progress,
           status: 'downloading',
         ));
+        _notifications?.showDownloadProgress(
+          playlistName: playlist.name,
+          currentTrack: downloadedSoFar + 1,
+          totalTracks: totalTracks,
+          progressPercent: progress.round(),
+        );
       }
     });
 
@@ -104,7 +131,7 @@ class DownloadService {
 
         final indexStr = track.index.toString().padLeft(3, '0');
         final outputTemplate =
-            '${playlist.outputPath}/$indexStr - %(title)s.%(ext)s';
+            '${playlist.outputPath}/${indexStr}_%(title)s.%(ext)s';
 
         try {
           final videoUrl =
@@ -120,10 +147,10 @@ class DownloadService {
 
           // Resolve actual file path (yt-dlp adds extension)
           final actualPath = _resolveDownloadedFile(
-              playlist.outputPath, '$indexStr - ${track.title}');
+              playlist.outputPath, '${indexStr}_');
           await _db.updateTrackStatus(track.id, 'complete',
               filePath: actualPath ??
-                  '${playlist.outputPath}/$indexStr - ${track.title}');
+                  '${playlist.outputPath}/${indexStr}_${track.title}');
           _log.info('[$trackNum/$totalTracks] Downloaded: ${track.title}');
 
           _progressController.add(DownloadProgress(
@@ -163,9 +190,11 @@ class DownloadService {
       ));
 
       await _writeMetadataForPlaylist(playlist.id);
+      await _notifications?.showDownloadComplete(playlist.name);
     } catch (e) {
       _log.error('Playlist download failed: $e');
       await _writeMetadataForPlaylist(playlist.id);
+      await _notifications?.cancel();
       _progressController.add(DownloadProgress(
         playlistId: playlist.id,
         currentTrackIndex: 0,
@@ -181,14 +210,23 @@ class DownloadService {
     }
   }
 
-  /// Find the actual downloaded file (with extension) matching a base name
-  String? _resolveDownloadedFile(String dirPath, String baseName) {
+  /// Find the actual downloaded file (with extension) matching an index prefix
+  String? _resolveDownloadedFile(String dirPath, String indexPrefix) {
     final dir = Directory(dirPath);
     if (!dir.existsSync()) return null;
+
+    const mediaExtensions = {
+      '.m4a', '.mp3', '.opus', '.ogg', '.flac', '.wav',
+      '.mp4', '.mkv', '.webm', '.avi', '.mov',
+    };
+
     for (final entity in dir.listSync()) {
-      if (entity is File &&
-          p.basenameWithoutExtension(entity.path) == baseName) {
-        return entity.path;
+      if (entity is File) {
+        final fileName = p.basename(entity.path);
+        final ext = p.extension(entity.path).toLowerCase();
+        if (fileName.startsWith(indexPrefix) && mediaExtensions.contains(ext)) {
+          return entity.path;
+        }
       }
     }
     return null;

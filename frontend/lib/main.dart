@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:audio_service/audio_service.dart';
@@ -12,6 +13,14 @@ import 'widgets/mini_player.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
+
+  // Schedule background auto-update via native WorkManager
+  const backgroundChannel = MethodChannel('com.woolytube/background');
+  try {
+    await backgroundChannel.invokeMethod('scheduleAutoUpdate');
+  } catch (_) {
+    // Non-critical — don't block app startup
+  }
 
   final playbackService = PlaybackService();
   WoolyTubeAudioHandler? audioHandler;

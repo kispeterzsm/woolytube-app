@@ -135,6 +135,24 @@ class AppDatabase extends _$AppDatabase {
     final result = await query.getSingle();
     return result.read(count) ?? 0;
   }
+
+  Future<List<Playlist>> getPlaylistsDueForUpdate() async {
+    final all = await (select(playlists)
+          ..where((p) => p.autoUpdate.equals(true)))
+        .get();
+    final now = DateTime.now();
+    return all.where((p) {
+      if (p.lastUpdated == null) return true;
+      return now.difference(p.lastUpdated!).inHours >= p.updateFrequencyHours;
+    }).toList();
+  }
+
+  Future<List<String>> getVideoIdsForPlaylist(int playlistId) async {
+    final trackList = await (select(tracks)
+          ..where((t) => t.playlistId.equals(playlistId)))
+        .get();
+    return trackList.map((t) => t.videoId).toList();
+  }
 }
 
 LazyDatabase _openConnection() {

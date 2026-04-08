@@ -115,6 +115,34 @@ class PlaylistService {
     await _writeMetadata(id);
   }
 
+  /// Re-fetch playlist info and insert any new tracks not already in the DB.
+  Future<int> syncNewTracks(Playlist playlist) async {
+    final info = await _ytdlp.getPlaylistInfo(playlist.url);
+    final entries = info['entries'] as List<dynamic>? ?? [];
+    final existingIds = await _db.getVideoIdsForPlaylist(playlist.id);
+    final existingIdSet = existingIds.toSet();
+
+    final newTracks = <TracksCompanion>[];
+    for (var i = 0; i < entries.length; i++) {
+      final entry = entries[i] as Map<String, dynamic>;
+      final videoId = entry['id'] as String? ?? '';
+      if (videoId.isEmpty || existingIdSet.contains(videoId)) continue;
+      newTracks.add(TracksCompanion.insert(
+        playlistId: playlist.id,
+        index: i + 1,
+        videoId: videoId,
+        title: entry['title'] as String? ?? 'Unknown',
+        thumbnailUrl: Value(entry['thumbnail'] as String?),
+        durationSeconds: Value(entry['duration'] as int?),
+      ));
+    }
+
+    if (newTracks.isNotEmpty) {
+      await _db.insertTracks(newTracks);
+    }
+    return newTracks.length;
+  }
+
   Future<void> deletePlaylist(int id) async {
     await _db.deletePlaylist(id);
   }

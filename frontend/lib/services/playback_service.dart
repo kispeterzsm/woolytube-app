@@ -73,7 +73,7 @@ class PlaybackService {
     // First try the stored path directly (in case it already has extension)
     if (File(storedPath).existsSync()) return storedPath;
 
-    // Scan directory for matching file
+    // Scan directory for matching file by full basename
     final dir = Directory(p.dirname(storedPath));
     final baseName = p.basename(storedPath);
     if (!dir.existsSync()) return null;
@@ -84,6 +84,26 @@ class PlaybackService {
         return entity.path;
       }
     }
+
+    // Fallback: match by index prefix (handles title mismatch from yt-dlp)
+    final indexPrefixMatch = RegExp(r'^\d{3}[_ -]').firstMatch(baseName);
+    if (indexPrefixMatch != null) {
+      final prefix = indexPrefixMatch.group(0)!;
+      const mediaExtensions = {
+        '.m4a', '.mp3', '.opus', '.ogg', '.flac', '.wav',
+        '.mp4', '.mkv', '.webm', '.avi', '.mov',
+      };
+      for (final entity in dir.listSync()) {
+        if (entity is File) {
+          final fileName = p.basename(entity.path);
+          final ext = p.extension(entity.path).toLowerCase();
+          if (fileName.startsWith(prefix) && mediaExtensions.contains(ext)) {
+            return entity.path;
+          }
+        }
+      }
+    }
+
     return null;
   }
 
@@ -142,8 +162,8 @@ class PlaybackService {
     final filePath =
         track.filePath != null ? resolveFilePath(track.filePath!) : null;
     if (filePath == null) {
-      // Skip to next if file not found
-      next();
+      // File not found — don't auto-advance, leave track selected so user
+      // can see which track failed.
       return;
     }
 

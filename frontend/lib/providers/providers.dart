@@ -6,6 +6,7 @@ import '../services/playlist_service.dart';
 import '../services/download_service.dart';
 import '../services/log_service.dart';
 import '../services/metadata_service.dart';
+import '../services/notification_service.dart';
 
 // Core singletons
 final databaseProvider = Provider<AppDatabase>((ref) {
@@ -37,12 +38,19 @@ final playlistServiceProvider = Provider<PlaylistService>((ref) {
   );
 });
 
+final notificationServiceProvider = Provider<DownloadNotificationService>((ref) {
+  final service = DownloadNotificationService();
+  service.initialize();
+  return service;
+});
+
 final downloadServiceProvider = Provider<DownloadService>((ref) {
   final service = DownloadService(
     ref.watch(databaseProvider),
     ref.watch(ytdlpServiceProvider),
     ref.watch(logServiceProvider),
     ref.watch(metadataServiceProvider),
+    ref.watch(notificationServiceProvider),
   );
   ref.onDispose(() => service.dispose());
   return service;
