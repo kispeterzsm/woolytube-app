@@ -142,7 +142,7 @@ class _HomePageState extends ConsumerState<HomePage> {
     }
   }
 
-  void _startUpdate(Playlist playlist) {
+  void _startUpdate(Playlist playlist) async {
     final downloadService = ref.read(downloadServiceProvider);
     if (downloadService.isDownloading) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -150,7 +150,68 @@ class _HomePageState extends ConsumerState<HomePage> {
       );
       return;
     }
-    downloadService.downloadPlaylist(playlist);
+
+    // Sync first to detect new, unavailable, and removed tracks
+    final playlistService = ref.read(playlistServiceProvider);
+    final result = await playlistService.syncPlaylist(playlist);
+
+    if (result.hasChanges && mounted) {
+      final parts = <String>[];
+      if (result.added > 0) parts.add('${result.added} new');
+      if (result.markedUnavailable > 0) {
+        parts.add('${result.markedUnavailable} unavailable');
+      }
+      if (result.removed > 0) parts.add('${result.removed} removed');
+      if (result.markedAvailable > 0) {
+        parts.add('${result.markedAvailable} restored');
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Synced: ${parts.join(', ')}')),
+      );
+    }
+
+    if (result.hasConflicts && mounted) {
+      await _showReplacementConflicts(result.replacementConflicts);
+    }
+
+    final freshPlaylist =
+        await ref.read(databaseProvider).getPlaylist(playlist.id);
+    downloadService.downloadPlaylist(freshPlaylist);
+  }
+
+  Future<void> _showReplacementConflicts(List<Track> conflicts) async {
+    final db = ref.read(databaseProvider);
+    for (final track in conflicts) {
+      if (!mounted) return;
+      final decision = await showDialog<String>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF2A2A2A),
+          title: const Text('Video Available Again',
+              style: TextStyle(color: Colors.white)),
+          content: Text(
+            '"${track.title}" is available on YouTube again.\n\n'
+            'You have a local replacement file. '
+            'Would you like to keep it or download the original?',
+            style: const TextStyle(color: Color(0xFFCCCCCC)),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'keep'),
+              child: const Text('Keep Replacement'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'download'),
+              child: const Text('Download Original'),
+            ),
+          ],
+        ),
+      );
+      if (decision == 'download') {
+        await db.resetTrackForRedownload(track.id);
+      }
+    }
   }
 
   Widget _buildImportBanner(List<DiscoveredPlaylist> imports) {

@@ -21,8 +21,16 @@ class YtDlpService {
 
   Future<void> initialize() async {
     if (_initialized) return;
-    await _methodChannel.invokeMethod('initialize');
-    _initialized = true;
+    for (var attempt = 0; attempt < 5; attempt++) {
+      try {
+        await _methodChannel.invokeMethod('initialize');
+        _initialized = true;
+        return;
+      } on MissingPluginException {
+        if (attempt == 4) rethrow;
+        await Future.delayed(Duration(milliseconds: 500 * (attempt + 1)));
+      }
+    }
   }
 
   Future<void> download({

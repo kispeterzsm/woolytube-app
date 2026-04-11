@@ -35,6 +35,9 @@ class Tracks extends Table {
   IntColumn get durationSeconds => integer().nullable()();
   TextColumn get status =>
       text().withDefault(const Constant('pending'))();
+  TextColumn get unavailableReason => text().nullable()();
+  BoolColumn get isLocalReplacement =>
+      boolean().withDefault(const Constant(false))();
   DateTimeColumn get downloadedAt => dateTime().nullable()();
 }
 
@@ -50,7 +53,19 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 3;
+
+  @override
+  MigrationStrategy get migration => MigrationStrategy(
+        onUpgrade: (migrator, from, to) async {
+          if (from < 2) {
+            await migrator.addColumn(tracks, tracks.unavailableReason);
+          }
+          if (from < 3) {
+            await migrator.addColumn(tracks, tracks.isLocalReplacement);
+          }
+        },
+      );
 
   // Playlist queries
   Future<List<Playlist>> getAllPlaylists() => select(playlists).get();
@@ -98,11 +113,14 @@ class AppDatabase extends _$AppDatabase {
       update(tracks).replace(track);
 
   Future<void> updateTrackStatus(int trackId, String status,
-      {String? filePath}) async {
+      {String? filePath, bool? isLocalReplacement}) async {
     await (update(tracks)..where((t) => t.id.equals(trackId))).write(
       TracksCompanion(
         status: Value(status),
         filePath: filePath != null ? Value(filePath) : const Value.absent(),
+        isLocalReplacement: isLocalReplacement != null
+            ? Value(isLocalReplacement)
+            : const Value.absent(),
         downloadedAt:
             status == 'complete' ? Value(DateTime.now()) : const Value.absent(),
       ),
@@ -152,6 +170,59 @@ class AppDatabase extends _$AppDatabase {
           ..where((t) => t.playlistId.equals(playlistId)))
         .get();
     return trackList.map((t) => t.videoId).toList();
+  }
+
+  Future<void> updateTrackUnavailable(int trackId, String reason,
+      {int? newIndex}) async {
+    await (update(tracks)..where((t) => t.id.equals(trackId))).write(
+      TracksCompanion(
+        status: const Value('unavailable'),
+        unavailableReason: Value(reason),
+        index: newIndex != null ? Value(newIndex) : const Value.absent(),
+      ),
+    );
+  }
+
+  Future<void> updateTrackAvailable(int trackId,
+      {required String title,
+      String? thumbnailUrl,
+      int? durationSeconds,
+      int? newIndex}) async {
+    await (update(tracks)..where((t) => t.id.equals(trackId))).write(
+      TracksCompanion(
+        status: const Value('pending'),
+        unavailableReason: const Value(null),
+        title: Value(title),
+        thumbnailUrl: Value(thumbnailUrl),
+        durationSeconds: Value(durationSeconds),
+        index: newIndex != null ? Value(newIndex) : const Value.absent(),
+      ),
+    );
+  }
+
+  Future<void> updateTrackIndex(int trackId, int newIndex) async {
+    await (update(tracks)..where((t) => t.id.equals(trackId))).write(
+      TracksCompanion(index: Value(newIndex)),
+    );
+  }
+
+  Future<void> updateTrackOnlineStatus(
+      int trackId, String? unavailableReason) async {
+    await (update(tracks)..where((t) => t.id.equals(trackId))).write(
+      TracksCompanion(unavailableReason: Value(unavailableReason)),
+    );
+  }
+
+  Future<void> resetTrackForRedownload(int trackId) async {
+    await (update(tracks)..where((t) => t.id.equals(trackId))).write(
+      TracksCompanion(
+        status: const Value('pending'),
+        filePath: const Value(null),
+        isLocalReplacement: const Value(false),
+        unavailableReason: const Value(null),
+        downloadedAt: const Value(null),
+      ),
+    );
   }
 }
 

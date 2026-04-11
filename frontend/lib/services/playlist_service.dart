@@ -4,6 +4,27 @@ import '../database/database.dart';
 import 'ytdlp_service.dart';
 import 'metadata_service.dart';
 
+class SyncResult {
+  final int added;
+  final int markedUnavailable;
+  final int markedAvailable;
+  final int removed;
+  final List<Track> replacementConflicts;
+
+  const SyncResult({
+    this.added = 0,
+    this.markedUnavailable = 0,
+    this.markedAvailable = 0,
+    this.removed = 0,
+    this.replacementConflicts = const [],
+  });
+
+  bool get hasChanges =>
+      added + markedUnavailable + markedAvailable + removed > 0;
+
+  bool get hasConflicts => replacementConflicts.isNotEmpty;
+}
+
 class PlaylistService {
   final AppDatabase _db;
   final YtDlpService _ytdlp;
@@ -58,13 +79,21 @@ class PlaylistService {
 
     for (var i = 0; i < entries.length; i++) {
       final entry = entries[i] as Map<String, dynamic>;
+      final videoId = entry['id'] as String? ?? '';
+      if (videoId.isEmpty) continue;
+
+      final playlistIndex = entry['playlist_index'] as int? ?? (i + 1);
+      final reason = _detectUnavailability(entry);
+
       tracks.add(TracksCompanion.insert(
         playlistId: playlistId,
-        index: i + 1,
-        videoId: entry['id'] as String? ?? '',
+        index: playlistIndex,
+        videoId: videoId,
         title: entry['title'] as String? ?? 'Unknown',
         thumbnailUrl: Value(entry['thumbnail'] as String?),
         durationSeconds: Value(entry['duration'] as int?),
+        status: Value(reason != null ? 'unavailable' : 'pending'),
+        unavailableReason: Value(reason),
       ));
     }
 
@@ -115,32 +144,129 @@ class PlaylistService {
     await _writeMetadata(id);
   }
 
-  /// Re-fetch playlist info and insert any new tracks not already in the DB.
-  Future<int> syncNewTracks(Playlist playlist) async {
+  /// Full reconciliation: detect new, unavailable, removed, and re-available tracks.
+  Future<SyncResult> syncPlaylist(Playlist playlist) async {
     final info = await _ytdlp.getPlaylistInfo(playlist.url);
-    final entries = info['entries'] as List<dynamic>? ?? [];
-    final existingIds = await _db.getVideoIdsForPlaylist(playlist.id);
-    final existingIdSet = existingIds.toSet();
+    final freshEntries = info['entries'] as List<dynamic>? ?? [];
+    final existingTracks = await _db.getTracksForPlaylist(playlist.id);
 
+    final existingByVideoId = <String, Track>{};
+    for (final t in existingTracks) {
+      existingByVideoId[t.videoId] = t;
+    }
+
+    final freshByVideoId = <String, Map<String, dynamic>>{};
+    for (var i = 0; i < freshEntries.length; i++) {
+      final entry = freshEntries[i] as Map<String, dynamic>;
+      final vid = entry['id'] as String? ?? '';
+      if (vid.isNotEmpty) freshByVideoId[vid] = entry;
+    }
+
+    int added = 0, markedUnavailable = 0, markedAvailable = 0, removed = 0;
+    final replacementConflicts = <Track>[];
+
+    // Helper: check if track has a valid file on disk
+    bool hasFileOnDisk(Track t) =>
+        t.filePath != null && File(t.filePath!).existsSync();
+
+    // Process existing tracks against fresh data
+    for (final track in existingTracks) {
+      final freshEntry = freshByVideoId[track.videoId];
+
+      if (freshEntry == null) {
+        // Video removed from playlist entirely
+        if (hasFileOnDisk(track)) {
+          // File on disk — keep playable, just note removal
+          if (track.unavailableReason != 'removed') {
+            await _db.updateTrackOnlineStatus(track.id, 'removed');
+            removed++;
+          }
+        } else if (track.status != 'unavailable' ||
+            track.unavailableReason != 'removed') {
+          await _db.updateTrackUnavailable(track.id, 'removed');
+          removed++;
+        }
+        continue;
+      }
+
+      final reason = _detectUnavailability(freshEntry);
+      final freshIndex = freshEntry['playlist_index'] as int? ?? track.index;
+
+      if (reason != null) {
+        // Video is unavailable online
+        if (hasFileOnDisk(track)) {
+          // File on disk — keep playable, just update online status
+          if (track.unavailableReason != reason) {
+            await _db.updateTrackOnlineStatus(track.id, reason);
+          }
+          // Don't change index for tracks with files
+        } else if (track.status != 'unavailable') {
+          await _db.updateTrackUnavailable(track.id, reason,
+              newIndex: freshIndex);
+          markedUnavailable++;
+        }
+      } else if (track.unavailableReason != null) {
+        // Video is available again (was previously flagged)
+        if (hasFileOnDisk(track)) {
+          if (track.isLocalReplacement) {
+            // Local replacement exists — user needs to decide
+            replacementConflicts.add(track);
+          }
+          // Clear the unavailable reason since video is back
+          await _db.updateTrackOnlineStatus(track.id, null);
+        } else if (track.status == 'unavailable') {
+          await _db.updateTrackAvailable(
+            track.id,
+            title: freshEntry['title'] as String? ?? 'Unknown',
+            thumbnailUrl: freshEntry['thumbnail'] as String?,
+            durationSeconds: freshEntry['duration'] as int?,
+            newIndex: freshIndex,
+          );
+        } else {
+          // Status is pending/error, reason was set informationally
+          await _db.updateTrackOnlineStatus(track.id, null);
+        }
+        markedAvailable++;
+      } else if (freshIndex != track.index && track.status != 'complete') {
+        // Index changed and track not yet downloaded — safe to update
+        await _db.updateTrackIndex(track.id, freshIndex);
+      }
+    }
+
+    // Add genuinely new tracks
     final newTracks = <TracksCompanion>[];
-    for (var i = 0; i < entries.length; i++) {
-      final entry = entries[i] as Map<String, dynamic>;
-      final videoId = entry['id'] as String? ?? '';
-      if (videoId.isEmpty || existingIdSet.contains(videoId)) continue;
+    for (var i = 0; i < freshEntries.length; i++) {
+      final entry = freshEntries[i] as Map<String, dynamic>;
+      final vid = entry['id'] as String? ?? '';
+      if (vid.isEmpty || existingByVideoId.containsKey(vid)) continue;
+
+      final reason = _detectUnavailability(entry);
+      final playlistIndex = entry['playlist_index'] as int? ?? (i + 1);
       newTracks.add(TracksCompanion.insert(
         playlistId: playlist.id,
-        index: i + 1,
-        videoId: videoId,
+        index: playlistIndex,
+        videoId: vid,
         title: entry['title'] as String? ?? 'Unknown',
         thumbnailUrl: Value(entry['thumbnail'] as String?),
         durationSeconds: Value(entry['duration'] as int?),
+        status: Value(reason != null ? 'unavailable' : 'pending'),
+        unavailableReason: Value(reason),
       ));
+      added++;
     }
 
     if (newTracks.isNotEmpty) {
       await _db.insertTracks(newTracks);
     }
-    return newTracks.length;
+
+    await _writeMetadata(playlist.id);
+    return SyncResult(
+      added: added,
+      markedUnavailable: markedUnavailable,
+      markedAvailable: markedAvailable,
+      removed: removed,
+      replacementConflicts: replacementConflicts,
+    );
   }
 
   Future<void> deletePlaylist(int id) async {
@@ -170,6 +296,22 @@ class PlaylistService {
     } catch (_) {
       // Non-critical — don't block playlist operations
     }
+  }
+
+  /// Returns the unavailability reason, or null if the video is available.
+  String? _detectUnavailability(Map<String, dynamic> entry) {
+    final availability = entry['availability'] as String? ?? '';
+    if (availability == 'private') return 'private';
+    if (availability == 'needs_auth') return 'needs_auth';
+    if (availability == 'premium_only') return 'premium_only';
+    if (availability == 'unavailable') return 'unavailable';
+
+    final title = entry['title'] as String? ?? '';
+    if (title == '[Private video]') return 'private';
+    if (title == '[Deleted video]') return 'deleted';
+    if (title == '[Unavailable]') return 'unavailable';
+
+    return null;
   }
 
   String _sanitizeFolderName(String name) {

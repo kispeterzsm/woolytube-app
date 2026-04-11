@@ -1,6 +1,9 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../database/database.dart';
 import '../providers/providers.dart';
 import '../providers/playback_providers.dart';
@@ -197,11 +200,18 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     final isPlayable = track.status == 'complete';
     final playbackService = ref.watch(playbackServiceProvider);
 
+    final isUnavailable = track.status == 'unavailable';
+    final hasLocalFile =
+        track.status == 'complete' && track.unavailableReason != null;
+
     return ListTile(
       onTap: isPlayable
           ? () {
               playbackService.playTrack(track, allTracks, playlist: _playlist);
             }
+          : null,
+      onLongPress: (isUnavailable || hasLocalFile)
+          ? () => _showUnavailableActions(track)
           : null,
       tileColor:
           isCurrentTrack ? const Color(0xFF2A2A2A) : Colors.transparent,
@@ -247,8 +257,19 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
         overflow: TextOverflow.ellipsis,
       ),
       subtitle: Text(
-        _formatDuration(track.durationSeconds),
-        style: const TextStyle(color: Color(0xFF888888), fontSize: 12),
+        isUnavailable
+            ? '${_unavailableLabel(track.unavailableReason)} · ${track.videoId}'
+            : hasLocalFile
+                ? '${_formatDuration(track.durationSeconds)} · ${_unavailableLabel(track.unavailableReason)} (local file)'
+                : _formatDuration(track.durationSeconds),
+        style: TextStyle(
+          color: isUnavailable
+              ? const Color(0xFFAA6666)
+              : hasLocalFile
+                  ? const Color(0xFFAAAA66)
+                  : const Color(0xFF888888),
+          fontSize: 12,
+        ),
       ),
       trailing: isCurrentTrack
           ? Icon(
@@ -256,7 +277,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
               color: const Color(0xFF2196F3),
               size: 20,
             )
-          : _statusIcon(track.status),
+          : _statusIcon(track.status, hasLocalFile: hasLocalFile),
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
     );
   }
@@ -293,10 +314,14 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     return null;
   }
 
-  Widget _statusIcon(String status) {
+  Widget _statusIcon(String status, {bool hasLocalFile = false}) {
     switch (status) {
       case 'complete':
-        return const Icon(Icons.check_circle, color: Colors.green, size: 20);
+        return Icon(
+          hasLocalFile ? Icons.check_circle_outline : Icons.check_circle,
+          color: hasLocalFile ? const Color(0xFFAAAA66) : Colors.green,
+          size: 20,
+        );
       case 'downloading':
         return const SizedBox(
           width: 20,
@@ -317,5 +342,142 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     final m = seconds ~/ 60;
     final s = seconds % 60;
     return '${m}:${s.toString().padLeft(2, '0')}';
+  }
+
+  String _unavailableLabel(String? reason) {
+    switch (reason) {
+      case 'private':
+        return 'Private video';
+      case 'deleted':
+        return 'Deleted video';
+      case 'removed':
+        return 'Removed from playlist';
+      case 'needs_auth':
+        return 'Requires authentication';
+      case 'premium_only':
+        return 'Premium only';
+      default:
+        return 'Unavailable';
+    }
+  }
+
+  void _showUnavailableActions(Track track) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF2A2A2A),
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(
+                _unavailableLabel(track.unavailableReason),
+                style: const TextStyle(
+                  color: Color(0xFFAA6666),
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.copy, color: Colors.white70),
+              title: const Text('Copy video ID',
+                  style: TextStyle(color: Colors.white)),
+              subtitle: Text(track.videoId,
+                  style: const TextStyle(color: Color(0xFF888888))),
+              onTap: () {
+                Clipboard.setData(ClipboardData(text: track.videoId));
+                Navigator.pop(sheetContext);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Video ID copied')),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.travel_explore, color: Colors.white70),
+              title: const Text('Search on quiteaplaylist.com',
+                  style: TextStyle(color: Colors.white)),
+              subtitle: const Text('Find this video in web archives',
+                  style: TextStyle(color: Color(0xFF888888))),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                launchUrl(Uri.parse(
+                    'https://quiteaplaylist.com/search?url=https://www.youtube.com/watch?v=${track.videoId}'));
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.folder_open, color: Colors.white70),
+              title: const Text('Scan for local replacement',
+                  style: TextStyle(color: Colors.white)),
+              subtitle: Text(
+                  'Check playlist folder for ${track.index.toString().padLeft(3, '0')}_* file',
+                  style: const TextStyle(color: Color(0xFF888888))),
+              onTap: () async {
+                Navigator.pop(sheetContext);
+                await _scanForLocalReplacement(track);
+              },
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _scanForLocalReplacement(Track track) async {
+    if (_playlist == null) return;
+
+    final indexPrefix = track.index.toString().padLeft(3, '0');
+    final dir = Directory(_playlist!.outputPath);
+    if (!dir.existsSync()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Playlist folder not found')),
+        );
+      }
+      return;
+    }
+
+    const mediaExtensions = {
+      '.m4a', '.mp3', '.opus', '.ogg', '.flac', '.wav',
+      '.mp4', '.mkv', '.webm', '.avi', '.mov',
+    };
+
+    String? foundPath;
+    for (final entity in dir.listSync()) {
+      if (entity is File) {
+        final fileName = entity.path.split('/').last;
+        final ext = fileName.contains('.')
+            ? '.${fileName.split('.').last}'.toLowerCase()
+            : '';
+        if (fileName.startsWith('${indexPrefix}_') &&
+            mediaExtensions.contains(ext)) {
+          foundPath = entity.path;
+          break;
+        }
+      }
+    }
+
+    if (foundPath != null) {
+      final db = ref.read(databaseProvider);
+      await db.updateTrackStatus(track.id, 'complete',
+          filePath: foundPath, isLocalReplacement: true);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text(
+                  'Found: ${foundPath.split('/').last}')),
+        );
+      }
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text(
+                  'No file starting with ${indexPrefix}_ found in playlist folder')),
+        );
+      }
+    }
   }
 }

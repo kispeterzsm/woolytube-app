@@ -47,8 +47,10 @@ void backgroundMain() async {
 
       for (final playlist in duePlaylists) {
         try {
-          await playlistService.syncNewTracks(playlist);
-          await downloadService.downloadPlaylist(playlist);
+          await playlistService.syncPlaylist(playlist);
+          // Re-fetch after sync since tracks may have changed
+          final freshPlaylist = await db.getPlaylist(playlist.id);
+          await downloadService.downloadPlaylist(freshPlaylist);
         } catch (_) {
           // Continue with next playlist
         }

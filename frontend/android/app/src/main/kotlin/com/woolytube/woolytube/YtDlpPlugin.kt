@@ -148,7 +148,7 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 var playlistTitle = ""
                 var playlistThumbnail: String? = null
 
-                for (line in lines) {
+                for ((index, line) in lines.withIndex()) {
                     try {
                         val json = org.json.JSONObject(line)
                         val entry = org.json.JSONObject()
@@ -156,6 +156,8 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                         entry.put("title", json.optString("title", "Unknown"))
                         entry.put("thumbnail", json.optString("thumbnail", ""))
                         entry.put("duration", json.optInt("duration", 0))
+                        entry.put("playlist_index", json.optInt("playlist_index", index + 1))
+                        entry.put("availability", json.optString("availability", ""))
                         entries.put(entry)
 
                         if (playlistTitle.isEmpty()) {

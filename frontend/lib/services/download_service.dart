@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:drift/drift.dart' show Value;
-import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import '../database/database.dart';
 import 'ytdlp_service.dart';
@@ -92,6 +91,7 @@ class DownloadService {
     }
 
     final downloadedSoFar = totalTracks - pendingTracks.length;
+    var currentTrackNum = downloadedSoFar + 1;
 
     _ytdlpProgressSub = _ytdlp.progressStream.listen((event) {
       final progress = (event['progress'] as num?)?.toDouble() ?? 0;
@@ -100,14 +100,14 @@ class DownloadService {
       if (status == 'downloading' || status == 'starting') {
         _progressController.add(DownloadProgress(
           playlistId: playlist.id,
-          currentTrackIndex: downloadedSoFar + 1,
+          currentTrackIndex: currentTrackNum,
           totalTracks: totalTracks,
           trackProgress: progress,
           status: 'downloading',
         ));
         _notifications?.showDownloadProgress(
           playlistName: playlist.name,
-          currentTrack: downloadedSoFar + 1,
+          currentTrack: currentTrackNum,
           totalTracks: totalTracks,
           progressPercent: progress.round(),
         );
@@ -118,10 +118,11 @@ class DownloadService {
       for (var i = 0; i < pendingTracks.length; i++) {
         final track = pendingTracks[i];
         final trackNum = downloadedSoFar + i + 1;
+        currentTrackNum = trackNum;
 
         _progressController.add(DownloadProgress(
           playlistId: playlist.id,
-          currentTrackIndex: trackNum,
+          currentTrackIndex: currentTrackNum,
           totalTracks: totalTracks,
           trackProgress: 0,
           status: 'downloading',
@@ -146,7 +147,7 @@ class DownloadService {
           );
 
           // Resolve actual file path (yt-dlp adds extension)
-          final actualPath = _resolveDownloadedFile(
+          final actualPath = MetadataService.resolveMediaFile(
               playlist.outputPath, '${indexStr}_');
           await _db.updateTrackStatus(track.id, 'complete',
               filePath: actualPath ??
@@ -208,28 +209,6 @@ class DownloadService {
       _ytdlpProgressSub?.cancel();
       _ytdlpProgressSub = null;
     }
-  }
-
-  /// Find the actual downloaded file (with extension) matching an index prefix
-  String? _resolveDownloadedFile(String dirPath, String indexPrefix) {
-    final dir = Directory(dirPath);
-    if (!dir.existsSync()) return null;
-
-    const mediaExtensions = {
-      '.m4a', '.mp3', '.opus', '.ogg', '.flac', '.wav',
-      '.mp4', '.mkv', '.webm', '.avi', '.mov',
-    };
-
-    for (final entity in dir.listSync()) {
-      if (entity is File) {
-        final fileName = p.basename(entity.path);
-        final ext = p.extension(entity.path).toLowerCase();
-        if (fileName.startsWith(indexPrefix) && mediaExtensions.contains(ext)) {
-          return entity.path;
-        }
-      }
-    }
-    return null;
   }
 
   Future<void> _writeMetadataForPlaylist(int playlistId) async {

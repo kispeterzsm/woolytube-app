@@ -95,6 +95,18 @@ final initProvider = FutureProvider<bool>((ref) async {
     // Non-critical — don't block app startup
   }
 
+  // Reconcile database with filesystem for all existing playlists
+  try {
+    final db = ref.watch(databaseProvider);
+    final metadata = ref.watch(metadataServiceProvider);
+    final playlists = await db.getAllPlaylists();
+    for (final playlist in playlists) {
+      await metadata.reconcilePlaylist(playlist);
+    }
+  } catch (_) {
+    // Non-critical — don't block app startup
+  }
+
   return true;
 });
 

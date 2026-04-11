@@ -11,6 +11,8 @@ class DiscoveredTrack {
   final String? thumbnailUrl;
   final int? durationSeconds;
   final String status;
+  final String? unavailableReason;
+  final bool isLocalReplacement;
   final String? fileName;
 
   DiscoveredTrack({
@@ -20,6 +22,8 @@ class DiscoveredTrack {
     this.thumbnailUrl,
     this.durationSeconds,
     required this.status,
+    this.unavailableReason,
+    this.isLocalReplacement = false,
     this.fileName,
   });
 }
@@ -84,6 +88,8 @@ class MetadataService {
         'thumbnailUrl': t.thumbnailUrl,
         'durationSeconds': t.durationSeconds,
         'status': t.status,
+        'unavailableReason': t.unavailableReason,
+        'isLocalReplacement': t.isLocalReplacement,
         'fileName': t.filePath != null ? p.basename(t.filePath!) : null,
       }).toList(),
     };
@@ -140,6 +146,58 @@ class MetadataService {
     return result;
   }
 
+  /// Reconciles database track statuses with actual files on disk.
+  /// Fixes mismatches where files exist but DB says pending, or vice versa.
+  Future<int> reconcilePlaylist(Playlist playlist) async {
+    final tracks = await _db.getTracksForPlaylist(playlist.id);
+    final dir = Directory(playlist.outputPath);
+    if (!await dir.exists()) return 0;
+
+    int fixed = 0;
+    for (final track in tracks) {
+      final indexPrefix =
+          '${track.index.toString().padLeft(3, '0')}_';
+      final fileOnDisk = resolveMediaFile(playlist.outputPath, indexPrefix);
+
+      if (fileOnDisk != null &&
+          (track.status == 'pending' ||
+              track.status == 'error' ||
+              track.status == 'unavailable')) {
+        // File exists but DB says not downloaded — fix it
+        await _db.updateTrackStatus(track.id, 'complete',
+            filePath: fileOnDisk);
+        fixed++;
+      } else if (fileOnDisk == null && track.status == 'complete') {
+        // DB says downloaded but file is gone — mark for re-download
+        await _db.updateTrackStatus(track.id, 'pending');
+        fixed++;
+      }
+    }
+    return fixed;
+  }
+
+  /// Find a media file in [dirPath] matching an index prefix (e.g. "001_").
+  static String? resolveMediaFile(String dirPath, String indexPrefix) {
+    final dir = Directory(dirPath);
+    if (!dir.existsSync()) return null;
+
+    const mediaExtensions = {
+      '.m4a', '.mp3', '.opus', '.ogg', '.flac', '.wav',
+      '.mp4', '.mkv', '.webm', '.avi', '.mov',
+    };
+
+    for (final entity in dir.listSync()) {
+      if (entity is File) {
+        final fileName = p.basename(entity.path);
+        final ext = p.extension(entity.path).toLowerCase();
+        if (fileName.startsWith(indexPrefix) && mediaExtensions.contains(ext)) {
+          return entity.path;
+        }
+      }
+    }
+    return null;
+  }
+
   /// Imports a discovered playlist into the database.
   Future<void> importPlaylist(DiscoveredPlaylist discovered) async {
     final playlistId = await _db.insertPlaylist(PlaylistsCompanion.insert(
@@ -158,14 +216,21 @@ class MetadataService {
     final tracks = <TracksCompanion>[];
     for (final dt in discovered.tracks) {
       String? filePath;
-      String status = 'pending';
+      String status = dt.status;
 
       if (dt.fileName != null) {
         final fullPath = p.join(discovered.folderPath, dt.fileName!);
         if (await File(fullPath).exists()) {
           filePath = fullPath;
           status = 'complete';
+        } else if (status == 'complete') {
+          status = 'pending'; // File gone, re-download
         }
+      }
+
+      // Preserve unavailable status from metadata
+      if (status != 'complete' && status != 'unavailable') {
+        status = 'pending';
       }
 
       tracks.add(TracksCompanion.insert(
@@ -176,6 +241,8 @@ class MetadataService {
         thumbnailUrl: Value(dt.thumbnailUrl),
         durationSeconds: Value(dt.durationSeconds),
         status: Value(status),
+        unavailableReason: Value(dt.unavailableReason),
+        isLocalReplacement: Value(dt.isLocalReplacement),
         filePath: Value(filePath),
         downloadedAt: Value(
             status == 'complete' ? DateTime.now() : null),
@@ -185,6 +252,10 @@ class MetadataService {
     if (tracks.isNotEmpty) {
       await _db.insertTracks(tracks);
     }
+
+    // Reconcile with actual files on disk (catches mismatches from stale JSON)
+    final playlist = await _db.getPlaylist(playlistId);
+    await reconcilePlaylist(playlist);
   }
 
   DiscoveredPlaylist? _parseMetadata(
@@ -207,6 +278,8 @@ class MetadataService {
             thumbnailUrl: m['thumbnailUrl'] as String?,
             durationSeconds: m['durationSeconds'] as int?,
             status: m['status'] as String? ?? 'pending',
+            unavailableReason: m['unavailableReason'] as String?,
+            isLocalReplacement: m['isLocalReplacement'] as bool? ?? false,
             fileName: m['fileName'] as String?,
           );
         })
