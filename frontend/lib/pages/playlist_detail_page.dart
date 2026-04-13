@@ -2,11 +2,12 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:cached_network_image/cached_network_image.dart';
+import 'package:cached_network_image/cached_network_image.dart' hide DownloadProgress;
 import 'package:url_launcher/url_launcher.dart';
 import '../database/database.dart';
 import '../providers/providers.dart';
 import '../providers/playback_providers.dart';
+import '../services/download_service.dart';
 
 class PlaylistDetailPage extends ConsumerStatefulWidget {
   final int playlistId;
@@ -22,6 +23,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   Playlist? _playlist;
   String _searchQuery = '';
   bool _showSearch = false;
+  bool _isUpdating = false;
 
   @override
   void initState() {
@@ -45,6 +47,10 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     final autoplayEnabled =
         ref.watch(autoplayEnabledProvider).valueOrNull ?? true;
     final playbackService = ref.watch(playbackServiceProvider);
+    final downloadProgress =
+        ref.watch(downloadProgressProvider).valueOrNull ?? DownloadProgress.idle;
+    final isDownloadingThis = downloadProgress.status == 'downloading' &&
+        downloadProgress.playlistId == widget.playlistId;
 
     return Scaffold(
       appBar: AppBar(
@@ -110,6 +116,15 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                     onChanged: (q) => setState(() => _searchQuery = q),
                   ),
                 ),
+              // Download progress
+              if (isDownloadingThis)
+                LinearProgressIndicator(
+                  value: downloadProgress.trackProgress / 100,
+                  backgroundColor: const Color(0xFF333333),
+                  valueColor:
+                      const AlwaysStoppedAnimation<Color>(Color(0xFF2196F3)),
+                  minHeight: 2,
+                ),
               // Controls row
               Padding(
                 padding:
@@ -133,6 +148,25 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                           padding: const EdgeInsets.symmetric(horizontal: 8),
                         ),
                       ),
+                    // Sync & download
+                    TextButton.icon(
+                      onPressed: (_isUpdating || isDownloadingThis)
+                          ? null
+                          : _startUpdate,
+                      icon: Icon(
+                        _isUpdating ? Icons.hourglass_top : Icons.sync,
+                        size: 20,
+                      ),
+                      label: Text(isDownloadingThis
+                          ? '${downloadProgress.currentTrackIndex}/${downloadProgress.totalTracks}'
+                          : 'Update'),
+                      style: TextButton.styleFrom(
+                        foregroundColor: (_isUpdating || isDownloadingThis)
+                            ? const Color(0xFF888888)
+                            : const Color(0xFF2196F3),
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                      ),
+                    ),
                     const Spacer(),
                     // Shuffle toggle
                     IconButton(
@@ -210,9 +244,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
               playbackService.playTrack(track, allTracks, playlist: _playlist);
             }
           : null,
-      onLongPress: (isUnavailable || hasLocalFile)
-          ? () => _showUnavailableActions(track)
-          : null,
+      onLongPress: () => _showTrackActions(track),
       tileColor:
           isCurrentTrack ? const Color(0xFF2A2A2A) : Colors.transparent,
       leading: SizedBox(
@@ -361,7 +393,89 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     }
   }
 
-  void _showUnavailableActions(Track track) {
+  Future<void> _startUpdate() async {
+    if (_playlist == null) return;
+
+    final downloadService = ref.read(downloadServiceProvider);
+    if (downloadService.isDownloading) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('A download is already in progress')),
+      );
+      return;
+    }
+
+    setState(() => _isUpdating = true);
+
+    try {
+      final playlistService = ref.read(playlistServiceProvider);
+      final result = await playlistService.syncPlaylist(_playlist!);
+
+      if (result.hasChanges && mounted) {
+        final parts = <String>[];
+        if (result.added > 0) parts.add('${result.added} new');
+        if (result.markedUnavailable > 0) {
+          parts.add('${result.markedUnavailable} unavailable');
+        }
+        if (result.removed > 0) parts.add('${result.removed} removed');
+        if (result.markedAvailable > 0) {
+          parts.add('${result.markedAvailable} restored');
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Synced: ${parts.join(', ')}')),
+        );
+      }
+
+      if (result.hasConflicts && mounted) {
+        await _showReplacementConflicts(result.replacementConflicts);
+      }
+
+      final freshPlaylist =
+          await ref.read(databaseProvider).getPlaylist(widget.playlistId);
+      setState(() => _playlist = freshPlaylist);
+      downloadService.downloadPlaylist(freshPlaylist);
+    } finally {
+      if (mounted) setState(() => _isUpdating = false);
+    }
+  }
+
+  Future<void> _showReplacementConflicts(List<Track> conflicts) async {
+    final db = ref.read(databaseProvider);
+    for (final track in conflicts) {
+      if (!mounted) return;
+      final decision = await showDialog<String>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF2A2A2A),
+          title: const Text('Video Available Again',
+              style: TextStyle(color: Colors.white)),
+          content: Text(
+            '"${track.title}" is available on YouTube again.\n\n'
+            'You have a local replacement file. '
+            'Would you like to keep it or download the original?',
+            style: const TextStyle(color: Color(0xFFCCCCCC)),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'keep'),
+              child: const Text('Keep Replacement'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'download'),
+              child: const Text('Download Original'),
+            ),
+          ],
+        ),
+      );
+      if (decision == 'download') {
+        await db.resetTrackForRedownload(track.id);
+      }
+    }
+  }
+
+  void _showTrackActions(Track track) {
+    final indexPrefix = track.index.toString().padLeft(3, '0');
+
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF2A2A2A),
@@ -372,14 +486,18 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
             Padding(
               padding: const EdgeInsets.all(16),
               child: Text(
-                _unavailableLabel(track.unavailableReason),
+                track.title,
                 style: const TextStyle(
-                  color: Color(0xFFAA6666),
+                  color: Colors.white,
                   fontSize: 16,
                   fontWeight: FontWeight.w600,
                 ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
               ),
             ),
+            // Always: Copy video ID
             ListTile(
               leading: const Icon(Icons.copy, color: Colors.white70),
               title: const Text('Copy video ID',
@@ -394,30 +512,82 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                 );
               },
             ),
+            // Always: Open on YouTube
             ListTile(
-              leading: const Icon(Icons.travel_explore, color: Colors.white70),
-              title: const Text('Search on quiteaplaylist.com',
+              leading: const Icon(Icons.open_in_new, color: Colors.white70),
+              title: const Text('Open on YouTube',
                   style: TextStyle(color: Colors.white)),
-              subtitle: const Text('Find this video in web archives',
-                  style: TextStyle(color: Color(0xFF888888))),
               onTap: () {
                 Navigator.pop(sheetContext);
                 launchUrl(Uri.parse(
-                    'https://quiteaplaylist.com/search?url=https://www.youtube.com/watch?v=${track.videoId}'));
+                    'https://www.youtube.com/watch?v=${track.videoId}'));
               },
             ),
+            // Unavailable: Search on quiteaplaylist.com
+            if (track.status == 'unavailable')
+              ListTile(
+                leading:
+                    const Icon(Icons.travel_explore, color: Colors.white70),
+                title: const Text('Search on quiteaplaylist.com',
+                    style: TextStyle(color: Colors.white)),
+                subtitle: const Text('Find this video in web archives',
+                    style: TextStyle(color: Color(0xFF888888))),
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  launchUrl(Uri.parse(
+                      'https://quiteaplaylist.com/search?url=https://www.youtube.com/watch?v=${track.videoId}'));
+                },
+              ),
+            // Always: Scan for local replacement
             ListTile(
               leading: const Icon(Icons.folder_open, color: Colors.white70),
               title: const Text('Scan for local replacement',
                   style: TextStyle(color: Colors.white)),
               subtitle: Text(
-                  'Check playlist folder for ${track.index.toString().padLeft(3, '0')}_* file',
+                  track.status == 'complete'
+                      ? 'Replace current file with local file'
+                      : 'Check playlist folder for ${indexPrefix}_* file',
                   style: const TextStyle(color: Color(0xFF888888))),
               onTap: () async {
                 Navigator.pop(sheetContext);
                 await _scanForLocalReplacement(track);
               },
             ),
+            // Complete: Redownload
+            if (track.status == 'complete')
+              ListTile(
+                leading: const Icon(Icons.refresh, color: Colors.white70),
+                title: const Text('Redownload',
+                    style: TextStyle(color: Colors.white)),
+                subtitle: const Text(
+                    'Delete file and re-download from YouTube',
+                    style: TextStyle(color: Color(0xFF888888))),
+                onTap: () async {
+                  Navigator.pop(sheetContext);
+                  await _redownloadTrack(track);
+                },
+              ),
+            // Error: Retry download
+            if (track.status == 'error')
+              ListTile(
+                leading: const Icon(Icons.replay, color: Colors.white70),
+                title: const Text('Retry download',
+                    style: TextStyle(color: Colors.white)),
+                subtitle: const Text('Reset and queue for download',
+                    style: TextStyle(color: Color(0xFF888888))),
+                onTap: () async {
+                  Navigator.pop(sheetContext);
+                  final db = ref.read(databaseProvider);
+                  await db.resetTrackForRedownload(track.id);
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                          content: Text(
+                              'Queued "${track.title}" for download')),
+                    );
+                  }
+                },
+              ),
             const SizedBox(height: 8),
           ],
         ),
@@ -478,6 +648,28 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                   'No file starting with ${indexPrefix}_ found in playlist folder')),
         );
       }
+    }
+  }
+
+  Future<void> _redownloadTrack(Track track) async {
+    // Delete the existing file on disk
+    if (track.filePath != null) {
+      final file = File(track.filePath!);
+      if (await file.exists()) {
+        await file.delete();
+      }
+    }
+
+    // Reset track in database
+    final db = ref.read(databaseProvider);
+    await db.resetTrackForRedownload(track.id);
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content:
+                Text('Queued "${track.title}" for re-download')),
+      );
     }
   }
 }

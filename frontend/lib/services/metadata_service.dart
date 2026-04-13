@@ -173,7 +173,59 @@ class MetadataService {
         fixed++;
       }
     }
+
+    // Cleanup leftover .part files, .ytdl files, and orphaned thumbnails
+    final cleaned = await cleanupPlaylistFolder(playlist.outputPath);
+    fixed += cleaned;
+
     return fixed;
+  }
+
+  /// Deletes .part files, .ytdl files, and orphaned image files from the playlist folder.
+  /// Returns the number of files deleted.
+  static Future<int> cleanupPlaylistFolder(String dirPath) async {
+    final dir = Directory(dirPath);
+    if (!await dir.exists()) return 0;
+
+    int deleted = 0;
+    const imageExtensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif'};
+    final partPattern = RegExp(r'\.part(-Frag\d+)?$');
+
+    for (final entity in dir.listSync()) {
+      if (entity is! File) continue;
+      final fileName = p.basename(entity.path);
+      final ext = p.extension(entity.path).toLowerCase();
+
+      // Delete .part files (incomplete yt-dlp downloads)
+      if (partPattern.hasMatch(fileName)) {
+        await entity.delete();
+        deleted++;
+        continue;
+      }
+
+      // Delete .ytdl files (yt-dlp download state files)
+      if (ext == '.ytdl') {
+        await entity.delete();
+        deleted++;
+        continue;
+      }
+
+      // Delete .tmp files (metadata writing leftovers)
+      if (fileName.endsWith('.tmp')) {
+        await entity.delete();
+        deleted++;
+        continue;
+      }
+
+      // Delete orphaned image/thumbnail files (not the metadata JSON)
+      if (imageExtensions.contains(ext) && fileName != _metaFileName) {
+        await entity.delete();
+        deleted++;
+        continue;
+      }
+    }
+
+    return deleted;
   }
 
   /// Find a media file in [dirPath] matching an index prefix (e.g. "001_").

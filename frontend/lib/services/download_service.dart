@@ -120,6 +120,26 @@ class DownloadService {
         final trackNum = downloadedSoFar + i + 1;
         currentTrackNum = trackNum;
 
+        final indexStr = track.index.toString().padLeft(3, '0');
+
+        // Check if a file already exists on disk for this track
+        final existingFile = MetadataService.resolveMediaFile(
+            playlist.outputPath, '${indexStr}_');
+        if (existingFile != null) {
+          await _db.updateTrackStatus(track.id, 'complete',
+              filePath: existingFile, isLocalReplacement: true);
+          _log.info(
+              '[$trackNum/$totalTracks] Found existing file: ${existingFile.split('/').last}');
+          _progressController.add(DownloadProgress(
+            playlistId: playlist.id,
+            currentTrackIndex: trackNum,
+            totalTracks: totalTracks,
+            trackProgress: 100,
+            status: 'downloading',
+          ));
+          continue;
+        }
+
         _progressController.add(DownloadProgress(
           playlistId: playlist.id,
           currentTrackIndex: currentTrackNum,
@@ -130,7 +150,6 @@ class DownloadService {
 
         await _db.updateTrackStatus(track.id, 'downloading');
 
-        final indexStr = track.index.toString().padLeft(3, '0');
         final outputTemplate =
             '${playlist.outputPath}/${indexStr}_%(title)s.%(ext)s';
 
@@ -191,10 +210,23 @@ class DownloadService {
       ));
 
       await _writeMetadataForPlaylist(playlist.id);
+
+      // Cleanup .part files and orphaned thumbnails
+      try {
+        final cleaned =
+            await MetadataService.cleanupPlaylistFolder(playlist.outputPath);
+        if (cleaned > 0) _log.info('Cleaned up $cleaned leftover files');
+      } catch (e) {
+        _log.warn('Cleanup failed: $e');
+      }
+
       await _notifications?.showDownloadComplete(playlist.name);
     } catch (e) {
       _log.error('Playlist download failed: $e');
       await _writeMetadataForPlaylist(playlist.id);
+      try {
+        await MetadataService.cleanupPlaylistFolder(playlist.outputPath);
+      } catch (_) {}
       await _notifications?.cancel();
       _progressController.add(DownloadProgress(
         playlistId: playlist.id,
