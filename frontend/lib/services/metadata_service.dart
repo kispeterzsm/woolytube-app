@@ -153,10 +153,12 @@ class MetadataService {
     final dir = Directory(playlist.outputPath);
     if (!await dir.exists()) return 0;
 
+    // Widen any legacy short-prefix filenames to the current padding width.
+    await _widenIndexPrefixes(dir, tracks.length);
+
     int fixed = 0;
     for (final track in tracks) {
-      final indexPrefix =
-          '${track.index.toString().padLeft(3, '0')}_';
+      final indexPrefix = '${paddedIndex(track.index, tracks.length)}_';
       final fileOnDisk = resolveMediaFile(playlist.outputPath, indexPrefix);
 
       if (fileOnDisk != null &&
@@ -171,6 +173,13 @@ class MetadataService {
         // DB says downloaded but file is gone — mark for re-download
         await _db.updateTrackStatus(track.id, 'pending');
         fixed++;
+      } else if (fileOnDisk != null &&
+          track.status == 'complete' &&
+          track.filePath != fileOnDisk) {
+        // File is still there but stored path drifted (e.g. after rename) — refresh.
+        await _db.updateTrackStatus(track.id, 'complete',
+            filePath: fileOnDisk);
+        fixed++;
       }
     }
 
@@ -179,6 +188,35 @@ class MetadataService {
     fixed += cleaned;
 
     return fixed;
+  }
+
+  /// Renames files whose leading numeric prefix has fewer digits than the
+  /// playlist's current padding width. Only widens — never shrinks — so folders
+  /// that already used a wider prefix (e.g. because the playlist was larger in
+  /// the past) keep their names.
+  Future<void> _widenIndexPrefixes(Directory dir, int totalTracks) async {
+    final width = paddingWidth(totalTracks);
+    final prefixRe = RegExp(r'^(\d+)_(.*)$');
+
+    for (final entity in dir.listSync()) {
+      if (entity is! File) continue;
+      final oldName = p.basename(entity.path);
+      final match = prefixRe.firstMatch(oldName);
+      if (match == null) continue;
+      final digits = match.group(1)!;
+      if (digits.length >= width) continue;
+      final parsed = int.tryParse(digits);
+      if (parsed == null) continue;
+      final newName =
+          '${parsed.toString().padLeft(width, '0')}_${match.group(2)!}';
+      final newPath = p.join(dir.path, newName);
+      if (File(newPath).existsSync()) continue;
+      try {
+        await entity.rename(newPath);
+      } catch (_) {
+        // Best effort — skip on rename failure
+      }
+    }
   }
 
   /// Deletes .part files, .ytdl files, and orphaned image files from the playlist folder.
@@ -226,6 +264,29 @@ class MetadataService {
     }
 
     return deleted;
+  }
+
+  /// Zero-pads [index] to at least 5 digits, widening further if [totalTracks]
+  /// needs more digits. Keeps every track in a playlist aligned to the same width.
+  static String paddedIndex(int index, int totalTracks) {
+    final needed = totalTracks.toString().length;
+    final width = needed < 5 ? 5 : needed;
+    return index.toString().padLeft(width, '0');
+  }
+
+  /// Returns the minimum digit width used for file prefixes in a playlist.
+  static int paddingWidth(int totalTracks) {
+    final needed = totalTracks.toString().length;
+    return needed < 5 ? 5 : needed;
+  }
+
+  /// Replaces characters illegal on common filesystems with '_', matching
+  /// yt-dlp's default sanitisation (non-restrict mode). Collapses whitespace.
+  static String sanitizeFilename(String name) {
+    final replaced = name.replaceAll(
+        RegExp(r'''[\/\\:*?"<>|\x00-\x1f]'''), '_');
+    final collapsed = replaced.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return collapsed.isEmpty ? '_' : collapsed;
   }
 
   /// Find a media file in [dirPath] matching an index prefix (e.g. "001_").

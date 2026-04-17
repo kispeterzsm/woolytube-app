@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:drift/drift.dart' show Value;
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import '../database/database.dart';
 import 'ytdlp_service.dart';
@@ -120,7 +121,7 @@ class DownloadService {
         final trackNum = downloadedSoFar + i + 1;
         currentTrackNum = trackNum;
 
-        final indexStr = track.index.toString().padLeft(3, '0');
+        final indexStr = MetadataService.paddedIndex(track.index, totalTracks);
 
         // Check if a file already exists on disk for this track
         final existingFile = MetadataService.resolveMediaFile(
@@ -181,8 +182,10 @@ class DownloadService {
             status: 'downloading',
           ));
         } catch (e) {
-          await _db.updateTrackStatus(track.id, 'error');
-          _log.error('[$trackNum/$totalTracks] Failed "${track.title}": $e');
+          final errorMsg = _cleanErrorMessage(e);
+          await _db.updateTrackStatus(track.id, 'error', error: errorMsg);
+          _log.error(
+              '[$trackNum/$totalTracks] Failed "${track.title}": $errorMsg');
         }
       }
 
@@ -256,5 +259,26 @@ class DownloadService {
   void dispose() {
     _ytdlpProgressSub?.cancel();
     _progressController.close();
+  }
+
+  static final _ansiPattern = RegExp(r'\x1B\[[0-?]*[ -/]*[@-~]');
+  static final _ytPrefixPattern =
+      RegExp(r'^\s*(?:ERROR:\s*)?(?:\[[^\]]+\]\s*[^:]*:\s*)?');
+
+  static String _cleanErrorMessage(Object e) {
+    String raw;
+    if (e is PlatformException) {
+      raw = e.message ?? e.details?.toString() ?? e.toString();
+    } else {
+      raw = e.toString();
+    }
+    var cleaned = raw.replaceAll(_ansiPattern, '').trim();
+    // Strip a leading "ERROR: [youtube] xxxx: " prefix once.
+    cleaned = cleaned.replaceFirst(_ytPrefixPattern, '').trim();
+    if (cleaned.isEmpty) cleaned = raw.trim();
+    if (cleaned.length > 500) {
+      cleaned = '${cleaned.substring(0, 500)}...';
+    }
+    return cleaned;
   }
 }

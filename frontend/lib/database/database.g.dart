@@ -894,6 +894,17 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
     type: DriftSqlType.dateTime,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _lastErrorMeta = const VerificationMeta(
+    'lastError',
+  );
+  @override
+  late final GeneratedColumn<String> lastError = GeneratedColumn<String>(
+    'last_error',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -909,6 +920,7 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
     unavailableReason,
     isLocalReplacement,
     downloadedAt,
+    lastError,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -1023,6 +1035,12 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
         ),
       );
     }
+    if (data.containsKey('last_error')) {
+      context.handle(
+        _lastErrorMeta,
+        lastError.isAcceptableOrUnknown(data['last_error']!, _lastErrorMeta),
+      );
+    }
     return context;
   }
 
@@ -1091,6 +1109,10 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
         DriftSqlType.dateTime,
         data['${effectivePrefix}downloaded_at'],
       ),
+      lastError: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}last_error'],
+      ),
     );
   }
 
@@ -1114,6 +1136,7 @@ class Track extends DataClass implements Insertable<Track> {
   final String? unavailableReason;
   final bool isLocalReplacement;
   final DateTime? downloadedAt;
+  final String? lastError;
   const Track({
     required this.id,
     required this.playlistId,
@@ -1128,6 +1151,7 @@ class Track extends DataClass implements Insertable<Track> {
     this.unavailableReason,
     required this.isLocalReplacement,
     this.downloadedAt,
+    this.lastError,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -1156,6 +1180,9 @@ class Track extends DataClass implements Insertable<Track> {
     map['is_local_replacement'] = Variable<bool>(isLocalReplacement);
     if (!nullToAbsent || downloadedAt != null) {
       map['downloaded_at'] = Variable<DateTime>(downloadedAt);
+    }
+    if (!nullToAbsent || lastError != null) {
+      map['last_error'] = Variable<String>(lastError);
     }
     return map;
   }
@@ -1193,6 +1220,10 @@ class Track extends DataClass implements Insertable<Track> {
           downloadedAt == null && nullToAbsent
               ? const Value.absent()
               : Value(downloadedAt),
+      lastError:
+          lastError == null && nullToAbsent
+              ? const Value.absent()
+              : Value(lastError),
     );
   }
 
@@ -1217,6 +1248,7 @@ class Track extends DataClass implements Insertable<Track> {
       ),
       isLocalReplacement: serializer.fromJson<bool>(json['isLocalReplacement']),
       downloadedAt: serializer.fromJson<DateTime?>(json['downloadedAt']),
+      lastError: serializer.fromJson<String?>(json['lastError']),
     );
   }
   @override
@@ -1236,6 +1268,7 @@ class Track extends DataClass implements Insertable<Track> {
       'unavailableReason': serializer.toJson<String?>(unavailableReason),
       'isLocalReplacement': serializer.toJson<bool>(isLocalReplacement),
       'downloadedAt': serializer.toJson<DateTime?>(downloadedAt),
+      'lastError': serializer.toJson<String?>(lastError),
     };
   }
 
@@ -1253,6 +1286,7 @@ class Track extends DataClass implements Insertable<Track> {
     Value<String?> unavailableReason = const Value.absent(),
     bool? isLocalReplacement,
     Value<DateTime?> downloadedAt = const Value.absent(),
+    Value<String?> lastError = const Value.absent(),
   }) => Track(
     id: id ?? this.id,
     playlistId: playlistId ?? this.playlistId,
@@ -1272,6 +1306,7 @@ class Track extends DataClass implements Insertable<Track> {
             : this.unavailableReason,
     isLocalReplacement: isLocalReplacement ?? this.isLocalReplacement,
     downloadedAt: downloadedAt.present ? downloadedAt.value : this.downloadedAt,
+    lastError: lastError.present ? lastError.value : this.lastError,
   );
   Track copyWithCompanion(TracksCompanion data) {
     return Track(
@@ -1307,6 +1342,7 @@ class Track extends DataClass implements Insertable<Track> {
           data.downloadedAt.present
               ? data.downloadedAt.value
               : this.downloadedAt,
+      lastError: data.lastError.present ? data.lastError.value : this.lastError,
     );
   }
 
@@ -1325,7 +1361,8 @@ class Track extends DataClass implements Insertable<Track> {
           ..write('status: $status, ')
           ..write('unavailableReason: $unavailableReason, ')
           ..write('isLocalReplacement: $isLocalReplacement, ')
-          ..write('downloadedAt: $downloadedAt')
+          ..write('downloadedAt: $downloadedAt, ')
+          ..write('lastError: $lastError')
           ..write(')'))
         .toString();
   }
@@ -1345,6 +1382,7 @@ class Track extends DataClass implements Insertable<Track> {
     unavailableReason,
     isLocalReplacement,
     downloadedAt,
+    lastError,
   );
   @override
   bool operator ==(Object other) =>
@@ -1362,7 +1400,8 @@ class Track extends DataClass implements Insertable<Track> {
           other.status == this.status &&
           other.unavailableReason == this.unavailableReason &&
           other.isLocalReplacement == this.isLocalReplacement &&
-          other.downloadedAt == this.downloadedAt);
+          other.downloadedAt == this.downloadedAt &&
+          other.lastError == this.lastError);
 }
 
 class TracksCompanion extends UpdateCompanion<Track> {
@@ -1379,6 +1418,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
   final Value<String?> unavailableReason;
   final Value<bool> isLocalReplacement;
   final Value<DateTime?> downloadedAt;
+  final Value<String?> lastError;
   const TracksCompanion({
     this.id = const Value.absent(),
     this.playlistId = const Value.absent(),
@@ -1393,6 +1433,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
     this.unavailableReason = const Value.absent(),
     this.isLocalReplacement = const Value.absent(),
     this.downloadedAt = const Value.absent(),
+    this.lastError = const Value.absent(),
   });
   TracksCompanion.insert({
     this.id = const Value.absent(),
@@ -1408,6 +1449,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
     this.unavailableReason = const Value.absent(),
     this.isLocalReplacement = const Value.absent(),
     this.downloadedAt = const Value.absent(),
+    this.lastError = const Value.absent(),
   }) : playlistId = Value(playlistId),
        index = Value(index),
        videoId = Value(videoId),
@@ -1426,6 +1468,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
     Expression<String>? unavailableReason,
     Expression<bool>? isLocalReplacement,
     Expression<DateTime>? downloadedAt,
+    Expression<String>? lastError,
   }) {
     return RawValuesInsertable({
       if (id != null) 'id': id,
@@ -1442,6 +1485,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
       if (isLocalReplacement != null)
         'is_local_replacement': isLocalReplacement,
       if (downloadedAt != null) 'downloaded_at': downloadedAt,
+      if (lastError != null) 'last_error': lastError,
     });
   }
 
@@ -1459,6 +1503,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
     Value<String?>? unavailableReason,
     Value<bool>? isLocalReplacement,
     Value<DateTime?>? downloadedAt,
+    Value<String?>? lastError,
   }) {
     return TracksCompanion(
       id: id ?? this.id,
@@ -1474,6 +1519,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
       unavailableReason: unavailableReason ?? this.unavailableReason,
       isLocalReplacement: isLocalReplacement ?? this.isLocalReplacement,
       downloadedAt: downloadedAt ?? this.downloadedAt,
+      lastError: lastError ?? this.lastError,
     );
   }
 
@@ -1519,6 +1565,9 @@ class TracksCompanion extends UpdateCompanion<Track> {
     if (downloadedAt.present) {
       map['downloaded_at'] = Variable<DateTime>(downloadedAt.value);
     }
+    if (lastError.present) {
+      map['last_error'] = Variable<String>(lastError.value);
+    }
     return map;
   }
 
@@ -1537,7 +1586,8 @@ class TracksCompanion extends UpdateCompanion<Track> {
           ..write('status: $status, ')
           ..write('unavailableReason: $unavailableReason, ')
           ..write('isLocalReplacement: $isLocalReplacement, ')
-          ..write('downloadedAt: $downloadedAt')
+          ..write('downloadedAt: $downloadedAt, ')
+          ..write('lastError: $lastError')
           ..write(')'))
         .toString();
   }
@@ -2014,6 +2064,7 @@ typedef $$TracksTableCreateCompanionBuilder =
       Value<String?> unavailableReason,
       Value<bool> isLocalReplacement,
       Value<DateTime?> downloadedAt,
+      Value<String?> lastError,
     });
 typedef $$TracksTableUpdateCompanionBuilder =
     TracksCompanion Function({
@@ -2030,6 +2081,7 @@ typedef $$TracksTableUpdateCompanionBuilder =
       Value<String?> unavailableReason,
       Value<bool> isLocalReplacement,
       Value<DateTime?> downloadedAt,
+      Value<String?> lastError,
     });
 
 final class $$TracksTableReferences
@@ -2120,6 +2172,11 @@ class $$TracksTableFilterComposer
 
   ColumnFilters<DateTime> get downloadedAt => $composableBuilder(
     column: $table.downloadedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get lastError => $composableBuilder(
+    column: $table.lastError,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -2216,6 +2273,11 @@ class $$TracksTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get lastError => $composableBuilder(
+    column: $table.lastError,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   $$PlaylistsTableOrderingComposer get playlistId {
     final $$PlaylistsTableOrderingComposer composer = $composerBuilder(
       composer: this,
@@ -2297,6 +2359,9 @@ class $$TracksTableAnnotationComposer
     builder: (column) => column,
   );
 
+  GeneratedColumn<String> get lastError =>
+      $composableBuilder(column: $table.lastError, builder: (column) => column);
+
   $$PlaylistsTableAnnotationComposer get playlistId {
     final $$PlaylistsTableAnnotationComposer composer = $composerBuilder(
       composer: this,
@@ -2362,6 +2427,7 @@ class $$TracksTableTableManager
                 Value<String?> unavailableReason = const Value.absent(),
                 Value<bool> isLocalReplacement = const Value.absent(),
                 Value<DateTime?> downloadedAt = const Value.absent(),
+                Value<String?> lastError = const Value.absent(),
               }) => TracksCompanion(
                 id: id,
                 playlistId: playlistId,
@@ -2376,6 +2442,7 @@ class $$TracksTableTableManager
                 unavailableReason: unavailableReason,
                 isLocalReplacement: isLocalReplacement,
                 downloadedAt: downloadedAt,
+                lastError: lastError,
               ),
           createCompanionCallback:
               ({
@@ -2392,6 +2459,7 @@ class $$TracksTableTableManager
                 Value<String?> unavailableReason = const Value.absent(),
                 Value<bool> isLocalReplacement = const Value.absent(),
                 Value<DateTime?> downloadedAt = const Value.absent(),
+                Value<String?> lastError = const Value.absent(),
               }) => TracksCompanion.insert(
                 id: id,
                 playlistId: playlistId,
@@ -2406,6 +2474,7 @@ class $$TracksTableTableManager
                 unavailableReason: unavailableReason,
                 isLocalReplacement: isLocalReplacement,
                 downloadedAt: downloadedAt,
+                lastError: lastError,
               ),
           withReferenceMapper:
               (p0) =>

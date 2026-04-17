@@ -1,13 +1,16 @@
 import 'dart:io';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart' hide DownloadProgress;
+import 'package:path/path.dart' as p;
 import 'package:url_launcher/url_launcher.dart';
 import '../database/database.dart';
 import '../providers/providers.dart';
 import '../providers/playback_providers.dart';
 import '../services/download_service.dart';
+import '../services/metadata_service.dart';
 
 class PlaylistDetailPage extends ConsumerStatefulWidget {
   final int playlistId;
@@ -237,6 +240,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     final isUnavailable = track.status == 'unavailable';
     final hasLocalFile =
         track.status == 'complete' && track.unavailableReason != null;
+    final hasError = track.status == 'error' && track.lastError != null;
 
     return ListTile(
       onTap: isPlayable
@@ -289,19 +293,25 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
         overflow: TextOverflow.ellipsis,
       ),
       subtitle: Text(
-        isUnavailable
-            ? '${_unavailableLabel(track.unavailableReason)} · ${track.videoId}'
-            : hasLocalFile
-                ? '${_formatDuration(track.durationSeconds)} · ${_unavailableLabel(track.unavailableReason)} (local file)'
-                : _formatDuration(track.durationSeconds),
+        hasError
+            ? 'Download failed · ${_friendlyError(track.lastError!)}'
+            : isUnavailable
+                ? '${_unavailableLabel(track.unavailableReason)} · ${track.videoId}'
+                : hasLocalFile
+                    ? '${_formatDuration(track.durationSeconds)} · ${_unavailableLabel(track.unavailableReason)} (local file)'
+                    : _formatDuration(track.durationSeconds),
         style: TextStyle(
-          color: isUnavailable
+          color: hasError
               ? const Color(0xFFAA6666)
-              : hasLocalFile
-                  ? const Color(0xFFAAAA66)
-                  : const Color(0xFF888888),
+              : isUnavailable
+                  ? const Color(0xFFAA6666)
+                  : hasLocalFile
+                      ? const Color(0xFFAAAA66)
+                      : const Color(0xFF888888),
           fontSize: 12,
         ),
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
       ),
       trailing: isCurrentTrack
           ? Icon(
@@ -374,6 +384,49 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     final m = seconds ~/ 60;
     final s = seconds % 60;
     return '${m}:${s.toString().padLeft(2, '0')}';
+  }
+
+  String _friendlyError(String raw) {
+    final lower = raw.toLowerCase();
+    if (lower.contains('confirm your age') ||
+        lower.contains('sign in to confirm') ||
+        lower.contains('age-restricted')) {
+      return 'Age-restricted — needs sign-in';
+    }
+    if (lower.contains('private video')) return 'Private video';
+    if (lower.contains('members-only') || lower.contains('members only')) {
+      return 'Members-only video';
+    }
+    if (lower.contains('premium')) return 'YouTube Premium only';
+    if (lower.contains('http error 403') ||
+        lower.contains('rate-limit') ||
+        lower.contains(' 429')) {
+      return 'Blocked by YouTube (rate-limited)';
+    }
+    if (lower.contains('geo') && lower.contains('restrict')) {
+      return 'Geo-restricted';
+    }
+    if (lower.contains('live event')) return 'Live event, not downloadable';
+    if (lower.contains('video unavailable') ||
+        lower.contains('this video is not available')) {
+      return 'Video unavailable';
+    }
+    if (lower.contains('network') || lower.contains('connection')) {
+      return 'Network error';
+    }
+    // Fallback: first line, truncated.
+    final firstLine = raw.split('\n').first.trim();
+    if (firstLine.length > 120) {
+      return '${firstLine.substring(0, 120)}...';
+    }
+    return firstLine;
+  }
+
+  bool _isAgeGateError(String raw) {
+    final lower = raw.toLowerCase();
+    return lower.contains('confirm your age') ||
+        lower.contains('sign in to confirm') ||
+        lower.contains('age-restricted');
   }
 
   String _unavailableLabel(String? reason) {
@@ -474,8 +527,6 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   }
 
   void _showTrackActions(Track track) {
-    final indexPrefix = track.index.toString().padLeft(3, '0');
-
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF2A2A2A),
@@ -538,19 +589,29 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                       'https://quiteaplaylist.com/search?url=https://www.youtube.com/watch?v=${track.videoId}'));
                 },
               ),
-            // Always: Scan for local replacement
+            // Always: Pick local replacement
             ListTile(
-              leading: const Icon(Icons.folder_open, color: Colors.white70),
-              title: const Text('Scan for local replacement',
+              leading: const Icon(Icons.file_upload, color: Colors.white70),
+              title: const Text('Pick local replacement',
                   style: TextStyle(color: Colors.white)),
-              subtitle: Text(
-                  track.status == 'complete'
-                      ? 'Replace current file with local file'
-                      : 'Check playlist folder for ${indexPrefix}_* file',
-                  style: const TextStyle(color: Color(0xFF888888))),
+              subtitle: const Text(
+                  'Choose a video/audio file from your device',
+                  style: TextStyle(color: Color(0xFF888888))),
               onTap: () async {
                 Navigator.pop(sheetContext);
-                await _scanForLocalReplacement(track);
+                await _pickLocalReplacement(track);
+              },
+            ),
+            // Always: Override title / filename
+            ListTile(
+              leading: const Icon(Icons.edit, color: Colors.white70),
+              title: const Text('Override title / filename',
+                  style: TextStyle(color: Colors.white)),
+              subtitle: const Text('Edit the stored title or on-disk name',
+                  style: TextStyle(color: Color(0xFF888888))),
+              onTap: () async {
+                Navigator.pop(sheetContext);
+                await _showOverrideDialog(track);
               },
             ),
             // Complete: Redownload
@@ -565,6 +626,20 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                 onTap: () async {
                   Navigator.pop(sheetContext);
                   await _redownloadTrack(track);
+                },
+              ),
+            // Error: Show details
+            if (track.status == 'error' && track.lastError != null)
+              ListTile(
+                leading:
+                    const Icon(Icons.error_outline, color: Colors.white70),
+                title: const Text('Show error details',
+                    style: TextStyle(color: Colors.white)),
+                subtitle: Text(_friendlyError(track.lastError!),
+                    style: const TextStyle(color: Color(0xFFAA6666))),
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  _showErrorDetails(track);
                 },
               ),
             // Error: Retry download
@@ -595,10 +670,9 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     );
   }
 
-  Future<void> _scanForLocalReplacement(Track track) async {
+  Future<void> _pickLocalReplacement(Track track) async {
     if (_playlist == null) return;
 
-    final indexPrefix = track.index.toString().padLeft(3, '0');
     final dir = Directory(_playlist!.outputPath);
     if (!dir.existsSync()) {
       if (mounted) {
@@ -609,46 +683,280 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
       return;
     }
 
-    const mediaExtensions = {
-      '.m4a', '.mp3', '.opus', '.ogg', '.flac', '.wav',
-      '.mp4', '.mkv', '.webm', '.avi', '.mov',
-    };
+    FilePickerResult? result;
+    try {
+      result = await FilePicker.platform
+          .pickFiles(type: FileType.media, withData: false);
+    } catch (_) {
+      // Some platforms reject FileType.media — fall back to any file.
+      result = await FilePicker.platform
+          .pickFiles(type: FileType.any, withData: false);
+    }
+    if (result == null || result.files.isEmpty) return;
+    final picked = result.files.single;
+    final sourcePath = picked.path;
+    if (sourcePath == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not access picked file')),
+        );
+      }
+      return;
+    }
 
-    String? foundPath;
-    for (final entity in dir.listSync()) {
-      if (entity is File) {
-        final fileName = entity.path.split('/').last;
-        final ext = fileName.contains('.')
-            ? '.${fileName.split('.').last}'.toLowerCase()
-            : '';
-        if (fileName.startsWith('${indexPrefix}_') &&
-            mediaExtensions.contains(ext)) {
-          foundPath = entity.path;
-          break;
+    final db = ref.read(databaseProvider);
+    final totalTracks = await db.getTotalTrackCount(_playlist!.id);
+    final indexStr = MetadataService.paddedIndex(track.index, totalTracks);
+
+    final ext = p.extension(picked.name);
+    final base = p.basenameWithoutExtension(picked.name);
+    final sanitized = MetadataService.sanitizeFilename(base);
+    final newName = '${indexStr}_$sanitized$ext';
+    final newPath = p.join(_playlist!.outputPath, newName);
+
+    // Remove any existing file for this track's index prefix.
+    final existing = MetadataService.resolveMediaFile(
+        _playlist!.outputPath, '${indexStr}_');
+    if (existing != null && existing != newPath) {
+      try {
+        await File(existing).delete();
+      } catch (_) {
+        // Non-fatal — the copy below may still overwrite it.
+      }
+    }
+
+    try {
+      await File(sourcePath).copy(newPath);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Copy failed: $e')),
+        );
+      }
+      return;
+    }
+
+    await db.updateTrackStatus(track.id, 'complete',
+        filePath: newPath, isLocalReplacement: true);
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Replaced with $newName')),
+      );
+    }
+  }
+
+  Future<void> _showOverrideDialog(Track track) async {
+    if (_playlist == null) return;
+
+    final currentFile = track.filePath != null ? File(track.filePath!) : null;
+    final hasFile = currentFile != null && currentFile.existsSync();
+    final currentBasename =
+        hasFile ? p.basenameWithoutExtension(currentFile.path) : '';
+    // Strip leading "<digits>_" so the field shows just the editable portion.
+    final nameWithoutPrefix =
+        currentBasename.replaceFirst(RegExp(r'^\d+_'), '');
+
+    final titleController = TextEditingController(text: track.title);
+    final filenameController =
+        TextEditingController(text: hasFile ? nameWithoutPrefix : '');
+
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF2A2A2A),
+        title: const Text('Override',
+            style: TextStyle(color: Colors.white)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            TextField(
+              controller: titleController,
+              style: const TextStyle(color: Colors.white),
+              decoration: InputDecoration(
+                labelText: 'Title',
+                labelStyle: const TextStyle(color: Color(0xFF888888)),
+                hintText: track.title,
+                hintStyle: const TextStyle(color: Color(0xFF555555)),
+                border: const OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: filenameController,
+              enabled: hasFile,
+              style: const TextStyle(color: Colors.white),
+              decoration: InputDecoration(
+                labelText: 'Filename',
+                labelStyle: const TextStyle(color: Color(0xFF888888)),
+                hintText: hasFile ? nameWithoutPrefix : 'No file on disk',
+                hintStyle: const TextStyle(color: Color(0xFF555555)),
+                helperText: hasFile
+                    ? 'Index prefix and extension stay the same'
+                    : null,
+                helperStyle: const TextStyle(color: Color(0xFF666666)),
+                border: const OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel',
+                style: TextStyle(color: Color(0xFF888888))),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Save',
+                style: TextStyle(color: Color(0xFF4A9EFF))),
+          ),
+        ],
+      ),
+    );
+
+    if (saved != true) return;
+
+    final db = ref.read(databaseProvider);
+    final newTitle = titleController.text.trim();
+    final newFilename = filenameController.text.trim();
+
+    var titleChanged = false;
+    var fileChanged = false;
+    String? newPath;
+
+    if (newTitle.isNotEmpty && newTitle != track.title) {
+      titleChanged = true;
+    }
+
+    if (hasFile && newFilename.isNotEmpty && newFilename != nameWithoutPrefix) {
+      final ext = p.extension(currentFile.path);
+      final prefixMatch =
+          RegExp(r'^(\d+_)').firstMatch(p.basename(currentFile.path));
+      final prefix = prefixMatch?.group(1) ?? '';
+      final sanitized = MetadataService.sanitizeFilename(newFilename);
+      final newName = '$prefix$sanitized$ext';
+      newPath = p.join(p.dirname(currentFile.path), newName);
+      if (newPath != currentFile.path) {
+        if (File(newPath).existsSync()) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('A file with that name already exists')),
+            );
+          }
+          return;
+        }
+        try {
+          await currentFile.rename(newPath);
+          fileChanged = true;
+        } catch (e) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Rename failed: $e')),
+            );
+          }
+          return;
         }
       }
     }
 
-    if (foundPath != null) {
-      final db = ref.read(databaseProvider);
-      await db.updateTrackStatus(track.id, 'complete',
-          filePath: foundPath, isLocalReplacement: true);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text(
-                  'Found: ${foundPath.split('/').last}')),
-        );
-      }
-    } else {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text(
-                  'No file starting with ${indexPrefix}_ found in playlist folder')),
-        );
-      }
+    if (titleChanged || fileChanged) {
+      await db.updateTrackFields(
+        track.id,
+        title: titleChanged ? newTitle : null,
+        filePath: fileChanged ? newPath : null,
+      );
     }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content: Text(titleChanged || fileChanged
+                ? 'Override saved'
+                : 'No changes')),
+      );
+    }
+  }
+
+  Future<void> _showErrorDetails(Track track) async {
+    final raw = track.lastError ?? '';
+    final isAgeGate = _isAgeGateError(raw);
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF2A2A2A),
+        title: Row(
+          children: [
+            const Icon(Icons.error_outline, color: Color(0xFFAA6666)),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                _friendlyError(raw),
+                style: const TextStyle(
+                    color: Colors.white, fontSize: 16),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 360),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SelectableText(
+                  raw,
+                  style: const TextStyle(
+                    color: Color(0xFFCCCCCC),
+                    fontSize: 12,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+                if (isAgeGate) ...[
+                  const SizedBox(height: 16),
+                  const Divider(color: Color(0xFF444444), height: 1),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'This video requires a signed-in session to confirm age. '
+                    'WoolyTube automatically tries to bypass this using '
+                    "YouTube's TV client, but this particular video can't be "
+                    'fetched without cookies from a logged-in browser.',
+                    style: TextStyle(
+                        color: Color(0xFFAAAAAA), fontSize: 12),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
+          TextButton(
+            onPressed: () async {
+              Navigator.pop(ctx);
+              final db = ref.read(databaseProvider);
+              await db.resetTrackForRedownload(track.id);
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                      content:
+                          Text('Queued "${track.title}" for download')),
+                );
+              }
+            },
+            child: const Text('Retry'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _redownloadTrack(Track track) async {

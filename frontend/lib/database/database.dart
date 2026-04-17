@@ -39,6 +39,7 @@ class Tracks extends Table {
   BoolColumn get isLocalReplacement =>
       boolean().withDefault(const Constant(false))();
   DateTimeColumn get downloadedAt => dateTime().nullable()();
+  TextColumn get lastError => text().nullable()();
 }
 
 @DriftDatabase(tables: [Playlists, Tracks])
@@ -53,7 +54,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -63,6 +64,9 @@ class AppDatabase extends _$AppDatabase {
           }
           if (from < 3) {
             await migrator.addColumn(tracks, tracks.isLocalReplacement);
+          }
+          if (from < 4) {
+            await migrator.addColumn(tracks, tracks.lastError);
           }
         },
       );
@@ -112,8 +116,27 @@ class AppDatabase extends _$AppDatabase {
   Future<bool> updateTrack(TracksCompanion track) =>
       update(tracks).replace(track);
 
+  Future<void> updateTrackFields(int trackId,
+      {String? title, String? filePath}) async {
+    await (update(tracks)..where((t) => t.id.equals(trackId))).write(
+      TracksCompanion(
+        title: title != null ? Value(title) : const Value.absent(),
+        filePath: filePath != null ? Value(filePath) : const Value.absent(),
+      ),
+    );
+  }
+
   Future<void> updateTrackStatus(int trackId, String status,
-      {String? filePath, bool? isLocalReplacement}) async {
+      {String? filePath, bool? isLocalReplacement, String? error}) async {
+    final Value<String?> errorValue;
+    if (status == 'error') {
+      errorValue = Value(error);
+    } else if (status == 'complete') {
+      errorValue = const Value(null);
+    } else {
+      errorValue = const Value.absent();
+    }
+
     await (update(tracks)..where((t) => t.id.equals(trackId))).write(
       TracksCompanion(
         status: Value(status),
@@ -123,6 +146,7 @@ class AppDatabase extends _$AppDatabase {
             : const Value.absent(),
         downloadedAt:
             status == 'complete' ? Value(DateTime.now()) : const Value.absent(),
+        lastError: errorValue,
       ),
     );
   }
@@ -221,6 +245,7 @@ class AppDatabase extends _$AppDatabase {
         isLocalReplacement: const Value(false),
         unavailableReason: const Value(null),
         downloadedAt: const Value(null),
+        lastError: const Value(null),
       ),
     );
   }
