@@ -1,13 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:media_kit/media_kit.dart';
+import 'package:media_kit/media_kit.dart' hide Track;
 import 'package:audio_service/audio_service.dart';
+import 'database/database.dart';
 import 'providers/providers.dart';
 import 'providers/playback_providers.dart';
+import 'providers/lifecycle_provider.dart';
 import 'services/playback_service.dart';
 import 'services/audio_handler.dart';
 import 'pages/home_page.dart';
+import 'pages/player_page.dart';
 import 'widgets/mini_player.dart';
 
 void main() async {
@@ -49,13 +52,65 @@ void main() async {
   ));
 }
 
-class WoolyTubeApp extends StatelessWidget {
+class WoolyTubeApp extends ConsumerStatefulWidget {
   const WoolyTubeApp({super.key});
 
   @override
+  ConsumerState<WoolyTubeApp> createState() => _WoolyTubeAppState();
+}
+
+class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
+    with WidgetsBindingObserver {
+  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    ref.read(appLifecycleProvider.notifier).state = state;
+    final playbackService = ref.read(playbackServiceProvider);
+    switch (state) {
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.hidden:
+        playbackService.handleAppInactive();
+        break;
+      case AppLifecycleState.resumed:
+        playbackService.handleAppResumed();
+        break;
+      case AppLifecycleState.detached:
+        break;
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    // Auto-open the full-screen player when a video track starts.
+    ref.listen<AsyncValue<Track?>>(currentTrackProvider, (prev, next) {
+      final track = next.valueOrNull;
+      if (track == null) return;
+      if (prev?.valueOrNull?.id == track.id) return;
+      final svc = ref.read(playbackServiceProvider);
+      if (!svc.isVideoContent) return;
+      if (videoFullscreenNotifier.value) return;
+      _navigatorKey.currentState?.push(
+        MaterialPageRoute(builder: (_) => const PlayerPage()),
+      );
+    });
+
     return MaterialApp(
       title: 'WoolyTube',
+      navigatorKey: _navigatorKey,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,

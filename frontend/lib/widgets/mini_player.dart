@@ -3,20 +3,53 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import '../providers/playback_providers.dart';
+import '../providers/lifecycle_provider.dart';
 import '../pages/player_page.dart';
 
-class MiniPlayerBar extends ConsumerWidget {
+class MiniPlayerBar extends ConsumerStatefulWidget {
   const MiniPlayerBar({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<MiniPlayerBar> createState() => _MiniPlayerBarState();
+}
+
+class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
+  @override
+  void initState() {
+    super.initState();
+    videoFullscreenNotifier.addListener(_onFullscreenChanged);
+  }
+
+  @override
+  void dispose() {
+    videoFullscreenNotifier.removeListener(_onFullscreenChanged);
+    super.dispose();
+  }
+
+  void _onFullscreenChanged() {
+    // Defer setState — the notifier may be flipped while the popping route
+    // is still being disposed, and synchronous setState during that phase
+    // is silently dropped.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final currentTrack = ref.watch(currentTrackProvider).valueOrNull;
     if (currentTrack == null) return const SizedBox.shrink();
+    if (videoFullscreenNotifier.value) return const SizedBox.shrink();
+    return _buildBar(context, ref, currentTrack);
+  }
+
+  Widget _buildBar(BuildContext context, WidgetRef ref, dynamic currentTrack) {
 
     final isPlaying = ref.watch(isPlayingProvider).valueOrNull ?? false;
     final position = ref.watch(positionProvider).valueOrNull ?? Duration.zero;
     final duration = ref.watch(durationProvider).valueOrNull ?? Duration.zero;
     final isVideo = ref.watch(isVideoContentProvider).valueOrNull ?? false;
+    final foregrounded = ref.watch(isAppForegroundedProvider);
     final playbackService = ref.watch(playbackServiceProvider);
 
     final progress =
@@ -60,7 +93,7 @@ class MiniPlayerBar extends ConsumerWidget {
                     child: SizedBox(
                       width: 48,
                       height: 48,
-                      child: isVideo
+                      child: isVideo && foregrounded
                           ? Video(
                               controller: playbackService.videoController,
                               controls: NoVideoControls,

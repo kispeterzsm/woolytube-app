@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../database/database.dart';
 import '../services/playback_service.dart';
@@ -36,12 +37,26 @@ final isVideoContentProvider = StreamProvider<bool>((ref) {
   return ref.watch(playbackServiceProvider).isVideoContentStream;
 });
 
+final videoAspectProvider = StreamProvider<double?>((ref) {
+  return ref.watch(playbackServiceProvider).videoAspectStream;
+});
+
+/// True while the full-screen VLC-style video view is mounted. The global
+/// MiniPlayerBar uses this to hide itself so the video can go edge-to-edge.
+/// Plain ValueNotifier (not Riverpod) so the video page can flip it from
+/// initState/dispose without violating lifecycle rules.
+final ValueNotifier<bool> videoFullscreenNotifier = ValueNotifier<bool>(false);
+
 final shuffleEnabledProvider = StreamProvider<bool>((ref) {
   return ref.watch(playbackServiceProvider).shuffleEnabledStream;
 });
 
 final autoplayEnabledProvider = StreamProvider<bool>((ref) {
   return ref.watch(playbackServiceProvider).autoplayEnabledStream;
+});
+
+final audioOnlyModeProvider = StreamProvider<bool>((ref) {
+  return ref.watch(playbackServiceProvider).audioOnlyModeStream;
 });
 
 final queueProvider = StreamProvider<List<Track>>((ref) {

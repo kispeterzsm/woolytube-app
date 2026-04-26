@@ -19,6 +19,10 @@ class PlayerControls extends ConsumerWidget {
         ref.watch(shuffleEnabledProvider).valueOrNull ?? false;
     final autoplayEnabled =
         ref.watch(autoplayEnabledProvider).valueOrNull ?? true;
+    final audioOnlyMode =
+        ref.watch(audioOnlyModeProvider).valueOrNull ?? false;
+    final currentPlaylist = ref.watch(currentPlaylistProvider).valueOrNull;
+    final isVideoPlaylist = currentPlaylist?.audioOnly == false;
     final playbackService = ref.watch(playbackServiceProvider);
 
     return Column(
@@ -30,6 +34,20 @@ class PlayerControls extends ConsumerWidget {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
+                if (isVideoPlaylist) ...[
+                  IconButton(
+                    icon: Icon(
+                      audioOnlyMode ? Icons.videocam_off : Icons.videocam,
+                      color: audioOnlyMode
+                          ? const Color(0xFF2196F3)
+                          : const Color(0xFF888888),
+                      size: 22,
+                    ),
+                    onPressed: playbackService.toggleAudioOnlyMode,
+                    tooltip: audioOnlyMode ? 'Audio only' : 'Play video',
+                  ),
+                  const SizedBox(width: 16),
+                ],
                 IconButton(
                   icon: Icon(
                     Icons.shuffle,

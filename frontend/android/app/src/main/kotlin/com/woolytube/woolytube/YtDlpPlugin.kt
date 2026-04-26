@@ -121,7 +121,6 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 val request = YoutubeDLRequest(url)
                 request.addOption("--dump-json")
                 request.addOption("--no-download")
-                applyYoutubeClientArgs(request)
                 val response = YoutubeDL.getInstance().execute(request)
                 withContext(Dispatchers.Main) { result.success(response.out) }
             } catch (e: Exception) {
@@ -142,7 +141,6 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 request.addOption("--flat-playlist")
                 request.addOption("--dump-json")
                 request.addOption("--no-download")
-                applyYoutubeClientArgs(request)
                 val response = YoutubeDL.getInstance().execute(request)
 
                 val lines = response.out.trim().split("\n").filter { it.isNotBlank() }
@@ -255,7 +253,6 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         request.addOption("--restrict-filenames")
         request.addOption("--no-mtime")
         request.addOption("--no-playlist")
-        applyYoutubeClientArgs(request)
 
         YoutubeDL.getInstance().execute(request) { progress, etaInSeconds, line ->
             scope.launch(Dispatchers.Main) {
@@ -271,14 +268,5 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
     private fun sendProgress(data: Map<String, Any>) {
         progressSink?.success(data)
-    }
-
-    // Age-gate bypass: default client rejects age-restricted videos; the tv_*
-    // clients emulate YouTube's TV app, which generally isn't age-gated.
-    private fun applyYoutubeClientArgs(request: YoutubeDLRequest) {
-        request.addOption(
-            "--extractor-args",
-            "youtube:player_client=default,tv_simply,tv_embedded,web_safari"
-        )
     }
 }

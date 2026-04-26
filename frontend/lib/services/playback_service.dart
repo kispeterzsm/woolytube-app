@@ -41,6 +41,14 @@ class PlaybackService {
   Stream<Duration> get durationStream => _player.stream.duration;
   Stream<bool> get isPlayingStream => _player.stream.playing;
   Stream<bool> get isCompletedStream => _player.stream.completed;
+  Stream<int?> get videoWidthStream => _player.stream.width;
+  Stream<int?> get videoHeightStream => _player.stream.height;
+  Stream<double?> get videoAspectStream => Rx.combineLatest2(
+        _player.stream.width,
+        _player.stream.height,
+        (int? w, int? h) =>
+            (w != null && h != null && w > 0 && h > 0) ? w / h : null,
+      );
 
   // Current values
   Track? get currentTrack => _currentTrack.value;
@@ -56,6 +64,10 @@ class PlaybackService {
 
   // Shuffle state
   List<int> _shuffledIndices = [];
+
+  // Background/foreground transition safety net
+  Duration _lastKnownPosition = Duration.zero;
+  bool _wasPlayingBeforeBackground = false;
 
   PlaybackService() {
     _player = Player();
@@ -168,6 +180,36 @@ class PlaybackService {
     }
 
     await _player.open(Media('file://$filePath'));
+  }
+
+  /// Disable libmpv's video track before the Android GL surface is destroyed.
+  /// Without this, surface destruction makes libmpv pause and reset the file
+  /// on the next play action. Audio keeps decoding normally.
+  Future<void> handleAppInactive() async {
+    _lastKnownPosition = _player.state.position;
+    _wasPlayingBeforeBackground = _player.state.playing;
+    final native = _player.platform;
+    if (native is NativePlayer) {
+      await native.setProperty('vid', 'no');
+    }
+  }
+
+  /// Re-enable video decoding when the app returns to foreground so the
+  /// Video widget can render again. If libmpv reset position during the
+  /// surface teardown, seek back to where we were.
+  Future<void> handleAppResumed() async {
+    final native = _player.platform;
+    if (native is NativePlayer) {
+      await native.setProperty('vid', 'auto');
+    }
+    final current = _player.state.position;
+    if (_lastKnownPosition > Duration.zero &&
+        (current - _lastKnownPosition).abs() > const Duration(seconds: 2)) {
+      await _player.seek(_lastKnownPosition);
+    }
+    if (_wasPlayingBeforeBackground && !_player.state.playing) {
+      await _player.play();
+    }
   }
 
   Future<void> pause() => _player.pause();
