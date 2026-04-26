@@ -75,4 +75,28 @@ class YtDlpService {
   Future<void> updateYtDlp() async {
     await _methodChannel.invokeMethod('updateYtDlp');
   }
+
+  Future<void> startDownloadService(String playlistName) async {
+    await _methodChannel.invokeMethod('startDownloadService', {
+      'playlistName': playlistName,
+    });
+  }
+
+  Future<void> updateDownloadServiceProgress({
+    required String playlistName,
+    required int currentTrack,
+    required int totalTracks,
+    required int progress,
+  }) async {
+    await _methodChannel.invokeMethod('updateDownloadServiceProgress', {
+      'playlistName': playlistName,
+      'currentTrack': currentTrack,
+      'totalTracks': totalTracks,
+      'progress': progress,
+    });
+  }
+
+  Future<void> stopDownloadService() async {
+    await _methodChannel.invokeMethod('stopDownloadService');
+  }
 }

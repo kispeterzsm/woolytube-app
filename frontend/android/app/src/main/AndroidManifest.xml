@@ -37,6 +37,11 @@
             </intent-filter>
         </activity>
         <service
+            android:name=".DownloadForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <service
             android:name="com.ryanheise.audioservice.AudioService"
             android:foregroundServiceType="mediaPlayback"
             android:exported="true">

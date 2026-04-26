@@ -94,6 +94,12 @@ class DownloadService {
     final downloadedSoFar = totalTracks - pendingTracks.length;
     var currentTrackNum = downloadedSoFar + 1;
 
+    try {
+      await _ytdlp.startDownloadService(playlist.name);
+    } catch (e) {
+      _log.warn('Failed to start download foreground service: $e');
+    }
+
     _ytdlpProgressSub = _ytdlp.progressStream.listen((event) {
       final progress = (event['progress'] as num?)?.toDouble() ?? 0;
       final status = event['status'] as String? ?? 'downloading';
@@ -106,11 +112,11 @@ class DownloadService {
           trackProgress: progress,
           status: 'downloading',
         ));
-        _notifications?.showDownloadProgress(
+        _ytdlp.updateDownloadServiceProgress(
           playlistName: playlist.name,
           currentTrack: currentTrackNum,
           totalTracks: totalTracks,
-          progressPercent: progress.round(),
+          progress: progress.round(),
         );
       }
     });
@@ -158,12 +164,13 @@ class DownloadService {
           final videoUrl =
               'https://www.youtube.com/watch?v=${track.videoId}';
 
-          await _ytdlp.download(
+          await _downloadWithRetry(
             url: videoUrl,
             outputPath: playlist.outputPath,
             audioOnly: playlist.audioOnly,
             embedThumbnail: playlist.includeThumbnails,
             outputTemplate: outputTemplate,
+            trackLabel: '[$trackNum/$totalTracks] ${track.title}',
           );
 
           // Resolve actual file path (yt-dlp adds extension)
@@ -230,7 +237,6 @@ class DownloadService {
       try {
         await MetadataService.cleanupPlaylistFolder(playlist.outputPath);
       } catch (_) {}
-      await _notifications?.cancel();
       _progressController.add(DownloadProgress(
         playlistId: playlist.id,
         currentTrackIndex: 0,
@@ -243,6 +249,64 @@ class DownloadService {
       _isDownloading = false;
       _ytdlpProgressSub?.cancel();
       _ytdlpProgressSub = null;
+      try {
+        await _ytdlp.stopDownloadService();
+      } catch (e) {
+        _log.warn('Failed to stop download foreground service: $e');
+      }
+    }
+  }
+
+  static const _transientErrorPatterns = [
+    'no address associated with hostname',
+    'unable to download webpage',
+    'http error 5',
+    'connection reset',
+    'connection refused',
+    'connection closed',
+    'timed out',
+    'timeout',
+    'rate limited',
+    'temporary failure in name resolution',
+    'network is unreachable',
+  ];
+
+  static bool _isTransientError(String message) {
+    final lower = message.toLowerCase();
+    return _transientErrorPatterns.any(lower.contains);
+  }
+
+  Future<void> _downloadWithRetry({
+    required String url,
+    required String outputPath,
+    required bool audioOnly,
+    required bool embedThumbnail,
+    required String outputTemplate,
+    required String trackLabel,
+  }) async {
+    const backoffs = [Duration(seconds: 5), Duration(seconds: 15)];
+    var attempt = 0;
+    while (true) {
+      try {
+        await _ytdlp.download(
+          url: url,
+          outputPath: outputPath,
+          audioOnly: audioOnly,
+          embedThumbnail: embedThumbnail,
+          outputTemplate: outputTemplate,
+        );
+        return;
+      } catch (e) {
+        final cleaned = _cleanErrorMessage(e);
+        if (attempt >= backoffs.length || !_isTransientError(cleaned)) {
+          rethrow;
+        }
+        final delay = backoffs[attempt];
+        attempt++;
+        _log.warn(
+            '$trackLabel: transient error (attempt $attempt), retrying in ${delay.inSeconds}s: $cleaned');
+        await Future.delayed(delay);
+      }
     }
   }
 

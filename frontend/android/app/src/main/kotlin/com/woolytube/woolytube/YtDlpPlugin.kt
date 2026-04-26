@@ -1,7 +1,9 @@
 package com.woolytube.woolytube
 
 import android.content.Context
+import android.content.Intent
 import android.util.Log
+import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
@@ -54,6 +56,9 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "getPlaylistInfo" -> handleGetPlaylistInfo(call.arguments as Map<*, *>, result)
             "cancelDownload" -> handleCancelDownload(call.arguments as Map<*, *>, result)
             "updateYtDlp" -> handleUpdateYtDlp(result)
+            "startDownloadService" -> handleStartDownloadService(call.arguments as Map<*, *>, result)
+            "updateDownloadServiceProgress" -> handleUpdateDownloadServiceProgress(call.arguments as Map<*, *>, result)
+            "stopDownloadService" -> handleStopDownloadService(result)
             else -> result.notImplemented()
         }
     }
@@ -268,5 +273,56 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
     private fun sendProgress(data: Map<String, Any>) {
         progressSink?.success(data)
+    }
+
+    private fun handleStartDownloadService(args: Map<*, *>, result: MethodChannel.Result) {
+        val playlistName = args["playlistName"] as? String ?: "playlist"
+        val intent = Intent(context, DownloadForegroundService::class.java).apply {
+            action = DownloadForegroundService.ACTION_START_OR_UPDATE
+            putExtra(DownloadForegroundService.EXTRA_PLAYLIST_NAME, playlistName)
+            putExtra(DownloadForegroundService.EXTRA_CURRENT_TRACK, 0)
+            putExtra(DownloadForegroundService.EXTRA_TOTAL_TRACKS, 0)
+            putExtra(DownloadForegroundService.EXTRA_PROGRESS, 0)
+        }
+        try {
+            ContextCompat.startForegroundService(context, intent)
+            result.success(null)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start download service", e)
+            result.error("FG_SERVICE_ERROR", e.message, null)
+        }
+    }
+
+    private fun handleUpdateDownloadServiceProgress(args: Map<*, *>, result: MethodChannel.Result) {
+        val playlistName = args["playlistName"] as? String ?: "playlist"
+        val currentTrack = (args["currentTrack"] as? Number)?.toInt() ?: 0
+        val totalTracks = (args["totalTracks"] as? Number)?.toInt() ?: 0
+        val progress = (args["progress"] as? Number)?.toInt() ?: 0
+        val intent = Intent(context, DownloadForegroundService::class.java).apply {
+            action = DownloadForegroundService.ACTION_START_OR_UPDATE
+            putExtra(DownloadForegroundService.EXTRA_PLAYLIST_NAME, playlistName)
+            putExtra(DownloadForegroundService.EXTRA_CURRENT_TRACK, currentTrack)
+            putExtra(DownloadForegroundService.EXTRA_TOTAL_TRACKS, totalTracks)
+            putExtra(DownloadForegroundService.EXTRA_PROGRESS, progress)
+        }
+        try {
+            ContextCompat.startForegroundService(context, intent)
+            result.success(null)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to update download service progress", e)
+            result.success(null)
+        }
+    }
+
+    private fun handleStopDownloadService(result: MethodChannel.Result) {
+        val intent = Intent(context, DownloadForegroundService::class.java).apply {
+            action = DownloadForegroundService.ACTION_STOP
+        }
+        try {
+            context.startService(intent)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to stop download service", e)
+        }
+        result.success(null)
     }
 }
