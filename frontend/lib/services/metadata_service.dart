@@ -58,6 +58,14 @@ class DiscoveredPlaylist {
 
 const _metaFileName = 'woolytube_meta.json';
 
+class _CandidateFile {
+  String digits;
+  String rest;
+  String path;
+  _CandidateFile(
+      {required this.digits, required this.rest, required this.path});
+}
+
 class MetadataService {
   final AppDatabase _db;
 
@@ -147,76 +155,104 @@ class MetadataService {
   }
 
   /// Reconciles database track statuses with actual files on disk.
-  /// Fixes mismatches where files exist but DB says pending, or vice versa.
+  /// Single async directory pass: categorizes junk for deletion, widens any
+  /// short-prefix filenames, then matches tracks to files via O(1) map lookup.
   Future<int> reconcilePlaylist(Playlist playlist) async {
     final tracks = await _db.getTracksForPlaylist(playlist.id);
     final dir = Directory(playlist.outputPath);
     if (!await dir.exists()) return 0;
 
-    // Widen any legacy short-prefix filenames to the current padding width.
-    await _widenIndexPrefixes(dir, tracks.length);
+    const mediaExtensions = {
+      '.m4a', '.mp3', '.opus', '.ogg', '.flac', '.wav',
+      '.mp4', '.mkv', '.webm', '.avi', '.mov',
+    };
+    const imageExtensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif'};
+    final partPattern = RegExp(r'\.part(-Frag\d+)?$');
+    final prefixRe = RegExp(r'^(\d+)_(.*)$');
+    final width = paddingWidth(tracks.length);
+
+    final toDelete = <File>[];
+    final mediaFiles = <_CandidateFile>[];
+
+    await for (final entity in dir.list()) {
+      if (entity is! File) continue;
+      final fileName = p.basename(entity.path);
+      final ext = p.extension(entity.path).toLowerCase();
+
+      if (partPattern.hasMatch(fileName) ||
+          ext == '.ytdl' ||
+          fileName.endsWith('.tmp') ||
+          (imageExtensions.contains(ext) && fileName != _metaFileName)) {
+        toDelete.add(entity);
+        continue;
+      }
+
+      if (!mediaExtensions.contains(ext)) continue;
+      final match = prefixRe.firstMatch(fileName);
+      if (match == null) continue;
+      mediaFiles.add(_CandidateFile(
+        digits: match.group(1)!,
+        rest: match.group(2)!,
+        path: entity.path,
+      ));
+    }
 
     int fixed = 0;
+    for (final entity in toDelete) {
+      try {
+        await entity.delete();
+        fixed++;
+      } catch (_) {
+        // Best effort
+      }
+    }
+
+    // Only widens — never shrinks — so folders that previously used a wider
+    // prefix (because the playlist was larger in the past) keep their names.
+    for (final f in mediaFiles) {
+      if (f.digits.length >= width) continue;
+      final parsed = int.tryParse(f.digits);
+      if (parsed == null) continue;
+      final widened = parsed.toString().padLeft(width, '0');
+      final newPath = p.join(dir.path, '${widened}_${f.rest}');
+      if (File(newPath).existsSync()) continue;
+      try {
+        await File(f.path).rename(newPath);
+        f.digits = widened;
+        f.path = newPath;
+      } catch (_) {
+        // Best effort
+      }
+    }
+
+    final filesByPrefix = <String, String>{
+      for (final f in mediaFiles) '${f.digits}_': f.path,
+    };
+
     for (final track in tracks) {
       final indexPrefix = '${paddedIndex(track.index, tracks.length)}_';
-      final fileOnDisk = resolveMediaFile(playlist.outputPath, indexPrefix);
+      final fileOnDisk = filesByPrefix[indexPrefix];
 
       if (fileOnDisk != null &&
           (track.status == 'pending' ||
               track.status == 'error' ||
               track.status == 'unavailable')) {
-        // File exists but DB says not downloaded — fix it
         await _db.updateTrackStatus(track.id, 'complete',
             filePath: fileOnDisk);
         fixed++;
       } else if (fileOnDisk == null && track.status == 'complete') {
-        // DB says downloaded but file is gone — mark for re-download
         await _db.updateTrackStatus(track.id, 'pending');
         fixed++;
       } else if (fileOnDisk != null &&
           track.status == 'complete' &&
           track.filePath != fileOnDisk) {
-        // File is still there but stored path drifted (e.g. after rename) — refresh.
         await _db.updateTrackStatus(track.id, 'complete',
             filePath: fileOnDisk);
         fixed++;
       }
     }
 
-    // Cleanup leftover .part files, .ytdl files, and orphaned thumbnails
-    final cleaned = await cleanupPlaylistFolder(playlist.outputPath);
-    fixed += cleaned;
-
     return fixed;
-  }
-
-  /// Renames files whose leading numeric prefix has fewer digits than the
-  /// playlist's current padding width. Only widens — never shrinks — so folders
-  /// that already used a wider prefix (e.g. because the playlist was larger in
-  /// the past) keep their names.
-  Future<void> _widenIndexPrefixes(Directory dir, int totalTracks) async {
-    final width = paddingWidth(totalTracks);
-    final prefixRe = RegExp(r'^(\d+)_(.*)$');
-
-    for (final entity in dir.listSync()) {
-      if (entity is! File) continue;
-      final oldName = p.basename(entity.path);
-      final match = prefixRe.firstMatch(oldName);
-      if (match == null) continue;
-      final digits = match.group(1)!;
-      if (digits.length >= width) continue;
-      final parsed = int.tryParse(digits);
-      if (parsed == null) continue;
-      final newName =
-          '${parsed.toString().padLeft(width, '0')}_${match.group(2)!}';
-      final newPath = p.join(dir.path, newName);
-      if (File(newPath).existsSync()) continue;
-      try {
-        await entity.rename(newPath);
-      } catch (_) {
-        // Best effort — skip on rename failure
-      }
-    }
   }
 
   /// Deletes .part files, .ytdl files, and orphaned image files from the playlist folder.

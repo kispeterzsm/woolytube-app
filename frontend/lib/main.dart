@@ -25,11 +25,12 @@ void main() async {
     // Non-critical — don't block app startup
   }
 
+  final database = AppDatabase();
   final playbackService = PlaybackService();
   WoolyTubeAudioHandler? audioHandler;
   try {
     final handler = await AudioService.init(
-      builder: () => WoolyTubeAudioHandler(playbackService),
+      builder: () => WoolyTubeAudioHandler(playbackService, database),
       config: const AudioServiceConfig(
         androidNotificationChannelId: 'com.woolytube.audio',
         androidNotificationChannelName: 'WoolyTube Playback',
@@ -44,6 +45,7 @@ void main() async {
 
   runApp(ProviderScope(
     overrides: [
+      databaseProvider.overrideWithValue(database),
       playbackServiceProvider.overrideWithValue(playbackService),
       if (audioHandler != null)
         audioHandlerProvider.overrideWithValue(audioHandler),

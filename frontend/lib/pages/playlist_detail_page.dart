@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -38,6 +39,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     final db = ref.read(databaseProvider);
     final playlist = await db.getPlaylist(widget.playlistId);
     setState(() => _playlist = playlist);
+    unawaited(ref.read(metadataServiceProvider).reconcilePlaylist(playlist));
   }
 
   @override

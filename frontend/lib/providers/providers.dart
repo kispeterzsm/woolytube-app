@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../database/database.dart';
@@ -60,16 +61,16 @@ final downloadServiceProvider = Provider<DownloadService>((ref) {
 final initProvider = FutureProvider<bool>((ref) async {
   final ytdlp = ref.watch(ytdlpServiceProvider);
   final log = ref.watch(logServiceProvider);
-  await ytdlp.initialize();
-  log.info('yt-dlp initialized');
+  final sw = Stopwatch()..start();
 
-  // Update yt-dlp to latest version
-  try {
-    await ytdlp.updateYtDlp();
-    log.info('yt-dlp updated to latest');
-  } catch (e) {
-    log.warn('yt-dlp update failed: $e');
-  }
+  await ytdlp.initialize();
+  log.info('init: ytdlp.initialize ${sw.elapsedMilliseconds}ms');
+
+  // yt-dlp self-update is a network call; must not block the splash screen.
+  unawaited(ytdlp.updateYtDlp().then(
+        (_) => log.info('yt-dlp updated to latest'),
+        onError: (e) => log.warn('yt-dlp update failed: $e'),
+      ));
 
   // Request storage permission for Android 11+
   if (!await Permission.manageExternalStorage.isGranted) {
@@ -83,6 +84,7 @@ final initProvider = FutureProvider<bool>((ref) async {
   if (!await Permission.notification.isGranted) {
     await Permission.notification.request();
   }
+  log.info('init: permissions ${sw.elapsedMilliseconds}ms');
 
   // Scan for importable playlists from previous installation
   try {
@@ -94,19 +96,9 @@ final initProvider = FutureProvider<bool>((ref) async {
   } catch (_) {
     // Non-critical — don't block app startup
   }
+  log.info('init: scan ${sw.elapsedMilliseconds}ms');
 
-  // Reconcile database with filesystem for all existing playlists
-  try {
-    final db = ref.watch(databaseProvider);
-    final metadata = ref.watch(metadataServiceProvider);
-    final playlists = await db.getAllPlaylists();
-    for (final playlist in playlists) {
-      await metadata.reconcilePlaylist(playlist);
-    }
-  } catch (_) {
-    // Non-critical — don't block app startup
-  }
-
+  log.info('init: total ${sw.elapsedMilliseconds}ms');
   return true;
 });
 

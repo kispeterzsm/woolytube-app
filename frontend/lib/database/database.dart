@@ -54,10 +54,17 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 4;
+  int get schemaVersion => 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
+        onCreate: (migrator) async {
+          await migrator.createAll();
+          await customStatement(
+              'CREATE INDEX IF NOT EXISTS idx_tracks_pl_status ON tracks (playlist_id, status)');
+          await customStatement(
+              'CREATE INDEX IF NOT EXISTS idx_tracks_pl_index ON tracks (playlist_id, "index")');
+        },
         onUpgrade: (migrator, from, to) async {
           if (from < 2) {
             await migrator.addColumn(tracks, tracks.unavailableReason);
@@ -67,6 +74,12 @@ class AppDatabase extends _$AppDatabase {
           }
           if (from < 4) {
             await migrator.addColumn(tracks, tracks.lastError);
+          }
+          if (from < 5) {
+            await customStatement(
+                'CREATE INDEX IF NOT EXISTS idx_tracks_pl_status ON tracks (playlist_id, status)');
+            await customStatement(
+                'CREATE INDEX IF NOT EXISTS idx_tracks_pl_index ON tracks (playlist_id, "index")');
           }
         },
       );
