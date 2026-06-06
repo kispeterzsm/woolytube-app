@@ -42,16 +42,20 @@ class DownloadService {
   final MetadataService _metadata;
   final DownloadNotificationService? _notifications;
 
-  final _progressController =
-      StreamController<DownloadProgress>.broadcast();
+  final _progressController = StreamController<DownloadProgress>.broadcast();
   Stream<DownloadProgress> get progressStream => _progressController.stream;
 
   StreamSubscription? _ytdlpProgressSub;
   bool _isDownloading = false;
   bool get isDownloading => _isDownloading;
 
-  DownloadService(this._db, this._ytdlp, this._log, this._metadata,
-      [this._notifications]);
+  DownloadService(
+    this._db,
+    this._ytdlp,
+    this._log,
+    this._metadata, [
+    this._notifications,
+  ]);
 
   static Future<bool> acquireLock() async {
     final dir = await getApplicationDocumentsDirectory();
@@ -77,49 +81,32 @@ class DownloadService {
     final pendingTracks = await _db.getPendingTracks(playlist.id);
     final totalTracks = await _db.getTotalTrackCount(playlist.id);
 
-    _log.info('Updating "${playlist.name}": ${pendingTracks.length} of $totalTracks tracks to download');
+    _log.info(
+      'Updating "${playlist.name}": ${pendingTracks.length} of $totalTracks tracks to download',
+    );
 
     if (pendingTracks.isEmpty) {
       _isDownloading = false;
-      _progressController.add(DownloadProgress(
-        playlistId: playlist.id,
-        currentTrackIndex: totalTracks,
-        totalTracks: totalTracks,
-        trackProgress: 100,
-        status: 'complete',
-      ));
+      _progressController.add(
+        DownloadProgress(
+          playlistId: playlist.id,
+          currentTrackIndex: totalTracks,
+          totalTracks: totalTracks,
+          trackProgress: 100,
+          status: 'complete',
+        ),
+      );
       return;
     }
 
     final downloadedSoFar = totalTracks - pendingTracks.length;
     var currentTrackNum = downloadedSoFar + 1;
 
-    try {
-      await _ytdlp.startDownloadService(playlist.name);
-    } catch (e) {
-      _log.warn('Failed to start download foreground service: $e');
-    }
-
-    _ytdlpProgressSub = _ytdlp.progressStream.listen((event) {
-      final progress = (event['progress'] as num?)?.toDouble() ?? 0;
-      final status = event['status'] as String? ?? 'downloading';
-
-      if (status == 'downloading' || status == 'starting') {
-        _progressController.add(DownloadProgress(
-          playlistId: playlist.id,
-          currentTrackIndex: currentTrackNum,
-          totalTracks: totalTracks,
-          trackProgress: progress,
-          status: 'downloading',
-        ));
-        _ytdlp.updateDownloadServiceProgress(
-          playlistName: playlist.name,
-          currentTrack: currentTrackNum,
-          totalTracks: totalTracks,
-          progress: progress.round(),
-        );
-      }
-    });
+    await _startDownloadReporting(
+      playlist: playlist,
+      currentTrackIndex: () => currentTrackNum,
+      totalTracks: totalTracks,
+    );
 
     try {
       for (var i = 0; i < pendingTracks.length; i++) {
@@ -127,104 +114,36 @@ class DownloadService {
         final trackNum = downloadedSoFar + i + 1;
         currentTrackNum = trackNum;
 
-        final indexStr = MetadataService.paddedIndex(track.index, totalTracks);
-
-        // Check if a file already exists on disk for this track
-        final existingFile = MetadataService.resolveMediaFile(
-            playlist.outputPath, '${indexStr}_');
-        if (existingFile != null) {
-          await _db.updateTrackStatus(track.id, 'complete',
-              filePath: existingFile, isLocalReplacement: true);
-          _log.info(
-              '[$trackNum/$totalTracks] Found existing file: ${existingFile.split('/').last}');
-          _progressController.add(DownloadProgress(
-            playlistId: playlist.id,
-            currentTrackIndex: trackNum,
-            totalTracks: totalTracks,
-            trackProgress: 100,
-            status: 'downloading',
-          ));
-          continue;
-        }
-
-        _progressController.add(DownloadProgress(
-          playlistId: playlist.id,
-          currentTrackIndex: currentTrackNum,
+        await _downloadTrackFile(
+          playlist: playlist,
+          track: track,
           totalTracks: totalTracks,
-          trackProgress: 0,
-          status: 'downloading',
-        ));
-
-        await _db.updateTrackStatus(track.id, 'downloading');
-
-        final outputTemplate =
-            '${playlist.outputPath}/${indexStr}_%(title)s.%(ext)s';
-
-        try {
-          final videoUrl =
-              'https://www.youtube.com/watch?v=${track.videoId}';
-
-          await _downloadWithRetry(
-            url: videoUrl,
-            outputPath: playlist.outputPath,
-            audioOnly: playlist.audioOnly,
-            embedThumbnail: playlist.includeThumbnails,
-            outputTemplate: outputTemplate,
-            trackLabel: '[$trackNum/$totalTracks] ${track.title}',
-          );
-
-          // Resolve actual file path (yt-dlp adds extension)
-          final actualPath = MetadataService.resolveMediaFile(
-              playlist.outputPath, '${indexStr}_');
-          await _db.updateTrackStatus(track.id, 'complete',
-              filePath: actualPath ??
-                  '${playlist.outputPath}/${indexStr}_${track.title}');
-          _log.info('[$trackNum/$totalTracks] Downloaded: ${track.title}');
-
-          _progressController.add(DownloadProgress(
-            playlistId: playlist.id,
-            currentTrackIndex: trackNum,
-            totalTracks: totalTracks,
-            trackProgress: 100,
-            status: 'downloading',
-          ));
-        } catch (e) {
-          final errorMsg = _cleanErrorMessage(e);
-          await _db.updateTrackStatus(track.id, 'error', error: errorMsg);
-          _log.error(
-              '[$trackNum/$totalTracks] Failed "${track.title}": $errorMsg');
-        }
+          progressTrackIndex: trackNum,
+          progressTotalTracks: totalTracks,
+          trackLabel: '[$trackNum/$totalTracks] ${track.title}',
+          reuseExistingFile: true,
+        );
       }
 
-      _progressController.add(DownloadProgress(
-        playlistId: playlist.id,
-        currentTrackIndex: totalTracks,
-        totalTracks: totalTracks,
-        trackProgress: 100,
-        status: 'complete',
-      ));
+      _progressController.add(
+        DownloadProgress(
+          playlistId: playlist.id,
+          currentTrackIndex: totalTracks,
+          totalTracks: totalTracks,
+          trackProgress: 100,
+          status: 'complete',
+        ),
+      );
 
-      await _db.updatePlaylist(PlaylistsCompanion(
-        id: Value(playlist.id),
-        url: Value(playlist.url),
-        name: Value(playlist.name),
-        thumbnailUrl: Value(playlist.thumbnailUrl),
-        thumbnailPath: Value(playlist.thumbnailPath),
-        audioOnly: Value(playlist.audioOnly),
-        autoUpdate: Value(playlist.autoUpdate),
-        updateFrequencyHours: Value(playlist.updateFrequencyHours),
-        includeThumbnails: Value(playlist.includeThumbnails),
-        lastUpdated: Value(DateTime.now()),
-        createdAt: Value(playlist.createdAt),
-        outputPath: Value(playlist.outputPath),
-      ));
+      await _markPlaylistUpdated(playlist);
 
       await _writeMetadataForPlaylist(playlist.id);
 
       // Cleanup .part files and orphaned thumbnails
       try {
-        final cleaned =
-            await MetadataService.cleanupPlaylistFolder(playlist.outputPath);
+        final cleaned = await MetadataService.cleanupPlaylistFolder(
+          playlist.outputPath,
+        );
         if (cleaned > 0) _log.info('Cleaned up $cleaned leftover files');
       } catch (e) {
         _log.warn('Cleanup failed: $e');
@@ -237,14 +156,16 @@ class DownloadService {
       try {
         await MetadataService.cleanupPlaylistFolder(playlist.outputPath);
       } catch (_) {}
-      _progressController.add(DownloadProgress(
-        playlistId: playlist.id,
-        currentTrackIndex: 0,
-        totalTracks: totalTracks,
-        trackProgress: 0,
-        status: 'error',
-        error: e.toString(),
-      ));
+      _progressController.add(
+        DownloadProgress(
+          playlistId: playlist.id,
+          currentTrackIndex: 0,
+          totalTracks: totalTracks,
+          trackProgress: 0,
+          status: 'error',
+          error: e.toString(),
+        ),
+      );
     } finally {
       _isDownloading = false;
       _ytdlpProgressSub?.cancel();
@@ -255,6 +176,235 @@ class DownloadService {
         _log.warn('Failed to stop download foreground service: $e');
       }
     }
+  }
+
+  Future<void> downloadTrack(Playlist playlist, Track track) async {
+    if (_isDownloading) return;
+    _isDownloading = true;
+
+    final totalTracks = await _db.getTotalTrackCount(playlist.id);
+    const progressTrackIndex = 1;
+    const progressTotalTracks = 1;
+
+    await _startDownloadReporting(
+      playlist: playlist,
+      currentTrackIndex: () => progressTrackIndex,
+      totalTracks: progressTotalTracks,
+    );
+
+    try {
+      _log.info('Downloading "${track.title}" from "${playlist.name}"');
+      await _db.resetTrackForRedownload(track.id);
+
+      final succeeded = await _downloadTrackFile(
+        playlist: playlist,
+        track: track,
+        totalTracks: totalTracks,
+        progressTrackIndex: progressTrackIndex,
+        progressTotalTracks: progressTotalTracks,
+        trackLabel: '[${track.index}/$totalTracks] ${track.title}',
+        reuseExistingFile: false,
+      );
+
+      if (!succeeded) {
+        throw StateError('Download failed');
+      }
+
+      _progressController.add(
+        DownloadProgress(
+          playlistId: playlist.id,
+          currentTrackIndex: progressTrackIndex,
+          totalTracks: progressTotalTracks,
+          trackProgress: 100,
+          status: 'complete',
+        ),
+      );
+
+      await _markPlaylistUpdated(playlist);
+      await _writeMetadataForPlaylist(playlist.id);
+
+      try {
+        final cleaned = await MetadataService.cleanupPlaylistFolder(
+          playlist.outputPath,
+        );
+        if (cleaned > 0) _log.info('Cleaned up $cleaned leftover files');
+      } catch (e) {
+        _log.warn('Cleanup failed: $e');
+      }
+
+      await _notifications?.showDownloadComplete(track.title);
+    } catch (e) {
+      _progressController.add(
+        DownloadProgress(
+          playlistId: playlist.id,
+          currentTrackIndex: 0,
+          totalTracks: progressTotalTracks,
+          trackProgress: 0,
+          status: 'error',
+          error: e.toString(),
+        ),
+      );
+      rethrow;
+    } finally {
+      _isDownloading = false;
+      _ytdlpProgressSub?.cancel();
+      _ytdlpProgressSub = null;
+      try {
+        await _ytdlp.stopDownloadService();
+      } catch (e) {
+        _log.warn('Failed to stop download foreground service: $e');
+      }
+    }
+  }
+
+  Future<void> _startDownloadReporting({
+    required Playlist playlist,
+    required int Function() currentTrackIndex,
+    required int totalTracks,
+  }) async {
+    try {
+      await _ytdlp.startDownloadService(playlist.name);
+    } catch (e) {
+      _log.warn('Failed to start download foreground service: $e');
+    }
+
+    _ytdlpProgressSub = _ytdlp.progressStream.listen((event) {
+      final progress = (event['progress'] as num?)?.toDouble() ?? 0;
+      final status = event['status'] as String? ?? 'downloading';
+
+      if (status == 'downloading' || status == 'starting') {
+        final currentTrack = currentTrackIndex();
+        _progressController.add(
+          DownloadProgress(
+            playlistId: playlist.id,
+            currentTrackIndex: currentTrack,
+            totalTracks: totalTracks,
+            trackProgress: progress,
+            status: 'downloading',
+          ),
+        );
+        _ytdlp.updateDownloadServiceProgress(
+          playlistName: playlist.name,
+          currentTrack: currentTrack,
+          totalTracks: totalTracks,
+          progress: progress.round(),
+        );
+      }
+    });
+  }
+
+  Future<bool> _downloadTrackFile({
+    required Playlist playlist,
+    required Track track,
+    required int totalTracks,
+    required int progressTrackIndex,
+    required int progressTotalTracks,
+    required String trackLabel,
+    required bool reuseExistingFile,
+  }) async {
+    final indexStr = MetadataService.paddedIndex(track.index, totalTracks);
+
+    if (reuseExistingFile) {
+      final existingFile = MetadataService.resolveMediaFile(
+        playlist.outputPath,
+        '${indexStr}_',
+      );
+      if (existingFile != null) {
+        await _db.updateTrackStatus(
+          track.id,
+          'complete',
+          filePath: existingFile,
+          isLocalReplacement: true,
+        );
+        _log.info(
+          '$trackLabel Found existing file: ${existingFile.split('/').last}',
+        );
+        _progressController.add(
+          DownloadProgress(
+            playlistId: playlist.id,
+            currentTrackIndex: progressTrackIndex,
+            totalTracks: progressTotalTracks,
+            trackProgress: 100,
+            status: 'downloading',
+          ),
+        );
+        return true;
+      }
+    }
+
+    _progressController.add(
+      DownloadProgress(
+        playlistId: playlist.id,
+        currentTrackIndex: progressTrackIndex,
+        totalTracks: progressTotalTracks,
+        trackProgress: 0,
+        status: 'downloading',
+      ),
+    );
+
+    await _db.updateTrackStatus(track.id, 'downloading');
+
+    final outputTemplate =
+        '${playlist.outputPath}/${indexStr}_%(title)s.%(ext)s';
+    final videoUrl = 'https://www.youtube.com/watch?v=${track.videoId}';
+
+    try {
+      await _downloadWithRetry(
+        url: videoUrl,
+        outputPath: playlist.outputPath,
+        audioOnly: playlist.audioOnly,
+        embedThumbnail: playlist.includeThumbnails,
+        outputTemplate: outputTemplate,
+        trackLabel: trackLabel,
+      );
+
+      final actualPath = MetadataService.resolveMediaFile(
+        playlist.outputPath,
+        '${indexStr}_',
+      );
+      await _db.updateTrackStatus(
+        track.id,
+        'complete',
+        filePath:
+            actualPath ?? '${playlist.outputPath}/${indexStr}_${track.title}',
+      );
+      _log.info('$trackLabel Downloaded: ${track.title}');
+
+      _progressController.add(
+        DownloadProgress(
+          playlistId: playlist.id,
+          currentTrackIndex: progressTrackIndex,
+          totalTracks: progressTotalTracks,
+          trackProgress: 100,
+          status: 'downloading',
+        ),
+      );
+      return true;
+    } catch (e) {
+      final errorMsg = _cleanErrorMessage(e);
+      await _db.updateTrackStatus(track.id, 'error', error: errorMsg);
+      _log.error('$trackLabel Failed "${track.title}": $errorMsg');
+      return false;
+    }
+  }
+
+  Future<void> _markPlaylistUpdated(Playlist playlist) async {
+    await _db.updatePlaylist(
+      PlaylistsCompanion(
+        id: Value(playlist.id),
+        url: Value(playlist.url),
+        name: Value(playlist.name),
+        thumbnailUrl: Value(playlist.thumbnailUrl),
+        thumbnailPath: Value(playlist.thumbnailPath),
+        audioOnly: Value(playlist.audioOnly),
+        autoUpdate: Value(playlist.autoUpdate),
+        updateFrequencyHours: Value(playlist.updateFrequencyHours),
+        includeThumbnails: Value(playlist.includeThumbnails),
+        lastUpdated: Value(DateTime.now()),
+        createdAt: Value(playlist.createdAt),
+        outputPath: Value(playlist.outputPath),
+      ),
+    );
   }
 
   static const _transientErrorPatterns = [
@@ -304,7 +454,8 @@ class DownloadService {
         final delay = backoffs[attempt];
         attempt++;
         _log.warn(
-            '$trackLabel: transient error (attempt $attempt), retrying in ${delay.inSeconds}s: $cleaned');
+          '$trackLabel: transient error (attempt $attempt), retrying in ${delay.inSeconds}s: $cleaned',
+        );
         await Future.delayed(delay);
       }
     }
@@ -326,8 +477,9 @@ class DownloadService {
   }
 
   static final _ansiPattern = RegExp(r'\x1B\[[0-?]*[ -/]*[@-~]');
-  static final _ytPrefixPattern =
-      RegExp(r'^\s*(?:ERROR:\s*)?(?:\[[^\]]+\]\s*[^:]*:\s*)?');
+  static final _ytPrefixPattern = RegExp(
+    r'^\s*(?:ERROR:\s*)?(?:\[[^\]]+\]\s*[^:]*:\s*)?',
+  );
 
   static String _cleanErrorMessage(Object e) {
     String raw;

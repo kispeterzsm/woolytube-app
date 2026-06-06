@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart'
     hide DownloadProgress;
 import 'package:path/path.dart' as p;
+import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../database/database.dart';
 import '../providers/providers.dart';
@@ -93,14 +94,13 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
             );
           }
 
+          final normalizedSearchQuery = _searchQuery.trim().toLowerCase();
           final filteredTracks =
-              _searchQuery.isEmpty
+              normalizedSearchQuery.isEmpty
                   ? tracks
                   : tracks
                       .where(
-                        (t) => t.title.toLowerCase().contains(
-                          _searchQuery.toLowerCase(),
-                        ),
+                        (t) => _matchesTrackSearch(t, normalizedSearchQuery),
                       )
                       .toList();
 
@@ -275,98 +275,144 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     final hasLocalFile =
         track.status == 'complete' && track.unavailableReason != null;
     final hasError = track.status == 'error' && track.lastError != null;
+    final subtitle = _trackSubtitle(
+      track,
+      hasError: hasError,
+      isUnavailable: isUnavailable,
+      hasLocalFile: hasLocalFile,
+    );
+    final thumbnailWidth =
+        MediaQuery.sizeOf(context).width < 360 ? 96.0 : 112.0;
 
-    return ListTile(
-      onTap:
-          isPlayable
-              ? () {
-                playbackService.playTrack(
-                  track,
-                  allTracks,
-                  playlist: _playlist,
-                );
-              }
-              : null,
-      onLongPress: () => _showTrackActions(track),
-      tileColor: isCurrentTrack ? const Color(0xFF2A2A2A) : Colors.transparent,
-      leading: SizedBox(
-        width: 64,
-        height: 48,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(4),
-          child: Stack(
-            fit: StackFit.expand,
+    return Material(
+      color: isCurrentTrack ? const Color(0xFF2A2A2A) : Colors.transparent,
+      child: InkWell(
+        onTap:
+            isPlayable
+                ? () {
+                  playbackService.playTrack(
+                    track,
+                    allTracks,
+                    playlist: _playlist,
+                  );
+                }
+                : null,
+        onLongPress: () => _showTrackActions(track),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              _buildTrackThumbnail(track),
-              // Play overlay for playable tracks
-              if (isPlayable && !isCurrentTrack)
-                Container(
-                  color: Colors.black26,
-                  child: const Center(
-                    child: Icon(
-                      Icons.play_arrow,
-                      color: Colors.white70,
-                      size: 24,
+              SizedBox(
+                width: 32,
+                child: Text(
+                  track.index.toString(),
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color:
+                        isCurrentTrack
+                            ? const Color(0xFF2196F3)
+                            : const Color(0xFF888888),
+                    fontSize: 13,
+                    fontWeight:
+                        isCurrentTrack ? FontWeight.w600 : FontWeight.normal,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: 10),
+              SizedBox(
+                width: thumbnailWidth,
+                child: AspectRatio(
+                  aspectRatio: 16 / 9,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        _buildTrackThumbnail(track),
+                        if (isCurrentlyPlaying)
+                          Container(
+                            color: Colors.black38,
+                            child: const Center(
+                              child: Icon(
+                                Icons.equalizer,
+                                color: Color(0xFF2196F3),
+                                size: 24,
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
                   ),
                 ),
-              // Now playing indicator
-              if (isCurrentlyPlaying)
-                Container(
-                  color: Colors.black38,
-                  child: const Center(
-                    child: Icon(
-                      Icons.equalizer,
-                      color: Color(0xFF2196F3),
-                      size: 24,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      track.title,
+                      style: TextStyle(
+                        color:
+                            isCurrentTrack
+                                ? const Color(0xFF2196F3)
+                                : Colors.white,
+                        fontSize: 14,
+                        fontWeight:
+                            isCurrentTrack
+                                ? FontWeight.w600
+                                : FontWeight.normal,
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                  ),
+                    if (subtitle.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        subtitle,
+                        style: TextStyle(
+                          color:
+                              hasError
+                                  ? const Color(0xFFAA6666)
+                                  : isUnavailable
+                                  ? const Color(0xFFAA6666)
+                                  : hasLocalFile
+                                  ? const Color(0xFFAAAA66)
+                                  : const Color(0xFF888888),
+                          fontSize: 12,
+                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ],
                 ),
+              ),
+              const SizedBox(width: 8),
+              SizedBox(
+                width: 24,
+                child: Center(
+                  child:
+                      isCurrentTrack
+                          ? Icon(
+                            isCurrentlyPlaying ? Icons.pause : Icons.play_arrow,
+                            color: const Color(0xFF2196F3),
+                            size: 20,
+                          )
+                          : _statusIcon(
+                            track.status,
+                            hasLocalFile: hasLocalFile,
+                          ),
+                ),
+              ),
             ],
           ),
         ),
       ),
-      title: Text(
-        track.title,
-        style: TextStyle(
-          color: isCurrentTrack ? const Color(0xFF2196F3) : Colors.white,
-          fontSize: 14,
-          fontWeight: isCurrentTrack ? FontWeight.w600 : FontWeight.normal,
-        ),
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-      ),
-      subtitle: Text(
-        hasError
-            ? 'Download failed · ${_friendlyError(track.lastError!)}'
-            : isUnavailable
-            ? '${_unavailableLabel(track.unavailableReason)} · ${track.videoId}'
-            : hasLocalFile
-            ? '${_formatDuration(track.durationSeconds)} · ${_unavailableLabel(track.unavailableReason)} (local file)'
-            : _formatDuration(track.durationSeconds),
-        style: TextStyle(
-          color:
-              hasError
-                  ? const Color(0xFFAA6666)
-                  : isUnavailable
-                  ? const Color(0xFFAA6666)
-                  : hasLocalFile
-                  ? const Color(0xFFAAAA66)
-                  : const Color(0xFF888888),
-          fontSize: 12,
-        ),
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-      ),
-      trailing:
-          isCurrentTrack
-              ? Icon(
-                isCurrentlyPlaying ? Icons.pause : Icons.play_arrow,
-                color: const Color(0xFF2196F3),
-                size: 20,
-              )
-              : _statusIcon(track.status, hasLocalFile: hasLocalFile),
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
     );
   }
 
@@ -405,6 +451,22 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     return null;
   }
 
+  String _videoUrl(Track track) =>
+      'https://www.youtube.com/watch?v=${track.videoId}';
+
+  Future<void> _shareTrack(Track track) async {
+    try {
+      await SharePlus.instance.share(
+        ShareParams(uri: Uri.parse(_videoUrl(track)), title: track.title),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Could not share: $e')));
+    }
+  }
+
   Widget _statusIcon(String status, {bool hasLocalFile = false}) {
     switch (status) {
       case 'complete':
@@ -428,11 +490,39 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     }
   }
 
+  bool _matchesTrackSearch(Track track, String query) {
+    final index = track.index.toString();
+    return track.title.toLowerCase().contains(query) ||
+        index.contains(query) ||
+        '#$index'.contains(query);
+  }
+
+  String _trackSubtitle(
+    Track track, {
+    required bool hasError,
+    required bool isUnavailable,
+    required bool hasLocalFile,
+  }) {
+    if (hasError) {
+      return 'Download failed · ${_friendlyError(track.lastError!)}';
+    }
+    if (isUnavailable) {
+      return '${_unavailableLabel(track.unavailableReason)} · ${track.videoId}';
+    }
+    if (hasLocalFile) {
+      final duration = _formatDuration(track.durationSeconds);
+      final localLabel =
+          '${_unavailableLabel(track.unavailableReason)} (local file)';
+      return duration.isEmpty ? localLabel : '$duration · $localLabel';
+    }
+    return _formatDuration(track.durationSeconds);
+  }
+
   String _formatDuration(int? seconds) {
     if (seconds == null || seconds == 0) return '';
     final m = seconds ~/ 60;
     final s = seconds % 60;
-    return '${m}:${s.toString().padLeft(2, '0')}';
+    return '$m:${s.toString().padLeft(2, '0')}';
   }
 
   String _friendlyError(String raw) {
@@ -635,11 +725,23 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                     ),
                     onTap: () {
                       Navigator.pop(sheetContext);
-                      launchUrl(
-                        Uri.parse(
-                          'https://www.youtube.com/watch?v=${track.videoId}',
-                        ),
-                      );
+                      launchUrl(Uri.parse(_videoUrl(track)));
+                    },
+                  ),
+                  // Always: Share original YouTube link
+                  ListTile(
+                    leading: const Icon(Icons.share, color: Colors.white70),
+                    title: const Text(
+                      'Share',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    subtitle: const Text(
+                      'Share original YouTube link',
+                      style: TextStyle(color: Color(0xFF888888)),
+                    ),
+                    onTap: () async {
+                      Navigator.pop(sheetContext);
+                      await _shareTrack(track);
                     },
                   ),
                   // Unavailable: Search on quiteaplaylist.com
@@ -660,9 +762,9 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                       onTap: () {
                         Navigator.pop(sheetContext);
                         launchUrl(
-                          Uri.parse(
-                            'https://quiteaplaylist.com/search?url=https://www.youtube.com/watch?v=${track.videoId}',
-                          ),
+                          Uri.https('quiteaplaylist.com', '/search', {
+                            'url': _videoUrl(track),
+                          }),
                         );
                       },
                     ),
@@ -747,22 +849,12 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                         style: TextStyle(color: Colors.white),
                       ),
                       subtitle: const Text(
-                        'Reset and queue for download',
+                        'Download just this video now',
                         style: TextStyle(color: Color(0xFF888888)),
                       ),
                       onTap: () async {
                         Navigator.pop(sheetContext);
-                        final db = ref.read(databaseProvider);
-                        await db.resetTrackForRedownload(track.id);
-                        if (mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text(
-                                'Queued "${track.title}" for download',
-                              ),
-                            ),
-                          );
-                        }
+                        await _startTrackDownload(track);
                       },
                     ),
                   const SizedBox(height: 8),
@@ -791,8 +883,17 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
       result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: const [
-          'm4a', 'mp3', 'opus', 'ogg', 'flac', 'wav',
-          'mp4', 'mkv', 'webm', 'avi', 'mov',
+          'm4a',
+          'mp3',
+          'opus',
+          'ogg',
+          'flac',
+          'wav',
+          'mp4',
+          'mkv',
+          'webm',
+          'avi',
+          'mov',
         ],
         withData: false,
       );
@@ -1076,15 +1177,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
               TextButton(
                 onPressed: () async {
                   Navigator.pop(ctx);
-                  final db = ref.read(databaseProvider);
-                  await db.resetTrackForRedownload(track.id);
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text('Queued "${track.title}" for download'),
-                      ),
-                    );
-                  }
+                  await _startTrackDownload(track);
                 },
                 child: const Text('Retry'),
               ),
@@ -1093,23 +1186,68 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     );
   }
 
-  Future<void> _redownloadTrack(Track track) async {
-    // Delete the existing file on disk
-    if (track.filePath != null) {
+  Future<void> _startTrackDownload(
+    Track track, {
+    bool deleteExistingFile = false,
+  }) async {
+    if (_playlist == null) return;
+
+    final downloadService = ref.read(downloadServiceProvider);
+    if (downloadService.isDownloading) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('A download is already in progress')),
+        );
+      }
+      return;
+    }
+
+    if (deleteExistingFile && track.filePath != null) {
       final file = File(track.filePath!);
-      if (await file.exists()) {
-        await file.delete();
+      try {
+        if (await file.exists()) {
+          await file.delete();
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('Delete failed: $e')));
+        }
+        return;
       }
     }
 
-    // Reset track in database
-    final db = ref.read(databaseProvider);
-    await db.resetTrackForRedownload(track.id);
-
+    final playlist = _playlist!;
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Queued "${track.title}" for re-download')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Downloading "${track.title}"')));
     }
+
+    unawaited(
+      downloadService
+          .downloadTrack(playlist, track)
+          .then(
+            (_) {
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Downloaded "${track.title}"')),
+              );
+            },
+            onError: (Object e, StackTrace _) {
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('Download failed: ${_friendlyError('$e')}'),
+                ),
+              );
+            },
+          ),
+    );
+  }
+
+  Future<void> _redownloadTrack(Track track) async {
+    await _startTrackDownload(track, deleteExistingFile: true);
   }
 }
