@@ -1,1 +1,0 @@
-7. Ensure that playlists will get updated in the background on their schedule even if the user doesn't open the app.

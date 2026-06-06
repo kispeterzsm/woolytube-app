@@ -32,13 +32,12 @@ Per-architecture APKs are also available on the [Releases page](https://github.c
 **Prerequisites:** Flutter SDK >= 3.7.2, Java 11, Android SDK
 
 ```bash
-cd frontend
 flutter pub get
 dart run build_runner build --delete-conflicting-outputs
 flutter build apk --split-per-abi
 ```
 
-The built APKs will be in `frontend/build/app/outputs/flutter-apk/`.
+The built APKs will be in `build/app/outputs/flutter-apk/`.
 
 ## Tech Stack
 
@@ -51,4 +50,4 @@ The built APKs will be in `frontend/build/app/outputs/flutter-apk/`.
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0 -- see the [LICENSE](LICENSE) file for details.
+This project is licensed under the GNU General Public License v3.0 -- see the [LICENSE.txt](LICENSE.txt) file for details.
