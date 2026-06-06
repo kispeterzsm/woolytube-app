@@ -118,6 +118,34 @@ class $PlaylistsTable extends Playlists
     ),
     defaultValue: const Constant(true),
   );
+  static const VerificationMeta _sponsorBlockEnabledMeta =
+      const VerificationMeta('sponsorBlockEnabled');
+  @override
+  late final GeneratedColumn<bool> sponsorBlockEnabled = GeneratedColumn<bool>(
+    'sponsor_block_enabled',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("sponsor_block_enabled" IN (0, 1))',
+    ),
+    defaultValue: const Constant(true),
+  );
+  static const VerificationMeta _sponsorBlockCategoriesMeta =
+      const VerificationMeta('sponsorBlockCategories');
+  @override
+  late final GeneratedColumn<String> sponsorBlockCategories =
+      GeneratedColumn<String>(
+        'sponsor_block_categories',
+        aliasedName,
+        false,
+        type: DriftSqlType.string,
+        requiredDuringInsert: false,
+        defaultValue: const Constant(
+          '["sponsor","selfpromo","music_offtopic"]',
+        ),
+      );
   static const VerificationMeta _lastUpdatedMeta = const VerificationMeta(
     'lastUpdated',
   );
@@ -162,6 +190,8 @@ class $PlaylistsTable extends Playlists
     autoUpdate,
     updateFrequencyHours,
     includeThumbnails,
+    sponsorBlockEnabled,
+    sponsorBlockCategories,
     lastUpdated,
     createdAt,
     outputPath,
@@ -245,6 +275,24 @@ class $PlaylistsTable extends Playlists
         ),
       );
     }
+    if (data.containsKey('sponsor_block_enabled')) {
+      context.handle(
+        _sponsorBlockEnabledMeta,
+        sponsorBlockEnabled.isAcceptableOrUnknown(
+          data['sponsor_block_enabled']!,
+          _sponsorBlockEnabledMeta,
+        ),
+      );
+    }
+    if (data.containsKey('sponsor_block_categories')) {
+      context.handle(
+        _sponsorBlockCategoriesMeta,
+        sponsorBlockCategories.isAcceptableOrUnknown(
+          data['sponsor_block_categories']!,
+          _sponsorBlockCategoriesMeta,
+        ),
+      );
+    }
     if (data.containsKey('last_updated')) {
       context.handle(
         _lastUpdatedMeta,
@@ -322,6 +370,16 @@ class $PlaylistsTable extends Playlists
             DriftSqlType.bool,
             data['${effectivePrefix}include_thumbnails'],
           )!,
+      sponsorBlockEnabled:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.bool,
+            data['${effectivePrefix}sponsor_block_enabled'],
+          )!,
+      sponsorBlockCategories:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.string,
+            data['${effectivePrefix}sponsor_block_categories'],
+          )!,
       lastUpdated: attachedDatabase.typeMapping.read(
         DriftSqlType.dateTime,
         data['${effectivePrefix}last_updated'],
@@ -355,6 +413,8 @@ class Playlist extends DataClass implements Insertable<Playlist> {
   final bool autoUpdate;
   final int updateFrequencyHours;
   final bool includeThumbnails;
+  final bool sponsorBlockEnabled;
+  final String sponsorBlockCategories;
   final DateTime? lastUpdated;
   final DateTime createdAt;
   final String outputPath;
@@ -368,6 +428,8 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     required this.autoUpdate,
     required this.updateFrequencyHours,
     required this.includeThumbnails,
+    required this.sponsorBlockEnabled,
+    required this.sponsorBlockCategories,
     this.lastUpdated,
     required this.createdAt,
     required this.outputPath,
@@ -388,6 +450,8 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     map['auto_update'] = Variable<bool>(autoUpdate);
     map['update_frequency_hours'] = Variable<int>(updateFrequencyHours);
     map['include_thumbnails'] = Variable<bool>(includeThumbnails);
+    map['sponsor_block_enabled'] = Variable<bool>(sponsorBlockEnabled);
+    map['sponsor_block_categories'] = Variable<String>(sponsorBlockCategories);
     if (!nullToAbsent || lastUpdated != null) {
       map['last_updated'] = Variable<DateTime>(lastUpdated);
     }
@@ -413,6 +477,8 @@ class Playlist extends DataClass implements Insertable<Playlist> {
       autoUpdate: Value(autoUpdate),
       updateFrequencyHours: Value(updateFrequencyHours),
       includeThumbnails: Value(includeThumbnails),
+      sponsorBlockEnabled: Value(sponsorBlockEnabled),
+      sponsorBlockCategories: Value(sponsorBlockCategories),
       lastUpdated:
           lastUpdated == null && nullToAbsent
               ? const Value.absent()
@@ -439,6 +505,12 @@ class Playlist extends DataClass implements Insertable<Playlist> {
         json['updateFrequencyHours'],
       ),
       includeThumbnails: serializer.fromJson<bool>(json['includeThumbnails']),
+      sponsorBlockEnabled: serializer.fromJson<bool>(
+        json['sponsorBlockEnabled'],
+      ),
+      sponsorBlockCategories: serializer.fromJson<String>(
+        json['sponsorBlockCategories'],
+      ),
       lastUpdated: serializer.fromJson<DateTime?>(json['lastUpdated']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
       outputPath: serializer.fromJson<String>(json['outputPath']),
@@ -457,6 +529,10 @@ class Playlist extends DataClass implements Insertable<Playlist> {
       'autoUpdate': serializer.toJson<bool>(autoUpdate),
       'updateFrequencyHours': serializer.toJson<int>(updateFrequencyHours),
       'includeThumbnails': serializer.toJson<bool>(includeThumbnails),
+      'sponsorBlockEnabled': serializer.toJson<bool>(sponsorBlockEnabled),
+      'sponsorBlockCategories': serializer.toJson<String>(
+        sponsorBlockCategories,
+      ),
       'lastUpdated': serializer.toJson<DateTime?>(lastUpdated),
       'createdAt': serializer.toJson<DateTime>(createdAt),
       'outputPath': serializer.toJson<String>(outputPath),
@@ -473,6 +549,8 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     bool? autoUpdate,
     int? updateFrequencyHours,
     bool? includeThumbnails,
+    bool? sponsorBlockEnabled,
+    String? sponsorBlockCategories,
     Value<DateTime?> lastUpdated = const Value.absent(),
     DateTime? createdAt,
     String? outputPath,
@@ -487,6 +565,9 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     autoUpdate: autoUpdate ?? this.autoUpdate,
     updateFrequencyHours: updateFrequencyHours ?? this.updateFrequencyHours,
     includeThumbnails: includeThumbnails ?? this.includeThumbnails,
+    sponsorBlockEnabled: sponsorBlockEnabled ?? this.sponsorBlockEnabled,
+    sponsorBlockCategories:
+        sponsorBlockCategories ?? this.sponsorBlockCategories,
     lastUpdated: lastUpdated.present ? lastUpdated.value : this.lastUpdated,
     createdAt: createdAt ?? this.createdAt,
     outputPath: outputPath ?? this.outputPath,
@@ -515,6 +596,14 @@ class Playlist extends DataClass implements Insertable<Playlist> {
           data.includeThumbnails.present
               ? data.includeThumbnails.value
               : this.includeThumbnails,
+      sponsorBlockEnabled:
+          data.sponsorBlockEnabled.present
+              ? data.sponsorBlockEnabled.value
+              : this.sponsorBlockEnabled,
+      sponsorBlockCategories:
+          data.sponsorBlockCategories.present
+              ? data.sponsorBlockCategories.value
+              : this.sponsorBlockCategories,
       lastUpdated:
           data.lastUpdated.present ? data.lastUpdated.value : this.lastUpdated,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
@@ -535,6 +624,8 @@ class Playlist extends DataClass implements Insertable<Playlist> {
           ..write('autoUpdate: $autoUpdate, ')
           ..write('updateFrequencyHours: $updateFrequencyHours, ')
           ..write('includeThumbnails: $includeThumbnails, ')
+          ..write('sponsorBlockEnabled: $sponsorBlockEnabled, ')
+          ..write('sponsorBlockCategories: $sponsorBlockCategories, ')
           ..write('lastUpdated: $lastUpdated, ')
           ..write('createdAt: $createdAt, ')
           ..write('outputPath: $outputPath')
@@ -553,6 +644,8 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     autoUpdate,
     updateFrequencyHours,
     includeThumbnails,
+    sponsorBlockEnabled,
+    sponsorBlockCategories,
     lastUpdated,
     createdAt,
     outputPath,
@@ -570,6 +663,8 @@ class Playlist extends DataClass implements Insertable<Playlist> {
           other.autoUpdate == this.autoUpdate &&
           other.updateFrequencyHours == this.updateFrequencyHours &&
           other.includeThumbnails == this.includeThumbnails &&
+          other.sponsorBlockEnabled == this.sponsorBlockEnabled &&
+          other.sponsorBlockCategories == this.sponsorBlockCategories &&
           other.lastUpdated == this.lastUpdated &&
           other.createdAt == this.createdAt &&
           other.outputPath == this.outputPath);
@@ -585,6 +680,8 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
   final Value<bool> autoUpdate;
   final Value<int> updateFrequencyHours;
   final Value<bool> includeThumbnails;
+  final Value<bool> sponsorBlockEnabled;
+  final Value<String> sponsorBlockCategories;
   final Value<DateTime?> lastUpdated;
   final Value<DateTime> createdAt;
   final Value<String> outputPath;
@@ -598,6 +695,8 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     this.autoUpdate = const Value.absent(),
     this.updateFrequencyHours = const Value.absent(),
     this.includeThumbnails = const Value.absent(),
+    this.sponsorBlockEnabled = const Value.absent(),
+    this.sponsorBlockCategories = const Value.absent(),
     this.lastUpdated = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.outputPath = const Value.absent(),
@@ -612,6 +711,8 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     this.autoUpdate = const Value.absent(),
     this.updateFrequencyHours = const Value.absent(),
     this.includeThumbnails = const Value.absent(),
+    this.sponsorBlockEnabled = const Value.absent(),
+    this.sponsorBlockCategories = const Value.absent(),
     this.lastUpdated = const Value.absent(),
     required DateTime createdAt,
     required String outputPath,
@@ -629,6 +730,8 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     Expression<bool>? autoUpdate,
     Expression<int>? updateFrequencyHours,
     Expression<bool>? includeThumbnails,
+    Expression<bool>? sponsorBlockEnabled,
+    Expression<String>? sponsorBlockCategories,
     Expression<DateTime>? lastUpdated,
     Expression<DateTime>? createdAt,
     Expression<String>? outputPath,
@@ -644,6 +747,10 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
       if (updateFrequencyHours != null)
         'update_frequency_hours': updateFrequencyHours,
       if (includeThumbnails != null) 'include_thumbnails': includeThumbnails,
+      if (sponsorBlockEnabled != null)
+        'sponsor_block_enabled': sponsorBlockEnabled,
+      if (sponsorBlockCategories != null)
+        'sponsor_block_categories': sponsorBlockCategories,
       if (lastUpdated != null) 'last_updated': lastUpdated,
       if (createdAt != null) 'created_at': createdAt,
       if (outputPath != null) 'output_path': outputPath,
@@ -660,6 +767,8 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     Value<bool>? autoUpdate,
     Value<int>? updateFrequencyHours,
     Value<bool>? includeThumbnails,
+    Value<bool>? sponsorBlockEnabled,
+    Value<String>? sponsorBlockCategories,
     Value<DateTime?>? lastUpdated,
     Value<DateTime>? createdAt,
     Value<String>? outputPath,
@@ -674,6 +783,9 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
       autoUpdate: autoUpdate ?? this.autoUpdate,
       updateFrequencyHours: updateFrequencyHours ?? this.updateFrequencyHours,
       includeThumbnails: includeThumbnails ?? this.includeThumbnails,
+      sponsorBlockEnabled: sponsorBlockEnabled ?? this.sponsorBlockEnabled,
+      sponsorBlockCategories:
+          sponsorBlockCategories ?? this.sponsorBlockCategories,
       lastUpdated: lastUpdated ?? this.lastUpdated,
       createdAt: createdAt ?? this.createdAt,
       outputPath: outputPath ?? this.outputPath,
@@ -710,6 +822,14 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     if (includeThumbnails.present) {
       map['include_thumbnails'] = Variable<bool>(includeThumbnails.value);
     }
+    if (sponsorBlockEnabled.present) {
+      map['sponsor_block_enabled'] = Variable<bool>(sponsorBlockEnabled.value);
+    }
+    if (sponsorBlockCategories.present) {
+      map['sponsor_block_categories'] = Variable<String>(
+        sponsorBlockCategories.value,
+      );
+    }
     if (lastUpdated.present) {
       map['last_updated'] = Variable<DateTime>(lastUpdated.value);
     }
@@ -734,6 +854,8 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
           ..write('autoUpdate: $autoUpdate, ')
           ..write('updateFrequencyHours: $updateFrequencyHours, ')
           ..write('includeThumbnails: $includeThumbnails, ')
+          ..write('sponsorBlockEnabled: $sponsorBlockEnabled, ')
+          ..write('sponsorBlockCategories: $sponsorBlockCategories, ')
           ..write('lastUpdated: $lastUpdated, ')
           ..write('createdAt: $createdAt, ')
           ..write('outputPath: $outputPath')
@@ -1593,16 +1715,785 @@ class TracksCompanion extends UpdateCompanion<Track> {
   }
 }
 
+class $SponsorBlockSegmentsTable extends SponsorBlockSegments
+    with TableInfo<$SponsorBlockSegmentsTable, SponsorBlockSegment> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $SponsorBlockSegmentsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<int> id = GeneratedColumn<int>(
+    'id',
+    aliasedName,
+    false,
+    hasAutoIncrement: true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'PRIMARY KEY AUTOINCREMENT',
+    ),
+  );
+  static const VerificationMeta _trackIdMeta = const VerificationMeta(
+    'trackId',
+  );
+  @override
+  late final GeneratedColumn<int> trackId = GeneratedColumn<int>(
+    'track_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'REFERENCES tracks (id) ON DELETE CASCADE',
+    ),
+  );
+  static const VerificationMeta _videoIdMeta = const VerificationMeta(
+    'videoId',
+  );
+  @override
+  late final GeneratedColumn<String> videoId = GeneratedColumn<String>(
+    'video_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _sourceMeta = const VerificationMeta('source');
+  @override
+  late final GeneratedColumn<String> source = GeneratedColumn<String>(
+    'source',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _uuidMeta = const VerificationMeta('uuid');
+  @override
+  late final GeneratedColumn<String> uuid = GeneratedColumn<String>(
+    'uuid',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _categoryMeta = const VerificationMeta(
+    'category',
+  );
+  @override
+  late final GeneratedColumn<String> category = GeneratedColumn<String>(
+    'category',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _actionTypeMeta = const VerificationMeta(
+    'actionType',
+  );
+  @override
+  late final GeneratedColumn<String> actionType = GeneratedColumn<String>(
+    'action_type',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant('skip'),
+  );
+  static const VerificationMeta _startMsMeta = const VerificationMeta(
+    'startMs',
+  );
+  @override
+  late final GeneratedColumn<int> startMs = GeneratedColumn<int>(
+    'start_ms',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _endMsMeta = const VerificationMeta('endMs');
+  @override
+  late final GeneratedColumn<int> endMs = GeneratedColumn<int>(
+    'end_ms',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _votesMeta = const VerificationMeta('votes');
+  @override
+  late final GeneratedColumn<int> votes = GeneratedColumn<int>(
+    'votes',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _lockedMeta = const VerificationMeta('locked');
+  @override
+  late final GeneratedColumn<bool> locked = GeneratedColumn<bool>(
+    'locked',
+    aliasedName,
+    true,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("locked" IN (0, 1))',
+    ),
+  );
+  static const VerificationMeta _descriptionMeta = const VerificationMeta(
+    'description',
+  );
+  @override
+  late final GeneratedColumn<String> description = GeneratedColumn<String>(
+    'description',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> createdAt = GeneratedColumn<DateTime>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    trackId,
+    videoId,
+    source,
+    uuid,
+    category,
+    actionType,
+    startMs,
+    endMs,
+    votes,
+    locked,
+    description,
+    createdAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'sponsor_block_segments';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<SponsorBlockSegment> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('track_id')) {
+      context.handle(
+        _trackIdMeta,
+        trackId.isAcceptableOrUnknown(data['track_id']!, _trackIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_trackIdMeta);
+    }
+    if (data.containsKey('video_id')) {
+      context.handle(
+        _videoIdMeta,
+        videoId.isAcceptableOrUnknown(data['video_id']!, _videoIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_videoIdMeta);
+    }
+    if (data.containsKey('source')) {
+      context.handle(
+        _sourceMeta,
+        source.isAcceptableOrUnknown(data['source']!, _sourceMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_sourceMeta);
+    }
+    if (data.containsKey('uuid')) {
+      context.handle(
+        _uuidMeta,
+        uuid.isAcceptableOrUnknown(data['uuid']!, _uuidMeta),
+      );
+    }
+    if (data.containsKey('category')) {
+      context.handle(
+        _categoryMeta,
+        category.isAcceptableOrUnknown(data['category']!, _categoryMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_categoryMeta);
+    }
+    if (data.containsKey('action_type')) {
+      context.handle(
+        _actionTypeMeta,
+        actionType.isAcceptableOrUnknown(data['action_type']!, _actionTypeMeta),
+      );
+    }
+    if (data.containsKey('start_ms')) {
+      context.handle(
+        _startMsMeta,
+        startMs.isAcceptableOrUnknown(data['start_ms']!, _startMsMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_startMsMeta);
+    }
+    if (data.containsKey('end_ms')) {
+      context.handle(
+        _endMsMeta,
+        endMs.isAcceptableOrUnknown(data['end_ms']!, _endMsMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_endMsMeta);
+    }
+    if (data.containsKey('votes')) {
+      context.handle(
+        _votesMeta,
+        votes.isAcceptableOrUnknown(data['votes']!, _votesMeta),
+      );
+    }
+    if (data.containsKey('locked')) {
+      context.handle(
+        _lockedMeta,
+        locked.isAcceptableOrUnknown(data['locked']!, _lockedMeta),
+      );
+    }
+    if (data.containsKey('description')) {
+      context.handle(
+        _descriptionMeta,
+        description.isAcceptableOrUnknown(
+          data['description']!,
+          _descriptionMeta,
+        ),
+      );
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  SponsorBlockSegment map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return SponsorBlockSegment(
+      id:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.int,
+            data['${effectivePrefix}id'],
+          )!,
+      trackId:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.int,
+            data['${effectivePrefix}track_id'],
+          )!,
+      videoId:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.string,
+            data['${effectivePrefix}video_id'],
+          )!,
+      source:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.string,
+            data['${effectivePrefix}source'],
+          )!,
+      uuid: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}uuid'],
+      ),
+      category:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.string,
+            data['${effectivePrefix}category'],
+          )!,
+      actionType:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.string,
+            data['${effectivePrefix}action_type'],
+          )!,
+      startMs:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.int,
+            data['${effectivePrefix}start_ms'],
+          )!,
+      endMs:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.int,
+            data['${effectivePrefix}end_ms'],
+          )!,
+      votes: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}votes'],
+      ),
+      locked: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}locked'],
+      ),
+      description: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}description'],
+      ),
+      createdAt:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.dateTime,
+            data['${effectivePrefix}created_at'],
+          )!,
+    );
+  }
+
+  @override
+  $SponsorBlockSegmentsTable createAlias(String alias) {
+    return $SponsorBlockSegmentsTable(attachedDatabase, alias);
+  }
+}
+
+class SponsorBlockSegment extends DataClass
+    implements Insertable<SponsorBlockSegment> {
+  final int id;
+  final int trackId;
+  final String videoId;
+  final String source;
+  final String? uuid;
+  final String category;
+  final String actionType;
+  final int startMs;
+  final int endMs;
+  final int? votes;
+  final bool? locked;
+  final String? description;
+  final DateTime createdAt;
+  const SponsorBlockSegment({
+    required this.id,
+    required this.trackId,
+    required this.videoId,
+    required this.source,
+    this.uuid,
+    required this.category,
+    required this.actionType,
+    required this.startMs,
+    required this.endMs,
+    this.votes,
+    this.locked,
+    this.description,
+    required this.createdAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<int>(id);
+    map['track_id'] = Variable<int>(trackId);
+    map['video_id'] = Variable<String>(videoId);
+    map['source'] = Variable<String>(source);
+    if (!nullToAbsent || uuid != null) {
+      map['uuid'] = Variable<String>(uuid);
+    }
+    map['category'] = Variable<String>(category);
+    map['action_type'] = Variable<String>(actionType);
+    map['start_ms'] = Variable<int>(startMs);
+    map['end_ms'] = Variable<int>(endMs);
+    if (!nullToAbsent || votes != null) {
+      map['votes'] = Variable<int>(votes);
+    }
+    if (!nullToAbsent || locked != null) {
+      map['locked'] = Variable<bool>(locked);
+    }
+    if (!nullToAbsent || description != null) {
+      map['description'] = Variable<String>(description);
+    }
+    map['created_at'] = Variable<DateTime>(createdAt);
+    return map;
+  }
+
+  SponsorBlockSegmentsCompanion toCompanion(bool nullToAbsent) {
+    return SponsorBlockSegmentsCompanion(
+      id: Value(id),
+      trackId: Value(trackId),
+      videoId: Value(videoId),
+      source: Value(source),
+      uuid: uuid == null && nullToAbsent ? const Value.absent() : Value(uuid),
+      category: Value(category),
+      actionType: Value(actionType),
+      startMs: Value(startMs),
+      endMs: Value(endMs),
+      votes:
+          votes == null && nullToAbsent ? const Value.absent() : Value(votes),
+      locked:
+          locked == null && nullToAbsent ? const Value.absent() : Value(locked),
+      description:
+          description == null && nullToAbsent
+              ? const Value.absent()
+              : Value(description),
+      createdAt: Value(createdAt),
+    );
+  }
+
+  factory SponsorBlockSegment.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return SponsorBlockSegment(
+      id: serializer.fromJson<int>(json['id']),
+      trackId: serializer.fromJson<int>(json['trackId']),
+      videoId: serializer.fromJson<String>(json['videoId']),
+      source: serializer.fromJson<String>(json['source']),
+      uuid: serializer.fromJson<String?>(json['uuid']),
+      category: serializer.fromJson<String>(json['category']),
+      actionType: serializer.fromJson<String>(json['actionType']),
+      startMs: serializer.fromJson<int>(json['startMs']),
+      endMs: serializer.fromJson<int>(json['endMs']),
+      votes: serializer.fromJson<int?>(json['votes']),
+      locked: serializer.fromJson<bool?>(json['locked']),
+      description: serializer.fromJson<String?>(json['description']),
+      createdAt: serializer.fromJson<DateTime>(json['createdAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<int>(id),
+      'trackId': serializer.toJson<int>(trackId),
+      'videoId': serializer.toJson<String>(videoId),
+      'source': serializer.toJson<String>(source),
+      'uuid': serializer.toJson<String?>(uuid),
+      'category': serializer.toJson<String>(category),
+      'actionType': serializer.toJson<String>(actionType),
+      'startMs': serializer.toJson<int>(startMs),
+      'endMs': serializer.toJson<int>(endMs),
+      'votes': serializer.toJson<int?>(votes),
+      'locked': serializer.toJson<bool?>(locked),
+      'description': serializer.toJson<String?>(description),
+      'createdAt': serializer.toJson<DateTime>(createdAt),
+    };
+  }
+
+  SponsorBlockSegment copyWith({
+    int? id,
+    int? trackId,
+    String? videoId,
+    String? source,
+    Value<String?> uuid = const Value.absent(),
+    String? category,
+    String? actionType,
+    int? startMs,
+    int? endMs,
+    Value<int?> votes = const Value.absent(),
+    Value<bool?> locked = const Value.absent(),
+    Value<String?> description = const Value.absent(),
+    DateTime? createdAt,
+  }) => SponsorBlockSegment(
+    id: id ?? this.id,
+    trackId: trackId ?? this.trackId,
+    videoId: videoId ?? this.videoId,
+    source: source ?? this.source,
+    uuid: uuid.present ? uuid.value : this.uuid,
+    category: category ?? this.category,
+    actionType: actionType ?? this.actionType,
+    startMs: startMs ?? this.startMs,
+    endMs: endMs ?? this.endMs,
+    votes: votes.present ? votes.value : this.votes,
+    locked: locked.present ? locked.value : this.locked,
+    description: description.present ? description.value : this.description,
+    createdAt: createdAt ?? this.createdAt,
+  );
+  SponsorBlockSegment copyWithCompanion(SponsorBlockSegmentsCompanion data) {
+    return SponsorBlockSegment(
+      id: data.id.present ? data.id.value : this.id,
+      trackId: data.trackId.present ? data.trackId.value : this.trackId,
+      videoId: data.videoId.present ? data.videoId.value : this.videoId,
+      source: data.source.present ? data.source.value : this.source,
+      uuid: data.uuid.present ? data.uuid.value : this.uuid,
+      category: data.category.present ? data.category.value : this.category,
+      actionType:
+          data.actionType.present ? data.actionType.value : this.actionType,
+      startMs: data.startMs.present ? data.startMs.value : this.startMs,
+      endMs: data.endMs.present ? data.endMs.value : this.endMs,
+      votes: data.votes.present ? data.votes.value : this.votes,
+      locked: data.locked.present ? data.locked.value : this.locked,
+      description:
+          data.description.present ? data.description.value : this.description,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SponsorBlockSegment(')
+          ..write('id: $id, ')
+          ..write('trackId: $trackId, ')
+          ..write('videoId: $videoId, ')
+          ..write('source: $source, ')
+          ..write('uuid: $uuid, ')
+          ..write('category: $category, ')
+          ..write('actionType: $actionType, ')
+          ..write('startMs: $startMs, ')
+          ..write('endMs: $endMs, ')
+          ..write('votes: $votes, ')
+          ..write('locked: $locked, ')
+          ..write('description: $description, ')
+          ..write('createdAt: $createdAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    trackId,
+    videoId,
+    source,
+    uuid,
+    category,
+    actionType,
+    startMs,
+    endMs,
+    votes,
+    locked,
+    description,
+    createdAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is SponsorBlockSegment &&
+          other.id == this.id &&
+          other.trackId == this.trackId &&
+          other.videoId == this.videoId &&
+          other.source == this.source &&
+          other.uuid == this.uuid &&
+          other.category == this.category &&
+          other.actionType == this.actionType &&
+          other.startMs == this.startMs &&
+          other.endMs == this.endMs &&
+          other.votes == this.votes &&
+          other.locked == this.locked &&
+          other.description == this.description &&
+          other.createdAt == this.createdAt);
+}
+
+class SponsorBlockSegmentsCompanion
+    extends UpdateCompanion<SponsorBlockSegment> {
+  final Value<int> id;
+  final Value<int> trackId;
+  final Value<String> videoId;
+  final Value<String> source;
+  final Value<String?> uuid;
+  final Value<String> category;
+  final Value<String> actionType;
+  final Value<int> startMs;
+  final Value<int> endMs;
+  final Value<int?> votes;
+  final Value<bool?> locked;
+  final Value<String?> description;
+  final Value<DateTime> createdAt;
+  const SponsorBlockSegmentsCompanion({
+    this.id = const Value.absent(),
+    this.trackId = const Value.absent(),
+    this.videoId = const Value.absent(),
+    this.source = const Value.absent(),
+    this.uuid = const Value.absent(),
+    this.category = const Value.absent(),
+    this.actionType = const Value.absent(),
+    this.startMs = const Value.absent(),
+    this.endMs = const Value.absent(),
+    this.votes = const Value.absent(),
+    this.locked = const Value.absent(),
+    this.description = const Value.absent(),
+    this.createdAt = const Value.absent(),
+  });
+  SponsorBlockSegmentsCompanion.insert({
+    this.id = const Value.absent(),
+    required int trackId,
+    required String videoId,
+    required String source,
+    this.uuid = const Value.absent(),
+    required String category,
+    this.actionType = const Value.absent(),
+    required int startMs,
+    required int endMs,
+    this.votes = const Value.absent(),
+    this.locked = const Value.absent(),
+    this.description = const Value.absent(),
+    required DateTime createdAt,
+  }) : trackId = Value(trackId),
+       videoId = Value(videoId),
+       source = Value(source),
+       category = Value(category),
+       startMs = Value(startMs),
+       endMs = Value(endMs),
+       createdAt = Value(createdAt);
+  static Insertable<SponsorBlockSegment> custom({
+    Expression<int>? id,
+    Expression<int>? trackId,
+    Expression<String>? videoId,
+    Expression<String>? source,
+    Expression<String>? uuid,
+    Expression<String>? category,
+    Expression<String>? actionType,
+    Expression<int>? startMs,
+    Expression<int>? endMs,
+    Expression<int>? votes,
+    Expression<bool>? locked,
+    Expression<String>? description,
+    Expression<DateTime>? createdAt,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (trackId != null) 'track_id': trackId,
+      if (videoId != null) 'video_id': videoId,
+      if (source != null) 'source': source,
+      if (uuid != null) 'uuid': uuid,
+      if (category != null) 'category': category,
+      if (actionType != null) 'action_type': actionType,
+      if (startMs != null) 'start_ms': startMs,
+      if (endMs != null) 'end_ms': endMs,
+      if (votes != null) 'votes': votes,
+      if (locked != null) 'locked': locked,
+      if (description != null) 'description': description,
+      if (createdAt != null) 'created_at': createdAt,
+    });
+  }
+
+  SponsorBlockSegmentsCompanion copyWith({
+    Value<int>? id,
+    Value<int>? trackId,
+    Value<String>? videoId,
+    Value<String>? source,
+    Value<String?>? uuid,
+    Value<String>? category,
+    Value<String>? actionType,
+    Value<int>? startMs,
+    Value<int>? endMs,
+    Value<int?>? votes,
+    Value<bool?>? locked,
+    Value<String?>? description,
+    Value<DateTime>? createdAt,
+  }) {
+    return SponsorBlockSegmentsCompanion(
+      id: id ?? this.id,
+      trackId: trackId ?? this.trackId,
+      videoId: videoId ?? this.videoId,
+      source: source ?? this.source,
+      uuid: uuid ?? this.uuid,
+      category: category ?? this.category,
+      actionType: actionType ?? this.actionType,
+      startMs: startMs ?? this.startMs,
+      endMs: endMs ?? this.endMs,
+      votes: votes ?? this.votes,
+      locked: locked ?? this.locked,
+      description: description ?? this.description,
+      createdAt: createdAt ?? this.createdAt,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<int>(id.value);
+    }
+    if (trackId.present) {
+      map['track_id'] = Variable<int>(trackId.value);
+    }
+    if (videoId.present) {
+      map['video_id'] = Variable<String>(videoId.value);
+    }
+    if (source.present) {
+      map['source'] = Variable<String>(source.value);
+    }
+    if (uuid.present) {
+      map['uuid'] = Variable<String>(uuid.value);
+    }
+    if (category.present) {
+      map['category'] = Variable<String>(category.value);
+    }
+    if (actionType.present) {
+      map['action_type'] = Variable<String>(actionType.value);
+    }
+    if (startMs.present) {
+      map['start_ms'] = Variable<int>(startMs.value);
+    }
+    if (endMs.present) {
+      map['end_ms'] = Variable<int>(endMs.value);
+    }
+    if (votes.present) {
+      map['votes'] = Variable<int>(votes.value);
+    }
+    if (locked.present) {
+      map['locked'] = Variable<bool>(locked.value);
+    }
+    if (description.present) {
+      map['description'] = Variable<String>(description.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<DateTime>(createdAt.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SponsorBlockSegmentsCompanion(')
+          ..write('id: $id, ')
+          ..write('trackId: $trackId, ')
+          ..write('videoId: $videoId, ')
+          ..write('source: $source, ')
+          ..write('uuid: $uuid, ')
+          ..write('category: $category, ')
+          ..write('actionType: $actionType, ')
+          ..write('startMs: $startMs, ')
+          ..write('endMs: $endMs, ')
+          ..write('votes: $votes, ')
+          ..write('locked: $locked, ')
+          ..write('description: $description, ')
+          ..write('createdAt: $createdAt')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
   late final $PlaylistsTable playlists = $PlaylistsTable(this);
   late final $TracksTable tracks = $TracksTable(this);
+  late final $SponsorBlockSegmentsTable sponsorBlockSegments =
+      $SponsorBlockSegmentsTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
   @override
-  List<DatabaseSchemaEntity> get allSchemaEntities => [playlists, tracks];
+  List<DatabaseSchemaEntity> get allSchemaEntities => [
+    playlists,
+    tracks,
+    sponsorBlockSegments,
+  ];
+  @override
+  StreamQueryUpdateRules get streamUpdateRules => const StreamQueryUpdateRules([
+    WritePropagation(
+      on: TableUpdateQuery.onTableName(
+        'tracks',
+        limitUpdateKind: UpdateKind.delete,
+      ),
+      result: [TableUpdate('sponsor_block_segments', kind: UpdateKind.delete)],
+    ),
+  ]);
 }
 
 typedef $$PlaylistsTableCreateCompanionBuilder =
@@ -1616,6 +2507,8 @@ typedef $$PlaylistsTableCreateCompanionBuilder =
       Value<bool> autoUpdate,
       Value<int> updateFrequencyHours,
       Value<bool> includeThumbnails,
+      Value<bool> sponsorBlockEnabled,
+      Value<String> sponsorBlockCategories,
       Value<DateTime?> lastUpdated,
       required DateTime createdAt,
       required String outputPath,
@@ -1631,6 +2524,8 @@ typedef $$PlaylistsTableUpdateCompanionBuilder =
       Value<bool> autoUpdate,
       Value<int> updateFrequencyHours,
       Value<bool> includeThumbnails,
+      Value<bool> sponsorBlockEnabled,
+      Value<String> sponsorBlockCategories,
       Value<DateTime?> lastUpdated,
       Value<DateTime> createdAt,
       Value<String> outputPath,
@@ -1711,6 +2606,16 @@ class $$PlaylistsTableFilterComposer
 
   ColumnFilters<bool> get includeThumbnails => $composableBuilder(
     column: $table.includeThumbnails,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get sponsorBlockEnabled => $composableBuilder(
+    column: $table.sponsorBlockEnabled,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get sponsorBlockCategories => $composableBuilder(
+    column: $table.sponsorBlockCategories,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -1809,6 +2714,16 @@ class $$PlaylistsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<bool> get sponsorBlockEnabled => $composableBuilder(
+    column: $table.sponsorBlockEnabled,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get sponsorBlockCategories => $composableBuilder(
+    column: $table.sponsorBlockCategories,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<DateTime> get lastUpdated => $composableBuilder(
     column: $table.lastUpdated,
     builder: (column) => ColumnOrderings(column),
@@ -1868,6 +2783,16 @@ class $$PlaylistsTableAnnotationComposer
 
   GeneratedColumn<bool> get includeThumbnails => $composableBuilder(
     column: $table.includeThumbnails,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<bool> get sponsorBlockEnabled => $composableBuilder(
+    column: $table.sponsorBlockEnabled,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get sponsorBlockCategories => $composableBuilder(
+    column: $table.sponsorBlockCategories,
     builder: (column) => column,
   );
 
@@ -1947,6 +2872,8 @@ class $$PlaylistsTableTableManager
                 Value<bool> autoUpdate = const Value.absent(),
                 Value<int> updateFrequencyHours = const Value.absent(),
                 Value<bool> includeThumbnails = const Value.absent(),
+                Value<bool> sponsorBlockEnabled = const Value.absent(),
+                Value<String> sponsorBlockCategories = const Value.absent(),
                 Value<DateTime?> lastUpdated = const Value.absent(),
                 Value<DateTime> createdAt = const Value.absent(),
                 Value<String> outputPath = const Value.absent(),
@@ -1960,6 +2887,8 @@ class $$PlaylistsTableTableManager
                 autoUpdate: autoUpdate,
                 updateFrequencyHours: updateFrequencyHours,
                 includeThumbnails: includeThumbnails,
+                sponsorBlockEnabled: sponsorBlockEnabled,
+                sponsorBlockCategories: sponsorBlockCategories,
                 lastUpdated: lastUpdated,
                 createdAt: createdAt,
                 outputPath: outputPath,
@@ -1975,6 +2904,8 @@ class $$PlaylistsTableTableManager
                 Value<bool> autoUpdate = const Value.absent(),
                 Value<int> updateFrequencyHours = const Value.absent(),
                 Value<bool> includeThumbnails = const Value.absent(),
+                Value<bool> sponsorBlockEnabled = const Value.absent(),
+                Value<String> sponsorBlockCategories = const Value.absent(),
                 Value<DateTime?> lastUpdated = const Value.absent(),
                 required DateTime createdAt,
                 required String outputPath,
@@ -1988,6 +2919,8 @@ class $$PlaylistsTableTableManager
                 autoUpdate: autoUpdate,
                 updateFrequencyHours: updateFrequencyHours,
                 includeThumbnails: includeThumbnails,
+                sponsorBlockEnabled: sponsorBlockEnabled,
+                sponsorBlockCategories: sponsorBlockCategories,
                 lastUpdated: lastUpdated,
                 createdAt: createdAt,
                 outputPath: outputPath,
@@ -2104,6 +3037,34 @@ final class $$TracksTableReferences
       manager.$state.copyWith(prefetchedData: [item]),
     );
   }
+
+  static MultiTypedResultKey<
+    $SponsorBlockSegmentsTable,
+    List<SponsorBlockSegment>
+  >
+  _sponsorBlockSegmentsRefsTable(_$AppDatabase db) =>
+      MultiTypedResultKey.fromTable(
+        db.sponsorBlockSegments,
+        aliasName: $_aliasNameGenerator(
+          db.tracks.id,
+          db.sponsorBlockSegments.trackId,
+        ),
+      );
+
+  $$SponsorBlockSegmentsTableProcessedTableManager
+  get sponsorBlockSegmentsRefs {
+    final manager = $$SponsorBlockSegmentsTableTableManager(
+      $_db,
+      $_db.sponsorBlockSegments,
+    ).filter((f) => f.trackId.id.sqlEquals($_itemColumn<int>('id')!));
+
+    final cache = $_typedResult.readTableOrNull(
+      _sponsorBlockSegmentsRefsTable($_db),
+    );
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: cache),
+    );
+  }
 }
 
 class $$TracksTableFilterComposer
@@ -2201,6 +3162,31 @@ class $$TracksTableFilterComposer
           ),
     );
     return composer;
+  }
+
+  Expression<bool> sponsorBlockSegmentsRefs(
+    Expression<bool> Function($$SponsorBlockSegmentsTableFilterComposer f) f,
+  ) {
+    final $$SponsorBlockSegmentsTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.id,
+      referencedTable: $db.sponsorBlockSegments,
+      getReferencedColumn: (t) => t.trackId,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$SponsorBlockSegmentsTableFilterComposer(
+            $db: $db,
+            $table: $db.sponsorBlockSegments,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return f(composer);
   }
 }
 
@@ -2384,6 +3370,32 @@ class $$TracksTableAnnotationComposer
     );
     return composer;
   }
+
+  Expression<T> sponsorBlockSegmentsRefs<T extends Object>(
+    Expression<T> Function($$SponsorBlockSegmentsTableAnnotationComposer a) f,
+  ) {
+    final $$SponsorBlockSegmentsTableAnnotationComposer composer =
+        $composerBuilder(
+          composer: this,
+          getCurrentColumn: (t) => t.id,
+          referencedTable: $db.sponsorBlockSegments,
+          getReferencedColumn: (t) => t.trackId,
+          builder:
+              (
+                joinBuilder, {
+                $addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer,
+              }) => $$SponsorBlockSegmentsTableAnnotationComposer(
+                $db: $db,
+                $table: $db.sponsorBlockSegments,
+                $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+                joinBuilder: joinBuilder,
+                $removeJoinBuilderFromRootComposer:
+                    $removeJoinBuilderFromRootComposer,
+              ),
+        );
+    return f(composer);
+  }
 }
 
 class $$TracksTableTableManager
@@ -2399,7 +3411,10 @@ class $$TracksTableTableManager
           $$TracksTableUpdateCompanionBuilder,
           (Track, $$TracksTableReferences),
           Track,
-          PrefetchHooks Function({bool playlistId})
+          PrefetchHooks Function({
+            bool playlistId,
+            bool sponsorBlockSegmentsRefs,
+          })
         > {
   $$TracksTableTableManager(_$AppDatabase db, $TracksTable table)
     : super(
@@ -2486,10 +3501,15 @@ class $$TracksTableTableManager
                         ),
                       )
                       .toList(),
-          prefetchHooksCallback: ({playlistId = false}) {
+          prefetchHooksCallback: ({
+            playlistId = false,
+            sponsorBlockSegmentsRefs = false,
+          }) {
             return PrefetchHooks(
               db: db,
-              explicitlyWatchedTables: [],
+              explicitlyWatchedTables: [
+                if (sponsorBlockSegmentsRefs) db.sponsorBlockSegments,
+              ],
               addJoins: <
                 T extends TableManagerState<
                   dynamic,
@@ -2521,7 +3541,30 @@ class $$TracksTableTableManager
                 return state;
               },
               getPrefetchedDataCallback: (items) async {
-                return [];
+                return [
+                  if (sponsorBlockSegmentsRefs)
+                    await $_getPrefetchedData<
+                      Track,
+                      $TracksTable,
+                      SponsorBlockSegment
+                    >(
+                      currentTable: table,
+                      referencedTable: $$TracksTableReferences
+                          ._sponsorBlockSegmentsRefsTable(db),
+                      managerFromTypedResult:
+                          (p0) =>
+                              $$TracksTableReferences(
+                                db,
+                                table,
+                                p0,
+                              ).sponsorBlockSegmentsRefs,
+                      referencedItemsForCurrentItem:
+                          (item, referencedItems) => referencedItems.where(
+                            (e) => e.trackId == item.id,
+                          ),
+                      typedResults: items,
+                    ),
+                ];
               },
             );
           },
@@ -2541,7 +3584,498 @@ typedef $$TracksTableProcessedTableManager =
       $$TracksTableUpdateCompanionBuilder,
       (Track, $$TracksTableReferences),
       Track,
-      PrefetchHooks Function({bool playlistId})
+      PrefetchHooks Function({bool playlistId, bool sponsorBlockSegmentsRefs})
+    >;
+typedef $$SponsorBlockSegmentsTableCreateCompanionBuilder =
+    SponsorBlockSegmentsCompanion Function({
+      Value<int> id,
+      required int trackId,
+      required String videoId,
+      required String source,
+      Value<String?> uuid,
+      required String category,
+      Value<String> actionType,
+      required int startMs,
+      required int endMs,
+      Value<int?> votes,
+      Value<bool?> locked,
+      Value<String?> description,
+      required DateTime createdAt,
+    });
+typedef $$SponsorBlockSegmentsTableUpdateCompanionBuilder =
+    SponsorBlockSegmentsCompanion Function({
+      Value<int> id,
+      Value<int> trackId,
+      Value<String> videoId,
+      Value<String> source,
+      Value<String?> uuid,
+      Value<String> category,
+      Value<String> actionType,
+      Value<int> startMs,
+      Value<int> endMs,
+      Value<int?> votes,
+      Value<bool?> locked,
+      Value<String?> description,
+      Value<DateTime> createdAt,
+    });
+
+final class $$SponsorBlockSegmentsTableReferences
+    extends
+        BaseReferences<
+          _$AppDatabase,
+          $SponsorBlockSegmentsTable,
+          SponsorBlockSegment
+        > {
+  $$SponsorBlockSegmentsTableReferences(
+    super.$_db,
+    super.$_table,
+    super.$_typedResult,
+  );
+
+  static $TracksTable _trackIdTable(_$AppDatabase db) => db.tracks.createAlias(
+    $_aliasNameGenerator(db.sponsorBlockSegments.trackId, db.tracks.id),
+  );
+
+  $$TracksTableProcessedTableManager get trackId {
+    final $_column = $_itemColumn<int>('track_id')!;
+
+    final manager = $$TracksTableTableManager(
+      $_db,
+      $_db.tracks,
+    ).filter((f) => f.id.sqlEquals($_column));
+    final item = $_typedResult.readTableOrNull(_trackIdTable($_db));
+    if (item == null) return manager;
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: [item]),
+    );
+  }
+}
+
+class $$SponsorBlockSegmentsTableFilterComposer
+    extends Composer<_$AppDatabase, $SponsorBlockSegmentsTable> {
+  $$SponsorBlockSegmentsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get videoId => $composableBuilder(
+    column: $table.videoId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get uuid => $composableBuilder(
+    column: $table.uuid,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get category => $composableBuilder(
+    column: $table.category,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get actionType => $composableBuilder(
+    column: $table.actionType,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get startMs => $composableBuilder(
+    column: $table.startMs,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get endMs => $composableBuilder(
+    column: $table.endMs,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get votes => $composableBuilder(
+    column: $table.votes,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get locked => $composableBuilder(
+    column: $table.locked,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get description => $composableBuilder(
+    column: $table.description,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  $$TracksTableFilterComposer get trackId {
+    final $$TracksTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.trackId,
+      referencedTable: $db.tracks,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$TracksTableFilterComposer(
+            $db: $db,
+            $table: $db.tracks,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$SponsorBlockSegmentsTableOrderingComposer
+    extends Composer<_$AppDatabase, $SponsorBlockSegmentsTable> {
+  $$SponsorBlockSegmentsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get videoId => $composableBuilder(
+    column: $table.videoId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get uuid => $composableBuilder(
+    column: $table.uuid,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get category => $composableBuilder(
+    column: $table.category,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get actionType => $composableBuilder(
+    column: $table.actionType,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get startMs => $composableBuilder(
+    column: $table.startMs,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get endMs => $composableBuilder(
+    column: $table.endMs,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get votes => $composableBuilder(
+    column: $table.votes,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get locked => $composableBuilder(
+    column: $table.locked,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get description => $composableBuilder(
+    column: $table.description,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  $$TracksTableOrderingComposer get trackId {
+    final $$TracksTableOrderingComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.trackId,
+      referencedTable: $db.tracks,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$TracksTableOrderingComposer(
+            $db: $db,
+            $table: $db.tracks,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$SponsorBlockSegmentsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $SponsorBlockSegmentsTable> {
+  $$SponsorBlockSegmentsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get videoId =>
+      $composableBuilder(column: $table.videoId, builder: (column) => column);
+
+  GeneratedColumn<String> get source =>
+      $composableBuilder(column: $table.source, builder: (column) => column);
+
+  GeneratedColumn<String> get uuid =>
+      $composableBuilder(column: $table.uuid, builder: (column) => column);
+
+  GeneratedColumn<String> get category =>
+      $composableBuilder(column: $table.category, builder: (column) => column);
+
+  GeneratedColumn<String> get actionType => $composableBuilder(
+    column: $table.actionType,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get startMs =>
+      $composableBuilder(column: $table.startMs, builder: (column) => column);
+
+  GeneratedColumn<int> get endMs =>
+      $composableBuilder(column: $table.endMs, builder: (column) => column);
+
+  GeneratedColumn<int> get votes =>
+      $composableBuilder(column: $table.votes, builder: (column) => column);
+
+  GeneratedColumn<bool> get locked =>
+      $composableBuilder(column: $table.locked, builder: (column) => column);
+
+  GeneratedColumn<String> get description => $composableBuilder(
+    column: $table.description,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<DateTime> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  $$TracksTableAnnotationComposer get trackId {
+    final $$TracksTableAnnotationComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.trackId,
+      referencedTable: $db.tracks,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$TracksTableAnnotationComposer(
+            $db: $db,
+            $table: $db.tracks,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$SponsorBlockSegmentsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $SponsorBlockSegmentsTable,
+          SponsorBlockSegment,
+          $$SponsorBlockSegmentsTableFilterComposer,
+          $$SponsorBlockSegmentsTableOrderingComposer,
+          $$SponsorBlockSegmentsTableAnnotationComposer,
+          $$SponsorBlockSegmentsTableCreateCompanionBuilder,
+          $$SponsorBlockSegmentsTableUpdateCompanionBuilder,
+          (SponsorBlockSegment, $$SponsorBlockSegmentsTableReferences),
+          SponsorBlockSegment,
+          PrefetchHooks Function({bool trackId})
+        > {
+  $$SponsorBlockSegmentsTableTableManager(
+    _$AppDatabase db,
+    $SponsorBlockSegmentsTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer:
+              () => $$SponsorBlockSegmentsTableFilterComposer(
+                $db: db,
+                $table: table,
+              ),
+          createOrderingComposer:
+              () => $$SponsorBlockSegmentsTableOrderingComposer(
+                $db: db,
+                $table: table,
+              ),
+          createComputedFieldComposer:
+              () => $$SponsorBlockSegmentsTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                Value<int> trackId = const Value.absent(),
+                Value<String> videoId = const Value.absent(),
+                Value<String> source = const Value.absent(),
+                Value<String?> uuid = const Value.absent(),
+                Value<String> category = const Value.absent(),
+                Value<String> actionType = const Value.absent(),
+                Value<int> startMs = const Value.absent(),
+                Value<int> endMs = const Value.absent(),
+                Value<int?> votes = const Value.absent(),
+                Value<bool?> locked = const Value.absent(),
+                Value<String?> description = const Value.absent(),
+                Value<DateTime> createdAt = const Value.absent(),
+              }) => SponsorBlockSegmentsCompanion(
+                id: id,
+                trackId: trackId,
+                videoId: videoId,
+                source: source,
+                uuid: uuid,
+                category: category,
+                actionType: actionType,
+                startMs: startMs,
+                endMs: endMs,
+                votes: votes,
+                locked: locked,
+                description: description,
+                createdAt: createdAt,
+              ),
+          createCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                required int trackId,
+                required String videoId,
+                required String source,
+                Value<String?> uuid = const Value.absent(),
+                required String category,
+                Value<String> actionType = const Value.absent(),
+                required int startMs,
+                required int endMs,
+                Value<int?> votes = const Value.absent(),
+                Value<bool?> locked = const Value.absent(),
+                Value<String?> description = const Value.absent(),
+                required DateTime createdAt,
+              }) => SponsorBlockSegmentsCompanion.insert(
+                id: id,
+                trackId: trackId,
+                videoId: videoId,
+                source: source,
+                uuid: uuid,
+                category: category,
+                actionType: actionType,
+                startMs: startMs,
+                endMs: endMs,
+                votes: votes,
+                locked: locked,
+                description: description,
+                createdAt: createdAt,
+              ),
+          withReferenceMapper:
+              (p0) =>
+                  p0
+                      .map(
+                        (e) => (
+                          e.readTable(table),
+                          $$SponsorBlockSegmentsTableReferences(db, table, e),
+                        ),
+                      )
+                      .toList(),
+          prefetchHooksCallback: ({trackId = false}) {
+            return PrefetchHooks(
+              db: db,
+              explicitlyWatchedTables: [],
+              addJoins: <
+                T extends TableManagerState<
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic
+                >
+              >(state) {
+                if (trackId) {
+                  state =
+                      state.withJoin(
+                            currentTable: table,
+                            currentColumn: table.trackId,
+                            referencedTable:
+                                $$SponsorBlockSegmentsTableReferences
+                                    ._trackIdTable(db),
+                            referencedColumn:
+                                $$SponsorBlockSegmentsTableReferences
+                                    ._trackIdTable(db)
+                                    .id,
+                          )
+                          as T;
+                }
+
+                return state;
+              },
+              getPrefetchedDataCallback: (items) async {
+                return [];
+              },
+            );
+          },
+        ),
+      );
+}
+
+typedef $$SponsorBlockSegmentsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $SponsorBlockSegmentsTable,
+      SponsorBlockSegment,
+      $$SponsorBlockSegmentsTableFilterComposer,
+      $$SponsorBlockSegmentsTableOrderingComposer,
+      $$SponsorBlockSegmentsTableAnnotationComposer,
+      $$SponsorBlockSegmentsTableCreateCompanionBuilder,
+      $$SponsorBlockSegmentsTableUpdateCompanionBuilder,
+      (SponsorBlockSegment, $$SponsorBlockSegmentsTableReferences),
+      SponsorBlockSegment,
+      PrefetchHooks Function({bool trackId})
     >;
 
 class $AppDatabaseManager {
@@ -2551,4 +4085,6 @@ class $AppDatabaseManager {
       $$PlaylistsTableTableManager(_db, _db.playlists);
   $$TracksTableTableManager get tracks =>
       $$TracksTableTableManager(_db, _db.tracks);
+  $$SponsorBlockSegmentsTableTableManager get sponsorBlockSegments =>
+      $$SponsorBlockSegmentsTableTableManager(_db, _db.sponsorBlockSegments);
 }

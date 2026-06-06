@@ -8,6 +8,7 @@ import 'ytdlp_service.dart';
 import 'log_service.dart';
 import 'metadata_service.dart';
 import 'notification_service.dart';
+import 'sponsorblock_service.dart';
 
 class DownloadProgress {
   final int playlistId;
@@ -41,6 +42,7 @@ class DownloadService {
   final LogService _log;
   final MetadataService _metadata;
   final DownloadNotificationService? _notifications;
+  final SponsorBlockService? _sponsorBlock;
 
   final _progressController = StreamController<DownloadProgress>.broadcast();
   Stream<DownloadProgress> get progressStream => _progressController.stream;
@@ -55,6 +57,7 @@ class DownloadService {
     this._log,
     this._metadata, [
     this._notifications,
+    this._sponsorBlock,
   ]);
 
   static Future<bool> acquireLock() async {
@@ -316,6 +319,13 @@ class DownloadService {
           filePath: existingFile,
           isLocalReplacement: true,
         );
+        await _sponsorBlock?.refreshTrackSegments(
+          track.copyWith(
+            filePath: Value(existingFile),
+            status: 'complete',
+            isLocalReplacement: true,
+          ),
+        );
         _log.info(
           '$trackLabel Found existing file: ${existingFile.split('/').last}',
         );
@@ -368,6 +378,10 @@ class DownloadService {
         filePath:
             actualPath ?? '${playlist.outputPath}/${indexStr}_${track.title}',
       );
+      final updatedTrack = (await _db.getTracksForPlaylist(
+        playlist.id,
+      )).firstWhere((t) => t.id == track.id, orElse: () => track);
+      await _sponsorBlock?.refreshTrackSegments(updatedTrack);
       _log.info('$trackLabel Downloaded: ${track.title}');
 
       _progressController.add(
@@ -400,6 +414,8 @@ class DownloadService {
         autoUpdate: Value(playlist.autoUpdate),
         updateFrequencyHours: Value(playlist.updateFrequencyHours),
         includeThumbnails: Value(playlist.includeThumbnails),
+        sponsorBlockEnabled: Value(playlist.sponsorBlockEnabled),
+        sponsorBlockCategories: Value(playlist.sponsorBlockCategories),
         lastUpdated: Value(DateTime.now()),
         createdAt: Value(playlist.createdAt),
         outputPath: Value(playlist.outputPath),

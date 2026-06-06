@@ -44,7 +44,6 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
   }
 
   Widget _buildBar(BuildContext context, WidgetRef ref, dynamic currentTrack) {
-
     final isPlaying = ref.watch(isPlayingProvider).valueOrNull ?? false;
     final position = ref.watch(positionProvider).valueOrNull ?? Duration.zero;
     final duration = ref.watch(durationProvider).valueOrNull ?? Duration.zero;
@@ -59,16 +58,14 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
 
     return GestureDetector(
       onTap: () {
-        Navigator.of(context).push(
-          MaterialPageRoute(builder: (_) => const PlayerPage()),
-        );
+        Navigator.of(
+          context,
+        ).push(MaterialPageRoute(builder: (_) => const PlayerPage()));
       },
       child: Container(
         decoration: const BoxDecoration(
           color: Color(0xFF2A2A2A),
-          border: Border(
-            top: BorderSide(color: Color(0xFF333333), width: 0.5),
-          ),
+          border: Border(top: BorderSide(color: Color(0xFF333333), width: 0.5)),
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -78,8 +75,9 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
               value: progress.clamp(0.0, 1.0),
               minHeight: 2,
               backgroundColor: const Color(0xFF333333),
-              valueColor:
-                  const AlwaysStoppedAnimation<Color>(Color(0xFF2196F3)),
+              valueColor: const AlwaysStoppedAnimation<Color>(
+                Color(0xFF2196F3),
+              ),
             ),
             // Content
             SizedBox(
@@ -93,12 +91,13 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
                     child: SizedBox(
                       width: 48,
                       height: 48,
-                      child: isVideo && foregrounded
-                          ? Video(
-                              controller: playbackService.videoController,
-                              controls: NoVideoControls,
-                            )
-                          : _buildThumbnail(_thumbnailUrl(currentTrack)),
+                      child:
+                          isVideo && foregrounded
+                              ? Video(
+                                controller: playbackService.videoController,
+                                controls: noVideoControls,
+                              )
+                              : _buildThumbnail(_thumbnailUrl(currentTrack)),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -192,7 +191,8 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
 
   /// Get thumbnail URL with YouTube fallback from video ID
   String? _thumbnailUrl(dynamic track) {
-    if (track.thumbnailUrl != null && (track.thumbnailUrl as String).isNotEmpty) {
+    if (track.thumbnailUrl != null &&
+        (track.thumbnailUrl as String).isNotEmpty) {
       return track.thumbnailUrl;
     }
     if (track.videoId != null && (track.videoId as String).isNotEmpty) {
@@ -214,4 +214,4 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
 }
 
 // No-controls callback for mini video preview
-Widget NoVideoControls(VideoState state) => const SizedBox.shrink();
+Widget noVideoControls(VideoState state) => const SizedBox.shrink();

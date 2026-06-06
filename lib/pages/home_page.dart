@@ -25,8 +25,7 @@ class _HomePageState extends ConsumerState<HomePage> {
   Widget build(BuildContext context) {
     final playlistsAsync = ref.watch(playlistsProvider);
     final downloadAsync = ref.watch(downloadProgressProvider);
-    final downloadProgress =
-        downloadAsync.valueOrNull ?? DownloadProgress.idle;
+    final downloadProgress = downloadAsync.valueOrNull ?? DownloadProgress.idle;
     final pendingImports = ref.watch(pendingImportsProvider);
 
     return Scaffold(
@@ -37,18 +36,22 @@ class _HomePageState extends ConsumerState<HomePage> {
         ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.bug_report, color: Color(0xFF888888), size: 20),
-            tooltip: 'Debug Log',
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const DebugLogPage()),
+            icon: const Icon(
+              Icons.bug_report,
+              color: Color(0xFF888888),
+              size: 20,
             ),
+            tooltip: 'Debug Log',
+            onPressed:
+                () => Navigator.of(
+                  context,
+                ).push(MaterialPageRoute(builder: (_) => const DebugLogPage())),
           ),
         ],
       ),
       body: Column(
         children: [
-          if (pendingImports.isNotEmpty)
-            _buildImportBanner(pendingImports),
+          if (pendingImports.isNotEmpty) _buildImportBanner(pendingImports),
           Expanded(
             child: playlistsAsync.when(
               loading: () => const Center(child: CircularProgressIndicator()),
@@ -59,17 +62,26 @@ class _HomePageState extends ConsumerState<HomePage> {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        const Icon(Icons.playlist_add,
-                            size: 64, color: Color(0xFF555555)),
+                        const Icon(
+                          Icons.playlist_add,
+                          size: 64,
+                          color: Color(0xFF555555),
+                        ),
                         const SizedBox(height: 16),
                         const Text(
                           'No playlists yet',
-                          style: TextStyle(color: Color(0xFF888888), fontSize: 16),
+                          style: TextStyle(
+                            color: Color(0xFF888888),
+                            fontSize: 16,
+                          ),
                         ),
                         const SizedBox(height: 8),
                         const Text(
                           'Tap + to add your first playlist',
-                          style: TextStyle(color: Color(0xFF666666), fontSize: 14),
+                          style: TextStyle(
+                            color: Color(0xFF666666),
+                            fontSize: 14,
+                          ),
                         ),
                       ],
                     ),
@@ -90,7 +102,9 @@ class _HomePageState extends ConsumerState<HomePage> {
   }
 
   Widget _buildPlaylistGrid(
-      List<Playlist> playlists, DownloadProgress downloadProgress) {
+    List<Playlist> playlists,
+    DownloadProgress downloadProgress,
+  ) {
     _refreshCounts(playlists);
 
     return Padding(
@@ -107,12 +121,11 @@ class _HomePageState extends ConsumerState<HomePage> {
           final playlist = playlists[index];
           final isDownloading =
               downloadProgress.status == 'downloading' &&
-                  downloadProgress.playlistId == playlist.id;
+              downloadProgress.playlistId == playlist.id;
 
           return PlaylistCard(
             playlist: playlist,
-            downloadedCount:
-                _downloadedCounts[playlist.id] ?? 0,
+            downloadedCount: _downloadedCounts[playlist.id] ?? 0,
             totalCount: _totalCounts[playlist.id] ?? 0,
             isDownloading: isDownloading,
             downloadProgress:
@@ -165,17 +178,18 @@ class _HomePageState extends ConsumerState<HomePage> {
       if (result.markedAvailable > 0) {
         parts.add('${result.markedAvailable} restored');
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Synced: ${parts.join(', ')}')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Synced: ${parts.join(', ')}')));
     }
 
     if (result.hasConflicts && mounted) {
       await _showReplacementConflicts(result.replacementConflicts);
     }
 
-    final freshPlaylist =
-        await ref.read(databaseProvider).getPlaylist(playlist.id);
+    final freshPlaylist = await ref
+        .read(databaseProvider)
+        .getPlaylist(playlist.id);
     downloadService.downloadPlaylist(freshPlaylist);
   }
 
@@ -186,27 +200,30 @@ class _HomePageState extends ConsumerState<HomePage> {
       final decision = await showDialog<String>(
         context: context,
         barrierDismissible: false,
-        builder: (ctx) => AlertDialog(
-          backgroundColor: const Color(0xFF2A2A2A),
-          title: const Text('Video Available Again',
-              style: TextStyle(color: Colors.white)),
-          content: Text(
-            '"${track.title}" is available on YouTube again.\n\n'
-            'You have a local replacement file. '
-            'Would you like to keep it or download the original?',
-            style: const TextStyle(color: Color(0xFFCCCCCC)),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, 'keep'),
-              child: const Text('Keep Replacement'),
+        builder:
+            (ctx) => AlertDialog(
+              backgroundColor: const Color(0xFF2A2A2A),
+              title: const Text(
+                'Video Available Again',
+                style: TextStyle(color: Colors.white),
+              ),
+              content: Text(
+                '"${track.title}" is available on YouTube again.\n\n'
+                'You have a local replacement file. '
+                'Would you like to keep it or download the original?',
+                style: const TextStyle(color: Color(0xFFCCCCCC)),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, 'keep'),
+                  child: const Text('Keep Replacement'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, 'download'),
+                  child: const Text('Download Original'),
+                ),
+              ],
             ),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, 'download'),
-              child: const Text('Download Original'),
-            ),
-          ],
-        ),
       );
       if (decision == 'download') {
         await db.resetTrackForRedownload(track.id);
@@ -226,7 +243,11 @@ class _HomePageState extends ConsumerState<HomePage> {
       ),
       child: Row(
         children: [
-          const Icon(Icons.download_rounded, color: Color(0xFF2196F3), size: 24),
+          const Icon(
+            Icons.download_rounded,
+            color: Color(0xFF2196F3),
+            size: 24,
+          ),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
@@ -249,8 +270,8 @@ class _HomePageState extends ConsumerState<HomePage> {
             ),
           ),
           TextButton(
-            onPressed: () =>
-                ref.read(pendingImportsProvider.notifier).state = [],
+            onPressed:
+                () => ref.read(pendingImportsProvider.notifier).state = [],
             child: const Text(
               'Dismiss',
               style: TextStyle(color: Color(0xFF888888), fontSize: 13),
@@ -264,7 +285,8 @@ class _HomePageState extends ConsumerState<HomePage> {
               foregroundColor: Colors.white,
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8)),
+                borderRadius: BorderRadius.circular(8),
+              ),
             ),
             child: const Text('Import All', style: TextStyle(fontSize: 13)),
           ),
@@ -283,29 +305,32 @@ class _HomePageState extends ConsumerState<HomePage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-              'Imported ${imports.length} playlist${imports.length == 1 ? '' : 's'}'),
+            'Imported ${imports.length} playlist${imports.length == 1 ? '' : 's'}',
+          ),
         ),
       );
     }
   }
 
   void _navigateToAddPlaylist(BuildContext context) {
-    Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => const AddPlaylistPage()),
-    );
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => const AddPlaylistPage()));
   }
 
   void _navigateToDetail(BuildContext context, Playlist playlist) {
     Navigator.of(context).push(
       MaterialPageRoute(
-          builder: (_) => PlaylistDetailPage(playlistId: playlist.id)),
+        builder: (_) => PlaylistDetailPage(playlistId: playlist.id),
+      ),
     );
   }
 
   void _navigateToSettings(BuildContext context, Playlist playlist) {
     Navigator.of(context).push(
       MaterialPageRoute(
-          builder: (_) => PlaylistSettingsPage(playlistId: playlist.id)),
+        builder: (_) => PlaylistSettingsPage(playlistId: playlist.id),
+      ),
     );
   }
 }

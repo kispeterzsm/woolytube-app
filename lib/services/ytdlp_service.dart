@@ -59,10 +59,10 @@ class YtDlpService {
   }
 
   Future<Map<String, dynamic>> getPlaylistInfo(String url) async {
-    final result =
-        await _methodChannel.invokeMethod<String>('getPlaylistInfo', {
-      'url': url,
-    });
+    final result = await _methodChannel.invokeMethod<String>(
+      'getPlaylistInfo',
+      {'url': url},
+    );
     return jsonDecode(result!) as Map<String, dynamic>;
   }
 

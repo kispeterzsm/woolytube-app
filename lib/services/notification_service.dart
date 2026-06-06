@@ -9,8 +9,9 @@ class DownloadNotificationService {
       FlutterLocalNotificationsPlugin();
 
   Future<void> initialize() async {
-    const androidSettings =
-        AndroidInitializationSettings('@mipmap/ic_launcher');
+    const androidSettings = AndroidInitializationSettings(
+      '@mipmap/ic_launcher',
+    );
     await _plugin.initialize(
       const InitializationSettings(android: androidSettings),
     );

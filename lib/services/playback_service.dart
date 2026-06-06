@@ -1,13 +1,48 @@
 import 'dart:io';
+import 'dart:convert';
 import 'dart:math';
 import 'package:media_kit/media_kit.dart' hide Track, Playlist;
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:rxdart/rxdart.dart';
 import 'package:path/path.dart' as p;
 import '../database/database.dart';
+import 'sponsorblock_service.dart';
+
+class SegmentMarkResult {
+  final bool started;
+  final bool saved;
+  final Duration? start;
+  final Duration? end;
+  final String? error;
+
+  const SegmentMarkResult._({
+    required this.started,
+    required this.saved,
+    this.start,
+    this.end,
+    this.error,
+  });
+
+  const SegmentMarkResult.started(Duration start)
+    : this._(started: true, saved: false, start: start);
+
+  const SegmentMarkResult.saved(Duration start, Duration end)
+    : this._(started: false, saved: true, start: start, end: end);
+
+  const SegmentMarkResult.error(String error)
+    : this._(started: false, saved: false, error: error);
+}
+
+class _SkipSegment {
+  final int startMs;
+  final int endMs;
+
+  const _SkipSegment(this.startMs, this.endMs);
+}
 
 class PlaybackService {
   late final Player _player;
+  final AppDatabase _db;
 
   // VideoController is lazy — only created when video playback is needed.
   // Attaching it eagerly causes Android to create a GL surface that gets
@@ -28,6 +63,7 @@ class PlaybackService {
   final _shuffleEnabled = BehaviorSubject<bool>.seeded(false);
   final _autoplayEnabled = BehaviorSubject<bool>.seeded(true);
   final _audioOnlyMode = BehaviorSubject<bool>.seeded(false);
+  final _pendingSegmentMarkStart = BehaviorSubject<Duration?>.seeded(null);
 
   // Streams
   Stream<Track?> get currentTrackStream => _currentTrack.stream;
@@ -37,6 +73,8 @@ class PlaybackService {
   Stream<bool> get shuffleEnabledStream => _shuffleEnabled.stream;
   Stream<bool> get autoplayEnabledStream => _autoplayEnabled.stream;
   Stream<bool> get audioOnlyModeStream => _audioOnlyMode.stream;
+  Stream<Duration?> get pendingSegmentMarkStartStream =>
+      _pendingSegmentMarkStart.stream;
   Stream<Duration> get positionStream => _player.stream.position;
   Stream<Duration> get durationStream => _player.stream.duration;
   Stream<bool> get isPlayingStream => _player.stream.playing;
@@ -44,11 +82,11 @@ class PlaybackService {
   Stream<int?> get videoWidthStream => _player.stream.width;
   Stream<int?> get videoHeightStream => _player.stream.height;
   Stream<double?> get videoAspectStream => Rx.combineLatest2(
-        _player.stream.width,
-        _player.stream.height,
-        (int? w, int? h) =>
-            (w != null && h != null && w > 0 && h > 0) ? w / h : null,
-      );
+    _player.stream.width,
+    _player.stream.height,
+    (int? w, int? h) =>
+        (w != null && h != null && w > 0 && h > 0) ? w / h : null,
+  );
 
   // Current values
   Track? get currentTrack => _currentTrack.value;
@@ -58,6 +96,7 @@ class PlaybackService {
   bool get shuffleEnabled => _shuffleEnabled.value;
   bool get autoplayEnabled => _autoplayEnabled.value;
   bool get audioOnlyMode => _audioOnlyMode.value;
+  Duration? get pendingSegmentMarkStart => _pendingSegmentMarkStart.value;
   bool get isPlaying => _player.state.playing;
   Duration get position => _player.state.position;
   Duration get duration => _player.state.duration;
@@ -68,8 +107,10 @@ class PlaybackService {
   // Background/foreground transition safety net
   Duration _lastKnownPosition = Duration.zero;
   bool _wasPlayingBeforeBackground = false;
+  List<_SkipSegment> _activeSegments = [];
+  bool _isSeekingPastSegment = false;
 
-  PlaybackService() {
+  PlaybackService(this._db) {
     _player = Player();
 
     // Auto-advance on track completion
@@ -78,6 +119,8 @@ class PlaybackService {
         next();
       }
     });
+
+    _player.stream.position.listen(_maybeSkipSponsorBlockSegment);
   }
 
   /// Resolve stored file path (without extension) to actual file on disk
@@ -102,8 +145,17 @@ class PlaybackService {
     if (indexPrefixMatch != null) {
       final prefix = indexPrefixMatch.group(0)!;
       const mediaExtensions = {
-        '.m4a', '.mp3', '.opus', '.ogg', '.flac', '.wav',
-        '.mp4', '.mkv', '.webm', '.avi', '.mov',
+        '.m4a',
+        '.mp3',
+        '.opus',
+        '.ogg',
+        '.flac',
+        '.wav',
+        '.mp4',
+        '.mkv',
+        '.webm',
+        '.avi',
+        '.mov',
       };
       for (final entity in dir.listSync()) {
         if (entity is File) {
@@ -136,23 +188,27 @@ class PlaybackService {
   }
 
   Stream<bool> get isVideoContentStream => Rx.combineLatest2(
-        _currentTrack.stream,
-        _audioOnlyMode.stream,
-        (Track? track, bool audioOnly) {
-          if (track == null || audioOnly) return false;
-          final resolved =
-              track.filePath != null ? resolveFilePath(track.filePath!) : null;
-          return _isVideoFile(resolved);
-        },
-      );
+    _currentTrack.stream,
+    _audioOnlyMode.stream,
+    (Track? track, bool audioOnly) {
+      if (track == null || audioOnly) return false;
+      final resolved =
+          track.filePath != null ? resolveFilePath(track.filePath!) : null;
+      return _isVideoFile(resolved);
+    },
+  );
 
   /// Start playing a track from a list of tracks
-  Future<void> playTrack(Track track, List<Track> allTracks,
-      {Playlist? playlist}) async {
+  Future<void> playTrack(
+    Track track,
+    List<Track> allTracks, {
+    Playlist? playlist,
+  }) async {
     // Filter to only playable (downloaded) tracks
-    final playable = allTracks
-        .where((t) => t.status == 'complete' && t.filePath != null)
-        .toList();
+    final playable =
+        allTracks
+            .where((t) => t.status == 'complete' && t.filePath != null)
+            .toList();
     if (playable.isEmpty) return;
 
     final index = playable.indexWhere((t) => t.id == track.id);
@@ -171,6 +227,7 @@ class PlaybackService {
   }
 
   Future<void> _loadAndPlay(Track track) async {
+    await _loadActiveSegments(track);
     final filePath =
         track.filePath != null ? resolveFilePath(track.filePath!) : null;
     if (filePath == null) {
@@ -180,6 +237,96 @@ class PlaybackService {
     }
 
     await _player.open(Media('file://$filePath'));
+  }
+
+  Future<void> _loadActiveSegments(Track track) async {
+    _pendingSegmentMarkStart.add(null);
+    final playlist = _currentPlaylist.value;
+    if (playlist == null || !playlist.sponsorBlockEnabled) {
+      _activeSegments = [];
+      return;
+    }
+
+    final enabledCategories = _decodeCategories(
+      playlist.sponsorBlockCategories,
+    );
+    if (enabledCategories.isEmpty) {
+      _activeSegments = [];
+      return;
+    }
+
+    final segments = await _db.getSegmentsForTrack(track.id);
+    final filtered =
+        segments
+            .where((segment) {
+              if (!enabledCategories.contains(segment.category)) return false;
+              if (segment.source == 'sponsorblock' &&
+                  track.isLocalReplacement) {
+                return false;
+              }
+              return segment.endMs > segment.startMs;
+            })
+            .map((segment) => _SkipSegment(segment.startMs, segment.endMs))
+            .toList()
+          ..sort((a, b) => a.startMs.compareTo(b.startMs));
+
+    _activeSegments = _mergeSegments(filtered);
+  }
+
+  Set<String> _decodeCategories(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) {
+        return decoded
+            .whereType<String>()
+            .where(sponsorBlockCategories.contains)
+            .toSet();
+      }
+    } catch (_) {}
+    return defaultSponsorBlockCategories.toSet();
+  }
+
+  List<_SkipSegment> _mergeSegments(List<_SkipSegment> segments) {
+    if (segments.isEmpty) return const [];
+    final merged = <_SkipSegment>[];
+    var current = segments.first;
+    for (final next in segments.skip(1)) {
+      if (next.startMs <= current.endMs + 250) {
+        current = _SkipSegment(current.startMs, max(current.endMs, next.endMs));
+      } else {
+        merged.add(current);
+        current = next;
+      }
+    }
+    merged.add(current);
+    return merged;
+  }
+
+  Future<void> _maybeSkipSponsorBlockSegment(Duration position) async {
+    if (_isSeekingPastSegment || !_player.state.playing) return;
+    if (_activeSegments.isEmpty) return;
+
+    final durationMs = _player.state.duration.inMilliseconds;
+    final positionMs = position.inMilliseconds;
+    for (final segment in _activeSegments) {
+      if (positionMs < segment.startMs || positionMs >= segment.endMs) {
+        continue;
+      }
+      final targetMs = segment.endMs + 250;
+      if (durationMs > 0 && targetMs >= durationMs - 500) {
+        await next();
+        return;
+      }
+      _isSeekingPastSegment = true;
+      try {
+        await _player.seek(Duration(milliseconds: targetMs));
+      } finally {
+        Future.delayed(const Duration(milliseconds: 400), () {
+          _isSeekingPastSegment = false;
+        });
+      }
+      return;
+    }
   }
 
   /// Disable libmpv's video track before the Android GL surface is destroyed.
@@ -224,6 +371,49 @@ class PlaybackService {
   }
 
   Future<void> seekTo(Duration position) => _player.seek(position);
+
+  Future<SegmentMarkResult> markLocalSegmentBoundary(String category) async {
+    final track = _currentTrack.value;
+    if (track == null) {
+      return const SegmentMarkResult.error('Nothing playing');
+    }
+    if (!sponsorBlockCategories.contains(category)) {
+      return const SegmentMarkResult.error('Unknown segment category');
+    }
+
+    final current = _player.state.position;
+    final start = _pendingSegmentMarkStart.value;
+    if (start == null) {
+      _pendingSegmentMarkStart.add(current);
+      return SegmentMarkResult.started(current);
+    }
+
+    final first = start < current ? start : current;
+    final second = start < current ? current : start;
+    if (second - first < const Duration(seconds: 1)) {
+      _pendingSegmentMarkStart.add(null);
+      return const SegmentMarkResult.error('Segment is too short');
+    }
+
+    await _db.insertLocalSegment(
+      SponsorBlockSegmentsCompanion.insert(
+        trackId: track.id,
+        videoId: track.videoId,
+        source: 'local',
+        category: category,
+        startMs: first.inMilliseconds,
+        endMs: second.inMilliseconds,
+        createdAt: DateTime.now(),
+      ),
+    );
+    _pendingSegmentMarkStart.add(null);
+    await _loadActiveSegments(track);
+    return SegmentMarkResult.saved(first, second);
+  }
+
+  void cancelLocalSegmentMark() {
+    _pendingSegmentMarkStart.add(null);
+  }
 
   Future<void> next() async {
     final q = _queue.value;
@@ -306,6 +496,8 @@ class PlaybackService {
     _queue.add([]);
     _queueIndex.add(0);
     _shuffledIndices = [];
+    _activeSegments = [];
+    _pendingSegmentMarkStart.add(null);
   }
 
   void dispose() {
@@ -317,5 +509,6 @@ class PlaybackService {
     _shuffleEnabled.close();
     _autoplayEnabled.close();
     _audioOnlyMode.close();
+    _pendingSegmentMarkStart.close();
   }
 }

@@ -84,6 +84,7 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
         // Start downloading automatically
         final db = ref.read(databaseProvider);
         final playlist = await db.getPlaylist(playlistId);
+        if (!mounted) return;
         ref.read(downloadServiceProvider).downloadPlaylist(playlist);
 
         Navigator.of(context).pop();
@@ -99,9 +100,7 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Add Playlist'),
-      ),
+      appBar: AppBar(title: const Text('Add Playlist')),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
         child: Column(
@@ -112,29 +111,33 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
               style: const TextStyle(color: Colors.white),
               decoration: InputDecoration(
                 hintText: 'Paste YouTube playlist URL...',
-                prefixIcon:
-                    const Icon(Icons.link, color: Color(0xFF888888)),
-                suffixIcon: _fetching
-                    ? const Padding(
-                        padding: EdgeInsets.all(12),
-                        child: SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2),
+                prefixIcon: const Icon(Icons.link, color: Color(0xFF888888)),
+                suffixIcon:
+                    _fetching
+                        ? const Padding(
+                          padding: EdgeInsets.all(12),
+                          child: SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                        )
+                        : IconButton(
+                          icon: const Icon(
+                            Icons.search,
+                            color: Color(0xFF2196F3),
+                          ),
+                          onPressed: _fetchInfo,
                         ),
-                      )
-                    : IconButton(
-                        icon: const Icon(Icons.search,
-                            color: Color(0xFF2196F3)),
-                        onPressed: _fetchInfo,
-                      ),
               ),
               onSubmitted: (_) => _fetchInfo(),
             ),
             if (_error != null) ...[
               const SizedBox(height: 12),
-              Text(_error!,
-                  style: const TextStyle(color: Colors.red, fontSize: 13)),
+              Text(
+                _error!,
+                style: const TextStyle(color: Colors.red, fontSize: 13),
+              ),
             ],
             if (_playlistInfo != null) ...[
               const SizedBox(height: 24),
@@ -186,13 +189,13 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
               child: CachedNetworkImage(
                 imageUrl: _playlistThumbnail!,
                 fit: BoxFit.cover,
-                placeholder: (_, __) => Container(
-                  color: const Color(0xFF333333),
-                  child: const Center(child: CircularProgressIndicator()),
-                ),
-                errorWidget: (_, __, ___) => Container(
-                  color: const Color(0xFF333333),
-                ),
+                placeholder:
+                    (_, __) => Container(
+                      color: const Color(0xFF333333),
+                      child: const Center(child: CircularProgressIndicator()),
+                    ),
+                errorWidget:
+                    (_, __, ___) => Container(color: const Color(0xFF333333)),
               ),
             ),
           Padding(
@@ -211,8 +214,10 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
                 const SizedBox(height: 4),
                 Text(
                   '$_trackCount videos',
-                  style:
-                      const TextStyle(color: Color(0xFF888888), fontSize: 14),
+                  style: const TextStyle(
+                    color: Color(0xFF888888),
+                    fontSize: 14,
+                  ),
                 ),
               ],
             ),
@@ -247,8 +252,10 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
           const SizedBox(height: 16),
           Row(
             children: [
-              const Text('Update every',
-                  style: TextStyle(color: Colors.white, fontSize: 14)),
+              const Text(
+                'Update every',
+                style: TextStyle(color: Colors.white, fontSize: 14),
+              ),
               const SizedBox(width: 12),
               Expanded(
                 child: Slider(
@@ -258,8 +265,8 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
                   divisions: 167,
                   activeColor: const Color(0xFF2196F3),
                   inactiveColor: const Color(0xFF333333),
-                  onChanged: (v) =>
-                      setState(() => _updateFrequencyHours = v.round()),
+                  onChanged:
+                      (v) => setState(() => _updateFrequencyHours = v.round()),
                 ),
               ),
               SizedBox(
@@ -267,7 +274,9 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
                 child: Text(
                   _formatFrequency(_updateFrequencyHours),
                   style: const TextStyle(
-                      color: Color(0xFF888888), fontSize: 13),
+                    color: Color(0xFF888888),
+                    fontSize: 13,
+                  ),
                   textAlign: TextAlign.right,
                 ),
               ),
@@ -279,7 +288,11 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
   }
 
   Widget _settingsToggle(
-      String title, String subtitle, bool value, ValueChanged<bool> onChanged) {
+    String title,
+    String subtitle,
+    bool value,
+    ValueChanged<bool> onChanged,
+  ) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
@@ -288,12 +301,17 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title,
-                    style:
-                        const TextStyle(color: Colors.white, fontSize: 14)),
-                Text(subtitle,
-                    style: const TextStyle(
-                        color: Color(0xFF888888), fontSize: 12)),
+                Text(
+                  title,
+                  style: const TextStyle(color: Colors.white, fontSize: 14),
+                ),
+                Text(
+                  subtitle,
+                  style: const TextStyle(
+                    color: Color(0xFF888888),
+                    fontSize: 12,
+                  ),
+                ),
               ],
             ),
           ),

@@ -18,6 +18,12 @@ class Playlists extends Table {
       integer().withDefault(const Constant(24))();
   BoolColumn get includeThumbnails =>
       boolean().withDefault(const Constant(true))();
+  BoolColumn get sponsorBlockEnabled =>
+      boolean().withDefault(const Constant(true))();
+  TextColumn get sponsorBlockCategories =>
+      text().withDefault(
+        const Constant('["sponsor","selfpromo","music_offtopic"]'),
+      )();
   DateTimeColumn get lastUpdated => dateTime().nullable()();
   DateTimeColumn get createdAt => dateTime()();
   TextColumn get outputPath => text()();
@@ -33,8 +39,7 @@ class Tracks extends Table {
   TextColumn get thumbnailPath => text().nullable()();
   TextColumn get filePath => text().nullable()();
   IntColumn get durationSeconds => integer().nullable()();
-  TextColumn get status =>
-      text().withDefault(const Constant('pending'))();
+  TextColumn get status => text().withDefault(const Constant('pending'))();
   TextColumn get unavailableReason => text().nullable()();
   BoolColumn get isLocalReplacement =>
       boolean().withDefault(const Constant(false))();
@@ -42,7 +47,24 @@ class Tracks extends Table {
   TextColumn get lastError => text().nullable()();
 }
 
-@DriftDatabase(tables: [Playlists, Tracks])
+class SponsorBlockSegments extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  IntColumn get trackId =>
+      integer().references(Tracks, #id, onDelete: KeyAction.cascade)();
+  TextColumn get videoId => text()();
+  TextColumn get source => text()(); // sponsorblock | local
+  TextColumn get uuid => text().nullable()();
+  TextColumn get category => text()();
+  TextColumn get actionType => text().withDefault(const Constant('skip'))();
+  IntColumn get startMs => integer()();
+  IntColumn get endMs => integer()();
+  IntColumn get votes => integer().nullable()();
+  BoolColumn get locked => boolean().nullable()();
+  TextColumn get description => text().nullable()();
+  DateTimeColumn get createdAt => dateTime()();
+}
+
+@DriftDatabase(tables: [Playlists, Tracks, SponsorBlockSegments])
 class AppDatabase extends _$AppDatabase {
   AppDatabase._internal(super.e);
 
@@ -54,35 +76,56 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 5;
+  int get schemaVersion => 6;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
-        onCreate: (migrator) async {
-          await migrator.createAll();
-          await customStatement(
-              'CREATE INDEX IF NOT EXISTS idx_tracks_pl_status ON tracks (playlist_id, status)');
-          await customStatement(
-              'CREATE INDEX IF NOT EXISTS idx_tracks_pl_index ON tracks (playlist_id, "index")');
-        },
-        onUpgrade: (migrator, from, to) async {
-          if (from < 2) {
-            await migrator.addColumn(tracks, tracks.unavailableReason);
-          }
-          if (from < 3) {
-            await migrator.addColumn(tracks, tracks.isLocalReplacement);
-          }
-          if (from < 4) {
-            await migrator.addColumn(tracks, tracks.lastError);
-          }
-          if (from < 5) {
-            await customStatement(
-                'CREATE INDEX IF NOT EXISTS idx_tracks_pl_status ON tracks (playlist_id, status)');
-            await customStatement(
-                'CREATE INDEX IF NOT EXISTS idx_tracks_pl_index ON tracks (playlist_id, "index")');
-          }
-        },
+    onCreate: (migrator) async {
+      await migrator.createAll();
+      await customStatement(
+        'CREATE INDEX IF NOT EXISTS idx_tracks_pl_status ON tracks (playlist_id, status)',
       );
+      await customStatement(
+        'CREATE INDEX IF NOT EXISTS idx_tracks_pl_index ON tracks (playlist_id, "index")',
+      );
+      await customStatement(
+        'CREATE INDEX IF NOT EXISTS idx_sb_track_start ON sponsor_block_segments (track_id, start_ms)',
+      );
+      await customStatement(
+        'CREATE INDEX IF NOT EXISTS idx_sb_track_source ON sponsor_block_segments (track_id, source)',
+      );
+    },
+    onUpgrade: (migrator, from, to) async {
+      if (from < 2) {
+        await migrator.addColumn(tracks, tracks.unavailableReason);
+      }
+      if (from < 3) {
+        await migrator.addColumn(tracks, tracks.isLocalReplacement);
+      }
+      if (from < 4) {
+        await migrator.addColumn(tracks, tracks.lastError);
+      }
+      if (from < 5) {
+        await customStatement(
+          'CREATE INDEX IF NOT EXISTS idx_tracks_pl_status ON tracks (playlist_id, status)',
+        );
+        await customStatement(
+          'CREATE INDEX IF NOT EXISTS idx_tracks_pl_index ON tracks (playlist_id, "index")',
+        );
+      }
+      if (from < 6) {
+        await migrator.addColumn(playlists, playlists.sponsorBlockEnabled);
+        await migrator.addColumn(playlists, playlists.sponsorBlockCategories);
+        await migrator.createTable(sponsorBlockSegments);
+        await customStatement(
+          'CREATE INDEX IF NOT EXISTS idx_sb_track_start ON sponsor_block_segments (track_id, start_ms)',
+        );
+        await customStatement(
+          'CREATE INDEX IF NOT EXISTS idx_sb_track_source ON sponsor_block_segments (track_id, source)',
+        );
+      }
+    },
+  );
 
   // Playlist queries
   Future<List<Playlist>> getAllPlaylists() => select(playlists).get();
@@ -117,8 +160,7 @@ class AppDatabase extends _$AppDatabase {
             ..orderBy([(t) => OrderingTerm.asc(t.index)]))
           .watch();
 
-  Future<int> insertTrack(TracksCompanion track) =>
-      into(tracks).insert(track);
+  Future<int> insertTrack(TracksCompanion track) => into(tracks).insert(track);
 
   Future<void> insertTracks(List<TracksCompanion> trackList) async {
     await batch((batch) {
@@ -129,8 +171,11 @@ class AppDatabase extends _$AppDatabase {
   Future<bool> updateTrack(TracksCompanion track) =>
       update(tracks).replace(track);
 
-  Future<void> updateTrackFields(int trackId,
-      {String? title, String? filePath}) async {
+  Future<void> updateTrackFields(
+    int trackId, {
+    String? title,
+    String? filePath,
+  }) async {
     await (update(tracks)..where((t) => t.id.equals(trackId))).write(
       TracksCompanion(
         title: title != null ? Value(title) : const Value.absent(),
@@ -139,8 +184,13 @@ class AppDatabase extends _$AppDatabase {
     );
   }
 
-  Future<void> updateTrackStatus(int trackId, String status,
-      {String? filePath, bool? isLocalReplacement, String? error}) async {
+  Future<void> updateTrackStatus(
+    int trackId,
+    String status, {
+    String? filePath,
+    bool? isLocalReplacement,
+    String? error,
+  }) async {
     final Value<String?> errorValue;
     if (status == 'error') {
       errorValue = Value(error);
@@ -154,9 +204,10 @@ class AppDatabase extends _$AppDatabase {
       TracksCompanion(
         status: Value(status),
         filePath: filePath != null ? Value(filePath) : const Value.absent(),
-        isLocalReplacement: isLocalReplacement != null
-            ? Value(isLocalReplacement)
-            : const Value.absent(),
+        isLocalReplacement:
+            isLocalReplacement != null
+                ? Value(isLocalReplacement)
+                : const Value.absent(),
         downloadedAt:
             status == 'complete' ? Value(DateTime.now()) : const Value.absent(),
         lastError: errorValue,
@@ -166,35 +217,41 @@ class AppDatabase extends _$AppDatabase {
 
   Future<List<Track>> getPendingTracks(int playlistId) =>
       (select(tracks)
-            ..where((t) =>
-                t.playlistId.equals(playlistId) &
-                (t.status.equals('pending') | t.status.equals('error')))
+            ..where(
+              (t) =>
+                  t.playlistId.equals(playlistId) &
+                  (t.status.equals('pending') | t.status.equals('error')),
+            )
             ..orderBy([(t) => OrderingTerm.asc(t.index)]))
           .get();
 
   Future<int> getDownloadedTrackCount(int playlistId) async {
     final count = tracks.id.count();
-    final query = selectOnly(tracks)
-      ..addColumns([count])
-      ..where(tracks.playlistId.equals(playlistId) &
-          tracks.status.equals('complete'));
+    final query =
+        selectOnly(tracks)
+          ..addColumns([count])
+          ..where(
+            tracks.playlistId.equals(playlistId) &
+                tracks.status.equals('complete'),
+          );
     final result = await query.getSingle();
     return result.read(count) ?? 0;
   }
 
   Future<int> getTotalTrackCount(int playlistId) async {
     final count = tracks.id.count();
-    final query = selectOnly(tracks)
-      ..addColumns([count])
-      ..where(tracks.playlistId.equals(playlistId));
+    final query =
+        selectOnly(tracks)
+          ..addColumns([count])
+          ..where(tracks.playlistId.equals(playlistId));
     final result = await query.getSingle();
     return result.read(count) ?? 0;
   }
 
   Future<List<Playlist>> getPlaylistsDueForUpdate() async {
-    final all = await (select(playlists)
-          ..where((p) => p.autoUpdate.equals(true)))
-        .get();
+    final all =
+        await (select(playlists)
+          ..where((p) => p.autoUpdate.equals(true))).get();
     final now = DateTime.now();
     return all.where((p) {
       if (p.lastUpdated == null) return true;
@@ -203,14 +260,17 @@ class AppDatabase extends _$AppDatabase {
   }
 
   Future<List<String>> getVideoIdsForPlaylist(int playlistId) async {
-    final trackList = await (select(tracks)
-          ..where((t) => t.playlistId.equals(playlistId)))
-        .get();
+    final trackList =
+        await (select(tracks)
+          ..where((t) => t.playlistId.equals(playlistId))).get();
     return trackList.map((t) => t.videoId).toList();
   }
 
-  Future<void> updateTrackUnavailable(int trackId, String reason,
-      {int? newIndex}) async {
+  Future<void> updateTrackUnavailable(
+    int trackId,
+    String reason, {
+    int? newIndex,
+  }) async {
     await (update(tracks)..where((t) => t.id.equals(trackId))).write(
       TracksCompanion(
         status: const Value('unavailable'),
@@ -220,11 +280,13 @@ class AppDatabase extends _$AppDatabase {
     );
   }
 
-  Future<void> updateTrackAvailable(int trackId,
-      {required String title,
-      String? thumbnailUrl,
-      int? durationSeconds,
-      int? newIndex}) async {
+  Future<void> updateTrackAvailable(
+    int trackId, {
+    required String title,
+    String? thumbnailUrl,
+    int? durationSeconds,
+    int? newIndex,
+  }) async {
     await (update(tracks)..where((t) => t.id.equals(trackId))).write(
       TracksCompanion(
         status: const Value('pending'),
@@ -238,16 +300,18 @@ class AppDatabase extends _$AppDatabase {
   }
 
   Future<void> updateTrackIndex(int trackId, int newIndex) async {
-    await (update(tracks)..where((t) => t.id.equals(trackId))).write(
-      TracksCompanion(index: Value(newIndex)),
-    );
+    await (update(tracks)..where(
+      (t) => t.id.equals(trackId),
+    )).write(TracksCompanion(index: Value(newIndex)));
   }
 
   Future<void> updateTrackOnlineStatus(
-      int trackId, String? unavailableReason) async {
-    await (update(tracks)..where((t) => t.id.equals(trackId))).write(
-      TracksCompanion(unavailableReason: Value(unavailableReason)),
-    );
+    int trackId,
+    String? unavailableReason,
+  ) async {
+    await (update(tracks)..where(
+      (t) => t.id.equals(trackId),
+    )).write(TracksCompanion(unavailableReason: Value(unavailableReason)));
   }
 
   Future<void> resetTrackForRedownload(int trackId) async {
@@ -262,6 +326,38 @@ class AppDatabase extends _$AppDatabase {
       ),
     );
   }
+
+  Future<List<SponsorBlockSegment>> getSegmentsForTrack(int trackId) =>
+      (select(sponsorBlockSegments)
+            ..where((s) => s.trackId.equals(trackId))
+            ..orderBy([(s) => OrderingTerm.asc(s.startMs)]))
+          .get();
+
+  Future<void> replaceSponsorBlockSegments(
+    int trackId,
+    List<SponsorBlockSegmentsCompanion> segments,
+  ) async {
+    await transaction(() async {
+      await (delete(sponsorBlockSegments)
+        ..where((s) => s.trackId.equals(trackId))).go();
+      if (segments.isNotEmpty) {
+        await batch((batch) {
+          batch.insertAll(sponsorBlockSegments, segments);
+        });
+      }
+    });
+  }
+
+  Future<int> insertLocalSegment(SponsorBlockSegmentsCompanion segment) =>
+      into(sponsorBlockSegments).insert(segment);
+
+  Future<void> deleteSegment(int segmentId) =>
+      (delete(sponsorBlockSegments)..where((s) => s.id.equals(segmentId))).go();
+
+  Future<void> deleteLocalSegmentsForTrack(int trackId) =>
+      (delete(sponsorBlockSegments)..where(
+        (s) => s.trackId.equals(trackId) & s.source.equals('local'),
+      )).go();
 }
 
 LazyDatabase _openConnection() {

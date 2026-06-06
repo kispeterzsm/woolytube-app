@@ -14,6 +14,7 @@ class DiscoveredTrack {
   final String? unavailableReason;
   final bool isLocalReplacement;
   final String? fileName;
+  final List<DiscoveredSponsorBlockSegment> sponsorBlockSegments;
 
   DiscoveredTrack({
     required this.index,
@@ -25,6 +26,23 @@ class DiscoveredTrack {
     this.unavailableReason,
     this.isLocalReplacement = false,
     this.fileName,
+    this.sponsorBlockSegments = const [],
+  });
+}
+
+class DiscoveredSponsorBlockSegment {
+  final String source;
+  final String? uuid;
+  final String category;
+  final int startMs;
+  final int endMs;
+
+  const DiscoveredSponsorBlockSegment({
+    required this.source,
+    this.uuid,
+    required this.category,
+    required this.startMs,
+    required this.endMs,
   });
 }
 
@@ -37,6 +55,8 @@ class DiscoveredPlaylist {
   final bool autoUpdate;
   final int updateFrequencyHours;
   final bool includeThumbnails;
+  final bool sponsorBlockEnabled;
+  final String sponsorBlockCategories;
   final DateTime? lastUpdated;
   final DateTime createdAt;
   final List<DiscoveredTrack> tracks;
@@ -50,6 +70,8 @@ class DiscoveredPlaylist {
     required this.autoUpdate,
     required this.updateFrequencyHours,
     required this.includeThumbnails,
+    required this.sponsorBlockEnabled,
+    required this.sponsorBlockCategories,
     this.lastUpdated,
     required this.createdAt,
     required this.tracks,
@@ -62,8 +84,11 @@ class _CandidateFile {
   String digits;
   String rest;
   String path;
-  _CandidateFile(
-      {required this.digits, required this.rest, required this.path});
+  _CandidateFile({
+    required this.digits,
+    required this.rest,
+    required this.path,
+  });
 }
 
 class MetadataService {
@@ -76,6 +101,34 @@ class MetadataService {
     final dir = Directory(playlist.outputPath);
     if (!await dir.exists()) return;
 
+    final tracksJson = <Map<String, dynamic>>[];
+    for (final t in tracks) {
+      final segments = await _db.getSegmentsForTrack(t.id);
+      tracksJson.add({
+        'index': t.index,
+        'videoId': t.videoId,
+        'title': t.title,
+        'thumbnailUrl': t.thumbnailUrl,
+        'durationSeconds': t.durationSeconds,
+        'status': t.status,
+        'unavailableReason': t.unavailableReason,
+        'isLocalReplacement': t.isLocalReplacement,
+        'fileName': t.filePath != null ? p.basename(t.filePath!) : null,
+        'sponsorBlockSegments':
+            segments
+                .map(
+                  (s) => {
+                    'source': s.source,
+                    'uuid': s.uuid,
+                    'category': s.category,
+                    'startMs': s.startMs,
+                    'endMs': s.endMs,
+                  },
+                )
+                .toList(),
+      });
+    }
+
     final data = {
       'version': 1,
       'playlist': {
@@ -86,20 +139,12 @@ class MetadataService {
         'autoUpdate': playlist.autoUpdate,
         'updateFrequencyHours': playlist.updateFrequencyHours,
         'includeThumbnails': playlist.includeThumbnails,
+        'sponsorBlockEnabled': playlist.sponsorBlockEnabled,
+        'sponsorBlockCategories': playlist.sponsorBlockCategories,
         'lastUpdated': playlist.lastUpdated?.toUtc().toIso8601String(),
         'createdAt': playlist.createdAt.toUtc().toIso8601String(),
       },
-      'tracks': tracks.map((t) => {
-        'index': t.index,
-        'videoId': t.videoId,
-        'title': t.title,
-        'thumbnailUrl': t.thumbnailUrl,
-        'durationSeconds': t.durationSeconds,
-        'status': t.status,
-        'unavailableReason': t.unavailableReason,
-        'isLocalReplacement': t.isLocalReplacement,
-        'fileName': t.filePath != null ? p.basename(t.filePath!) : null,
-      }).toList(),
+      'tracks': tracksJson,
     };
 
     final jsonStr = const JsonEncoder.withIndent('  ').convert(data);
@@ -128,8 +173,8 @@ class MetadataService {
         if (!await metaFile.exists()) continue;
 
         try {
-          final json = jsonDecode(await metaFile.readAsString())
-              as Map<String, dynamic>;
+          final json =
+              jsonDecode(await metaFile.readAsString()) as Map<String, dynamic>;
           final parsed = _parseMetadata(entity.path, json);
           if (parsed != null) discovered.add(parsed);
         } catch (_) {
@@ -163,8 +208,17 @@ class MetadataService {
     if (!await dir.exists()) return 0;
 
     const mediaExtensions = {
-      '.m4a', '.mp3', '.opus', '.ogg', '.flac', '.wav',
-      '.mp4', '.mkv', '.webm', '.avi', '.mov',
+      '.m4a',
+      '.mp3',
+      '.opus',
+      '.ogg',
+      '.flac',
+      '.wav',
+      '.mp4',
+      '.mkv',
+      '.webm',
+      '.avi',
+      '.mov',
     };
     const imageExtensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif'};
     final partPattern = RegExp(r'\.part(-Frag\d+)?$');
@@ -190,11 +244,13 @@ class MetadataService {
       if (!mediaExtensions.contains(ext)) continue;
       final match = prefixRe.firstMatch(fileName);
       if (match == null) continue;
-      mediaFiles.add(_CandidateFile(
-        digits: match.group(1)!,
-        rest: match.group(2)!,
-        path: entity.path,
-      ));
+      mediaFiles.add(
+        _CandidateFile(
+          digits: match.group(1)!,
+          rest: match.group(2)!,
+          path: entity.path,
+        ),
+      );
     }
 
     int fixed = 0;
@@ -237,8 +293,7 @@ class MetadataService {
           (track.status == 'pending' ||
               track.status == 'error' ||
               track.status == 'unavailable')) {
-        await _db.updateTrackStatus(track.id, 'complete',
-            filePath: fileOnDisk);
+        await _db.updateTrackStatus(track.id, 'complete', filePath: fileOnDisk);
         fixed++;
       } else if (fileOnDisk == null && track.status == 'complete') {
         await _db.updateTrackStatus(track.id, 'pending');
@@ -246,8 +301,7 @@ class MetadataService {
       } else if (fileOnDisk != null &&
           track.status == 'complete' &&
           track.filePath != fileOnDisk) {
-        await _db.updateTrackStatus(track.id, 'complete',
-            filePath: fileOnDisk);
+        await _db.updateTrackStatus(track.id, 'complete', filePath: fileOnDisk);
         fixed++;
       }
     }
@@ -320,7 +374,9 @@ class MetadataService {
   /// yt-dlp's default sanitisation (non-restrict mode). Collapses whitespace.
   static String sanitizeFilename(String name) {
     final replaced = name.replaceAll(
-        RegExp(r'''[\/\\:*?"<>|\x00-\x1f]'''), '_');
+      RegExp(r'''[\/\\:*?"<>|\x00-\x1f]'''),
+      '_',
+    );
     final collapsed = replaced.replaceAll(RegExp(r'\s+'), ' ').trim();
     return collapsed.isEmpty ? '_' : collapsed;
   }
@@ -331,8 +387,17 @@ class MetadataService {
     if (!dir.existsSync()) return null;
 
     const mediaExtensions = {
-      '.m4a', '.mp3', '.opus', '.ogg', '.flac', '.wav',
-      '.mp4', '.mkv', '.webm', '.avi', '.mov',
+      '.m4a',
+      '.mp3',
+      '.opus',
+      '.ogg',
+      '.flac',
+      '.wav',
+      '.mp4',
+      '.mkv',
+      '.webm',
+      '.avi',
+      '.mov',
     };
 
     for (final entity in dir.listSync()) {
@@ -349,20 +414,25 @@ class MetadataService {
 
   /// Imports a discovered playlist into the database.
   Future<void> importPlaylist(DiscoveredPlaylist discovered) async {
-    final playlistId = await _db.insertPlaylist(PlaylistsCompanion.insert(
-      url: discovered.url,
-      name: discovered.name,
-      thumbnailUrl: Value(discovered.thumbnailUrl),
-      audioOnly: Value(discovered.audioOnly),
-      autoUpdate: Value(discovered.autoUpdate),
-      updateFrequencyHours: Value(discovered.updateFrequencyHours),
-      includeThumbnails: Value(discovered.includeThumbnails),
-      lastUpdated: Value(discovered.lastUpdated),
-      createdAt: discovered.createdAt,
-      outputPath: discovered.folderPath,
-    ));
+    final playlistId = await _db.insertPlaylist(
+      PlaylistsCompanion.insert(
+        url: discovered.url,
+        name: discovered.name,
+        thumbnailUrl: Value(discovered.thumbnailUrl),
+        audioOnly: Value(discovered.audioOnly),
+        autoUpdate: Value(discovered.autoUpdate),
+        updateFrequencyHours: Value(discovered.updateFrequencyHours),
+        includeThumbnails: Value(discovered.includeThumbnails),
+        sponsorBlockEnabled: Value(discovered.sponsorBlockEnabled),
+        sponsorBlockCategories: Value(discovered.sponsorBlockCategories),
+        lastUpdated: Value(discovered.lastUpdated),
+        createdAt: discovered.createdAt,
+        outputPath: discovered.folderPath,
+      ),
+    );
 
     final tracks = <TracksCompanion>[];
+    final discoveredByVideoId = <String, DiscoveredTrack>{};
     for (final dt in discovered.tracks) {
       String? filePath;
       String status = dt.status;
@@ -382,24 +452,51 @@ class MetadataService {
         status = 'pending';
       }
 
-      tracks.add(TracksCompanion.insert(
-        playlistId: playlistId,
-        index: dt.index,
-        videoId: dt.videoId,
-        title: dt.title,
-        thumbnailUrl: Value(dt.thumbnailUrl),
-        durationSeconds: Value(dt.durationSeconds),
-        status: Value(status),
-        unavailableReason: Value(dt.unavailableReason),
-        isLocalReplacement: Value(dt.isLocalReplacement),
-        filePath: Value(filePath),
-        downloadedAt: Value(
-            status == 'complete' ? DateTime.now() : null),
-      ));
+      tracks.add(
+        TracksCompanion.insert(
+          playlistId: playlistId,
+          index: dt.index,
+          videoId: dt.videoId,
+          title: dt.title,
+          thumbnailUrl: Value(dt.thumbnailUrl),
+          durationSeconds: Value(dt.durationSeconds),
+          status: Value(status),
+          unavailableReason: Value(dt.unavailableReason),
+          isLocalReplacement: Value(dt.isLocalReplacement),
+          filePath: Value(filePath),
+          downloadedAt: Value(status == 'complete' ? DateTime.now() : null),
+        ),
+      );
+      discoveredByVideoId[dt.videoId] = dt;
     }
 
     if (tracks.isNotEmpty) {
       await _db.insertTracks(tracks);
+    }
+
+    final importedTracks = await _db.getTracksForPlaylist(playlistId);
+    for (final track in importedTracks) {
+      final discoveredTrack = discoveredByVideoId[track.videoId];
+      if (discoveredTrack == null) continue;
+      final segments =
+          discoveredTrack.sponsorBlockSegments
+              .where((s) => s.endMs > s.startMs)
+              .map(
+                (s) => SponsorBlockSegmentsCompanion.insert(
+                  trackId: track.id,
+                  videoId: track.videoId,
+                  source: s.source,
+                  uuid: Value(s.uuid),
+                  category: s.category,
+                  startMs: s.startMs,
+                  endMs: s.endMs,
+                  createdAt: DateTime.now(),
+                ),
+              )
+              .toList();
+      if (segments.isNotEmpty) {
+        await _db.replaceSponsorBlockSegments(track.id, segments);
+      }
     }
 
     // Reconcile with actual files on disk (catches mismatches from stale JSON)
@@ -408,7 +505,9 @@ class MetadataService {
   }
 
   DiscoveredPlaylist? _parseMetadata(
-      String folderPath, Map<String, dynamic> json) {
+    String folderPath,
+    Map<String, dynamic> json,
+  ) {
     final pl = json['playlist'] as Map<String, dynamic>?;
     if (pl == null) return null;
 
@@ -417,8 +516,8 @@ class MetadataService {
     if (url == null || name == null) return null;
 
     final tracksJson = json['tracks'] as List<dynamic>? ?? [];
-    final tracks = tracksJson
-        .map((t) {
+    final tracks =
+        tracksJson.map((t) {
           final m = t as Map<String, dynamic>;
           return DiscoveredTrack(
             index: m['index'] as int? ?? 0,
@@ -430,9 +529,11 @@ class MetadataService {
             unavailableReason: m['unavailableReason'] as String?,
             isLocalReplacement: m['isLocalReplacement'] as bool? ?? false,
             fileName: m['fileName'] as String?,
+            sponsorBlockSegments: _parseSegments(
+              m['sponsorBlockSegments'] as List<dynamic>?,
+            ),
           );
-        })
-        .toList();
+        }).toList();
 
     return DiscoveredPlaylist(
       folderPath: folderPath,
@@ -443,13 +544,47 @@ class MetadataService {
       autoUpdate: pl['autoUpdate'] as bool? ?? true,
       updateFrequencyHours: pl['updateFrequencyHours'] as int? ?? 24,
       includeThumbnails: pl['includeThumbnails'] as bool? ?? true,
-      lastUpdated: pl['lastUpdated'] != null
-          ? DateTime.tryParse(pl['lastUpdated'] as String)
-          : null,
-      createdAt: pl['createdAt'] != null
-          ? DateTime.tryParse(pl['createdAt'] as String) ?? DateTime.now()
-          : DateTime.now(),
+      sponsorBlockEnabled: pl['sponsorBlockEnabled'] as bool? ?? true,
+      sponsorBlockCategories:
+          pl['sponsorBlockCategories'] as String? ??
+          '["sponsor","selfpromo","music_offtopic"]',
+      lastUpdated:
+          pl['lastUpdated'] != null
+              ? DateTime.tryParse(pl['lastUpdated'] as String)
+              : null,
+      createdAt:
+          pl['createdAt'] != null
+              ? DateTime.tryParse(pl['createdAt'] as String) ?? DateTime.now()
+              : DateTime.now(),
       tracks: tracks,
     );
+  }
+
+  List<DiscoveredSponsorBlockSegment> _parseSegments(List<dynamic>? raw) {
+    if (raw == null) return const [];
+    final result = <DiscoveredSponsorBlockSegment>[];
+    for (final item in raw) {
+      if (item is! Map<String, dynamic>) continue;
+      final source = item['source'] as String? ?? '';
+      final category = item['category'] as String? ?? '';
+      final startMs = item['startMs'] as int?;
+      final endMs = item['endMs'] as int?;
+      if (source.isEmpty ||
+          category.isEmpty ||
+          startMs == null ||
+          endMs == null) {
+        continue;
+      }
+      result.add(
+        DiscoveredSponsorBlockSegment(
+          source: source,
+          uuid: item['uuid'] as String?,
+          category: category,
+          startMs: startMs,
+          endMs: endMs,
+        ),
+      );
+    }
+    return result;
   }
 }

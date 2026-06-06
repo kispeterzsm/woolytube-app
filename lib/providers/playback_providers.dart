@@ -59,6 +59,10 @@ final audioOnlyModeProvider = StreamProvider<bool>((ref) {
   return ref.watch(playbackServiceProvider).audioOnlyModeStream;
 });
 
+final pendingSegmentMarkStartProvider = StreamProvider<Duration?>((ref) {
+  return ref.watch(playbackServiceProvider).pendingSegmentMarkStartStream;
+});
+
 final queueProvider = StreamProvider<List<Track>>((ref) {
   return ref.watch(playbackServiceProvider).queueStream;
 });

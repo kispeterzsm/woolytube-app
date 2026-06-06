@@ -37,17 +37,15 @@ class PlaylistCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            AspectRatio(
-              aspectRatio: 16 / 9,
-              child: _buildThumbnail(),
-            ),
+            AspectRatio(aspectRatio: 16 / 9, child: _buildThumbnail()),
             if (isDownloading)
               LinearProgressIndicator(
                 value: downloadProgress / 100.0,
                 minHeight: 3,
                 backgroundColor: const Color(0xFF333333),
-                valueColor:
-                    const AlwaysStoppedAnimation<Color>(Color(0xFF2196F3)),
+                valueColor: const AlwaysStoppedAnimation<Color>(
+                  Color(0xFF2196F3),
+                ),
               ),
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
@@ -82,10 +80,7 @@ class PlaylistCard extends StatelessWidget {
                     icon: isDownloading ? Icons.hourglass_top : Icons.sync,
                     onTap: isDownloading ? null : onUpdate,
                   ),
-                  _iconButton(
-                    icon: Icons.settings,
-                    onTap: onSettings,
-                  ),
+                  _iconButton(icon: Icons.settings, onTap: onSettings),
                 ],
               ),
             ),

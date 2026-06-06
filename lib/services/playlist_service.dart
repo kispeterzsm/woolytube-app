@@ -1,8 +1,10 @@
 import 'dart:io';
+import 'dart:convert';
 import 'package:drift/drift.dart';
 import '../database/database.dart';
 import 'ytdlp_service.dart';
 import 'metadata_service.dart';
+import 'sponsorblock_service.dart';
 
 class SyncResult {
   final int added;
@@ -48,32 +50,41 @@ class PlaylistService {
     bool autoUpdate = true,
     int updateFrequencyHours = 24,
     bool includeThumbnails = true,
+    bool sponsorBlockEnabled = true,
+    List<String> sponsorBlockCategories = defaultSponsorBlockCategories,
   }) async {
-    final basePath = audioOnly
-        ? '/storage/emulated/0/Music/WoolyTube'
-        : '/storage/emulated/0/Movies/WoolyTube';
+    final basePath =
+        audioOnly
+            ? '/storage/emulated/0/Music/WoolyTube'
+            : '/storage/emulated/0/Movies/WoolyTube';
     final sanitizedName = _sanitizeFolderName(name);
     final outputPath = '$basePath/$sanitizedName';
 
     await Directory(outputPath).create(recursive: true);
 
-    final playlistId = await _db.insertPlaylist(PlaylistsCompanion.insert(
-      url: url,
-      name: name,
-      thumbnailUrl: Value(thumbnailUrl),
-      audioOnly: Value(audioOnly),
-      autoUpdate: Value(autoUpdate),
-      updateFrequencyHours: Value(updateFrequencyHours),
-      includeThumbnails: Value(includeThumbnails),
-      createdAt: DateTime.now(),
-      outputPath: outputPath,
-    ));
+    final playlistId = await _db.insertPlaylist(
+      PlaylistsCompanion.insert(
+        url: url,
+        name: name,
+        thumbnailUrl: Value(thumbnailUrl),
+        audioOnly: Value(audioOnly),
+        autoUpdate: Value(autoUpdate),
+        updateFrequencyHours: Value(updateFrequencyHours),
+        includeThumbnails: Value(includeThumbnails),
+        sponsorBlockEnabled: Value(sponsorBlockEnabled),
+        sponsorBlockCategories: Value(jsonEncode(sponsorBlockCategories)),
+        createdAt: DateTime.now(),
+        outputPath: outputPath,
+      ),
+    );
 
     return playlistId;
   }
 
   Future<void> populateTracksFromInfo(
-      int playlistId, Map<String, dynamic> playlistInfo) async {
+    int playlistId,
+    Map<String, dynamic> playlistInfo,
+  ) async {
     final entries = playlistInfo['entries'] as List<dynamic>? ?? [];
     final tracks = <TracksCompanion>[];
 
@@ -85,16 +96,18 @@ class PlaylistService {
       final playlistIndex = entry['playlist_index'] as int? ?? (i + 1);
       final reason = _detectUnavailability(entry);
 
-      tracks.add(TracksCompanion.insert(
-        playlistId: playlistId,
-        index: playlistIndex,
-        videoId: videoId,
-        title: entry['title'] as String? ?? 'Unknown',
-        thumbnailUrl: Value(entry['thumbnail'] as String?),
-        durationSeconds: Value(entry['duration'] as int?),
-        status: Value(reason != null ? 'unavailable' : 'pending'),
-        unavailableReason: Value(reason),
-      ));
+      tracks.add(
+        TracksCompanion.insert(
+          playlistId: playlistId,
+          index: playlistIndex,
+          videoId: videoId,
+          title: entry['title'] as String? ?? 'Unknown',
+          thumbnailUrl: Value(entry['thumbnail'] as String?),
+          durationSeconds: Value(entry['duration'] as int?),
+          status: Value(reason != null ? 'unavailable' : 'pending'),
+          unavailableReason: Value(reason),
+        ),
+      );
     }
 
     if (tracks.isNotEmpty) {
@@ -111,35 +124,50 @@ class PlaylistService {
     bool? autoUpdate,
     int? updateFrequencyHours,
     bool? includeThumbnails,
+    bool? sponsorBlockEnabled,
+    List<String>? sponsorBlockCategories,
   }) async {
     final playlist = await _db.getPlaylist(id);
 
     String outputPath = playlist.outputPath;
     if (audioOnly != null && audioOnly != playlist.audioOnly) {
-      final basePath = audioOnly
-          ? '/storage/emulated/0/Music/WoolyTube'
-          : '/storage/emulated/0/Movies/WoolyTube';
+      final basePath =
+          audioOnly
+              ? '/storage/emulated/0/Music/WoolyTube'
+              : '/storage/emulated/0/Movies/WoolyTube';
       final folderName = _sanitizeFolderName(name ?? playlist.name);
       outputPath = '$basePath/$folderName';
       await Directory(outputPath).create(recursive: true);
     }
 
-    await _db.updatePlaylist(PlaylistsCompanion(
-      id: Value(id),
-      url: Value(playlist.url),
-      name: Value(name ?? playlist.name),
-      thumbnailUrl: Value(playlist.thumbnailUrl),
-      thumbnailPath: Value(playlist.thumbnailPath),
-      audioOnly: Value(audioOnly ?? playlist.audioOnly),
-      autoUpdate: Value(autoUpdate ?? playlist.autoUpdate),
-      updateFrequencyHours:
-          Value(updateFrequencyHours ?? playlist.updateFrequencyHours),
-      includeThumbnails:
-          Value(includeThumbnails ?? playlist.includeThumbnails),
-      lastUpdated: Value(playlist.lastUpdated),
-      createdAt: Value(playlist.createdAt),
-      outputPath: Value(outputPath),
-    ));
+    await _db.updatePlaylist(
+      PlaylistsCompanion(
+        id: Value(id),
+        url: Value(playlist.url),
+        name: Value(name ?? playlist.name),
+        thumbnailUrl: Value(playlist.thumbnailUrl),
+        thumbnailPath: Value(playlist.thumbnailPath),
+        audioOnly: Value(audioOnly ?? playlist.audioOnly),
+        autoUpdate: Value(autoUpdate ?? playlist.autoUpdate),
+        updateFrequencyHours: Value(
+          updateFrequencyHours ?? playlist.updateFrequencyHours,
+        ),
+        includeThumbnails: Value(
+          includeThumbnails ?? playlist.includeThumbnails,
+        ),
+        sponsorBlockEnabled: Value(
+          sponsorBlockEnabled ?? playlist.sponsorBlockEnabled,
+        ),
+        sponsorBlockCategories: Value(
+          sponsorBlockCategories != null
+              ? jsonEncode(sponsorBlockCategories)
+              : playlist.sponsorBlockCategories,
+        ),
+        lastUpdated: Value(playlist.lastUpdated),
+        createdAt: Value(playlist.createdAt),
+        outputPath: Value(outputPath),
+      ),
+    );
 
     await _writeMetadata(id);
   }
@@ -201,8 +229,11 @@ class PlaylistService {
           }
           // Don't change index for tracks with files
         } else if (track.status != 'unavailable') {
-          await _db.updateTrackUnavailable(track.id, reason,
-              newIndex: freshIndex);
+          await _db.updateTrackUnavailable(
+            track.id,
+            reason,
+            newIndex: freshIndex,
+          );
           markedUnavailable++;
         }
       } else if (track.unavailableReason != null) {
@@ -242,16 +273,18 @@ class PlaylistService {
 
       final reason = _detectUnavailability(entry);
       final playlistIndex = entry['playlist_index'] as int? ?? (i + 1);
-      newTracks.add(TracksCompanion.insert(
-        playlistId: playlist.id,
-        index: playlistIndex,
-        videoId: vid,
-        title: entry['title'] as String? ?? 'Unknown',
-        thumbnailUrl: Value(entry['thumbnail'] as String?),
-        durationSeconds: Value(entry['duration'] as int?),
-        status: Value(reason != null ? 'unavailable' : 'pending'),
-        unavailableReason: Value(reason),
-      ));
+      newTracks.add(
+        TracksCompanion.insert(
+          playlistId: playlist.id,
+          index: playlistIndex,
+          videoId: vid,
+          title: entry['title'] as String? ?? 'Unknown',
+          thumbnailUrl: Value(entry['thumbnail'] as String?),
+          durationSeconds: Value(entry['duration'] as int?),
+          status: Value(reason != null ? 'unavailable' : 'pending'),
+          unavailableReason: Value(reason),
+        ),
+      );
       added++;
     }
 

@@ -14,6 +14,7 @@ import '../providers/providers.dart';
 import '../providers/playback_providers.dart';
 import '../services/download_service.dart';
 import '../services/metadata_service.dart';
+import '../services/sponsorblock_service.dart';
 
 class PlaylistDetailPage extends ConsumerStatefulWidget {
   final int playlistId;
@@ -787,6 +788,21 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                       await _pickLocalReplacement(track);
                     },
                   ),
+                  ListTile(
+                    leading: const Icon(Icons.bookmarks, color: Colors.white70),
+                    title: const Text(
+                      'Local skip segments',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    subtitle: const Text(
+                      'View or delete segments marked on this device',
+                      style: TextStyle(color: Color(0xFF888888)),
+                    ),
+                    onTap: () async {
+                      Navigator.pop(sheetContext);
+                      await _showLocalSegments(track);
+                    },
+                  ),
                   // Always: Override title / filename
                   ListTile(
                     leading: const Icon(Icons.edit, color: Colors.white70),
@@ -962,6 +978,94 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
         context,
       ).showSnackBar(SnackBar(content: Text('Replaced with $newName')));
     }
+  }
+
+  Future<void> _showLocalSegments(Track track) async {
+    final db = ref.read(databaseProvider);
+    var segments =
+        (await db.getSegmentsForTrack(
+          track.id,
+        )).where((s) => s.source == 'local').toList();
+
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF2A2A2A),
+      isScrollControlled: true,
+      builder:
+          (sheetContext) => StatefulBuilder(
+            builder:
+                (context, setSheetState) => SafeArea(
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Padding(
+                          padding: EdgeInsets.all(16),
+                          child: Text(
+                            'Local skip segments',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        if (segments.isEmpty)
+                          const Padding(
+                            padding: EdgeInsets.fromLTRB(24, 0, 24, 24),
+                            child: Text(
+                              'No local segments marked for this track.',
+                              style: TextStyle(color: Color(0xFF888888)),
+                            ),
+                          )
+                        else
+                          for (final segment in segments)
+                            ListTile(
+                              title: Text(
+                                sponsorBlockCategoryLabels[segment.category] ??
+                                    segment.category,
+                                style: const TextStyle(color: Colors.white),
+                              ),
+                              subtitle: Text(
+                                '${_formatMs(segment.startMs)} - ${_formatMs(segment.endMs)}',
+                                style: const TextStyle(
+                                  color: Color(0xFF888888),
+                                ),
+                              ),
+                              trailing: IconButton(
+                                icon: const Icon(
+                                  Icons.delete,
+                                  color: Colors.redAccent,
+                                ),
+                                onPressed: () async {
+                                  await db.deleteSegment(segment.id);
+                                  final updated =
+                                      (await db.getSegmentsForTrack(track.id))
+                                          .where((s) => s.source == 'local')
+                                          .toList();
+                                  setSheetState(() => segments = updated);
+                                },
+                              ),
+                            ),
+                      ],
+                    ),
+                  ),
+                ),
+          ),
+    );
+  }
+
+  String _formatMs(int ms) {
+    final duration = Duration(milliseconds: ms);
+    final h = duration.inHours;
+    final m = duration.inMinutes % 60;
+    final s = duration.inSeconds % 60;
+    if (h > 0) {
+      return '$h:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+    }
+    return '$m:${s.toString().padLeft(2, '0')}';
   }
 
   Future<void> _showOverrideDialog(Track track) async {

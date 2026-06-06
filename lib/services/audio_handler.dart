@@ -26,14 +26,17 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
           _broadcastState();
           return;
         }
-        mediaItem.add(MediaItem(
-          id: track.id.toString(),
-          title: track.title,
-          duration: track.durationSeconds != null
-              ? Duration(seconds: track.durationSeconds!)
-              : null,
-          artUri: _resolveArt(track.thumbnailPath, track.thumbnailUrl),
-        ));
+        mediaItem.add(
+          MediaItem(
+            id: track.id.toString(),
+            title: track.title,
+            duration:
+                track.durationSeconds != null
+                    ? Duration(seconds: track.durationSeconds!)
+                    : null,
+            artUri: _resolveArt(track.thumbnailPath, track.thumbnailUrl),
+          ),
+        );
         _broadcastState();
       }),
     );
@@ -43,8 +46,8 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
       _playbackService.positionStream
           .throttleTime(const Duration(seconds: 1))
           .listen((_) {
-        _broadcastState();
-      }),
+            _broadcastState();
+          }),
     );
 
     // Sync duration when it becomes available
@@ -82,27 +85,30 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
     final currentTrack = _playbackService.currentTrack;
     final shuffleOn = _playbackService.shuffleEnabled;
 
-    playbackState.add(PlaybackState(
-      controls: [
-        MediaControl.skipToPrevious,
-        playing ? MediaControl.pause : MediaControl.play,
-        MediaControl.skipToNext,
-        MediaControl.stop,
-        shuffleOn ? _shuffleOnControl : _shuffleOffControl,
-      ],
-      systemActions: const {
-        MediaAction.seek,
-        MediaAction.seekForward,
-        MediaAction.seekBackward,
-      },
-      androidCompactActionIndices: const [0, 1, 2],
-      processingState: currentTrack != null
-          ? AudioProcessingState.ready
-          : AudioProcessingState.idle,
-      playing: playing,
-      updatePosition: _playbackService.position,
-      speed: 1.0,
-    ));
+    playbackState.add(
+      PlaybackState(
+        controls: [
+          MediaControl.skipToPrevious,
+          playing ? MediaControl.pause : MediaControl.play,
+          MediaControl.skipToNext,
+          MediaControl.stop,
+          shuffleOn ? _shuffleOnControl : _shuffleOffControl,
+        ],
+        systemActions: const {
+          MediaAction.seek,
+          MediaAction.seekForward,
+          MediaAction.seekBackward,
+        },
+        androidCompactActionIndices: const [0, 1, 2],
+        processingState:
+            currentTrack != null
+                ? AudioProcessingState.ready
+                : AudioProcessingState.idle,
+        playing: playing,
+        updatePosition: _playbackService.position,
+        speed: 1.0,
+      ),
+    );
   }
 
   Uri? _resolveArt(String? localPath, String? remoteUrl) {
@@ -118,8 +124,10 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   @override
-  Future<List<MediaItem>> getChildren(String parentMediaId,
-      [Map<String, dynamic>? options]) async {
+  Future<List<MediaItem>> getChildren(
+    String parentMediaId, [
+    Map<String, dynamic>? options,
+  ]) async {
     if (parentMediaId == AudioService.browsableRootId) {
       final playlists = await _db.getAllPlaylists();
       return [
@@ -133,8 +141,7 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
       ];
     }
     if (parentMediaId.startsWith('playlist:')) {
-      final playlistId =
-          int.parse(parentMediaId.substring('playlist:'.length));
+      final playlistId = int.parse(parentMediaId.substring('playlist:'.length));
       final tracks = await _db.getTracksForPlaylist(playlistId);
       return [
         for (final t in tracks)
@@ -142,9 +149,10 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
             MediaItem(
               id: 'track:${t.id}:$playlistId',
               title: t.title,
-              duration: t.durationSeconds != null
-                  ? Duration(seconds: t.durationSeconds!)
-                  : null,
+              duration:
+                  t.durationSeconds != null
+                      ? Duration(seconds: t.durationSeconds!)
+                      : null,
               playable: true,
               artUri: _resolveArt(t.thumbnailPath, t.thumbnailUrl),
             ),
@@ -154,8 +162,10 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   @override
-  Future<void> playFromMediaId(String mediaId,
-      [Map<String, dynamic>? extras]) async {
+  Future<void> playFromMediaId(
+    String mediaId, [
+    Map<String, dynamic>? extras,
+  ]) async {
     if (!mediaId.startsWith('track:')) return;
     final parts = mediaId.split(':');
     if (parts.length < 3) return;
@@ -183,10 +193,9 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
   @override
   Future<void> stop() async {
     await _playbackService.stop();
-    playbackState.add(PlaybackState(
-      processingState: AudioProcessingState.idle,
-      playing: false,
-    ));
+    playbackState.add(
+      PlaybackState(processingState: AudioProcessingState.idle, playing: false),
+    );
     await super.stop();
   }
 
@@ -201,8 +210,10 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
       await _playbackService.seekTo(position);
 
   @override
-  Future<dynamic> customAction(String name,
-      [Map<String, dynamic>? extras]) async {
+  Future<dynamic> customAction(
+    String name, [
+    Map<String, dynamic>? extras,
+  ]) async {
     if (name == 'toggleShuffle') {
       _playbackService.toggleShuffle();
       return;

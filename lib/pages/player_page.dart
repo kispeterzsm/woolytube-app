@@ -9,6 +9,7 @@ import '../database/database.dart';
 import '../providers/playback_providers.dart';
 import '../providers/lifecycle_provider.dart';
 import '../widgets/player_controls.dart';
+import '../widgets/segment_mark_button.dart';
 
 class PlayerPage extends ConsumerWidget {
   const PlayerPage({super.key});
@@ -49,10 +50,10 @@ enum _FitMode { fit, fill, zoom }
 
 extension on _FitMode {
   String get label => switch (this) {
-        _FitMode.fit => 'Fit',
-        _FitMode.fill => 'Fill',
-        _FitMode.zoom => 'Zoom',
-      };
+    _FitMode.fit => 'Fit',
+    _FitMode.fill => 'Fill',
+    _FitMode.zoom => 'Zoom',
+  };
 }
 
 class _VideoPlayerViewState extends ConsumerState<_VideoPlayerView> {
@@ -248,9 +249,8 @@ class _VideoPlayerViewState extends ConsumerState<_VideoPlayerView> {
             child: GestureDetector(
               behavior: HitTestBehavior.translucent,
               onTap: _locked ? null : _toggleOverlay,
-              onDoubleTapDown: _locked
-                  ? null
-                  : (d) => _lastDoubleTapPos = d.localPosition,
+              onDoubleTapDown:
+                  _locked ? null : (d) => _lastDoubleTapPos = d.localPosition,
               onDoubleTap: _locked ? null : _handleDoubleTap,
               onScaleStart: _locked ? null : _onScaleStart,
               onScaleUpdate: _locked ? null : _onScaleUpdate,
@@ -261,9 +261,10 @@ class _VideoPlayerViewState extends ConsumerState<_VideoPlayerView> {
           if (_seekBadge != null)
             Positioned.fill(
               child: Align(
-                alignment: _seekBadgeIsLeft
-                    ? Alignment.centerLeft
-                    : Alignment.centerRight,
+                alignment:
+                    _seekBadgeIsLeft
+                        ? Alignment.centerLeft
+                        : Alignment.centerRight,
                 child: Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 48),
                   child: _SeekBadge(text: _seekBadge!),
@@ -277,9 +278,7 @@ class _VideoPlayerViewState extends ConsumerState<_VideoPlayerView> {
               top: 80,
               left: 0,
               right: 0,
-              child: Center(
-                child: _PillLabel(text: _modeLabel!),
-              ),
+              child: Center(child: _PillLabel(text: _modeLabel!)),
             ),
 
           // Overlay
@@ -318,11 +317,12 @@ class _VideoPlayerViewState extends ConsumerState<_VideoPlayerView> {
                   shape: const CircleBorder(),
                   child: IconButton(
                     icon: const Icon(Icons.lock, color: Colors.white),
-                    onPressed: () => setState(() {
-                      _locked = false;
-                      _overlayVisible = true;
-                      _scheduleAutoHide();
-                    }),
+                    onPressed:
+                        () => setState(() {
+                          _locked = false;
+                          _overlayVisible = true;
+                          _scheduleAutoHide();
+                        }),
                   ),
                 ),
               ),
@@ -492,9 +492,10 @@ class _VideoOverlay extends ConsumerWidget {
                         IconButton(
                           icon: Icon(
                             Icons.shuffle,
-                            color: shuffleEnabled
-                                ? const Color(0xFF2196F3)
-                                : Colors.white,
+                            color:
+                                shuffleEnabled
+                                    ? const Color(0xFF2196F3)
+                                    : Colors.white,
                             size: 22,
                           ),
                           onPressed: () {
@@ -505,18 +506,22 @@ class _VideoOverlay extends ConsumerWidget {
                         IconButton(
                           icon: Icon(
                             Icons.playlist_play,
-                            color: autoplayEnabled
-                                ? const Color(0xFF2196F3)
-                                : Colors.white,
+                            color:
+                                autoplayEnabled
+                                    ? const Color(0xFF2196F3)
+                                    : Colors.white,
                             size: 26,
                           ),
-                          tooltip: autoplayEnabled
-                              ? 'Autoplay on'
-                              : 'Autoplay off',
+                          tooltip:
+                              autoplayEnabled ? 'Autoplay on' : 'Autoplay off',
                           onPressed: () {
                             svc.toggleAutoplay();
                             onAnyAction();
                           },
+                        ),
+                        SegmentMarkButton(
+                          inactiveColor: Colors.white,
+                          onAction: onAnyAction,
                         ),
                         IconButton(
                           icon: const Icon(

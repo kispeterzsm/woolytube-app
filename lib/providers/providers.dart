@@ -9,6 +9,7 @@ import '../services/log_service.dart';
 import '../services/metadata_service.dart';
 import '../services/notification_service.dart';
 import '../services/update_service.dart';
+import '../services/sponsorblock_service.dart';
 
 // Core singletons
 final databaseProvider = Provider<AppDatabase>((ref) {
@@ -29,8 +30,9 @@ final metadataServiceProvider = Provider<MetadataService>((ref) {
   return MetadataService(ref.watch(databaseProvider));
 });
 
-final pendingImportsProvider =
-    StateProvider<List<DiscoveredPlaylist>>((ref) => []);
+final pendingImportsProvider = StateProvider<List<DiscoveredPlaylist>>(
+  (ref) => [],
+);
 
 final playlistServiceProvider = Provider<PlaylistService>((ref) {
   return PlaylistService(
@@ -40,7 +42,9 @@ final playlistServiceProvider = Provider<PlaylistService>((ref) {
   );
 });
 
-final notificationServiceProvider = Provider<DownloadNotificationService>((ref) {
+final notificationServiceProvider = Provider<DownloadNotificationService>((
+  ref,
+) {
   final service = DownloadNotificationService();
   service.initialize();
   return service;
@@ -50,6 +54,15 @@ final updateServiceProvider = Provider<UpdateService>((ref) {
   return UpdateService();
 });
 
+final sponsorBlockServiceProvider = Provider<SponsorBlockService>((ref) {
+  final service = SponsorBlockService(
+    ref.watch(databaseProvider),
+    ref.watch(logServiceProvider),
+  );
+  ref.onDispose(() => service.dispose());
+  return service;
+});
+
 final downloadServiceProvider = Provider<DownloadService>((ref) {
   final service = DownloadService(
     ref.watch(databaseProvider),
@@ -57,6 +70,7 @@ final downloadServiceProvider = Provider<DownloadService>((ref) {
     ref.watch(logServiceProvider),
     ref.watch(metadataServiceProvider),
     ref.watch(notificationServiceProvider),
+    ref.watch(sponsorBlockServiceProvider),
   );
   ref.onDispose(() => service.dispose());
   return service;
@@ -72,10 +86,12 @@ final initProvider = FutureProvider<bool>((ref) async {
   log.info('init: ytdlp.initialize ${sw.elapsedMilliseconds}ms');
 
   // yt-dlp self-update is a network call; must not block the splash screen.
-  unawaited(ytdlp.updateYtDlp().then(
-        (_) => log.info('yt-dlp updated to latest'),
-        onError: (e) => log.warn('yt-dlp update failed: $e'),
-      ));
+  unawaited(
+    ytdlp.updateYtDlp().then(
+      (_) => log.info('yt-dlp updated to latest'),
+      onError: (e) => log.warn('yt-dlp update failed: $e'),
+    ),
+  );
 
   // Request storage permission for Android 11+
   if (!await Permission.manageExternalStorage.isGranted) {
@@ -112,8 +128,10 @@ final playlistsProvider = StreamProvider<List<Playlist>>((ref) {
   return ref.watch(playlistServiceProvider).watchAllPlaylists();
 });
 
-final tracksProvider =
-    StreamProvider.family<List<Track>, int>((ref, playlistId) {
+final tracksProvider = StreamProvider.family<List<Track>, int>((
+  ref,
+  playlistId,
+) {
   return ref.watch(playlistServiceProvider).watchTracksForPlaylist(playlistId);
 });
 

@@ -28,7 +28,7 @@ void main() async {
   }
 
   final database = AppDatabase();
-  final playbackService = PlaybackService();
+  final playbackService = PlaybackService(database);
   WoolyTubeAudioHandler? audioHandler;
   try {
     final handler = await AudioService.init(
@@ -40,7 +40,7 @@ void main() async {
         androidStopForegroundOnPause: true,
       ),
     );
-    audioHandler = handler as WoolyTubeAudioHandler;
+    audioHandler = handler;
   } catch (e) {
     debugPrint('AudioService init failed: $e');
   }

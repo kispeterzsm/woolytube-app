@@ -1,7 +1,10 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../database/database.dart';
 import '../providers/providers.dart';
+import '../services/sponsorblock_service.dart';
 
 class PlaylistSettingsPage extends ConsumerStatefulWidget {
   final int playlistId;
@@ -20,6 +23,8 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
   bool _autoUpdate = true;
   int _updateFrequencyHours = 24;
   bool _includeThumbnails = true;
+  bool _sponsorBlockEnabled = true;
+  Set<String> _sponsorBlockCategories = defaultSponsorBlockCategories.toSet();
   bool _loaded = false;
 
   @override
@@ -39,6 +44,10 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
       _autoUpdate = playlist.autoUpdate;
       _updateFrequencyHours = playlist.updateFrequencyHours;
       _includeThumbnails = playlist.includeThumbnails;
+      _sponsorBlockEnabled = playlist.sponsorBlockEnabled;
+      _sponsorBlockCategories = _decodeCategories(
+        playlist.sponsorBlockCategories,
+      );
       _loaded = true;
     });
   }
@@ -52,6 +61,8 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
       autoUpdate: _autoUpdate,
       updateFrequencyHours: _updateFrequencyHours,
       includeThumbnails: _includeThumbnails,
+      sponsorBlockEnabled: _sponsorBlockEnabled,
+      sponsorBlockCategories: _sponsorBlockCategories.toList()..sort(),
     );
     if (mounted) Navigator.of(context).pop();
   }
@@ -59,25 +70,31 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
   Future<void> _delete() async {
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF2A2A2A),
-        title: const Text('Delete playlist?',
-            style: TextStyle(color: Colors.white)),
-        content: const Text(
-          'This will remove the playlist from the app. Downloaded files will not be deleted.',
-          style: TextStyle(color: Color(0xFF888888)),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+      builder:
+          (context) => AlertDialog(
+            backgroundColor: const Color(0xFF2A2A2A),
+            title: const Text(
+              'Delete playlist?',
+              style: TextStyle(color: Colors.white),
+            ),
+            content: const Text(
+              'This will remove the playlist from the app. Downloaded files will not be deleted.',
+              style: TextStyle(color: Color(0xFF888888)),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text(
+                  'Delete',
+                  style: TextStyle(color: Colors.red),
+                ),
+              ),
+            ],
           ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Delete', style: TextStyle(color: Colors.red)),
-          ),
-        ],
-      ),
     );
 
     if (confirmed == true) {
@@ -108,8 +125,10 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
         actions: [
           TextButton(
             onPressed: _save,
-            child: const Text('Save',
-                style: TextStyle(color: Color(0xFF2196F3), fontSize: 16)),
+            child: const Text(
+              'Save',
+              style: TextStyle(color: Color(0xFF2196F3), fontSize: 16),
+            ),
           ),
         ],
       ),
@@ -121,9 +140,10 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
             TextField(
               controller: _nameController,
               style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w600),
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+              ),
               decoration: const InputDecoration(
                 labelText: 'Playlist name',
                 labelStyle: TextStyle(color: Color(0xFF888888)),
@@ -133,8 +153,7 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
               const SizedBox(height: 8),
               Text(
                 _playlist!.url,
-                style:
-                    const TextStyle(color: Color(0xFF666666), fontSize: 12),
+                style: const TextStyle(color: Color(0xFF666666), fontSize: 12),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -158,12 +177,37 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
               _includeThumbnails,
               (v) => setState(() => _includeThumbnails = v),
             ),
+            const SizedBox(height: 24),
+            _settingsToggle(
+              'SponsorBlock',
+              'Skip configured segments during playback',
+              _sponsorBlockEnabled,
+              (v) => setState(() => _sponsorBlockEnabled = v),
+            ),
+            if (_sponsorBlockEnabled) ...[
+              const SizedBox(height: 8),
+              for (final category in sponsorBlockCategories)
+                _settingsToggle(
+                  sponsorBlockCategoryLabels[category] ?? category,
+                  'Skip ${sponsorBlockCategoryLabels[category] ?? category}',
+                  _sponsorBlockCategories.contains(category),
+                  (v) => setState(() {
+                    if (v) {
+                      _sponsorBlockCategories.add(category);
+                    } else {
+                      _sponsorBlockCategories.remove(category);
+                    }
+                  }),
+                ),
+            ],
             if (_autoUpdate) ...[
               const SizedBox(height: 16),
               Row(
                 children: [
-                  const Text('Update every',
-                      style: TextStyle(color: Colors.white, fontSize: 14)),
+                  const Text(
+                    'Update every',
+                    style: TextStyle(color: Colors.white, fontSize: 14),
+                  ),
                   const SizedBox(width: 12),
                   Expanded(
                     child: Slider(
@@ -173,8 +217,9 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
                       divisions: 167,
                       activeColor: const Color(0xFF2196F3),
                       inactiveColor: const Color(0xFF333333),
-                      onChanged: (v) =>
-                          setState(() => _updateFrequencyHours = v.round()),
+                      onChanged:
+                          (v) =>
+                              setState(() => _updateFrequencyHours = v.round()),
                     ),
                   ),
                   SizedBox(
@@ -182,7 +227,9 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
                     child: Text(
                       _formatFrequency(_updateFrequencyHours),
                       style: const TextStyle(
-                          color: Color(0xFF888888), fontSize: 13),
+                        color: Color(0xFF888888),
+                        fontSize: 13,
+                      ),
                       textAlign: TextAlign.right,
                     ),
                   ),
@@ -199,8 +246,10 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
                 ),
                 padding: const EdgeInsets.symmetric(vertical: 14),
               ),
-              child: const Text('Delete Playlist',
-                  style: TextStyle(color: Colors.red, fontSize: 16)),
+              child: const Text(
+                'Delete Playlist',
+                style: TextStyle(color: Colors.red, fontSize: 16),
+              ),
             ),
           ],
         ),
@@ -209,7 +258,11 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
   }
 
   Widget _settingsToggle(
-      String title, String subtitle, bool value, ValueChanged<bool> onChanged) {
+    String title,
+    String subtitle,
+    bool value,
+    ValueChanged<bool> onChanged,
+  ) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
@@ -218,12 +271,17 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title,
-                    style:
-                        const TextStyle(color: Colors.white, fontSize: 14)),
-                Text(subtitle,
-                    style: const TextStyle(
-                        color: Color(0xFF888888), fontSize: 12)),
+                Text(
+                  title,
+                  style: const TextStyle(color: Colors.white, fontSize: 14),
+                ),
+                Text(
+                  subtitle,
+                  style: const TextStyle(
+                    color: Color(0xFF888888),
+                    fontSize: 12,
+                  ),
+                ),
               ],
             ),
           ),
@@ -243,5 +301,20 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
     final days = hours ~/ 24;
     if (days == 7) return '1 week';
     return '${days}d';
+  }
+
+  Set<String> _decodeCategories(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) {
+        final categories =
+            decoded
+                .whereType<String>()
+                .where(sponsorBlockCategories.contains)
+                .toSet();
+        return categories;
+      }
+    } catch (_) {}
+    return defaultSponsorBlockCategories.toSet();
   }
 }
