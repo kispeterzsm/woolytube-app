@@ -13,14 +13,40 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 64
 fi
 
-for command in flutter gh git; do
-  if ! command -v "$command" >/dev/null 2>&1; then
-    echo "Missing required command: $command" >&2
+resolve_command() {
+  local env_var="$1"
+  local command_name="$2"
+  local fallback_path="${3:-}"
+  local configured_path="${!env_var:-}"
+
+  if [[ -n "$configured_path" ]]; then
+    if [[ -x "$configured_path" ]]; then
+      printf '%s\n' "$configured_path"
+      return
+    fi
+    echo "$env_var is set but is not executable: $configured_path" >&2
     exit 69
   fi
-done
 
-if [[ -n "$(git status --porcelain)" ]]; then
+  if command -v "$command_name" >/dev/null 2>&1; then
+    command -v "$command_name"
+    return
+  fi
+
+  if [[ -n "$fallback_path" && -x "$fallback_path" ]]; then
+    printf '%s\n' "$fallback_path"
+    return
+  fi
+
+  echo "Missing required command: $command_name" >&2
+  exit 69
+}
+
+FLUTTER_BIN="$(resolve_command FLUTTER_BIN flutter /home/wooly/flutter/bin/flutter)"
+GH_BIN="$(resolve_command GH_BIN gh)"
+GIT_BIN="$(resolve_command GIT_BIN git)"
+
+if [[ -n "$("$GIT_BIN" status --porcelain)" ]]; then
   echo "Working tree is dirty. Commit or stash changes before creating a release." >&2
   exit 65
 fi
@@ -37,13 +63,13 @@ ASSET_DIR="build/releases"
 ASSET_NAME="woolytube-$VERSION.apk"
 ASSET_PATH="$ASSET_DIR/$ASSET_NAME"
 
-if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+if "$GH_BIN" release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   echo "Release $TAG already exists in $REPO" >&2
   exit 65
 fi
 
-flutter pub get
-flutter build apk \
+"$FLUTTER_BIN" pub get
+"$FLUTTER_BIN" build apk \
   --release \
   --build-name "$VERSION" \
   --build-number "$BUILD_NUMBER"
@@ -51,7 +77,7 @@ flutter build apk \
 mkdir -p "$ASSET_DIR"
 cp build/app/outputs/flutter-apk/app-release.apk "$ASSET_PATH"
 
-gh release create "$TAG" "$ASSET_PATH" \
+"$GH_BIN" release create "$TAG" "$ASSET_PATH" \
   --repo "$REPO" \
   --title "WoolyTube $VERSION" \
   --notes "WoolyTube $VERSION"
