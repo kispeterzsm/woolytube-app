@@ -46,9 +46,19 @@ FLUTTER_BIN="$(resolve_command FLUTTER_BIN flutter /home/wooly/flutter/bin/flutt
 GH_BIN="$(resolve_command GH_BIN gh)"
 GIT_BIN="$(resolve_command GIT_BIN git)"
 
-if [[ -z "${JAVA_HOME:-}" && -d /usr/lib/jvm/java-21-openjdk ]]; then
-  export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
-fi
+configure_java_21() {
+  local java_home="${JAVA_21_HOME:-/usr/lib/jvm/java-21-openjdk}"
+
+  if [[ ! -x "$java_home/bin/java" ]]; then
+    echo "Missing Java 21 at $java_home. Set JAVA_21_HOME to the JDK 21 path." >&2
+    exit 69
+  fi
+
+  export JAVA_HOME="$java_home"
+  export PATH="$JAVA_HOME/bin:$PATH"
+}
+
+configure_java_21
 
 if [[ -n "$("$GIT_BIN" status --porcelain)" ]]; then
   echo "Working tree is dirty. Commit or stash changes before creating a release." >&2
