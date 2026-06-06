@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:media_kit/media_kit.dart' hide Track;
 import 'package:audio_service/audio_service.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'database/database.dart';
 import 'providers/providers.dart';
 import 'providers/playback_providers.dart';
@@ -155,11 +156,70 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
   }
 }
 
-class InitWrapper extends ConsumerWidget {
+class InitWrapper extends ConsumerStatefulWidget {
   const InitWrapper({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<InitWrapper> createState() => _InitWrapperState();
+}
+
+class _InitWrapperState extends ConsumerState<InitWrapper> {
+  bool _checkedForUpdates = false;
+
+  void _checkForUpdatesAfterStartup() {
+    if (_checkedForUpdates) return;
+    _checkedForUpdates = true;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+
+      final updateService = ref.read(updateServiceProvider);
+      final log = ref.read(logServiceProvider);
+
+      try {
+        final update = await updateService.checkForUpdate();
+        if (!mounted || update == null) return;
+
+        final shouldUpdate = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Update available'),
+            content: Text(
+              'WoolyTube ${update.version} is available. '
+              'You are running ${update.currentVersion}. '
+              'Download and install the new APK?',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Later'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Update'),
+              ),
+            ],
+          ),
+        );
+        if (!mounted || shouldUpdate != true) return;
+
+        final launched = await launchUrl(
+          update.downloadUri,
+          mode: LaunchMode.externalApplication,
+        );
+        if (!mounted || launched) return;
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not open ${update.releaseUri}')),
+        );
+      } catch (e) {
+        log.warn('update check failed: $e');
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final init = ref.watch(initProvider);
 
     return init.when(
@@ -190,7 +250,10 @@ class InitWrapper extends ConsumerWidget {
           ),
         ),
       ),
-      data: (_) => const HomePage(),
+      data: (_) {
+        _checkForUpdatesAfterStartup();
+        return const HomePage();
+      },
     );
   }
 }

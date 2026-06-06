@@ -8,6 +8,7 @@ import '../services/download_service.dart';
 import '../services/log_service.dart';
 import '../services/metadata_service.dart';
 import '../services/notification_service.dart';
+import '../services/update_service.dart';
 
 // Core singletons
 final databaseProvider = Provider<AppDatabase>((ref) {
@@ -43,6 +44,10 @@ final notificationServiceProvider = Provider<DownloadNotificationService>((ref) 
   final service = DownloadNotificationService();
   service.initialize();
   return service;
+});
+
+final updateServiceProvider = Provider<UpdateService>((ref) {
+  return UpdateService();
 });
 
 final downloadServiceProvider = Provider<DownloadService>((ref) {
