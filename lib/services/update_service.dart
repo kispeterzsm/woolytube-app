@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 class AppUpdate {
@@ -20,6 +21,10 @@ class AppUpdate {
 class UpdateService {
   UpdateService({HttpClient? httpClient})
     : _httpClient = httpClient ?? HttpClient();
+
+  static const MethodChannel _appUpdateChannel = MethodChannel(
+    'com.woolytube/app_update',
+  );
 
   static final Uri _latestReleaseUri = Uri.https(
     'api.github.com',
@@ -42,6 +47,14 @@ class UpdateService {
       downloadUri: release.downloadUri,
       releaseUri: release.releaseUri,
     );
+  }
+
+  Future<void> downloadAndInstallUpdate(AppUpdate update) {
+    return _appUpdateChannel.invokeMethod('downloadAndInstallApk', {
+      'url': update.downloadUri.toString(),
+      'fileName': 'woolytube-${update.version}.apk',
+      'title': 'WoolyTube ${update.version}',
+    });
   }
 
   Future<_GitHubRelease?> _fetchLatestRelease() async {

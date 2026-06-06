@@ -1,9 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:media_kit/media_kit.dart' hide Track;
 import 'package:audio_service/audio_service.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'database/database.dart';
 import 'providers/providers.dart';
 import 'providers/playback_providers.dart';
@@ -44,15 +45,17 @@ void main() async {
     debugPrint('AudioService init failed: $e');
   }
 
-  runApp(ProviderScope(
-    overrides: [
-      databaseProvider.overrideWithValue(database),
-      playbackServiceProvider.overrideWithValue(playbackService),
-      if (audioHandler != null)
-        audioHandlerProvider.overrideWithValue(audioHandler),
-    ],
-    child: const WoolyTubeApp(),
-  ));
+  runApp(
+    ProviderScope(
+      overrides: [
+        databaseProvider.overrideWithValue(database),
+        playbackServiceProvider.overrideWithValue(playbackService),
+        if (audioHandler != null)
+          audioHandlerProvider.overrideWithValue(audioHandler),
+      ],
+      child: const WoolyTubeApp(),
+    ),
+  );
 }
 
 class WoolyTubeApp extends ConsumerStatefulWidget {
@@ -182,36 +185,74 @@ class _InitWrapperState extends ConsumerState<InitWrapper> {
 
         final shouldUpdate = await showDialog<bool>(
           context: context,
-          builder: (context) => AlertDialog(
-            title: const Text('Update available'),
-            content: Text(
-              'WoolyTube ${update.version} is available. '
-              'You are running ${update.currentVersion}. '
-              'Download and install the new APK?',
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(false),
-                child: const Text('Later'),
+          builder:
+              (context) => AlertDialog(
+                title: const Text('Update available'),
+                content: Text(
+                  'WoolyTube ${update.version} is available. '
+                  'You are running ${update.currentVersion}. '
+                  'Download and install the new APK?',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(false),
+                    child: const Text('Later'),
+                  ),
+                  FilledButton(
+                    onPressed: () => Navigator.of(context).pop(true),
+                    child: const Text('Update'),
+                  ),
+                ],
               ),
-              FilledButton(
-                onPressed: () => Navigator.of(context).pop(true),
-                child: const Text('Update'),
-              ),
-            ],
-          ),
         );
         if (!mounted || shouldUpdate != true) return;
 
-        final launched = await launchUrl(
-          update.downloadUri,
-          mode: LaunchMode.externalApplication,
+        var progressDialogVisible = true;
+        unawaited(
+          showDialog<void>(
+            context: context,
+            barrierDismissible: false,
+            builder:
+                (context) => const AlertDialog(
+                  title: Text('Downloading update'),
+                  content: Row(
+                    children: [
+                      SizedBox(
+                        width: 28,
+                        height: 28,
+                        child: CircularProgressIndicator(strokeWidth: 3),
+                      ),
+                      SizedBox(width: 16),
+                      Expanded(
+                        child: Text('The installer will open when ready.'),
+                      ),
+                    ],
+                  ),
+                ),
+          ),
         );
-        if (!mounted || launched) return;
 
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not open ${update.releaseUri}')),
-        );
+        void closeProgressDialog() {
+          if (!mounted || !progressDialogVisible) return;
+          progressDialogVisible = false;
+          Navigator.of(context, rootNavigator: true).pop();
+        }
+
+        try {
+          await updateService.downloadAndInstallUpdate(update);
+          closeProgressDialog();
+        } on PlatformException catch (e) {
+          closeProgressDialog();
+          if (!mounted) return;
+
+          final message =
+              e.code == 'INSTALL_PERMISSION_REQUIRED'
+                  ? 'Allow WoolyTube to install unknown apps, then tap Update again.'
+                  : e.message ?? 'Could not download and install the update.';
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text(message)));
+        }
       } catch (e) {
         log.warn('update check failed: $e');
       }
@@ -223,33 +264,35 @@ class _InitWrapperState extends ConsumerState<InitWrapper> {
     final init = ref.watch(initProvider);
 
     return init.when(
-      loading: () => const Scaffold(
-        body: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              CircularProgressIndicator(color: Color(0xFF2196F3)),
-              SizedBox(height: 16),
-              Text(
-                'Initializing yt-dlp...',
-                style: TextStyle(color: Color(0xFF888888)),
+      loading:
+          () => const Scaffold(
+            body: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CircularProgressIndicator(color: Color(0xFF2196F3)),
+                  SizedBox(height: 16),
+                  Text(
+                    'Initializing yt-dlp...',
+                    style: TextStyle(color: Color(0xFF888888)),
+                  ),
+                ],
               ),
-            ],
-          ),
-        ),
-      ),
-      error: (e, _) => Scaffold(
-        body: Center(
-          child: Padding(
-            padding: EdgeInsets.all(24),
-            child: Text(
-              'Failed to initialize: $e',
-              style: TextStyle(color: Colors.red),
-              textAlign: TextAlign.center,
             ),
           ),
-        ),
-      ),
+      error:
+          (e, _) => Scaffold(
+            body: Center(
+              child: Padding(
+                padding: EdgeInsets.all(24),
+                child: Text(
+                  'Failed to initialize: $e',
+                  style: TextStyle(color: Colors.red),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ),
+          ),
       data: (_) {
         _checkForUpdatesAfterStartup();
         return const HomePage();
