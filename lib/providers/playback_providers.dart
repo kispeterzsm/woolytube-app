@@ -63,6 +63,11 @@ final pendingSegmentMarkStartProvider = StreamProvider<Duration?>((ref) {
   return ref.watch(playbackServiceProvider).pendingSegmentMarkStartStream;
 });
 
+final playbackSponsorBlockSegmentsProvider =
+    StreamProvider<List<PlaybackSponsorBlockSegment>>((ref) {
+      return ref.watch(playbackServiceProvider).sponsorBlockSegmentsStream;
+    });
+
 final queueProvider = StreamProvider<List<Track>>((ref) {
   return ref.watch(playbackServiceProvider).queueStream;
 });
