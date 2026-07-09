@@ -150,11 +150,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                     if (playableTracks.isNotEmpty)
                       TextButton.icon(
                         onPressed: () {
-                          playbackService.playTrack(
-                            playableTracks.first,
-                            tracks,
-                            playlist: _playlist,
-                          );
+                          playbackService.playAll(tracks, playlist: _playlist);
                         },
                         icon: const Icon(Icons.play_arrow, size: 20),
                         label: const Text('Play all'),

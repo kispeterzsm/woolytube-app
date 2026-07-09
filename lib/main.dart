@@ -11,9 +11,15 @@ import 'providers/playback_providers.dart';
 import 'providers/lifecycle_provider.dart';
 import 'services/playback_service.dart';
 import 'services/audio_handler.dart';
+import 'services/background_worker.dart' as background_worker;
 import 'pages/home_page.dart';
 import 'pages/player_page.dart';
 import 'widgets/mini_player.dart';
+
+@pragma('vm:entry-point')
+void backgroundMain() {
+  background_worker.backgroundMain();
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();

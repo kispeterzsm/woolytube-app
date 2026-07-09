@@ -43,6 +43,7 @@ class _SkipSegment {
 class PlaybackService {
   late final Player _player;
   final AppDatabase _db;
+  final Random _random;
 
   // VideoController is lazy — only created when video playback is needed.
   // Attaching it eagerly causes Android to create a GL surface that gets
@@ -110,7 +111,7 @@ class PlaybackService {
   List<_SkipSegment> _activeSegments = [];
   bool _isSeekingPastSegment = false;
 
-  PlaybackService(this._db) {
+  PlaybackService(this._db, {Random? random}) : _random = random ?? Random() {
     _player = Player();
 
     // Auto-advance on track completion
@@ -204,16 +205,37 @@ class PlaybackService {
     List<Track> allTracks, {
     Playlist? playlist,
   }) async {
-    // Filter to only playable (downloaded) tracks
-    final playable =
-        allTracks
-            .where((t) => t.status == 'complete' && t.filePath != null)
-            .toList();
+    final playable = _playableTracks(allTracks);
     if (playable.isEmpty) return;
 
     final index = playable.indexWhere((t) => t.id == track.id);
     if (index == -1) return;
 
+    await _playPlayableTrack(playable, index, playlist: playlist);
+  }
+
+  Future<void> playAll(List<Track> allTracks, {Playlist? playlist}) async {
+    final playable = _playableTracks(allTracks);
+    if (playable.isEmpty) return;
+
+    final index =
+        _shuffleEnabled.value && playable.length > 1
+            ? 1 + _random.nextInt(playable.length - 1)
+            : 0;
+
+    await _playPlayableTrack(playable, index, playlist: playlist);
+  }
+
+  List<Track> _playableTracks(List<Track> tracks) =>
+      tracks
+          .where((t) => t.status == 'complete' && t.filePath != null)
+          .toList();
+
+  Future<void> _playPlayableTrack(
+    List<Track> playable,
+    int index, {
+    Playlist? playlist,
+  }) async {
     _queue.add(playable);
     _queueIndex.add(index);
     _currentTrack.add(playable[index]);
@@ -485,7 +507,7 @@ class PlaybackService {
   void _generateShuffledIndices(int currentIndex) {
     final indices = List.generate(_queue.value.length, (i) => i);
     indices.remove(currentIndex);
-    indices.shuffle(Random());
+    indices.shuffle(_random);
     _shuffledIndices = [currentIndex, ...indices];
   }
 
