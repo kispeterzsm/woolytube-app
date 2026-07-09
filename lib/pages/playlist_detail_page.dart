@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:drift/drift.dart' hide Column;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -787,16 +788,16 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                   ListTile(
                     leading: const Icon(Icons.bookmarks, color: Colors.white70),
                     title: const Text(
-                      'Local skip segments',
+                      'Skip segments',
                       style: TextStyle(color: Colors.white),
                     ),
                     subtitle: const Text(
-                      'View or delete segments marked on this device',
+                      'View, edit, hide, or delete skip segments',
                       style: TextStyle(color: Color(0xFF888888)),
                     ),
                     onTap: () async {
                       Navigator.pop(sheetContext);
-                      await _showLocalSegments(track);
+                      await _showSkipSegments(track);
                     },
                   ),
                   // Always: Override title / filename
@@ -976,12 +977,15 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     }
   }
 
-  Future<void> _showLocalSegments(Track track) async {
+  Future<void> _showSkipSegments(Track track) async {
     final db = ref.read(databaseProvider);
-    var segments =
-        (await db.getSegmentsForTrack(
-          track.id,
-        )).where((s) => s.source == 'local').toList();
+    var segments = await db.getSegmentsForTrack(track.id);
+
+    Future<void> reload(StateSetter setSheetState) async {
+      final updated = await db.getSegmentsForTrack(track.id);
+      setSheetState(() => segments = updated);
+      await ref.read(playbackServiceProvider).refreshCurrentSegments();
+    }
 
     if (!mounted) return;
     await showModalBottomSheet<void>(
@@ -1000,7 +1004,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                         const Padding(
                           padding: EdgeInsets.all(16),
                           child: Text(
-                            'Local skip segments',
+                            'Skip segments',
                             style: TextStyle(
                               color: Colors.white,
                               fontSize: 16,
@@ -1012,45 +1016,291 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                           const Padding(
                             padding: EdgeInsets.fromLTRB(24, 0, 24, 24),
                             child: Text(
-                              'No local segments marked for this track.',
+                              'No skip segments cached for this track.',
                               style: TextStyle(color: Color(0xFF888888)),
                             ),
                           )
                         else
-                          for (final segment in segments)
-                            ListTile(
-                              title: Text(
-                                sponsorBlockCategoryLabels[segment.category] ??
-                                    segment.category,
-                                style: const TextStyle(color: Colors.white),
-                              ),
-                              subtitle: Text(
-                                '${_formatMs(segment.startMs)} - ${_formatMs(segment.endMs)}',
-                                style: const TextStyle(
-                                  color: Color(0xFF888888),
-                                ),
-                              ),
-                              trailing: IconButton(
-                                icon: const Icon(
-                                  Icons.delete,
-                                  color: Colors.redAccent,
-                                ),
-                                onPressed: () async {
-                                  await db.deleteSegment(segment.id);
-                                  final updated =
-                                      (await db.getSegmentsForTrack(track.id))
-                                          .where((s) => s.source == 'local')
-                                          .toList();
-                                  setSheetState(() => segments = updated);
-                                },
-                              ),
+                          ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxHeight:
+                                  MediaQuery.of(context).size.height * 0.65,
                             ),
+                            child: ListView(
+                              shrinkWrap: true,
+                              children: [
+                                for (final segment in segments)
+                                  ListTile(
+                                    leading: _segmentColorSwatch(segment),
+                                    title: Text(
+                                      sponsorBlockCategoryLabels[segment
+                                              .category] ??
+                                          segment.category,
+                                      style: TextStyle(
+                                        color:
+                                            segment.source == 'hidden'
+                                                ? const Color(0xFF888888)
+                                                : Colors.white,
+                                      ),
+                                    ),
+                                    subtitle: Text(
+                                      '${_sourceLabel(segment.source)} - ${_formatMs(segment.startMs)} - ${_formatMs(segment.endMs)}',
+                                      style: const TextStyle(
+                                        color: Color(0xFF888888),
+                                      ),
+                                    ),
+                                    trailing: Wrap(
+                                      spacing: 4,
+                                      children: [
+                                        IconButton(
+                                          icon: const Icon(
+                                            Icons.edit,
+                                            color: Colors.white70,
+                                          ),
+                                          tooltip: 'Edit segment',
+                                          onPressed: () async {
+                                            final changed =
+                                                await _showSegmentEditDialog(
+                                                  track,
+                                                  segment,
+                                                );
+                                            if (changed && mounted) {
+                                              await reload(setSheetState);
+                                            }
+                                          },
+                                        ),
+                                        if (segment.source == 'hidden')
+                                          IconButton(
+                                            icon: const Icon(
+                                              Icons.restore,
+                                              color: Color(0xFF2196F3),
+                                            ),
+                                            tooltip: 'Restore segment',
+                                            onPressed: () async {
+                                              await db.updateSegment(
+                                                segment.id,
+                                                source: 'sponsorblock',
+                                              );
+                                              await reload(setSheetState);
+                                            },
+                                          )
+                                        else
+                                          IconButton(
+                                            icon: const Icon(
+                                              Icons.delete,
+                                              color: Colors.redAccent,
+                                            ),
+                                            tooltip:
+                                                segment.source == 'local'
+                                                    ? 'Delete segment'
+                                                    : 'Hide segment',
+                                            onPressed: () async {
+                                              if (segment.source == 'local' ||
+                                                  segment.uuid == null) {
+                                                await db.deleteSegment(
+                                                  segment.id,
+                                                );
+                                              } else {
+                                                await db.updateSegment(
+                                                  segment.id,
+                                                  source: 'hidden',
+                                                );
+                                              }
+                                              await reload(setSheetState);
+                                            },
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
                       ],
                     ),
                   ),
                 ),
           ),
     );
+  }
+
+  Widget _segmentColorSwatch(SponsorBlockSegment segment) {
+    final colorValue =
+        sponsorBlockCategoryColors[segment.category] ?? 0xFF888888;
+    return Container(
+      width: 14,
+      height: 14,
+      decoration: BoxDecoration(
+        color: Color(
+          colorValue,
+        ).withValues(alpha: segment.source == 'hidden' ? 0.35 : 1),
+        borderRadius: BorderRadius.circular(2),
+        border: Border.all(color: const Color(0xFF555555)),
+      ),
+    );
+  }
+
+  String _sourceLabel(String source) => switch (source) {
+    'sponsorblock' => 'SponsorBlock',
+    'override' => 'Edited',
+    'hidden' => 'Hidden',
+    'local' => 'Local',
+    _ => source,
+  };
+
+  Future<bool> _showSegmentEditDialog(
+    Track track,
+    SponsorBlockSegment segment,
+  ) async {
+    final db = ref.read(databaseProvider);
+    var category =
+        isSponsorBlockCategory(segment.category) ? segment.category : 'sponsor';
+    final startController = TextEditingController(
+      text: _formatMs(segment.startMs),
+    );
+    final endController = TextEditingController(text: _formatMs(segment.endMs));
+    String? error;
+
+    final saved = await showDialog<bool>(
+      context: context,
+      builder:
+          (dialogContext) => StatefulBuilder(
+            builder:
+                (context, setDialogState) => AlertDialog(
+                  backgroundColor: const Color(0xFF2A2A2A),
+                  title: const Text(
+                    'Edit skip segment',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                  content: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      DropdownButtonFormField<String>(
+                        value: category,
+                        dropdownColor: const Color(0xFF2A2A2A),
+                        decoration: const InputDecoration(
+                          labelText: 'Category',
+                          labelStyle: TextStyle(color: Color(0xFF888888)),
+                        ),
+                        style: const TextStyle(color: Colors.white),
+                        items:
+                            sponsorBlockCategoryDefinitions
+                                .map(
+                                  (definition) => DropdownMenuItem(
+                                    value: definition.id,
+                                    child: Text(definition.label),
+                                  ),
+                                )
+                                .toList(),
+                        onChanged:
+                            (value) => setDialogState(() {
+                              if (value != null) category = value;
+                            }),
+                      ),
+                      TextField(
+                        controller: startController,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: const InputDecoration(
+                          labelText: 'Start',
+                          labelStyle: TextStyle(color: Color(0xFF888888)),
+                        ),
+                      ),
+                      TextField(
+                        controller: endController,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: const InputDecoration(
+                          labelText: 'End',
+                          labelStyle: TextStyle(color: Color(0xFF888888)),
+                        ),
+                      ),
+                      if (error != null) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          error!,
+                          style: const TextStyle(color: Colors.redAccent),
+                        ),
+                      ],
+                    ],
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(dialogContext, false),
+                      child: const Text('Cancel'),
+                    ),
+                    TextButton(
+                      onPressed: () async {
+                        final startMs = _parseTimestampMs(startController.text);
+                        final endMs = _parseTimestampMs(endController.text);
+                        if (startMs == null || endMs == null) {
+                          setDialogState(() => error = 'Use mm:ss or seconds');
+                          return;
+                        }
+                        if (endMs <= startMs) {
+                          setDialogState(
+                            () => error = 'End must be after start',
+                          );
+                          return;
+                        }
+                        if (segment.source == 'sponsorblock' ||
+                            segment.source == 'hidden') {
+                          await db.deleteSegment(segment.id);
+                          await db.insertSegment(
+                            SponsorBlockSegmentsCompanion.insert(
+                              trackId: track.id,
+                              videoId: track.videoId,
+                              source: 'override',
+                              uuid: Value(segment.uuid),
+                              category: category,
+                              actionType: Value(segment.actionType),
+                              startMs: startMs,
+                              endMs: endMs,
+                              votes: Value(segment.votes),
+                              locked: Value(segment.locked),
+                              description: Value(segment.description),
+                              createdAt: DateTime.now(),
+                            ),
+                          );
+                        } else {
+                          await db.updateSegment(
+                            segment.id,
+                            category: category,
+                            startMs: startMs,
+                            endMs: endMs,
+                            source:
+                                segment.source == 'local'
+                                    ? 'local'
+                                    : 'override',
+                          );
+                        }
+                        if (dialogContext.mounted) {
+                          Navigator.pop(dialogContext, true);
+                        }
+                      },
+                      child: const Text('Save'),
+                    ),
+                  ],
+                ),
+          ),
+    );
+    startController.dispose();
+    endController.dispose();
+    return saved == true;
+  }
+
+  int? _parseTimestampMs(String raw) {
+    final value = raw.trim();
+    if (value.isEmpty) return null;
+    final seconds = double.tryParse(value);
+    if (seconds != null) return (seconds * 1000).round();
+
+    final parts = value.split(':');
+    if (parts.length < 2 || parts.length > 3) return null;
+    var totalSeconds = 0;
+    for (final part in parts) {
+      final parsed = int.tryParse(part);
+      if (parsed == null || parsed < 0) return null;
+      totalSeconds = totalSeconds * 60 + parsed;
+    }
+    return totalSeconds * 1000;
   }
 
   String _formatMs(int ms) {
