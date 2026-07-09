@@ -56,6 +56,7 @@ Future<Track> insertTestTrack(
   String? unavailableReason,
   bool isLocalReplacement = false,
   DateTime? downloadedAt,
+  DateTime? sponsorBlockCheckedAt,
   String? lastError,
 }) async {
   final id = await db.insertTrack(
@@ -71,6 +72,7 @@ Future<Track> insertTestTrack(
       unavailableReason: Value(unavailableReason),
       isLocalReplacement: Value(isLocalReplacement),
       downloadedAt: Value(downloadedAt),
+      sponsorBlockCheckedAt: Value(sponsorBlockCheckedAt),
       lastError: Value(lastError),
     ),
   );

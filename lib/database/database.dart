@@ -49,6 +49,7 @@ class Tracks extends Table {
   BoolColumn get isLocalReplacement =>
       boolean().withDefault(const Constant(false))();
   DateTimeColumn get downloadedAt => dateTime().nullable()();
+  DateTimeColumn get sponsorBlockCheckedAt => dateTime().nullable()();
   TextColumn get lastError => text().nullable()();
 }
 
@@ -85,7 +86,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 7;
+  int get schemaVersion => 8;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -155,6 +156,9 @@ class AppDatabase extends _$AppDatabase {
             ],
           );
         }
+      }
+      if (from < 8) {
+        await migrator.addColumn(tracks, tracks.sponsorBlockCheckedAt);
       }
     },
   );
@@ -357,6 +361,24 @@ class AppDatabase extends _$AppDatabase {
     )).write(TracksCompanion(unavailableReason: Value(unavailableReason)));
   }
 
+  Future<void> updateTrackLocalReplacement(
+    int trackId,
+    bool isLocalReplacement,
+  ) async {
+    await (update(tracks)..where(
+      (t) => t.id.equals(trackId),
+    )).write(TracksCompanion(isLocalReplacement: Value(isLocalReplacement)));
+  }
+
+  Future<void> updateTrackSponsorBlockCheckedAt(
+    int trackId,
+    DateTime? checkedAt,
+  ) async {
+    await (update(tracks)..where(
+      (t) => t.id.equals(trackId),
+    )).write(TracksCompanion(sponsorBlockCheckedAt: Value(checkedAt)));
+  }
+
   Future<void> resetTrackForRedownload(int trackId) async {
     await (update(tracks)..where((t) => t.id.equals(trackId))).write(
       TracksCompanion(
@@ -365,6 +387,7 @@ class AppDatabase extends _$AppDatabase {
         isLocalReplacement: const Value(false),
         unavailableReason: const Value(null),
         downloadedAt: const Value(null),
+        sponsorBlockCheckedAt: const Value(null),
         lastError: const Value(null),
       ),
     );

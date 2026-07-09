@@ -14,6 +14,7 @@ class DiscoveredTrack {
   final String status;
   final String? unavailableReason;
   final bool isLocalReplacement;
+  final DateTime? sponsorBlockCheckedAt;
   final String? fileName;
   final List<DiscoveredSponsorBlockSegment> sponsorBlockSegments;
 
@@ -26,6 +27,7 @@ class DiscoveredTrack {
     required this.status,
     this.unavailableReason,
     this.isLocalReplacement = false,
+    this.sponsorBlockCheckedAt,
     this.fileName,
     this.sponsorBlockSegments = const [],
   });
@@ -116,6 +118,8 @@ class MetadataService {
         'status': t.status,
         'unavailableReason': t.unavailableReason,
         'isLocalReplacement': t.isLocalReplacement,
+        'sponsorBlockCheckedAt':
+            t.sponsorBlockCheckedAt?.toUtc().toIso8601String(),
         'fileName': t.filePath != null ? p.basename(t.filePath!) : null,
         'sponsorBlockSegments':
             segments
@@ -478,6 +482,7 @@ class MetadataService {
           isLocalReplacement: Value(dt.isLocalReplacement),
           filePath: Value(filePath),
           downloadedAt: Value(status == 'complete' ? DateTime.now() : null),
+          sponsorBlockCheckedAt: Value(dt.sponsorBlockCheckedAt),
         ),
       );
       discoveredByVideoId[dt.videoId] = dt;
@@ -541,6 +546,10 @@ class MetadataService {
             status: m['status'] as String? ?? 'pending',
             unavailableReason: m['unavailableReason'] as String?,
             isLocalReplacement: m['isLocalReplacement'] as bool? ?? false,
+            sponsorBlockCheckedAt:
+                m['sponsorBlockCheckedAt'] != null
+                    ? DateTime.tryParse(m['sponsorBlockCheckedAt'] as String)
+                    : null,
             fileName: m['fileName'] as String?,
             sponsorBlockSegments: _parseSegments(
               m['sponsorBlockSegments'] as List<dynamic>?,

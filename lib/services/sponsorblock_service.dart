@@ -28,6 +28,7 @@ class SponsorBlockService {
     try {
       final segments = await fetchSegments(track.videoId, track.id);
       await _db.replaceRemoteSponsorBlockSegments(track.id, segments);
+      await _db.updateTrackSponsorBlockCheckedAt(track.id, DateTime.now());
       _log.info(
         'SponsorBlock: ${segments.length} segments cached for ${track.title}',
       );
