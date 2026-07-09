@@ -169,4 +169,109 @@ void main() {
     expect(segments, hasLength(1));
     expect(segments.single.category, 'outro');
   });
+
+  test('remote SponsorBlock refresh preserves local overrides', () async {
+    final playlist = await insertTestPlaylist(db);
+    final track = await insertTestTrack(db, playlistId: playlist.id);
+
+    await db.replaceSponsorBlockSegments(track.id, [
+      SponsorBlockSegmentsCompanion.insert(
+        trackId: track.id,
+        videoId: track.videoId,
+        source: 'sponsorblock',
+        uuid: const Value('remote-1'),
+        category: 'sponsor',
+        startMs: 1000,
+        endMs: 2000,
+        createdAt: DateTime(2024),
+      ),
+      SponsorBlockSegmentsCompanion.insert(
+        trackId: track.id,
+        videoId: track.videoId,
+        source: 'local',
+        category: 'intro',
+        startMs: 3000,
+        endMs: 4000,
+        createdAt: DateTime(2024),
+      ),
+      SponsorBlockSegmentsCompanion.insert(
+        trackId: track.id,
+        videoId: track.videoId,
+        source: 'override',
+        uuid: const Value('remote-2'),
+        category: 'preview',
+        startMs: 5000,
+        endMs: 6000,
+        createdAt: DateTime(2024),
+      ),
+      SponsorBlockSegmentsCompanion.insert(
+        trackId: track.id,
+        videoId: track.videoId,
+        source: 'hidden',
+        uuid: const Value('remote-3'),
+        category: 'outro',
+        startMs: 7000,
+        endMs: 8000,
+        createdAt: DateTime(2024),
+      ),
+    ]);
+
+    await db.replaceRemoteSponsorBlockSegments(track.id, [
+      SponsorBlockSegmentsCompanion.insert(
+        trackId: track.id,
+        videoId: track.videoId,
+        source: 'sponsorblock',
+        uuid: const Value('remote-1'),
+        category: 'selfpromo',
+        startMs: 10000,
+        endMs: 12000,
+        createdAt: DateTime(2025),
+      ),
+      SponsorBlockSegmentsCompanion.insert(
+        trackId: track.id,
+        videoId: track.videoId,
+        source: 'sponsorblock',
+        uuid: const Value('remote-2'),
+        category: 'interaction',
+        startMs: 13000,
+        endMs: 14000,
+        createdAt: DateTime(2025),
+      ),
+      SponsorBlockSegmentsCompanion.insert(
+        trackId: track.id,
+        videoId: track.videoId,
+        source: 'sponsorblock',
+        uuid: const Value('remote-3'),
+        category: 'hook',
+        startMs: 15000,
+        endMs: 16000,
+        createdAt: DateTime(2025),
+      ),
+      SponsorBlockSegmentsCompanion.insert(
+        trackId: track.id,
+        videoId: track.videoId,
+        source: 'sponsorblock',
+        uuid: const Value('remote-4'),
+        category: 'music_offtopic',
+        startMs: 17000,
+        endMs: 18000,
+        createdAt: DateTime(2025),
+      ),
+    ]);
+
+    final byUuid = {
+      for (final segment in await db.getSegmentsForTrack(track.id))
+        segment.uuid ?? 'local': segment,
+    };
+
+    expect(byUuid['local']!.source, 'local');
+    expect(byUuid['remote-1']!.source, 'sponsorblock');
+    expect(byUuid['remote-1']!.category, 'selfpromo');
+    expect(byUuid['remote-2']!.source, 'override');
+    expect(byUuid['remote-2']!.category, 'preview');
+    expect(byUuid['remote-3']!.source, 'hidden');
+    expect(byUuid['remote-3']!.category, 'outro');
+    expect(byUuid['remote-4']!.source, 'sponsorblock');
+    expect(byUuid['remote-4']!.category, 'music_offtopic');
+  });
 }

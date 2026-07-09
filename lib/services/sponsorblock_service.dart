@@ -5,37 +5,10 @@ import 'package:crypto/crypto.dart';
 import 'package:drift/drift.dart';
 
 import '../database/database.dart';
+import 'sponsorblock_categories.dart';
 import 'log_service.dart';
 
-const sponsorBlockCategories = [
-  'sponsor',
-  'selfpromo',
-  'interaction',
-  'intro',
-  'outro',
-  'preview',
-  'hook',
-  'music_offtopic',
-  'filler',
-];
-
-const defaultSponsorBlockCategories = [
-  'sponsor',
-  'selfpromo',
-  'music_offtopic',
-];
-
-const sponsorBlockCategoryLabels = {
-  'sponsor': 'Sponsor',
-  'selfpromo': 'Self-promotion',
-  'interaction': 'Interaction',
-  'intro': 'Intro',
-  'outro': 'Outro',
-  'preview': 'Preview',
-  'hook': 'Hook',
-  'music_offtopic': 'Music/off-topic',
-  'filler': 'Filler',
-};
+export 'sponsorblock_categories.dart';
 
 class SponsorBlockService {
   static const _host = 'sponsor.ajay.app';
@@ -54,7 +27,7 @@ class SponsorBlockService {
 
     try {
       final segments = await fetchSegments(track.videoId, track.id);
-      await _db.replaceSponsorBlockSegments(track.id, segments);
+      await _db.replaceRemoteSponsorBlockSegments(track.id, segments);
       _log.info(
         'SponsorBlock: ${segments.length} segments cached for ${track.title}',
       );
@@ -70,7 +43,7 @@ class SponsorBlockService {
     final hash = sha256.convert(utf8.encode(videoId)).toString();
     final uri = Uri.https(_host, '/api/skipSegments/${hash.substring(0, 4)}', {
       'categories': jsonEncode(sponsorBlockCategories),
-      'actionTypes': jsonEncode(['skip']),
+      'actionTypes': jsonEncode(['skip', 'poi']),
     });
 
     final request = await _httpClient.getUrl(uri);
@@ -96,18 +69,23 @@ class SponsorBlockService {
 
       for (final item in segments) {
         if (item is! Map<String, dynamic>) continue;
-        if (item['actionType'] != null && item['actionType'] != 'skip') {
+        final actionType = item['actionType'] as String? ?? 'skip';
+        if (actionType != 'skip' && actionType != 'poi') {
           continue;
         }
 
         final rawSegment = item['segment'];
         if (rawSegment is! List || rawSegment.length < 2) continue;
         final start = (rawSegment[0] as num?)?.toDouble();
-        final end = (rawSegment[1] as num?)?.toDouble();
-        if (start == null || end == null || end <= start) continue;
+        var end = (rawSegment[1] as num?)?.toDouble();
+        if (start == null || end == null) continue;
+        if (actionType == 'poi' && end <= start) {
+          end = start + 1;
+        }
+        if (end <= start) continue;
 
         final category = item['category'] as String? ?? '';
-        if (!sponsorBlockCategories.contains(category)) continue;
+        if (!isSponsorBlockCategory(category)) continue;
 
         result.add(
           SponsorBlockSegmentsCompanion.insert(
@@ -116,7 +94,7 @@ class SponsorBlockService {
             source: 'sponsorblock',
             uuid: Value(item['UUID'] as String?),
             category: category,
-            actionType: Value(item['actionType'] as String? ?? 'skip'),
+            actionType: Value(actionType),
             startMs: (start * 1000).round(),
             endMs: (end * 1000).round(),
             votes: Value((item['votes'] as num?)?.toInt()),

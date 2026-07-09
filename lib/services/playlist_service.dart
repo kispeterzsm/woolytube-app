@@ -52,7 +52,10 @@ class PlaylistService {
     bool includeThumbnails = true,
     bool sponsorBlockEnabled = true,
     List<String> sponsorBlockCategories = defaultSponsorBlockCategories,
+    Map<String, SponsorBlockCategoryAction>? sponsorBlockCategoryActions,
   }) async {
+    final actions =
+        sponsorBlockCategoryActions ?? defaultSponsorBlockCategoryActions();
     final basePath =
         audioOnly
             ? '/storage/emulated/0/Music/WoolyTube'
@@ -72,7 +75,12 @@ class PlaylistService {
         updateFrequencyHours: Value(updateFrequencyHours),
         includeThumbnails: Value(includeThumbnails),
         sponsorBlockEnabled: Value(sponsorBlockEnabled),
-        sponsorBlockCategories: Value(jsonEncode(sponsorBlockCategories)),
+        sponsorBlockCategories: Value(
+          jsonEncode(autoSkipCategoriesFromActions(actions)),
+        ),
+        sponsorBlockCategoryActions: Value(
+          encodeSponsorBlockCategoryActions(actions),
+        ),
         createdAt: DateTime.now(),
         outputPath: outputPath,
       ),
@@ -126,8 +134,22 @@ class PlaylistService {
     bool? includeThumbnails,
     bool? sponsorBlockEnabled,
     List<String>? sponsorBlockCategories,
+    Map<String, SponsorBlockCategoryAction>? sponsorBlockCategoryActions,
   }) async {
     final playlist = await _db.getPlaylist(id);
+    final legacyCategorySet =
+        sponsorBlockCategories?.where(isSponsorBlockCategory).toSet();
+    final resolvedSponsorBlockActions =
+        sponsorBlockCategoryActions ??
+        (legacyCategorySet != null
+            ? {
+              for (final definition in sponsorBlockCategoryDefinitions)
+                definition.id:
+                    legacyCategorySet.contains(definition.id)
+                        ? SponsorBlockCategoryAction.autoSkip
+                        : SponsorBlockCategoryAction.disabled,
+            }
+            : null);
 
     String outputPath = playlist.outputPath;
     if (audioOnly != null && audioOnly != playlist.audioOnly) {
@@ -159,9 +181,16 @@ class PlaylistService {
           sponsorBlockEnabled ?? playlist.sponsorBlockEnabled,
         ),
         sponsorBlockCategories: Value(
-          sponsorBlockCategories != null
-              ? jsonEncode(sponsorBlockCategories)
+          resolvedSponsorBlockActions != null
+              ? jsonEncode(
+                autoSkipCategoriesFromActions(resolvedSponsorBlockActions),
+              )
               : playlist.sponsorBlockCategories,
+        ),
+        sponsorBlockCategoryActions: Value(
+          resolvedSponsorBlockActions != null
+              ? encodeSponsorBlockCategoryActions(resolvedSponsorBlockActions)
+              : playlist.sponsorBlockCategoryActions,
         ),
         lastUpdated: Value(playlist.lastUpdated),
         createdAt: Value(playlist.createdAt),

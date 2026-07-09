@@ -416,6 +416,9 @@ class DownloadService {
         includeThumbnails: Value(playlist.includeThumbnails),
         sponsorBlockEnabled: Value(playlist.sponsorBlockEnabled),
         sponsorBlockCategories: Value(playlist.sponsorBlockCategories),
+        sponsorBlockCategoryActions: Value(
+          playlist.sponsorBlockCategoryActions,
+        ),
         lastUpdated: Value(DateTime.now()),
         createdAt: Value(playlist.createdAt),
         outputPath: Value(playlist.outputPath),

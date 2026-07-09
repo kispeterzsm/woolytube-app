@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:drift/drift.dart';
 import 'package:path/path.dart' as p;
 import '../database/database.dart';
+import 'sponsorblock_categories.dart';
 
 class DiscoveredTrack {
   final int index;
@@ -57,6 +58,7 @@ class DiscoveredPlaylist {
   final bool includeThumbnails;
   final bool sponsorBlockEnabled;
   final String sponsorBlockCategories;
+  final String sponsorBlockCategoryActions;
   final DateTime? lastUpdated;
   final DateTime createdAt;
   final List<DiscoveredTrack> tracks;
@@ -72,6 +74,7 @@ class DiscoveredPlaylist {
     required this.includeThumbnails,
     required this.sponsorBlockEnabled,
     required this.sponsorBlockCategories,
+    this.sponsorBlockCategoryActions = defaultSponsorBlockCategoryActionsJson,
     this.lastUpdated,
     required this.createdAt,
     required this.tracks,
@@ -141,6 +144,7 @@ class MetadataService {
         'includeThumbnails': playlist.includeThumbnails,
         'sponsorBlockEnabled': playlist.sponsorBlockEnabled,
         'sponsorBlockCategories': playlist.sponsorBlockCategories,
+        'sponsorBlockCategoryActions': playlist.sponsorBlockCategoryActions,
         'lastUpdated': playlist.lastUpdated?.toUtc().toIso8601String(),
         'createdAt': playlist.createdAt.toUtc().toIso8601String(),
       },
@@ -431,6 +435,9 @@ class MetadataService {
         includeThumbnails: Value(discovered.includeThumbnails),
         sponsorBlockEnabled: Value(discovered.sponsorBlockEnabled),
         sponsorBlockCategories: Value(discovered.sponsorBlockCategories),
+        sponsorBlockCategoryActions: Value(
+          discovered.sponsorBlockCategoryActions,
+        ),
         lastUpdated: Value(discovered.lastUpdated),
         createdAt: discovered.createdAt,
         outputPath: discovered.folderPath,
@@ -554,6 +561,12 @@ class MetadataService {
       sponsorBlockCategories:
           pl['sponsorBlockCategories'] as String? ??
           '["sponsor","selfpromo","music_offtopic"]',
+      sponsorBlockCategoryActions:
+          pl['sponsorBlockCategoryActions'] as String? ??
+          sponsorBlockCategoryActionsJsonFromLegacyJson(
+            pl['sponsorBlockCategories'] as String? ??
+                '["sponsor","selfpromo","music_offtopic"]',
+          ),
       lastUpdated:
           pl['lastUpdated'] != null
               ? DateTime.tryParse(pl['lastUpdated'] as String)
