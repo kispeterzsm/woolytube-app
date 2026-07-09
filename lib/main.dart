@@ -115,9 +115,7 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
       final svc = ref.read(playbackServiceProvider);
       if (!svc.isVideoContent) return;
       if (videoFullscreenNotifier.value) return;
-      _navigatorKey.currentState?.push(
-        MaterialPageRoute(builder: (_) => const PlayerPage()),
-      );
+      _navigatorKey.currentState?.push(playerPageRoute());
     });
 
     return MaterialApp(
@@ -158,9 +156,7 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
             ),
             MiniPlayerBar(
               onOpenPlayer: () {
-                _navigatorKey.currentState?.push(
-                  MaterialPageRoute(builder: (_) => const PlayerPage()),
-                );
+                _navigatorKey.currentState?.push(playerPageRoute());
               },
             ),
           ],

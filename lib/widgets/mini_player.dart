@@ -175,9 +175,7 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
       return;
     }
 
-    Navigator.maybeOf(
-      context,
-    )?.push(MaterialPageRoute(builder: (_) => const PlayerPage()));
+    Navigator.maybeOf(context)?.push(playerPageRoute());
   }
 
   Widget _buildThumbnail(String? url) {
