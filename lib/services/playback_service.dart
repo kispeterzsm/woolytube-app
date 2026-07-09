@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:convert';
 import 'dart:math';
 import 'package:media_kit/media_kit.dart' hide Track, Playlist;
 import 'package:media_kit_video/media_kit_video.dart';
@@ -40,6 +39,33 @@ class _SkipSegment {
   const _SkipSegment(this.startMs, this.endMs);
 }
 
+class PlaybackSponsorBlockSegment {
+  final int id;
+  final String source;
+  final String category;
+  final String label;
+  final int colorValue;
+  final SponsorBlockCategoryAction action;
+  final String actionType;
+  final int startMs;
+  final int endMs;
+
+  const PlaybackSponsorBlockSegment({
+    required this.id,
+    required this.source,
+    required this.category,
+    required this.label,
+    required this.colorValue,
+    required this.action,
+    required this.actionType,
+    required this.startMs,
+    required this.endMs,
+  });
+
+  bool get shouldSkip =>
+      action == SponsorBlockCategoryAction.autoSkip && actionType == 'skip';
+}
+
 class PlaybackService {
   late final Player _player;
   final AppDatabase _db;
@@ -65,6 +91,8 @@ class PlaybackService {
   final _autoplayEnabled = BehaviorSubject<bool>.seeded(true);
   final _audioOnlyMode = BehaviorSubject<bool>.seeded(false);
   final _pendingSegmentMarkStart = BehaviorSubject<Duration?>.seeded(null);
+  final _sponsorBlockSegments =
+      BehaviorSubject<List<PlaybackSponsorBlockSegment>>.seeded([]);
 
   // Streams
   Stream<Track?> get currentTrackStream => _currentTrack.stream;
@@ -76,6 +104,8 @@ class PlaybackService {
   Stream<bool> get audioOnlyModeStream => _audioOnlyMode.stream;
   Stream<Duration?> get pendingSegmentMarkStartStream =>
       _pendingSegmentMarkStart.stream;
+  Stream<List<PlaybackSponsorBlockSegment>> get sponsorBlockSegmentsStream =>
+      _sponsorBlockSegments.stream;
   Stream<Duration> get positionStream => _player.stream.position;
   Stream<Duration> get durationStream => _player.stream.duration;
   Stream<bool> get isPlayingStream => _player.stream.playing;
@@ -98,6 +128,8 @@ class PlaybackService {
   bool get autoplayEnabled => _autoplayEnabled.value;
   bool get audioOnlyMode => _audioOnlyMode.value;
   Duration? get pendingSegmentMarkStart => _pendingSegmentMarkStart.value;
+  List<PlaybackSponsorBlockSegment> get sponsorBlockSegments =>
+      _sponsorBlockSegments.value;
   bool get isPlaying => _player.state.playing;
   Duration get position => _player.state.position;
   Duration get duration => _player.state.duration;
@@ -261,51 +293,84 @@ class PlaybackService {
     await _player.open(Media('file://$filePath'));
   }
 
+  Future<void> refreshCurrentSegments() async {
+    final track = _currentTrack.value;
+    if (track != null) {
+      await _loadActiveSegments(track);
+    }
+  }
+
   Future<void> _loadActiveSegments(Track track) async {
     _pendingSegmentMarkStart.add(null);
-    final playlist = _currentPlaylist.value;
+    final playlist = await _playlistForTrack(track);
     if (playlist == null || !playlist.sponsorBlockEnabled) {
       _activeSegments = [];
+      _sponsorBlockSegments.add([]);
       return;
     }
 
-    final enabledCategories = _decodeCategories(
-      playlist.sponsorBlockCategories,
+    final categoryActions = decodeSponsorBlockCategoryActions(
+      playlist.sponsorBlockCategoryActions,
+      legacyCategories: playlist.sponsorBlockCategories,
     );
-    if (enabledCategories.isEmpty) {
-      _activeSegments = [];
-      return;
-    }
 
     final segments = await _db.getSegmentsForTrack(track.id);
-    final filtered =
+    final visible =
         segments
             .where((segment) {
-              if (!enabledCategories.contains(segment.category)) return false;
+              if (!isSponsorBlockCategory(segment.category)) return false;
+              if (segment.source == 'hidden') return false;
               if (segment.source == 'sponsorblock' &&
                   track.isLocalReplacement) {
                 return false;
               }
+              final action =
+                  categoryActions[segment.category] ??
+                  SponsorBlockCategoryAction.disabled;
+              if (action == SponsorBlockCategoryAction.disabled) return false;
               return segment.endMs > segment.startMs;
             })
-            .map((segment) => _SkipSegment(segment.startMs, segment.endMs))
+            .map((segment) {
+              final definition = sponsorBlockCategoryDefinition(
+                segment.category,
+              );
+              return PlaybackSponsorBlockSegment(
+                id: segment.id,
+                source: segment.source,
+                category: segment.category,
+                label: definition.label,
+                colorValue: definition.colorValue,
+                action:
+                    categoryActions[segment.category] ??
+                    SponsorBlockCategoryAction.disabled,
+                actionType: segment.actionType,
+                startMs: segment.startMs,
+                endMs: segment.endMs,
+              );
+            })
             .toList()
           ..sort((a, b) => a.startMs.compareTo(b.startMs));
 
-    _activeSegments = _mergeSegments(filtered);
+    _sponsorBlockSegments.add(visible);
+    _activeSegments = _mergeSegments(
+      visible
+          .where((segment) => segment.shouldSkip)
+          .map((segment) => _SkipSegment(segment.startMs, segment.endMs))
+          .toList(),
+    );
   }
 
-  Set<String> _decodeCategories(String raw) {
+  Future<Playlist?> _playlistForTrack(Track track) async {
+    final current = _currentPlaylist.value;
+    if (current != null && current.id == track.playlistId) {
+      return current;
+    }
     try {
-      final decoded = jsonDecode(raw);
-      if (decoded is List) {
-        return decoded
-            .whereType<String>()
-            .where(sponsorBlockCategories.contains)
-            .toSet();
-      }
+      final playlist = await _db.getPlaylist(track.playlistId);
+      _currentPlaylist.add(playlist);
+      return playlist;
     } catch (_) {}
-    return defaultSponsorBlockCategories.toSet();
+    return current;
   }
 
   List<_SkipSegment> _mergeSegments(List<_SkipSegment> segments) {
@@ -399,7 +464,7 @@ class PlaybackService {
     if (track == null) {
       return const SegmentMarkResult.error('Nothing playing');
     }
-    if (!sponsorBlockCategories.contains(category)) {
+    if (!isSponsorBlockCategory(category)) {
       return const SegmentMarkResult.error('Unknown segment category');
     }
 
@@ -519,6 +584,7 @@ class PlaybackService {
     _queueIndex.add(0);
     _shuffledIndices = [];
     _activeSegments = [];
+    _sponsorBlockSegments.add([]);
     _pendingSegmentMarkStart.add(null);
   }
 
@@ -532,5 +598,6 @@ class PlaybackService {
     _autoplayEnabled.close();
     _audioOnlyMode.close();
     _pendingSegmentMarkStart.close();
+    _sponsorBlockSegments.close();
   }
 }

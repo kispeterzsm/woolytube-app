@@ -1,6 +1,7 @@
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
 import 'package:woolytube/database/database.dart';
+import 'package:woolytube/services/sponsorblock_categories.dart';
 
 AppDatabase openTestDatabase() {
   return AppDatabase.forTesting(NativeDatabase.memory());
@@ -17,6 +18,7 @@ Future<Playlist> insertTestPlaylist(
   bool includeThumbnails = true,
   bool sponsorBlockEnabled = true,
   String sponsorBlockCategories = '["sponsor","selfpromo","music_offtopic"]',
+  String sponsorBlockCategoryActions = defaultSponsorBlockCategoryActionsJson,
   DateTime? lastUpdated,
   DateTime? createdAt,
   String outputPath = '/tmp/woolytube-test',
@@ -32,6 +34,7 @@ Future<Playlist> insertTestPlaylist(
       includeThumbnails: Value(includeThumbnails),
       sponsorBlockEnabled: Value(sponsorBlockEnabled),
       sponsorBlockCategories: Value(sponsorBlockCategories),
+      sponsorBlockCategoryActions: Value(sponsorBlockCategoryActions),
       lastUpdated: Value(lastUpdated),
       createdAt: createdAt ?? DateTime(2024),
       outputPath: outputPath,
@@ -53,6 +56,7 @@ Future<Track> insertTestTrack(
   String? unavailableReason,
   bool isLocalReplacement = false,
   DateTime? downloadedAt,
+  DateTime? sponsorBlockCheckedAt,
   String? lastError,
 }) async {
   final id = await db.insertTrack(
@@ -68,6 +72,7 @@ Future<Track> insertTestTrack(
       unavailableReason: Value(unavailableReason),
       isLocalReplacement: Value(isLocalReplacement),
       downloadedAt: Value(downloadedAt),
+      sponsorBlockCheckedAt: Value(sponsorBlockCheckedAt),
       lastError: Value(lastError),
     ),
   );

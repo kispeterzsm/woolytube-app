@@ -1,5 +1,3 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../database/database.dart';
@@ -24,7 +22,8 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
   int _updateFrequencyHours = 24;
   bool _includeThumbnails = true;
   bool _sponsorBlockEnabled = true;
-  Set<String> _sponsorBlockCategories = defaultSponsorBlockCategories.toSet();
+  Map<String, SponsorBlockCategoryAction> _sponsorBlockCategoryActions =
+      defaultSponsorBlockCategoryActions();
   bool _loaded = false;
 
   @override
@@ -45,8 +44,9 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
       _updateFrequencyHours = playlist.updateFrequencyHours;
       _includeThumbnails = playlist.includeThumbnails;
       _sponsorBlockEnabled = playlist.sponsorBlockEnabled;
-      _sponsorBlockCategories = _decodeCategories(
-        playlist.sponsorBlockCategories,
+      _sponsorBlockCategoryActions = decodeSponsorBlockCategoryActions(
+        playlist.sponsorBlockCategoryActions,
+        legacyCategories: playlist.sponsorBlockCategories,
       );
       _loaded = true;
     });
@@ -62,7 +62,7 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
       updateFrequencyHours: _updateFrequencyHours,
       includeThumbnails: _includeThumbnails,
       sponsorBlockEnabled: _sponsorBlockEnabled,
-      sponsorBlockCategories: _sponsorBlockCategories.toList()..sort(),
+      sponsorBlockCategoryActions: _sponsorBlockCategoryActions,
     );
     if (mounted) Navigator.of(context).pop();
   }
@@ -186,19 +186,8 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
             ),
             if (_sponsorBlockEnabled) ...[
               const SizedBox(height: 8),
-              for (final category in sponsorBlockCategories)
-                _settingsToggle(
-                  sponsorBlockCategoryLabels[category] ?? category,
-                  'Skip ${sponsorBlockCategoryLabels[category] ?? category}',
-                  _sponsorBlockCategories.contains(category),
-                  (v) => setState(() {
-                    if (v) {
-                      _sponsorBlockCategories.add(category);
-                    } else {
-                      _sponsorBlockCategories.remove(category);
-                    }
-                  }),
-                ),
+              for (final definition in sponsorBlockCategoryDefinitions)
+                _sponsorBlockCategoryActionRow(definition),
             ],
             if (_autoUpdate) ...[
               const SizedBox(height: 16),
@@ -296,25 +285,65 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
     );
   }
 
+  Widget _sponsorBlockCategoryActionRow(
+    SponsorBlockCategoryDefinition definition,
+  ) {
+    final action =
+        _sponsorBlockCategoryActions[definition.id] ?? definition.defaultAction;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        children: [
+          Container(
+            width: 12,
+            height: 12,
+            decoration: BoxDecoration(
+              color: Color(definition.colorValue),
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              definition.label,
+              style: const TextStyle(color: Colors.white, fontSize: 14),
+            ),
+          ),
+          DropdownButtonHideUnderline(
+            child: DropdownButton<SponsorBlockCategoryAction>(
+              value: action,
+              dropdownColor: const Color(0xFF2A2A2A),
+              style: const TextStyle(color: Colors.white, fontSize: 13),
+              iconEnabledColor: const Color(0xFF888888),
+              items:
+                  SponsorBlockCategoryAction.values
+                      .map(
+                        (value) => DropdownMenuItem(
+                          value: value,
+                          child: Text(value.label),
+                        ),
+                      )
+                      .toList(),
+              onChanged:
+                  (value) => setState(() {
+                    if (value != null) {
+                      _sponsorBlockCategoryActions = {
+                        ..._sponsorBlockCategoryActions,
+                        definition.id: value,
+                      };
+                    }
+                  }),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   String _formatFrequency(int hours) {
     if (hours < 24) return '${hours}h';
     final days = hours ~/ 24;
     if (days == 7) return '1 week';
     return '${days}d';
-  }
-
-  Set<String> _decodeCategories(String raw) {
-    try {
-      final decoded = jsonDecode(raw);
-      if (decoded is List) {
-        final categories =
-            decoded
-                .whereType<String>()
-                .where(sponsorBlockCategories.contains)
-                .toSet();
-        return categories;
-      }
-    } catch (_) {}
-    return defaultSponsorBlockCategories.toSet();
   }
 }

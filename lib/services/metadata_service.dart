@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:drift/drift.dart';
 import 'package:path/path.dart' as p;
 import '../database/database.dart';
+import 'sponsorblock_categories.dart';
 
 class DiscoveredTrack {
   final int index;
@@ -13,6 +14,7 @@ class DiscoveredTrack {
   final String status;
   final String? unavailableReason;
   final bool isLocalReplacement;
+  final DateTime? sponsorBlockCheckedAt;
   final String? fileName;
   final List<DiscoveredSponsorBlockSegment> sponsorBlockSegments;
 
@@ -25,6 +27,7 @@ class DiscoveredTrack {
     required this.status,
     this.unavailableReason,
     this.isLocalReplacement = false,
+    this.sponsorBlockCheckedAt,
     this.fileName,
     this.sponsorBlockSegments = const [],
   });
@@ -57,6 +60,7 @@ class DiscoveredPlaylist {
   final bool includeThumbnails;
   final bool sponsorBlockEnabled;
   final String sponsorBlockCategories;
+  final String sponsorBlockCategoryActions;
   final DateTime? lastUpdated;
   final DateTime createdAt;
   final List<DiscoveredTrack> tracks;
@@ -72,6 +76,7 @@ class DiscoveredPlaylist {
     required this.includeThumbnails,
     required this.sponsorBlockEnabled,
     required this.sponsorBlockCategories,
+    this.sponsorBlockCategoryActions = defaultSponsorBlockCategoryActionsJson,
     this.lastUpdated,
     required this.createdAt,
     required this.tracks,
@@ -113,6 +118,8 @@ class MetadataService {
         'status': t.status,
         'unavailableReason': t.unavailableReason,
         'isLocalReplacement': t.isLocalReplacement,
+        'sponsorBlockCheckedAt':
+            t.sponsorBlockCheckedAt?.toUtc().toIso8601String(),
         'fileName': t.filePath != null ? p.basename(t.filePath!) : null,
         'sponsorBlockSegments':
             segments
@@ -141,6 +148,7 @@ class MetadataService {
         'includeThumbnails': playlist.includeThumbnails,
         'sponsorBlockEnabled': playlist.sponsorBlockEnabled,
         'sponsorBlockCategories': playlist.sponsorBlockCategories,
+        'sponsorBlockCategoryActions': playlist.sponsorBlockCategoryActions,
         'lastUpdated': playlist.lastUpdated?.toUtc().toIso8601String(),
         'createdAt': playlist.createdAt.toUtc().toIso8601String(),
       },
@@ -431,6 +439,9 @@ class MetadataService {
         includeThumbnails: Value(discovered.includeThumbnails),
         sponsorBlockEnabled: Value(discovered.sponsorBlockEnabled),
         sponsorBlockCategories: Value(discovered.sponsorBlockCategories),
+        sponsorBlockCategoryActions: Value(
+          discovered.sponsorBlockCategoryActions,
+        ),
         lastUpdated: Value(discovered.lastUpdated),
         createdAt: discovered.createdAt,
         outputPath: discovered.folderPath,
@@ -471,6 +482,7 @@ class MetadataService {
           isLocalReplacement: Value(dt.isLocalReplacement),
           filePath: Value(filePath),
           downloadedAt: Value(status == 'complete' ? DateTime.now() : null),
+          sponsorBlockCheckedAt: Value(dt.sponsorBlockCheckedAt),
         ),
       );
       discoveredByVideoId[dt.videoId] = dt;
@@ -534,6 +546,10 @@ class MetadataService {
             status: m['status'] as String? ?? 'pending',
             unavailableReason: m['unavailableReason'] as String?,
             isLocalReplacement: m['isLocalReplacement'] as bool? ?? false,
+            sponsorBlockCheckedAt:
+                m['sponsorBlockCheckedAt'] != null
+                    ? DateTime.tryParse(m['sponsorBlockCheckedAt'] as String)
+                    : null,
             fileName: m['fileName'] as String?,
             sponsorBlockSegments: _parseSegments(
               m['sponsorBlockSegments'] as List<dynamic>?,
@@ -554,6 +570,12 @@ class MetadataService {
       sponsorBlockCategories:
           pl['sponsorBlockCategories'] as String? ??
           '["sponsor","selfpromo","music_offtopic"]',
+      sponsorBlockCategoryActions:
+          pl['sponsorBlockCategoryActions'] as String? ??
+          sponsorBlockCategoryActionsJsonFromLegacyJson(
+            pl['sponsorBlockCategories'] as String? ??
+                '["sponsor","selfpromo","music_offtopic"]',
+          ),
       lastUpdated:
           pl['lastUpdated'] != null
               ? DateTime.tryParse(pl['lastUpdated'] as String)

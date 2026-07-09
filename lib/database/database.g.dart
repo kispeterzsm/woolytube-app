@@ -146,6 +146,18 @@ class $PlaylistsTable extends Playlists
           '["sponsor","selfpromo","music_offtopic"]',
         ),
       );
+  static const VerificationMeta _sponsorBlockCategoryActionsMeta =
+      const VerificationMeta('sponsorBlockCategoryActions');
+  @override
+  late final GeneratedColumn<String> sponsorBlockCategoryActions =
+      GeneratedColumn<String>(
+        'sponsor_block_category_actions',
+        aliasedName,
+        false,
+        type: DriftSqlType.string,
+        requiredDuringInsert: false,
+        defaultValue: const Constant(defaultSponsorBlockCategoryActionsJson),
+      );
   static const VerificationMeta _lastUpdatedMeta = const VerificationMeta(
     'lastUpdated',
   );
@@ -192,6 +204,7 @@ class $PlaylistsTable extends Playlists
     includeThumbnails,
     sponsorBlockEnabled,
     sponsorBlockCategories,
+    sponsorBlockCategoryActions,
     lastUpdated,
     createdAt,
     outputPath,
@@ -293,6 +306,15 @@ class $PlaylistsTable extends Playlists
         ),
       );
     }
+    if (data.containsKey('sponsor_block_category_actions')) {
+      context.handle(
+        _sponsorBlockCategoryActionsMeta,
+        sponsorBlockCategoryActions.isAcceptableOrUnknown(
+          data['sponsor_block_category_actions']!,
+          _sponsorBlockCategoryActionsMeta,
+        ),
+      );
+    }
     if (data.containsKey('last_updated')) {
       context.handle(
         _lastUpdatedMeta,
@@ -380,6 +402,11 @@ class $PlaylistsTable extends Playlists
             DriftSqlType.string,
             data['${effectivePrefix}sponsor_block_categories'],
           )!,
+      sponsorBlockCategoryActions:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.string,
+            data['${effectivePrefix}sponsor_block_category_actions'],
+          )!,
       lastUpdated: attachedDatabase.typeMapping.read(
         DriftSqlType.dateTime,
         data['${effectivePrefix}last_updated'],
@@ -415,6 +442,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
   final bool includeThumbnails;
   final bool sponsorBlockEnabled;
   final String sponsorBlockCategories;
+  final String sponsorBlockCategoryActions;
   final DateTime? lastUpdated;
   final DateTime createdAt;
   final String outputPath;
@@ -430,6 +458,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     required this.includeThumbnails,
     required this.sponsorBlockEnabled,
     required this.sponsorBlockCategories,
+    required this.sponsorBlockCategoryActions,
     this.lastUpdated,
     required this.createdAt,
     required this.outputPath,
@@ -452,6 +481,9 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     map['include_thumbnails'] = Variable<bool>(includeThumbnails);
     map['sponsor_block_enabled'] = Variable<bool>(sponsorBlockEnabled);
     map['sponsor_block_categories'] = Variable<String>(sponsorBlockCategories);
+    map['sponsor_block_category_actions'] = Variable<String>(
+      sponsorBlockCategoryActions,
+    );
     if (!nullToAbsent || lastUpdated != null) {
       map['last_updated'] = Variable<DateTime>(lastUpdated);
     }
@@ -479,6 +511,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
       includeThumbnails: Value(includeThumbnails),
       sponsorBlockEnabled: Value(sponsorBlockEnabled),
       sponsorBlockCategories: Value(sponsorBlockCategories),
+      sponsorBlockCategoryActions: Value(sponsorBlockCategoryActions),
       lastUpdated:
           lastUpdated == null && nullToAbsent
               ? const Value.absent()
@@ -511,6 +544,9 @@ class Playlist extends DataClass implements Insertable<Playlist> {
       sponsorBlockCategories: serializer.fromJson<String>(
         json['sponsorBlockCategories'],
       ),
+      sponsorBlockCategoryActions: serializer.fromJson<String>(
+        json['sponsorBlockCategoryActions'],
+      ),
       lastUpdated: serializer.fromJson<DateTime?>(json['lastUpdated']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
       outputPath: serializer.fromJson<String>(json['outputPath']),
@@ -533,6 +569,9 @@ class Playlist extends DataClass implements Insertable<Playlist> {
       'sponsorBlockCategories': serializer.toJson<String>(
         sponsorBlockCategories,
       ),
+      'sponsorBlockCategoryActions': serializer.toJson<String>(
+        sponsorBlockCategoryActions,
+      ),
       'lastUpdated': serializer.toJson<DateTime?>(lastUpdated),
       'createdAt': serializer.toJson<DateTime>(createdAt),
       'outputPath': serializer.toJson<String>(outputPath),
@@ -551,6 +590,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     bool? includeThumbnails,
     bool? sponsorBlockEnabled,
     String? sponsorBlockCategories,
+    String? sponsorBlockCategoryActions,
     Value<DateTime?> lastUpdated = const Value.absent(),
     DateTime? createdAt,
     String? outputPath,
@@ -568,6 +608,8 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     sponsorBlockEnabled: sponsorBlockEnabled ?? this.sponsorBlockEnabled,
     sponsorBlockCategories:
         sponsorBlockCategories ?? this.sponsorBlockCategories,
+    sponsorBlockCategoryActions:
+        sponsorBlockCategoryActions ?? this.sponsorBlockCategoryActions,
     lastUpdated: lastUpdated.present ? lastUpdated.value : this.lastUpdated,
     createdAt: createdAt ?? this.createdAt,
     outputPath: outputPath ?? this.outputPath,
@@ -604,6 +646,10 @@ class Playlist extends DataClass implements Insertable<Playlist> {
           data.sponsorBlockCategories.present
               ? data.sponsorBlockCategories.value
               : this.sponsorBlockCategories,
+      sponsorBlockCategoryActions:
+          data.sponsorBlockCategoryActions.present
+              ? data.sponsorBlockCategoryActions.value
+              : this.sponsorBlockCategoryActions,
       lastUpdated:
           data.lastUpdated.present ? data.lastUpdated.value : this.lastUpdated,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
@@ -626,6 +672,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
           ..write('includeThumbnails: $includeThumbnails, ')
           ..write('sponsorBlockEnabled: $sponsorBlockEnabled, ')
           ..write('sponsorBlockCategories: $sponsorBlockCategories, ')
+          ..write('sponsorBlockCategoryActions: $sponsorBlockCategoryActions, ')
           ..write('lastUpdated: $lastUpdated, ')
           ..write('createdAt: $createdAt, ')
           ..write('outputPath: $outputPath')
@@ -646,6 +693,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     includeThumbnails,
     sponsorBlockEnabled,
     sponsorBlockCategories,
+    sponsorBlockCategoryActions,
     lastUpdated,
     createdAt,
     outputPath,
@@ -665,6 +713,8 @@ class Playlist extends DataClass implements Insertable<Playlist> {
           other.includeThumbnails == this.includeThumbnails &&
           other.sponsorBlockEnabled == this.sponsorBlockEnabled &&
           other.sponsorBlockCategories == this.sponsorBlockCategories &&
+          other.sponsorBlockCategoryActions ==
+              this.sponsorBlockCategoryActions &&
           other.lastUpdated == this.lastUpdated &&
           other.createdAt == this.createdAt &&
           other.outputPath == this.outputPath);
@@ -682,6 +732,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
   final Value<bool> includeThumbnails;
   final Value<bool> sponsorBlockEnabled;
   final Value<String> sponsorBlockCategories;
+  final Value<String> sponsorBlockCategoryActions;
   final Value<DateTime?> lastUpdated;
   final Value<DateTime> createdAt;
   final Value<String> outputPath;
@@ -697,6 +748,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     this.includeThumbnails = const Value.absent(),
     this.sponsorBlockEnabled = const Value.absent(),
     this.sponsorBlockCategories = const Value.absent(),
+    this.sponsorBlockCategoryActions = const Value.absent(),
     this.lastUpdated = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.outputPath = const Value.absent(),
@@ -713,6 +765,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     this.includeThumbnails = const Value.absent(),
     this.sponsorBlockEnabled = const Value.absent(),
     this.sponsorBlockCategories = const Value.absent(),
+    this.sponsorBlockCategoryActions = const Value.absent(),
     this.lastUpdated = const Value.absent(),
     required DateTime createdAt,
     required String outputPath,
@@ -732,6 +785,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     Expression<bool>? includeThumbnails,
     Expression<bool>? sponsorBlockEnabled,
     Expression<String>? sponsorBlockCategories,
+    Expression<String>? sponsorBlockCategoryActions,
     Expression<DateTime>? lastUpdated,
     Expression<DateTime>? createdAt,
     Expression<String>? outputPath,
@@ -751,6 +805,8 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
         'sponsor_block_enabled': sponsorBlockEnabled,
       if (sponsorBlockCategories != null)
         'sponsor_block_categories': sponsorBlockCategories,
+      if (sponsorBlockCategoryActions != null)
+        'sponsor_block_category_actions': sponsorBlockCategoryActions,
       if (lastUpdated != null) 'last_updated': lastUpdated,
       if (createdAt != null) 'created_at': createdAt,
       if (outputPath != null) 'output_path': outputPath,
@@ -769,6 +825,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     Value<bool>? includeThumbnails,
     Value<bool>? sponsorBlockEnabled,
     Value<String>? sponsorBlockCategories,
+    Value<String>? sponsorBlockCategoryActions,
     Value<DateTime?>? lastUpdated,
     Value<DateTime>? createdAt,
     Value<String>? outputPath,
@@ -786,6 +843,8 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
       sponsorBlockEnabled: sponsorBlockEnabled ?? this.sponsorBlockEnabled,
       sponsorBlockCategories:
           sponsorBlockCategories ?? this.sponsorBlockCategories,
+      sponsorBlockCategoryActions:
+          sponsorBlockCategoryActions ?? this.sponsorBlockCategoryActions,
       lastUpdated: lastUpdated ?? this.lastUpdated,
       createdAt: createdAt ?? this.createdAt,
       outputPath: outputPath ?? this.outputPath,
@@ -830,6 +889,11 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
         sponsorBlockCategories.value,
       );
     }
+    if (sponsorBlockCategoryActions.present) {
+      map['sponsor_block_category_actions'] = Variable<String>(
+        sponsorBlockCategoryActions.value,
+      );
+    }
     if (lastUpdated.present) {
       map['last_updated'] = Variable<DateTime>(lastUpdated.value);
     }
@@ -856,6 +920,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
           ..write('includeThumbnails: $includeThumbnails, ')
           ..write('sponsorBlockEnabled: $sponsorBlockEnabled, ')
           ..write('sponsorBlockCategories: $sponsorBlockCategories, ')
+          ..write('sponsorBlockCategoryActions: $sponsorBlockCategoryActions, ')
           ..write('lastUpdated: $lastUpdated, ')
           ..write('createdAt: $createdAt, ')
           ..write('outputPath: $outputPath')
@@ -1016,6 +1081,17 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
     type: DriftSqlType.dateTime,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _sponsorBlockCheckedAtMeta =
+      const VerificationMeta('sponsorBlockCheckedAt');
+  @override
+  late final GeneratedColumn<DateTime> sponsorBlockCheckedAt =
+      GeneratedColumn<DateTime>(
+        'sponsor_block_checked_at',
+        aliasedName,
+        true,
+        type: DriftSqlType.dateTime,
+        requiredDuringInsert: false,
+      );
   static const VerificationMeta _lastErrorMeta = const VerificationMeta(
     'lastError',
   );
@@ -1042,6 +1118,7 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
     unavailableReason,
     isLocalReplacement,
     downloadedAt,
+    sponsorBlockCheckedAt,
     lastError,
   ];
   @override
@@ -1157,6 +1234,15 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
         ),
       );
     }
+    if (data.containsKey('sponsor_block_checked_at')) {
+      context.handle(
+        _sponsorBlockCheckedAtMeta,
+        sponsorBlockCheckedAt.isAcceptableOrUnknown(
+          data['sponsor_block_checked_at']!,
+          _sponsorBlockCheckedAtMeta,
+        ),
+      );
+    }
     if (data.containsKey('last_error')) {
       context.handle(
         _lastErrorMeta,
@@ -1231,6 +1317,10 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
         DriftSqlType.dateTime,
         data['${effectivePrefix}downloaded_at'],
       ),
+      sponsorBlockCheckedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}sponsor_block_checked_at'],
+      ),
       lastError: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
         data['${effectivePrefix}last_error'],
@@ -1258,6 +1348,7 @@ class Track extends DataClass implements Insertable<Track> {
   final String? unavailableReason;
   final bool isLocalReplacement;
   final DateTime? downloadedAt;
+  final DateTime? sponsorBlockCheckedAt;
   final String? lastError;
   const Track({
     required this.id,
@@ -1273,6 +1364,7 @@ class Track extends DataClass implements Insertable<Track> {
     this.unavailableReason,
     required this.isLocalReplacement,
     this.downloadedAt,
+    this.sponsorBlockCheckedAt,
     this.lastError,
   });
   @override
@@ -1302,6 +1394,11 @@ class Track extends DataClass implements Insertable<Track> {
     map['is_local_replacement'] = Variable<bool>(isLocalReplacement);
     if (!nullToAbsent || downloadedAt != null) {
       map['downloaded_at'] = Variable<DateTime>(downloadedAt);
+    }
+    if (!nullToAbsent || sponsorBlockCheckedAt != null) {
+      map['sponsor_block_checked_at'] = Variable<DateTime>(
+        sponsorBlockCheckedAt,
+      );
     }
     if (!nullToAbsent || lastError != null) {
       map['last_error'] = Variable<String>(lastError);
@@ -1342,6 +1439,10 @@ class Track extends DataClass implements Insertable<Track> {
           downloadedAt == null && nullToAbsent
               ? const Value.absent()
               : Value(downloadedAt),
+      sponsorBlockCheckedAt:
+          sponsorBlockCheckedAt == null && nullToAbsent
+              ? const Value.absent()
+              : Value(sponsorBlockCheckedAt),
       lastError:
           lastError == null && nullToAbsent
               ? const Value.absent()
@@ -1370,6 +1471,9 @@ class Track extends DataClass implements Insertable<Track> {
       ),
       isLocalReplacement: serializer.fromJson<bool>(json['isLocalReplacement']),
       downloadedAt: serializer.fromJson<DateTime?>(json['downloadedAt']),
+      sponsorBlockCheckedAt: serializer.fromJson<DateTime?>(
+        json['sponsorBlockCheckedAt'],
+      ),
       lastError: serializer.fromJson<String?>(json['lastError']),
     );
   }
@@ -1390,6 +1494,9 @@ class Track extends DataClass implements Insertable<Track> {
       'unavailableReason': serializer.toJson<String?>(unavailableReason),
       'isLocalReplacement': serializer.toJson<bool>(isLocalReplacement),
       'downloadedAt': serializer.toJson<DateTime?>(downloadedAt),
+      'sponsorBlockCheckedAt': serializer.toJson<DateTime?>(
+        sponsorBlockCheckedAt,
+      ),
       'lastError': serializer.toJson<String?>(lastError),
     };
   }
@@ -1408,6 +1515,7 @@ class Track extends DataClass implements Insertable<Track> {
     Value<String?> unavailableReason = const Value.absent(),
     bool? isLocalReplacement,
     Value<DateTime?> downloadedAt = const Value.absent(),
+    Value<DateTime?> sponsorBlockCheckedAt = const Value.absent(),
     Value<String?> lastError = const Value.absent(),
   }) => Track(
     id: id ?? this.id,
@@ -1428,6 +1536,10 @@ class Track extends DataClass implements Insertable<Track> {
             : this.unavailableReason,
     isLocalReplacement: isLocalReplacement ?? this.isLocalReplacement,
     downloadedAt: downloadedAt.present ? downloadedAt.value : this.downloadedAt,
+    sponsorBlockCheckedAt:
+        sponsorBlockCheckedAt.present
+            ? sponsorBlockCheckedAt.value
+            : this.sponsorBlockCheckedAt,
     lastError: lastError.present ? lastError.value : this.lastError,
   );
   Track copyWithCompanion(TracksCompanion data) {
@@ -1464,6 +1576,10 @@ class Track extends DataClass implements Insertable<Track> {
           data.downloadedAt.present
               ? data.downloadedAt.value
               : this.downloadedAt,
+      sponsorBlockCheckedAt:
+          data.sponsorBlockCheckedAt.present
+              ? data.sponsorBlockCheckedAt.value
+              : this.sponsorBlockCheckedAt,
       lastError: data.lastError.present ? data.lastError.value : this.lastError,
     );
   }
@@ -1484,6 +1600,7 @@ class Track extends DataClass implements Insertable<Track> {
           ..write('unavailableReason: $unavailableReason, ')
           ..write('isLocalReplacement: $isLocalReplacement, ')
           ..write('downloadedAt: $downloadedAt, ')
+          ..write('sponsorBlockCheckedAt: $sponsorBlockCheckedAt, ')
           ..write('lastError: $lastError')
           ..write(')'))
         .toString();
@@ -1504,6 +1621,7 @@ class Track extends DataClass implements Insertable<Track> {
     unavailableReason,
     isLocalReplacement,
     downloadedAt,
+    sponsorBlockCheckedAt,
     lastError,
   );
   @override
@@ -1523,6 +1641,7 @@ class Track extends DataClass implements Insertable<Track> {
           other.unavailableReason == this.unavailableReason &&
           other.isLocalReplacement == this.isLocalReplacement &&
           other.downloadedAt == this.downloadedAt &&
+          other.sponsorBlockCheckedAt == this.sponsorBlockCheckedAt &&
           other.lastError == this.lastError);
 }
 
@@ -1540,6 +1659,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
   final Value<String?> unavailableReason;
   final Value<bool> isLocalReplacement;
   final Value<DateTime?> downloadedAt;
+  final Value<DateTime?> sponsorBlockCheckedAt;
   final Value<String?> lastError;
   const TracksCompanion({
     this.id = const Value.absent(),
@@ -1555,6 +1675,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
     this.unavailableReason = const Value.absent(),
     this.isLocalReplacement = const Value.absent(),
     this.downloadedAt = const Value.absent(),
+    this.sponsorBlockCheckedAt = const Value.absent(),
     this.lastError = const Value.absent(),
   });
   TracksCompanion.insert({
@@ -1571,6 +1692,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
     this.unavailableReason = const Value.absent(),
     this.isLocalReplacement = const Value.absent(),
     this.downloadedAt = const Value.absent(),
+    this.sponsorBlockCheckedAt = const Value.absent(),
     this.lastError = const Value.absent(),
   }) : playlistId = Value(playlistId),
        index = Value(index),
@@ -1590,6 +1712,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
     Expression<String>? unavailableReason,
     Expression<bool>? isLocalReplacement,
     Expression<DateTime>? downloadedAt,
+    Expression<DateTime>? sponsorBlockCheckedAt,
     Expression<String>? lastError,
   }) {
     return RawValuesInsertable({
@@ -1607,6 +1730,8 @@ class TracksCompanion extends UpdateCompanion<Track> {
       if (isLocalReplacement != null)
         'is_local_replacement': isLocalReplacement,
       if (downloadedAt != null) 'downloaded_at': downloadedAt,
+      if (sponsorBlockCheckedAt != null)
+        'sponsor_block_checked_at': sponsorBlockCheckedAt,
       if (lastError != null) 'last_error': lastError,
     });
   }
@@ -1625,6 +1750,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
     Value<String?>? unavailableReason,
     Value<bool>? isLocalReplacement,
     Value<DateTime?>? downloadedAt,
+    Value<DateTime?>? sponsorBlockCheckedAt,
     Value<String?>? lastError,
   }) {
     return TracksCompanion(
@@ -1641,6 +1767,8 @@ class TracksCompanion extends UpdateCompanion<Track> {
       unavailableReason: unavailableReason ?? this.unavailableReason,
       isLocalReplacement: isLocalReplacement ?? this.isLocalReplacement,
       downloadedAt: downloadedAt ?? this.downloadedAt,
+      sponsorBlockCheckedAt:
+          sponsorBlockCheckedAt ?? this.sponsorBlockCheckedAt,
       lastError: lastError ?? this.lastError,
     );
   }
@@ -1687,6 +1815,11 @@ class TracksCompanion extends UpdateCompanion<Track> {
     if (downloadedAt.present) {
       map['downloaded_at'] = Variable<DateTime>(downloadedAt.value);
     }
+    if (sponsorBlockCheckedAt.present) {
+      map['sponsor_block_checked_at'] = Variable<DateTime>(
+        sponsorBlockCheckedAt.value,
+      );
+    }
     if (lastError.present) {
       map['last_error'] = Variable<String>(lastError.value);
     }
@@ -1709,6 +1842,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
           ..write('unavailableReason: $unavailableReason, ')
           ..write('isLocalReplacement: $isLocalReplacement, ')
           ..write('downloadedAt: $downloadedAt, ')
+          ..write('sponsorBlockCheckedAt: $sponsorBlockCheckedAt, ')
           ..write('lastError: $lastError')
           ..write(')'))
         .toString();
@@ -2509,6 +2643,7 @@ typedef $$PlaylistsTableCreateCompanionBuilder =
       Value<bool> includeThumbnails,
       Value<bool> sponsorBlockEnabled,
       Value<String> sponsorBlockCategories,
+      Value<String> sponsorBlockCategoryActions,
       Value<DateTime?> lastUpdated,
       required DateTime createdAt,
       required String outputPath,
@@ -2526,6 +2661,7 @@ typedef $$PlaylistsTableUpdateCompanionBuilder =
       Value<bool> includeThumbnails,
       Value<bool> sponsorBlockEnabled,
       Value<String> sponsorBlockCategories,
+      Value<String> sponsorBlockCategoryActions,
       Value<DateTime?> lastUpdated,
       Value<DateTime> createdAt,
       Value<String> outputPath,
@@ -2616,6 +2752,11 @@ class $$PlaylistsTableFilterComposer
 
   ColumnFilters<String> get sponsorBlockCategories => $composableBuilder(
     column: $table.sponsorBlockCategories,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get sponsorBlockCategoryActions => $composableBuilder(
+    column: $table.sponsorBlockCategoryActions,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -2724,6 +2865,11 @@ class $$PlaylistsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get sponsorBlockCategoryActions => $composableBuilder(
+    column: $table.sponsorBlockCategoryActions,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<DateTime> get lastUpdated => $composableBuilder(
     column: $table.lastUpdated,
     builder: (column) => ColumnOrderings(column),
@@ -2793,6 +2939,11 @@ class $$PlaylistsTableAnnotationComposer
 
   GeneratedColumn<String> get sponsorBlockCategories => $composableBuilder(
     column: $table.sponsorBlockCategories,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get sponsorBlockCategoryActions => $composableBuilder(
+    column: $table.sponsorBlockCategoryActions,
     builder: (column) => column,
   );
 
@@ -2874,6 +3025,8 @@ class $$PlaylistsTableTableManager
                 Value<bool> includeThumbnails = const Value.absent(),
                 Value<bool> sponsorBlockEnabled = const Value.absent(),
                 Value<String> sponsorBlockCategories = const Value.absent(),
+                Value<String> sponsorBlockCategoryActions =
+                    const Value.absent(),
                 Value<DateTime?> lastUpdated = const Value.absent(),
                 Value<DateTime> createdAt = const Value.absent(),
                 Value<String> outputPath = const Value.absent(),
@@ -2889,6 +3042,7 @@ class $$PlaylistsTableTableManager
                 includeThumbnails: includeThumbnails,
                 sponsorBlockEnabled: sponsorBlockEnabled,
                 sponsorBlockCategories: sponsorBlockCategories,
+                sponsorBlockCategoryActions: sponsorBlockCategoryActions,
                 lastUpdated: lastUpdated,
                 createdAt: createdAt,
                 outputPath: outputPath,
@@ -2906,6 +3060,8 @@ class $$PlaylistsTableTableManager
                 Value<bool> includeThumbnails = const Value.absent(),
                 Value<bool> sponsorBlockEnabled = const Value.absent(),
                 Value<String> sponsorBlockCategories = const Value.absent(),
+                Value<String> sponsorBlockCategoryActions =
+                    const Value.absent(),
                 Value<DateTime?> lastUpdated = const Value.absent(),
                 required DateTime createdAt,
                 required String outputPath,
@@ -2921,6 +3077,7 @@ class $$PlaylistsTableTableManager
                 includeThumbnails: includeThumbnails,
                 sponsorBlockEnabled: sponsorBlockEnabled,
                 sponsorBlockCategories: sponsorBlockCategories,
+                sponsorBlockCategoryActions: sponsorBlockCategoryActions,
                 lastUpdated: lastUpdated,
                 createdAt: createdAt,
                 outputPath: outputPath,
@@ -2997,6 +3154,7 @@ typedef $$TracksTableCreateCompanionBuilder =
       Value<String?> unavailableReason,
       Value<bool> isLocalReplacement,
       Value<DateTime?> downloadedAt,
+      Value<DateTime?> sponsorBlockCheckedAt,
       Value<String?> lastError,
     });
 typedef $$TracksTableUpdateCompanionBuilder =
@@ -3014,6 +3172,7 @@ typedef $$TracksTableUpdateCompanionBuilder =
       Value<String?> unavailableReason,
       Value<bool> isLocalReplacement,
       Value<DateTime?> downloadedAt,
+      Value<DateTime?> sponsorBlockCheckedAt,
       Value<String?> lastError,
     });
 
@@ -3133,6 +3292,11 @@ class $$TracksTableFilterComposer
 
   ColumnFilters<DateTime> get downloadedAt => $composableBuilder(
     column: $table.downloadedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get sponsorBlockCheckedAt => $composableBuilder(
+    column: $table.sponsorBlockCheckedAt,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -3259,6 +3423,11 @@ class $$TracksTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<DateTime> get sponsorBlockCheckedAt => $composableBuilder(
+    column: $table.sponsorBlockCheckedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<String> get lastError => $composableBuilder(
     column: $table.lastError,
     builder: (column) => ColumnOrderings(column),
@@ -3342,6 +3511,11 @@ class $$TracksTableAnnotationComposer
 
   GeneratedColumn<DateTime> get downloadedAt => $composableBuilder(
     column: $table.downloadedAt,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<DateTime> get sponsorBlockCheckedAt => $composableBuilder(
+    column: $table.sponsorBlockCheckedAt,
     builder: (column) => column,
   );
 
@@ -3442,6 +3616,7 @@ class $$TracksTableTableManager
                 Value<String?> unavailableReason = const Value.absent(),
                 Value<bool> isLocalReplacement = const Value.absent(),
                 Value<DateTime?> downloadedAt = const Value.absent(),
+                Value<DateTime?> sponsorBlockCheckedAt = const Value.absent(),
                 Value<String?> lastError = const Value.absent(),
               }) => TracksCompanion(
                 id: id,
@@ -3457,6 +3632,7 @@ class $$TracksTableTableManager
                 unavailableReason: unavailableReason,
                 isLocalReplacement: isLocalReplacement,
                 downloadedAt: downloadedAt,
+                sponsorBlockCheckedAt: sponsorBlockCheckedAt,
                 lastError: lastError,
               ),
           createCompanionCallback:
@@ -3474,6 +3650,7 @@ class $$TracksTableTableManager
                 Value<String?> unavailableReason = const Value.absent(),
                 Value<bool> isLocalReplacement = const Value.absent(),
                 Value<DateTime?> downloadedAt = const Value.absent(),
+                Value<DateTime?> sponsorBlockCheckedAt = const Value.absent(),
                 Value<String?> lastError = const Value.absent(),
               }) => TracksCompanion.insert(
                 id: id,
@@ -3489,6 +3666,7 @@ class $$TracksTableTableManager
                 unavailableReason: unavailableReason,
                 isLocalReplacement: isLocalReplacement,
                 downloadedAt: downloadedAt,
+                sponsorBlockCheckedAt: sponsorBlockCheckedAt,
                 lastError: lastError,
               ),
           withReferenceMapper:

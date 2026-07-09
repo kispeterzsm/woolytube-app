@@ -5,6 +5,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../providers/playback_providers.dart';
 import '../providers/lifecycle_provider.dart';
 import '../pages/player_page.dart';
+import 'sponsorblock_progress_bar.dart';
 
 class MiniPlayerBar extends ConsumerStatefulWidget {
   const MiniPlayerBar({super.key});
@@ -47,6 +48,8 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
     final isPlaying = ref.watch(isPlayingProvider).valueOrNull ?? false;
     final position = ref.watch(positionProvider).valueOrNull ?? Duration.zero;
     final duration = ref.watch(durationProvider).valueOrNull ?? Duration.zero;
+    final sponsorBlockSegments =
+        ref.watch(playbackSponsorBlockSegmentsProvider).valueOrNull ?? const [];
     final isVideo = ref.watch(isVideoContentProvider).valueOrNull ?? false;
     final foregrounded = ref.watch(isAppForegroundedProvider);
     final playbackService = ref.watch(playbackServiceProvider);
@@ -70,14 +73,11 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Progress bar
-            LinearProgressIndicator(
-              value: progress.clamp(0.0, 1.0),
-              minHeight: 2,
-              backgroundColor: const Color(0xFF333333),
-              valueColor: const AlwaysStoppedAnimation<Color>(
-                Color(0xFF2196F3),
-              ),
+            SegmentedProgressBar(
+              progress: progress,
+              durationMs: duration.inMilliseconds,
+              segments: sponsorBlockSegments,
+              height: 2,
             ),
             // Content
             SizedBox(

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/playback_providers.dart';
 import 'segment_mark_button.dart';
+import 'sponsorblock_progress_bar.dart';
 
 class PlayerControls extends ConsumerWidget {
   final bool showShuffleAutoplay;
@@ -117,6 +118,8 @@ class SeekBar extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final position = ref.watch(positionProvider).valueOrNull ?? Duration.zero;
     final duration = ref.watch(durationProvider).valueOrNull ?? Duration.zero;
+    final sponsorBlockSegments =
+        ref.watch(playbackSponsorBlockSegmentsProvider).valueOrNull ?? const [];
     final playbackService = ref.watch(playbackServiceProvider);
 
     final positionMs = position.inMilliseconds.toDouble();
@@ -126,22 +129,46 @@ class SeekBar extends ConsumerWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        SliderTheme(
-          data: SliderThemeData(
-            trackHeight: 3,
-            thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-            overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
-            activeTrackColor: const Color(0xFF2196F3),
-            inactiveTrackColor: const Color(0xFF444444),
-            thumbColor: const Color(0xFF2196F3),
-            overlayColor: const Color(0xFF2196F3).withValues(alpha: 0.2),
-          ),
-          child: Slider(
-            value: positionMs.clamp(0, durationMs),
-            max: durationMs,
-            onChanged: (value) {
-              playbackService.seekTo(Duration(milliseconds: value.toInt()));
-            },
+        SizedBox(
+          height: 36,
+          child: Stack(
+            children: [
+              SliderTheme(
+                data: SliderThemeData(
+                  trackHeight: 3,
+                  thumbShape: const RoundSliderThumbShape(
+                    enabledThumbRadius: 6,
+                  ),
+                  overlayShape: const RoundSliderOverlayShape(
+                    overlayRadius: 14,
+                  ),
+                  activeTrackColor: const Color(0xFF2196F3),
+                  inactiveTrackColor: const Color(0xFF444444),
+                  thumbColor: const Color(0xFF2196F3),
+                  overlayColor: const Color(0xFF2196F3).withValues(alpha: 0.2),
+                ),
+                child: Slider(
+                  value: positionMs.clamp(0, durationMs),
+                  max: durationMs,
+                  onChanged: (value) {
+                    playbackService.seekTo(
+                      Duration(milliseconds: value.toInt()),
+                    );
+                  },
+                ),
+              ),
+              Positioned(
+                left: 24,
+                right: 24,
+                top: 16.5,
+                child: IgnorePointer(
+                  child: SegmentOverlayBar(
+                    durationMs: duration.inMilliseconds,
+                    segments: sponsorBlockSegments,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
         Padding(

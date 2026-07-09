@@ -3,6 +3,7 @@ import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
+import '../services/sponsorblock_categories.dart';
 
 part 'database.g.dart';
 
@@ -24,6 +25,10 @@ class Playlists extends Table {
       text().withDefault(
         const Constant('["sponsor","selfpromo","music_offtopic"]'),
       )();
+  TextColumn get sponsorBlockCategoryActions =>
+      text().withDefault(
+        const Constant(defaultSponsorBlockCategoryActionsJson),
+      )();
   DateTimeColumn get lastUpdated => dateTime().nullable()();
   DateTimeColumn get createdAt => dateTime()();
   TextColumn get outputPath => text()();
@@ -44,6 +49,7 @@ class Tracks extends Table {
   BoolColumn get isLocalReplacement =>
       boolean().withDefault(const Constant(false))();
   DateTimeColumn get downloadedAt => dateTime().nullable()();
+  DateTimeColumn get sponsorBlockCheckedAt => dateTime().nullable()();
   TextColumn get lastError => text().nullable()();
 }
 
@@ -52,7 +58,7 @@ class SponsorBlockSegments extends Table {
   IntColumn get trackId =>
       integer().references(Tracks, #id, onDelete: KeyAction.cascade)();
   TextColumn get videoId => text()();
-  TextColumn get source => text()(); // sponsorblock | local
+  TextColumn get source => text()(); // sponsorblock | local | override | hidden
   TextColumn get uuid => text().nullable()();
   TextColumn get category => text()();
   TextColumn get actionType => text().withDefault(const Constant('skip'))();
@@ -80,7 +86,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 6;
+  int get schemaVersion => 8;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -127,6 +133,32 @@ class AppDatabase extends _$AppDatabase {
         await customStatement(
           'CREATE INDEX IF NOT EXISTS idx_sb_track_source ON sponsor_block_segments (track_id, source)',
         );
+      }
+      if (from < 7) {
+        await migrator.addColumn(
+          playlists,
+          playlists.sponsorBlockCategoryActions,
+        );
+        final rows =
+            await customSelect(
+              'SELECT id, sponsor_block_categories FROM playlists',
+            ).get();
+        for (final row in rows) {
+          final id = row.read<int>('id');
+          final legacy = row.read<String>('sponsor_block_categories');
+          await customUpdate(
+            'UPDATE playlists SET sponsor_block_category_actions = ? WHERE id = ?',
+            variables: [
+              Variable<String>(
+                sponsorBlockCategoryActionsJsonFromLegacyJson(legacy),
+              ),
+              Variable<int>(id),
+            ],
+          );
+        }
+      }
+      if (from < 8) {
+        await migrator.addColumn(tracks, tracks.sponsorBlockCheckedAt);
       }
     },
   );
@@ -329,6 +361,24 @@ class AppDatabase extends _$AppDatabase {
     )).write(TracksCompanion(unavailableReason: Value(unavailableReason)));
   }
 
+  Future<void> updateTrackLocalReplacement(
+    int trackId,
+    bool isLocalReplacement,
+  ) async {
+    await (update(tracks)..where(
+      (t) => t.id.equals(trackId),
+    )).write(TracksCompanion(isLocalReplacement: Value(isLocalReplacement)));
+  }
+
+  Future<void> updateTrackSponsorBlockCheckedAt(
+    int trackId,
+    DateTime? checkedAt,
+  ) async {
+    await (update(tracks)..where(
+      (t) => t.id.equals(trackId),
+    )).write(TracksCompanion(sponsorBlockCheckedAt: Value(checkedAt)));
+  }
+
   Future<void> resetTrackForRedownload(int trackId) async {
     await (update(tracks)..where((t) => t.id.equals(trackId))).write(
       TracksCompanion(
@@ -337,6 +387,7 @@ class AppDatabase extends _$AppDatabase {
         isLocalReplacement: const Value(false),
         unavailableReason: const Value(null),
         downloadedAt: const Value(null),
+        sponsorBlockCheckedAt: const Value(null),
         lastError: const Value(null),
       ),
     );
@@ -347,6 +398,12 @@ class AppDatabase extends _$AppDatabase {
             ..where((s) => s.trackId.equals(trackId))
             ..orderBy([(s) => OrderingTerm.asc(s.startMs)]))
           .get();
+
+  Stream<List<SponsorBlockSegment>> watchSegmentsForTrack(int trackId) =>
+      (select(sponsorBlockSegments)
+            ..where((s) => s.trackId.equals(trackId))
+            ..orderBy([(s) => OrderingTerm.asc(s.startMs)]))
+          .watch();
 
   Future<void> replaceSponsorBlockSegments(
     int trackId,
@@ -363,8 +420,63 @@ class AppDatabase extends _$AppDatabase {
     });
   }
 
-  Future<int> insertLocalSegment(SponsorBlockSegmentsCompanion segment) =>
+  Future<void> replaceRemoteSponsorBlockSegments(
+    int trackId,
+    List<SponsorBlockSegmentsCompanion> segments,
+  ) async {
+    await transaction(() async {
+      final protectedRows =
+          await (select(sponsorBlockSegments)..where(
+            (s) =>
+                s.trackId.equals(trackId) &
+                (s.source.equals('override') | s.source.equals('hidden')) &
+                s.uuid.isNotNull(),
+          )).get();
+      final protectedUuids = protectedRows.map((s) => s.uuid).nonNulls.toSet();
+
+      await (delete(sponsorBlockSegments)..where(
+        (s) => s.trackId.equals(trackId) & s.source.equals('sponsorblock'),
+      )).go();
+
+      final remoteSegments =
+          segments.where((segment) {
+            final uuid = segment.uuid.present ? segment.uuid.value : null;
+            return uuid == null || !protectedUuids.contains(uuid);
+          }).toList();
+      if (remoteSegments.isNotEmpty) {
+        await batch((batch) {
+          batch.insertAll(sponsorBlockSegments, remoteSegments);
+        });
+      }
+    });
+  }
+
+  Future<int> insertSegment(SponsorBlockSegmentsCompanion segment) =>
       into(sponsorBlockSegments).insert(segment);
+
+  Future<int> insertLocalSegment(SponsorBlockSegmentsCompanion segment) =>
+      insertSegment(segment);
+
+  Future<void> updateSegment(
+    int segmentId, {
+    String? source,
+    String? category,
+    String? actionType,
+    int? startMs,
+    int? endMs,
+    String? description,
+  }) => (update(sponsorBlockSegments)
+    ..where((s) => s.id.equals(segmentId))).write(
+    SponsorBlockSegmentsCompanion(
+      source: source != null ? Value(source) : const Value.absent(),
+      category: category != null ? Value(category) : const Value.absent(),
+      actionType: actionType != null ? Value(actionType) : const Value.absent(),
+      startMs: startMs != null ? Value(startMs) : const Value.absent(),
+      endMs: endMs != null ? Value(endMs) : const Value.absent(),
+      description:
+          description != null ? Value(description) : const Value.absent(),
+    ),
+  );
 
   Future<void> deleteSegment(int segmentId) =>
       (delete(sponsorBlockSegments)..where((s) => s.id.equals(segmentId))).go();

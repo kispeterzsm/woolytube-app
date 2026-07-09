@@ -89,6 +89,8 @@ class DownloadService {
     );
 
     if (pendingTracks.isEmpty) {
+      await _backfillMissingSponsorBlockSegments(playlist);
+      await _writeMetadataForPlaylist(playlist.id);
       _isDownloading = false;
       _progressController.add(
         DownloadProgress(
@@ -140,6 +142,7 @@ class DownloadService {
 
       await _markPlaylistUpdated(playlist);
 
+      await _backfillMissingSponsorBlockSegments(playlist);
       await _writeMetadataForPlaylist(playlist.id);
 
       // Cleanup .part files and orphaned thumbnails
@@ -317,13 +320,13 @@ class DownloadService {
           track.id,
           'complete',
           filePath: existingFile,
-          isLocalReplacement: true,
+          isLocalReplacement: false,
         );
         await _sponsorBlock?.refreshTrackSegments(
           track.copyWith(
             filePath: Value(existingFile),
             status: 'complete',
-            isLocalReplacement: true,
+            isLocalReplacement: false,
           ),
         );
         _log.info(
@@ -416,6 +419,9 @@ class DownloadService {
         includeThumbnails: Value(playlist.includeThumbnails),
         sponsorBlockEnabled: Value(playlist.sponsorBlockEnabled),
         sponsorBlockCategories: Value(playlist.sponsorBlockCategories),
+        sponsorBlockCategoryActions: Value(
+          playlist.sponsorBlockCategoryActions,
+        ),
         lastUpdated: Value(DateTime.now()),
         createdAt: Value(playlist.createdAt),
         outputPath: Value(playlist.outputPath),
@@ -475,6 +481,63 @@ class DownloadService {
         await Future.delayed(delay);
       }
     }
+  }
+
+  static const _sponsorBlockMissingRetryInterval = Duration(days: 7);
+
+  Future<void> _backfillMissingSponsorBlockSegments(Playlist playlist) async {
+    if (_sponsorBlock == null || !playlist.sponsorBlockEnabled) return;
+
+    final now = DateTime.now();
+    final tracks = await _db.getTracksForPlaylist(playlist.id);
+    var refreshed = 0;
+    var repaired = 0;
+    for (final track in tracks) {
+      if (track.status != 'complete' ||
+          track.filePath == null ||
+          track.unavailableReason != null) {
+        continue;
+      }
+
+      final existingSegments = await _db.getSegmentsForTrack(track.id);
+      final hasRemoteState = existingSegments.any(
+        (segment) =>
+            segment.source == 'sponsorblock' ||
+            segment.source == 'override' ||
+            segment.source == 'hidden',
+      );
+      if (hasRemoteState) continue;
+      if (!_shouldRetryMissingSponsorBlock(track, now)) continue;
+
+      try {
+        final segments = await _sponsorBlock.fetchSegments(
+          track.videoId,
+          track.id,
+        );
+
+        if (track.isLocalReplacement && segments.isNotEmpty) {
+          await _db.updateTrackLocalReplacement(track.id, false);
+          repaired++;
+        }
+        await _db.replaceRemoteSponsorBlockSegments(track.id, segments);
+        await _db.updateTrackSponsorBlockCheckedAt(track.id, now);
+        refreshed++;
+      } catch (e) {
+        _log.warn('SponsorBlock backfill failed for ${track.videoId}: $e');
+      }
+    }
+
+    if (refreshed > 0) {
+      final repairText =
+          repaired > 0 ? ', repaired $repaired reused downloads' : '';
+      _log.info('SponsorBlock: backfilled $refreshed tracks$repairText');
+    }
+  }
+
+  bool _shouldRetryMissingSponsorBlock(Track track, DateTime now) {
+    final checkedAt = track.sponsorBlockCheckedAt;
+    return checkedAt == null ||
+        now.difference(checkedAt) >= _sponsorBlockMissingRetryInterval;
   }
 
   Future<void> _writeMetadataForPlaylist(int playlistId) async {
