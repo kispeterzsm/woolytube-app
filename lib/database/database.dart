@@ -75,6 +75,10 @@ class AppDatabase extends _$AppDatabase {
     return _instance!;
   }
 
+  factory AppDatabase.forTesting(QueryExecutor executor) {
+    return AppDatabase._internal(executor);
+  }
+
   @override
   int get schemaVersion => 6;
 
@@ -190,6 +194,8 @@ class AppDatabase extends _$AppDatabase {
     String? filePath,
     bool? isLocalReplacement,
     String? error,
+    bool clearFilePath = false,
+    bool clearDownloadedAt = false,
   }) async {
     final Value<String?> errorValue;
     if (status == 'error') {
@@ -203,13 +209,22 @@ class AppDatabase extends _$AppDatabase {
     await (update(tracks)..where((t) => t.id.equals(trackId))).write(
       TracksCompanion(
         status: Value(status),
-        filePath: filePath != null ? Value(filePath) : const Value.absent(),
+        filePath:
+            clearFilePath
+                ? const Value(null)
+                : filePath != null
+                ? Value(filePath)
+                : const Value.absent(),
         isLocalReplacement:
             isLocalReplacement != null
                 ? Value(isLocalReplacement)
                 : const Value.absent(),
         downloadedAt:
-            status == 'complete' ? Value(DateTime.now()) : const Value.absent(),
+            status == 'complete'
+                ? Value(DateTime.now())
+                : clearDownloadedAt
+                ? const Value(null)
+                : const Value.absent(),
         lastError: errorValue,
       ),
     );

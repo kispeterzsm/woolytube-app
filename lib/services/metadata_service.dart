@@ -296,7 +296,13 @@ class MetadataService {
         await _db.updateTrackStatus(track.id, 'complete', filePath: fileOnDisk);
         fixed++;
       } else if (fileOnDisk == null && track.status == 'complete') {
-        await _db.updateTrackStatus(track.id, 'pending');
+        await _db.updateTrackStatus(
+          track.id,
+          'pending',
+          clearFilePath: true,
+          clearDownloadedAt: true,
+          isLocalReplacement: false,
+        );
         fixed++;
       } else if (fileOnDisk != null &&
           track.status == 'complete' &&

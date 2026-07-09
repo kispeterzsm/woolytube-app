@@ -6,6 +6,8 @@ The project is fully client-side. Downloads, metadata, playlist state, backgroun
 
 The repository root is the Flutter app root. Main Dart code lives in `lib/`, Android platform code lives in `android/`, and tests live in `test/`.
 
+Run `flutter test` to validate the host-side test suite without a connected phone. These tests cover version comparison, Drift database behavior with an in-memory database, metadata file writing/import/reconciliation, cleanup of playlist folders, and playlist sync behavior using fake yt-dlp responses.
+
 Use Java 21 for Android builds. The local machine has Java 21 at `/usr/lib/jvm/java-21-openjdk`; `release-apk.sh` and `build-apk.sh` force `JAVA_HOME` to that path automatically. If another machine stores JDK 21 elsewhere, set `JAVA_21_HOME` before running either script.
 
 After every code modification, run `./build-apk.sh` to verify the app still builds. It runs `flutter pub get`, builds a local release APK, and copies it to `build/releases/woolytube-local.apk`. It does not require a clean working tree and does not upload anything to GitHub.
