@@ -156,7 +156,13 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
                 child: child!,
               ),
             ),
-            const MiniPlayerBar(),
+            MiniPlayerBar(
+              onOpenPlayer: () {
+                _navigatorKey.currentState?.push(
+                  MaterialPageRoute(builder: (_) => const PlayerPage()),
+                );
+              },
+            ),
           ],
         );
       },

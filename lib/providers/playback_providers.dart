@@ -41,9 +41,9 @@ final videoAspectProvider = StreamProvider<double?>((ref) {
   return ref.watch(playbackServiceProvider).videoAspectStream;
 });
 
-/// True while the full-screen VLC-style video view is mounted. The global
-/// MiniPlayerBar uses this to hide itself so the video can go edge-to-edge.
-/// Plain ValueNotifier (not Riverpod) so the video page can flip it from
+/// True while a full-screen player view is mounted. The global MiniPlayerBar
+/// uses this to hide itself so expanded playback can use the full app surface.
+/// Plain ValueNotifier (not Riverpod) so player pages can flip it from
 /// initState/dispose without violating lifecycle rules.
 final ValueNotifier<bool> videoFullscreenNotifier = ValueNotifier<bool>(false);
 
@@ -70,4 +70,8 @@ final playbackSponsorBlockSegmentsProvider =
 
 final queueProvider = StreamProvider<List<Track>>((ref) {
   return ref.watch(playbackServiceProvider).queueStream;
+});
+
+final queueIndexProvider = StreamProvider<int>((ref) {
+  return ref.watch(playbackServiceProvider).queueIndexStream;
 });

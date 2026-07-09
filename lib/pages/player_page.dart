@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -608,106 +610,724 @@ class _PillLabel extends StatelessWidget {
 Widget _noVideoControls(VideoState state) => const SizedBox.shrink();
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Audio — unchanged portrait layout
+// Audio — expanded VLC-style player
 
-class _AudioPlayerView extends ConsumerWidget {
+class _AudioPlayerView extends ConsumerStatefulWidget {
   final Track track;
   const _AudioPlayerView({required this.track});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_AudioPlayerView> createState() => _AudioPlayerViewState();
+}
+
+class _AudioPlayerViewState extends ConsumerState<_AudioPlayerView> {
+  @override
+  void initState() {
+    super.initState();
+    videoFullscreenNotifier.value = true;
+  }
+
+  @override
+  void dispose() {
+    videoFullscreenNotifier.value = false;
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final currentPlaylist = ref.watch(currentPlaylistProvider).valueOrNull;
+    final queue = ref.watch(queueProvider).valueOrNull ?? const <Track>[];
+    final queueIndex = ref.watch(queueIndexProvider).valueOrNull ?? 0;
+    final clampedQueueIndex =
+        queue.isEmpty ? 0 : queueIndex.clamp(0, queue.length - 1).toInt();
+    final position = ref.watch(positionProvider).valueOrNull ?? Duration.zero;
+    final duration = ref.watch(durationProvider).valueOrNull ?? Duration.zero;
+    final isPlaying = ref.watch(isPlayingProvider).valueOrNull ?? false;
+    final shuffleEnabled =
+        ref.watch(shuffleEnabledProvider).valueOrNull ?? false;
+    final autoplayEnabled =
+        ref.watch(autoplayEnabledProvider).valueOrNull ?? true;
+    final audioOnlyMode = ref.watch(audioOnlyModeProvider).valueOrNull ?? false;
+    final isVideoPlaylist = currentPlaylist?.audioOnly == false;
+    final playbackService = ref.watch(playbackServiceProvider);
+
     return Scaffold(
-      backgroundColor: const Color(0xFF1A1A1A),
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.keyboard_arrow_down, size: 30),
-          onPressed: () => Navigator.pop(context),
-        ),
-        title: Text(
-          currentPlaylist?.name ?? 'Now Playing',
-          style: const TextStyle(fontSize: 14, color: Color(0xFF888888)),
-        ),
-        centerTitle: true,
-      ),
-      body: SafeArea(
-        child: Column(
-          children: [
-            const Spacer(flex: 1),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 40),
-              child: AspectRatio(
-                aspectRatio: 1,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: _buildLargeThumbnail(_thumbnailUrl(track)),
+      backgroundColor: Colors.black,
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          _AudioBackdrop(track: widget.track),
+          SafeArea(
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(4, 2, 4, 0),
+                  child: Row(
+                    children: [
+                      IconButton(
+                        icon: const Icon(
+                          Icons.keyboard_arrow_down,
+                          color: Colors.white,
+                          size: 34,
+                        ),
+                        onPressed: () => Navigator.pop(context),
+                      ),
+                      Expanded(
+                        child: Text(
+                          currentPlaylist?.name ?? 'Now Playing',
+                          style: const TextStyle(
+                            color: Color(0xFFDDDDDD),
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                      const SizedBox(width: 48),
+                    ],
+                  ),
                 ),
-              ),
-            ),
-            const SizedBox(height: 32),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: Text(
-                track.title,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 20,
-                  fontWeight: FontWeight.w600,
+                Expanded(
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      return SingleChildScrollView(
+                        padding: const EdgeInsets.fromLTRB(20, 10, 20, 28),
+                        child: ConstrainedBox(
+                          constraints: BoxConstraints(
+                            minHeight: constraints.maxHeight,
+                          ),
+                          child: Column(
+                            children: [
+                              _AudioArtwork(track: widget.track),
+                              const SizedBox(height: 24),
+                              Text(
+                                widget.track.title,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.w700,
+                                  height: 1.18,
+                                ),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                textAlign: TextAlign.center,
+                              ),
+                              if ((currentPlaylist?.name ?? '').isNotEmpty) ...[
+                                const SizedBox(height: 8),
+                                Text(
+                                  currentPlaylist!.name,
+                                  style: const TextStyle(
+                                    color: Color(0xFFB0B0B0),
+                                    fontSize: 13,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  textAlign: TextAlign.center,
+                                ),
+                              ],
+                              const SizedBox(height: 18),
+                              _AudioProgressPill(
+                                queueIndex:
+                                    queue.isEmpty ? null : clampedQueueIndex,
+                                queueCount: queue.length,
+                                position: position,
+                                duration: duration,
+                              ),
+                              const SizedBox(height: 12),
+                              const SeekBar(),
+                              const SizedBox(height: 6),
+                              _AudioTransportControls(
+                                isPlaying: isPlaying,
+                                onReplay: () {
+                                  _seekBy(ref, const Duration(seconds: -10));
+                                },
+                                onPrevious: () => playbackService.previous(),
+                                onPlayPause: playbackService.togglePlayPause,
+                                onNext: () => playbackService.next(),
+                                onForward: () {
+                                  _seekBy(ref, const Duration(seconds: 10));
+                                },
+                              ),
+                              const SizedBox(height: 12),
+                              Wrap(
+                                alignment: WrapAlignment.center,
+                                crossAxisAlignment: WrapCrossAlignment.center,
+                                spacing: 12,
+                                runSpacing: 4,
+                                children: [
+                                  if (isVideoPlaylist)
+                                    _AudioSecondaryButton(
+                                      icon:
+                                          audioOnlyMode
+                                              ? Icons.videocam_off
+                                              : Icons.videocam,
+                                      color:
+                                          audioOnlyMode
+                                              ? const Color(0xFF64B5F6)
+                                              : Colors.white70,
+                                      tooltip:
+                                          audioOnlyMode
+                                              ? 'Audio only'
+                                              : 'Play video',
+                                      onPressed:
+                                          playbackService.toggleAudioOnlyMode,
+                                    ),
+                                  _AudioSecondaryButton(
+                                    icon: Icons.shuffle,
+                                    color:
+                                        shuffleEnabled
+                                            ? const Color(0xFF64B5F6)
+                                            : Colors.white70,
+                                    tooltip: 'Shuffle',
+                                    onPressed: playbackService.toggleShuffle,
+                                  ),
+                                  const SegmentMarkButton(
+                                    activeColor: Color(0xFF64B5F6),
+                                    inactiveColor: Colors.white70,
+                                  ),
+                                  _AudioSecondaryButton(
+                                    icon: Icons.playlist_play,
+                                    color:
+                                        autoplayEnabled
+                                            ? const Color(0xFF64B5F6)
+                                            : Colors.white70,
+                                    tooltip:
+                                        autoplayEnabled
+                                            ? 'Autoplay on'
+                                            : 'Autoplay off',
+                                    onPressed: playbackService.toggleAutoplay,
+                                  ),
+                                ],
+                              ),
+                              if (queue.length > 1) ...[
+                                const SizedBox(height: 24),
+                                _AudioQueueSection(
+                                  queue: queue,
+                                  queueIndex: clampedQueueIndex,
+                                  playlist: currentPlaylist,
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
                 ),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                textAlign: TextAlign.center,
-              ),
+              ],
             ),
-            const SizedBox(height: 8),
-            Text(
-              currentPlaylist?.name ?? '',
-              style: const TextStyle(color: Color(0xFF888888), fontSize: 14),
-            ),
-            const Spacer(flex: 1),
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 8),
-              child: SeekBar(),
-            ),
-            const SizedBox(height: 8),
-            const PlayerControls(showShuffleAutoplay: true),
-            const Spacer(flex: 1),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
 
-  String? _thumbnailUrl(Track track) {
-    if (track.thumbnailUrl != null && track.thumbnailUrl!.isNotEmpty) {
-      return track.thumbnailUrl;
+  void _seekBy(WidgetRef ref, Duration delta) {
+    final playbackService = ref.read(playbackServiceProvider);
+    final duration = playbackService.duration;
+    var target = playbackService.position + delta;
+    if (target < Duration.zero) {
+      target = Duration.zero;
     }
-    if (track.videoId.isNotEmpty) {
-      return 'https://i.ytimg.com/vi/${track.videoId}/hqdefault.jpg';
+    if (duration > Duration.zero && target > duration) {
+      target = duration;
     }
-    return null;
+    playbackService.seekTo(target);
   }
+}
 
-  Widget _buildLargeThumbnail(String? url) {
+class _AudioBackdrop extends StatelessWidget {
+  final Track track;
+
+  const _AudioBackdrop({required this.track});
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_hasAudioArtwork(track)) {
+      return Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xFF242424), Color(0xFF050505)],
+          ),
+        ),
+      );
+    }
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        ImageFiltered(
+          imageFilter: ui.ImageFilter.blur(sigmaX: 22, sigmaY: 22),
+          child: Transform.scale(
+            scale: 1.08,
+            child: _AudioImage(
+              track: track,
+              fit: BoxFit.cover,
+              showIcon: false,
+            ),
+          ),
+        ),
+        Container(color: Colors.black.withValues(alpha: 0.56)),
+        const DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [Colors.black54, Colors.transparent, Colors.black87],
+              stops: [0.0, 0.42, 1.0],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _AudioArtwork extends StatelessWidget {
+  final Track track;
+
+  const _AudioArtwork({required this.track});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 620),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.45),
+                blurRadius: 28,
+                offset: const Offset(0, 18),
+              ),
+            ],
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: AspectRatio(
+              aspectRatio: 16 / 9,
+              child: _AudioImage(track: track, fit: BoxFit.cover, iconSize: 86),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AudioProgressPill extends StatelessWidget {
+  final int? queueIndex;
+  final int queueCount;
+  final Duration position;
+  final Duration duration;
+
+  const _AudioProgressPill({
+    required this.queueIndex,
+    required this.queueCount,
+    required this.position,
+    required this.duration,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final parts = <String>[
+      if (queueIndex != null) 'Track: ${queueIndex! + 1} / $queueCount',
+      'Progress: ${_formatClock(position)} / ${_formatClock(duration)}',
+    ];
+
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 360),
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.82),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Text(
+        parts.join('  ·  '),
+        style: const TextStyle(
+          color: Color(0xFF4A4A4A),
+          fontSize: 12,
+          fontWeight: FontWeight.w500,
+        ),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        textAlign: TextAlign.center,
+      ),
+    );
+  }
+}
+
+class _AudioTransportControls extends StatelessWidget {
+  final bool isPlaying;
+  final VoidCallback onReplay;
+  final VoidCallback onPrevious;
+  final VoidCallback onPlayPause;
+  final VoidCallback onNext;
+  final VoidCallback onForward;
+
+  const _AudioTransportControls({
+    required this.isPlaying,
+    required this.onReplay,
+    required this.onPrevious,
+    required this.onPlayPause,
+    required this.onNext,
+    required this.onForward,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return FittedBox(
+      fit: BoxFit.scaleDown,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          _AudioPrimaryButton(
+            icon: Icons.replay_10,
+            iconSize: 30,
+            buttonSize: 48,
+            onPressed: onReplay,
+            tooltip: 'Back 10 seconds',
+          ),
+          const SizedBox(width: 8),
+          _AudioPrimaryButton(
+            icon: Icons.skip_previous,
+            iconSize: 40,
+            buttonSize: 52,
+            onPressed: onPrevious,
+            tooltip: 'Previous',
+          ),
+          const SizedBox(width: 12),
+          IconButton(
+            icon: Icon(isPlaying ? Icons.pause : Icons.play_arrow, size: 44),
+            color: Colors.black,
+            tooltip: isPlaying ? 'Pause' : 'Play',
+            style: IconButton.styleFrom(
+              fixedSize: const Size.square(74),
+              backgroundColor: Colors.white,
+              shape: const CircleBorder(),
+            ),
+            onPressed: onPlayPause,
+          ),
+          const SizedBox(width: 12),
+          _AudioPrimaryButton(
+            icon: Icons.skip_next,
+            iconSize: 40,
+            buttonSize: 52,
+            onPressed: onNext,
+            tooltip: 'Next',
+          ),
+          const SizedBox(width: 8),
+          _AudioPrimaryButton(
+            icon: Icons.forward_10,
+            iconSize: 30,
+            buttonSize: 48,
+            onPressed: onForward,
+            tooltip: 'Forward 10 seconds',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AudioPrimaryButton extends StatelessWidget {
+  final IconData icon;
+  final double iconSize;
+  final double buttonSize;
+  final VoidCallback onPressed;
+  final String tooltip;
+
+  const _AudioPrimaryButton({
+    required this.icon,
+    required this.iconSize,
+    required this.buttonSize,
+    required this.onPressed,
+    required this.tooltip,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      icon: Icon(icon, size: iconSize),
+      color: Colors.white,
+      tooltip: tooltip,
+      style: IconButton.styleFrom(
+        fixedSize: Size.square(buttonSize),
+        backgroundColor: Colors.black.withValues(alpha: 0.34),
+        shape: const CircleBorder(),
+      ),
+      onPressed: onPressed,
+    );
+  }
+}
+
+class _AudioSecondaryButton extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String tooltip;
+  final VoidCallback onPressed;
+
+  const _AudioSecondaryButton({
+    required this.icon,
+    required this.color,
+    required this.tooltip,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      icon: Icon(icon, size: 24),
+      color: color,
+      tooltip: tooltip,
+      onPressed: onPressed,
+    );
+  }
+}
+
+class _AudioQueueSection extends ConsumerWidget {
+  final List<Track> queue;
+  final int queueIndex;
+  final Playlist? playlist;
+
+  const _AudioQueueSection({
+    required this.queue,
+    required this.queueIndex,
+    required this.playlist,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final playbackService = ref.watch(playbackServiceProvider);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 4),
+          child: Text(
+            'Queue',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 15,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        ListView.separated(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          itemCount: queue.length,
+          separatorBuilder: (_, __) => const SizedBox(height: 4),
+          itemBuilder: (context, index) {
+            final track = queue[index];
+            final isCurrent = index == queueIndex;
+            return _AudioQueueTile(
+              track: track,
+              ordinal: index + 1,
+              isCurrent: isCurrent,
+              onTap:
+                  isCurrent
+                      ? null
+                      : () {
+                        playbackService.playTrack(
+                          track,
+                          queue,
+                          playlist: playlist,
+                        );
+                      },
+            );
+          },
+        ),
+      ],
+    );
+  }
+}
+
+class _AudioQueueTile extends StatelessWidget {
+  final Track track;
+  final int ordinal;
+  final bool isCurrent;
+  final VoidCallback? onTap;
+
+  const _AudioQueueTile({
+    required this.track,
+    required this.ordinal,
+    required this.isCurrent,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: onTap,
+        child: Container(
+          decoration: BoxDecoration(
+            color:
+                isCurrent
+                    ? Colors.white.withValues(alpha: 0.09)
+                    : Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 30,
+                child: Text(
+                  ordinal.toString(),
+                  style: TextStyle(
+                    color: isCurrent ? const Color(0xFF64B5F6) : Colors.white54,
+                    fontSize: 12,
+                    fontWeight: isCurrent ? FontWeight.w700 : FontWeight.w500,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              const SizedBox(width: 8),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
+                child: SizedBox(
+                  width: 58,
+                  height: 34,
+                  child: _AudioImage(track: track, fit: BoxFit.cover),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  track.title,
+                  style: TextStyle(
+                    color: isCurrent ? const Color(0xFF64B5F6) : Colors.white,
+                    fontSize: 13,
+                    fontWeight: isCurrent ? FontWeight.w700 : FontWeight.w500,
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (isCurrent)
+                const Padding(
+                  padding: EdgeInsets.only(left: 8),
+                  child: Icon(
+                    Icons.equalizer,
+                    color: Color(0xFF64B5F6),
+                    size: 20,
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AudioImage extends StatelessWidget {
+  final Track track;
+  final BoxFit fit;
+  final double iconSize;
+  final bool showIcon;
+
+  const _AudioImage({
+    required this.track,
+    required this.fit,
+    this.iconSize = 24,
+    this.showIcon = true,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final path = _thumbnailPath(track);
+    final placeholder = _AudioImagePlaceholder(
+      iconSize: iconSize,
+      showIcon: showIcon,
+    );
+    if (path != null) {
+      return Image.file(
+        File(path),
+        fit: fit,
+        errorBuilder: (_, __, ___) => placeholder,
+      );
+    }
+
+    final url = _thumbnailUrl(track);
     if (url != null && url.isNotEmpty) {
       return CachedNetworkImage(
         imageUrl: url,
-        fit: BoxFit.cover,
-        placeholder: (_, __) => Container(color: const Color(0xFF2A2A2A)),
-        errorWidget: (_, __, ___) => _largePlaceholder(),
+        fit: fit,
+        placeholder: (_, __) => placeholder,
+        errorWidget: (_, __, ___) => placeholder,
       );
     }
-    return _largePlaceholder();
-  }
 
-  Widget _largePlaceholder() {
+    return placeholder;
+  }
+}
+
+class _AudioImagePlaceholder extends StatelessWidget {
+  final double iconSize;
+  final bool showIcon;
+
+  const _AudioImagePlaceholder({
+    required this.iconSize,
+    required this.showIcon,
+  });
+
+  @override
+  Widget build(BuildContext context) {
     return Container(
-      color: const Color(0xFF2A2A2A),
-      child: const Center(
-        child: Icon(Icons.music_note, color: Color(0xFF444444), size: 80),
-      ),
+      color: const Color(0xFF252525),
+      child:
+          showIcon
+              ? Center(
+                child: Icon(
+                  Icons.music_note,
+                  color: const Color(0xFF595959),
+                  size: iconSize,
+                ),
+              )
+              : null,
     );
   }
+}
+
+bool _hasAudioArtwork(Track track) =>
+    _thumbnailPath(track) != null || _thumbnailUrl(track) != null;
+
+String? _thumbnailPath(Track track) {
+  final path = track.thumbnailPath;
+  if (path == null || path.isEmpty) return null;
+  return File(path).existsSync() ? path : null;
+}
+
+String? _thumbnailUrl(Track track) {
+  if (track.thumbnailUrl != null && track.thumbnailUrl!.isNotEmpty) {
+    return track.thumbnailUrl;
+  }
+  if (track.videoId.isNotEmpty) {
+    return 'https://i.ytimg.com/vi/${track.videoId}/hqdefault.jpg';
+  }
+  return null;
+}
+
+String _formatClock(Duration d) {
+  final hours = d.inHours;
+  final minutes = d.inMinutes.remainder(60);
+  final seconds = d.inSeconds.remainder(60);
+  if (hours > 0) {
+    return '$hours:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+  }
+  return '${d.inMinutes}:${seconds.toString().padLeft(2, '0')}';
 }

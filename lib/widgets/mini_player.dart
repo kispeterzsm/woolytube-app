@@ -8,7 +8,9 @@ import '../pages/player_page.dart';
 import 'sponsorblock_progress_bar.dart';
 
 class MiniPlayerBar extends ConsumerStatefulWidget {
-  const MiniPlayerBar({super.key});
+  final VoidCallback? onOpenPlayer;
+
+  const MiniPlayerBar({super.key, this.onOpenPlayer});
 
   @override
   ConsumerState<MiniPlayerBar> createState() => _MiniPlayerBarState();
@@ -60,11 +62,7 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
             : 0.0;
 
     return GestureDetector(
-      onTap: () {
-        Navigator.of(
-          context,
-        ).push(MaterialPageRoute(builder: (_) => const PlayerPage()));
-      },
+      onTap: _openPlayer,
       child: Container(
         decoration: const BoxDecoration(
           color: Color(0xFF2A2A2A),
@@ -168,6 +166,18 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
         ),
       ),
     );
+  }
+
+  void _openPlayer() {
+    final openPlayer = widget.onOpenPlayer;
+    if (openPlayer != null) {
+      openPlayer();
+      return;
+    }
+
+    Navigator.maybeOf(
+      context,
+    )?.push(MaterialPageRoute(builder: (_) => const PlayerPage()));
   }
 
   Widget _buildThumbnail(String? url) {
