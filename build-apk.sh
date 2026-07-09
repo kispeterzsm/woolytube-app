@@ -36,10 +36,21 @@ resolve_command() {
 }
 
 configure_java_21() {
-  local java_home="${JAVA_21_HOME:-/usr/lib/jvm/java-21-openjdk}"
+  local java_home="${JAVA_21_HOME:-}"
 
-  if [[ ! -x "$java_home/bin/java" ]]; then
-    echo "Missing Java 21 at $java_home. Set JAVA_21_HOME to the JDK 21 path." >&2
+  if [[ -z "$java_home" ]]; then
+    for candidate in \
+      /usr/lib/jvm/java-21-openjdk \
+      /home/wooly/.local/share/jdks/jdk-21.0.11+10; do
+      if [[ -x "$candidate/bin/java" ]]; then
+        java_home="$candidate"
+        break
+      fi
+    done
+  fi
+
+  if [[ -z "$java_home" || ! -x "$java_home/bin/java" ]]; then
+    echo "Missing Java 21. Set JAVA_21_HOME to the JDK 21 path." >&2
     exit 69
   fi
 
