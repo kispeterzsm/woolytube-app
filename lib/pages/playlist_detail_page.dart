@@ -369,22 +369,27 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
               const Divider(height: 1, color: Color(0xFF333333)),
               // Track list
               Expanded(
-                child: ListView.builder(
-                  controller: _trackListController,
-                  itemCount: filteredTracks.length,
-                  itemBuilder: (context, index) {
-                    final track = filteredTracks[index];
-                    final isCurrentTrack = currentTrack?.id == track.id;
-                    return KeyedSubtree(
-                      key: _trackTileKey(track.id),
-                      child: _buildTrackTile(
-                        track,
-                        isCurrentTrack: isCurrentTrack,
-                        isCurrentlyPlaying: isCurrentTrack && isPlaying,
-                        allTracks: tracks,
+                child: ValueListenableBuilder<double>(
+                  valueListenable: audioPlayerOverlayHeightNotifier,
+                  builder:
+                      (context, overlayHeight, _) => ListView.builder(
+                        controller: _trackListController,
+                        padding: EdgeInsets.only(bottom: overlayHeight),
+                        itemCount: filteredTracks.length,
+                        itemBuilder: (context, index) {
+                          final track = filteredTracks[index];
+                          final isCurrentTrack = currentTrack?.id == track.id;
+                          return KeyedSubtree(
+                            key: _trackTileKey(track.id),
+                            child: _buildTrackTile(
+                              track,
+                              isCurrentTrack: isCurrentTrack,
+                              isCurrentlyPlaying: isCurrentTrack && isPlaying,
+                              allTracks: tracks,
+                            ),
+                          );
+                        },
                       ),
-                    );
-                  },
                 ),
               ),
             ],

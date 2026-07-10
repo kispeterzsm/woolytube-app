@@ -47,6 +47,12 @@ final videoAspectProvider = StreamProvider<double?>((ref) {
 /// initState/dispose without violating lifecycle rules.
 final ValueNotifier<bool> videoFullscreenNotifier = ValueNotifier<bool>(false);
 
+/// The vertical space occupied by the expanded audio-player overlay. Pages
+/// behind the pass-through overlay use this as a scroll inset so their last
+/// items remain reachable.
+final ValueNotifier<double> audioPlayerOverlayHeightNotifier =
+    ValueNotifier<double>(0);
+
 final shuffleEnabledProvider = StreamProvider<bool>((ref) {
   return ref.watch(playbackServiceProvider).shuffleEnabledStream;
 });

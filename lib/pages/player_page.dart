@@ -643,16 +643,45 @@ class _AudioPlayerView extends ConsumerStatefulWidget {
 }
 
 class _AudioPlayerViewState extends ConsumerState<_AudioPlayerView> {
+  final _controlPanelKey = GlobalKey();
+
   @override
   void initState() {
     super.initState();
     videoFullscreenNotifier.value = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _updateOverlayHeight();
+    });
   }
 
   @override
   void dispose() {
+    audioPlayerOverlayHeightNotifier.value = 0;
     videoFullscreenNotifier.value = false;
     super.dispose();
+  }
+
+  bool _onControlPanelSizeChanged(SizeChangedLayoutNotification _) {
+    // SizeChangedLayoutNotification is sent during layout. Read the final
+    // dimensions after that frame rather than observing a previous size.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _updateOverlayHeight();
+    });
+    return false;
+  }
+
+  void _updateOverlayHeight() {
+    if (!mounted) return;
+    // Include the system gesture/navigation area because this route is drawn
+    // edge-to-edge over the page below it.
+    final panelHeight = _controlPanelKey.currentContext?.size?.height;
+    if (panelHeight != null) {
+      final overlayHeight =
+          panelHeight + MediaQuery.viewPaddingOf(context).bottom;
+      if (audioPlayerOverlayHeightNotifier.value != overlayHeight) {
+        audioPlayerOverlayHeightNotifier.value = overlayHeight;
+      }
+    }
   }
 
   @override
@@ -688,27 +717,33 @@ class _AudioPlayerViewState extends ConsumerState<_AudioPlayerView> {
         SafeArea(
           child: Align(
             alignment: Alignment.bottomCenter,
-            child: _AudioControlPanel(
-              track: widget.track,
-              playlist: currentPlaylist,
-              queueIndex: queue.isEmpty ? null : clampedQueueIndex,
-              queueCount: queue.length,
-              position: position,
-              duration: duration,
-              isPlaying: isPlaying,
-              isVideoPlaylist: isVideoPlaylist,
-              audioOnlyMode: audioOnlyMode,
-              shuffleEnabled: shuffleEnabled,
-              autoplayEnabled: autoplayEnabled,
-              onReplay: () => _seekBy(ref, const Duration(seconds: -10)),
-              onPrevious: () => playbackService.previous(),
-              onPlayPause: playbackService.togglePlayPause,
-              onNext: () => playbackService.next(),
-              onForward: () => _seekBy(ref, const Duration(seconds: 10)),
-              onToggleAudioOnly: playbackService.toggleAudioOnlyMode,
-              onToggleShuffle: playbackService.toggleShuffle,
-              onToggleAutoplay: playbackService.toggleAutoplay,
-              onMinimize: () => Navigator.of(context).pop(),
+            child: NotificationListener<SizeChangedLayoutNotification>(
+              onNotification: _onControlPanelSizeChanged,
+              child: SizeChangedLayoutNotifier(
+                key: _controlPanelKey,
+                child: _AudioControlPanel(
+                  track: widget.track,
+                  playlist: currentPlaylist,
+                  queueIndex: queue.isEmpty ? null : clampedQueueIndex,
+                  queueCount: queue.length,
+                  position: position,
+                  duration: duration,
+                  isPlaying: isPlaying,
+                  isVideoPlaylist: isVideoPlaylist,
+                  audioOnlyMode: audioOnlyMode,
+                  shuffleEnabled: shuffleEnabled,
+                  autoplayEnabled: autoplayEnabled,
+                  onReplay: () => _seekBy(ref, const Duration(seconds: -10)),
+                  onPrevious: () => playbackService.previous(),
+                  onPlayPause: playbackService.togglePlayPause,
+                  onNext: () => playbackService.next(),
+                  onForward: () => _seekBy(ref, const Duration(seconds: 10)),
+                  onToggleAudioOnly: playbackService.toggleAudioOnlyMode,
+                  onToggleShuffle: playbackService.toggleShuffle,
+                  onToggleAutoplay: playbackService.toggleAutoplay,
+                  onMinimize: () => Navigator.of(context).pop(),
+                ),
+              ),
             ),
           ),
         ),
