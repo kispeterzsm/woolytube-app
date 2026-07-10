@@ -27,10 +27,16 @@ class PlaylistDetailPage extends ConsumerStatefulWidget {
 }
 
 class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
+  static const _followScrollDuration = Duration(milliseconds: 250);
+
   Playlist? _playlist;
   String _searchQuery = '';
   bool _showSearch = false;
   bool _isUpdating = false;
+  final ScrollController _trackListController = ScrollController();
+  final Map<int, GlobalKey> _trackTileKeys = {};
+  int? _lastFollowedTrackId;
+  int _followRequest = 0;
 
   @override
   void initState() {
@@ -43,6 +49,86 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     final playlist = await db.getPlaylist(widget.playlistId);
     setState(() => _playlist = playlist);
     unawaited(ref.read(metadataServiceProvider).reconcilePlaylist(playlist));
+  }
+
+  @override
+  void dispose() {
+    _trackListController.dispose();
+    super.dispose();
+  }
+
+  GlobalKey _trackTileKey(int trackId) {
+    return _trackTileKeys.putIfAbsent(
+      trackId,
+      () => GlobalKey(debugLabel: 'playlist-track-$trackId'),
+    );
+  }
+
+  /// Keeps the currently playing item visible when playback advances while
+  /// this playlist is open behind the audio controls.
+  void _followCurrentTrack(Track? track, List<Track> visibleTracks) {
+    if (track == null || track.playlistId != widget.playlistId) return;
+
+    final targetIndex = visibleTracks.indexWhere((item) => item.id == track.id);
+    if (targetIndex == -1 || _lastFollowedTrackId == track.id) return;
+
+    _lastFollowedTrackId = track.id;
+    final request = ++_followRequest;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(
+        _scrollToTrack(track.id, targetIndex, visibleTracks.length, request),
+      );
+    });
+  }
+
+  Future<void> _scrollToTrack(
+    int trackId,
+    int targetIndex,
+    int trackCount,
+    int request,
+  ) async {
+    if (!mounted ||
+        request != _followRequest ||
+        !_trackListController.hasClients) {
+      return;
+    }
+
+    final key = _trackTileKeys[trackId];
+    final targetContext = key?.currentContext;
+    if (targetContext != null) {
+      await Scrollable.ensureVisible(
+        targetContext,
+        alignment: 0.4,
+        duration: _followScrollDuration,
+        curve: Curves.easeOut,
+      );
+      return;
+    }
+
+    final position = _trackListController.position;
+    final averageTrackExtent =
+        (position.maxScrollExtent + position.viewportDimension) / trackCount;
+    final targetOffset =
+        ((targetIndex + 0.5) * averageTrackExtent -
+                (position.viewportDimension * 0.4))
+            .clamp(0.0, position.maxScrollExtent)
+            .toDouble();
+
+    await _trackListController.animateTo(
+      targetOffset,
+      duration: _followScrollDuration,
+      curve: Curves.easeOut,
+    );
+
+    if (!mounted || request != _followRequest) return;
+    final refinedTargetContext = key?.currentContext;
+    if (refinedTargetContext == null || !refinedTargetContext.mounted) return;
+    await Scrollable.ensureVisible(
+      refinedTargetContext,
+      alignment: 0.4,
+      duration: _followScrollDuration,
+      curve: Curves.easeOut,
+    );
   }
 
   @override
@@ -108,6 +194,8 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
 
           final playableTracks =
               tracks.where((t) => t.status == 'complete').toList();
+
+          _followCurrentTrack(currentTrack, filteredTracks);
 
           return Column(
             children: [
@@ -240,15 +328,19 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
               // Track list
               Expanded(
                 child: ListView.builder(
+                  controller: _trackListController,
                   itemCount: filteredTracks.length,
                   itemBuilder: (context, index) {
                     final track = filteredTracks[index];
                     final isCurrentTrack = currentTrack?.id == track.id;
-                    return _buildTrackTile(
-                      track,
-                      isCurrentTrack: isCurrentTrack,
-                      isCurrentlyPlaying: isCurrentTrack && isPlaying,
-                      allTracks: tracks,
+                    return KeyedSubtree(
+                      key: _trackTileKey(track.id),
+                      child: _buildTrackTile(
+                        track,
+                        isCurrentTrack: isCurrentTrack,
+                        isCurrentlyPlaying: isCurrentTrack && isPlaying,
+                        allTracks: tracks,
+                      ),
                     );
                   },
                 ),

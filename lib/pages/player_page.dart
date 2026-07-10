@@ -38,13 +38,26 @@ class PlayerPage extends ConsumerWidget {
 }
 
 Route<void> playerPageRoute() {
-  return PageRouteBuilder<void>(
-    opaque: false,
-    pageBuilder: (_, __, ___) => const PlayerPage(),
-    transitionsBuilder: (_, animation, __, child) {
-      return FadeTransition(opacity: animation, child: child);
-    },
-  );
+  return _PassthroughPlayerPageRoute();
+}
+
+/// A non-modal route so the audio player's unused screen area stays
+/// interactive for the page underneath it.
+class _PassthroughPlayerPageRoute extends PageRouteBuilder<void> {
+  _PassthroughPlayerPageRoute()
+    : super(
+        opaque: false,
+        pageBuilder: (_, __, ___) => const PlayerPage(),
+        transitionsBuilder: (_, animation, __, child) {
+          return FadeTransition(opacity: animation, child: child);
+        },
+      );
+
+  // PageRouteBuilder installs a full-screen ModalBarrier by default, including
+  // when it is transparent. Remove it so the audio overlay can pass scrolling
+  // and taps through outside its control panel.
+  @override
+  Widget buildModalBarrier() => const SizedBox.shrink();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -662,45 +675,13 @@ class _AudioPlayerViewState extends ConsumerState<_AudioPlayerView> {
 
     return Stack(
       children: [
-        IgnorePointer(
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.18),
-            ),
-            child: const SizedBox.expand(),
-          ),
-        ),
-        SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(8, 6, 8, 0),
-            child: Row(
-              children: [
-                Material(
-                  color: Colors.black.withValues(alpha: 0.52),
-                  shape: const CircleBorder(),
-                  child: IconButton(
-                    icon: const Icon(
-                      Icons.keyboard_arrow_down,
-                      color: Colors.white,
-                      size: 34,
-                    ),
-                    onPressed: () => Navigator.pop(context),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    currentPlaylist?.name ?? 'Now Playing',
-                    style: const TextStyle(
-                      color: Color(0xFFEEEEEE),
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
+        Positioned.fill(
+          child: IgnorePointer(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.18),
+              ),
+              child: const SizedBox.expand(),
             ),
           ),
         ),
@@ -727,6 +708,7 @@ class _AudioPlayerViewState extends ConsumerState<_AudioPlayerView> {
               onToggleAudioOnly: playbackService.toggleAudioOnlyMode,
               onToggleShuffle: playbackService.toggleShuffle,
               onToggleAutoplay: playbackService.toggleAutoplay,
+              onMinimize: () => Navigator.of(context).pop(),
             ),
           ),
         ),
@@ -768,6 +750,7 @@ class _AudioControlPanel extends StatelessWidget {
   final VoidCallback onToggleAudioOnly;
   final VoidCallback onToggleShuffle;
   final VoidCallback onToggleAutoplay;
+  final VoidCallback onMinimize;
 
   const _AudioControlPanel({
     required this.track,
@@ -789,6 +772,7 @@ class _AudioControlPanel extends StatelessWidget {
     required this.onToggleAudioOnly,
     required this.onToggleShuffle,
     required this.onToggleAutoplay,
+    required this.onMinimize,
   });
 
   @override
@@ -814,49 +798,57 @@ class _AudioControlPanel extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Row(
-                children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(5),
-                    child: SizedBox(
-                      width: 82,
-                      height: 46,
-                      child: _AudioImage(track: track, fit: BoxFit.cover),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          track.title,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 15,
-                            fontWeight: FontWeight.w700,
-                            height: 1.18,
-                          ),
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
+              Semantics(
+                button: true,
+                label: 'Minimize player',
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: onMinimize,
+                  child: Row(
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(5),
+                        child: SizedBox(
+                          width: 82,
+                          height: 46,
+                          child: _AudioImage(track: track, fit: BoxFit.cover),
                         ),
-                        if ((playlist?.name ?? '').isNotEmpty) ...[
-                          const SizedBox(height: 3),
-                          Text(
-                            playlist!.name,
-                            style: const TextStyle(
-                              color: Color(0xFFB0B0B0),
-                              fontSize: 12,
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              track.title,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700,
+                                height: 1.18,
+                              ),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
                             ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      ],
-                    ),
+                            if ((playlist?.name ?? '').isNotEmpty) ...[
+                              const SizedBox(height: 3),
+                              Text(
+                                playlist!.name,
+                                style: const TextStyle(
+                                  color: Color(0xFFB0B0B0),
+                                  fontSize: 12,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
-                ],
+                ),
               ),
               const SizedBox(height: 12),
               _AudioProgressPill(
