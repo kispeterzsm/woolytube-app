@@ -27,6 +27,7 @@ class _HomePageState extends ConsumerState<HomePage> {
   AppUpdate? _availableUpdate;
   Future<void>? _updateCheck;
   bool _isCheckingForUpdate = false;
+  bool _isDownloadingUpdate = false;
 
   @override
   void initState() {
@@ -50,15 +51,19 @@ class _HomePageState extends ConsumerState<HomePage> {
         actions: [
           IconButton(
             icon: Icon(
-              Icons.system_update,
+              _isDownloadingUpdate ? Icons.downloading : Icons.system_update,
               color:
-                  _availableUpdate == null
+                  _isDownloadingUpdate
+                      ? const Color(0xFF2196F3)
+                      : _availableUpdate == null
                       ? const Color(0xFF888888)
                       : const Color(0xFF2196F3),
               size: 20,
             ),
             tooltip:
-                _availableUpdate != null
+                _isDownloadingUpdate
+                    ? 'Update is downloading'
+                    : _availableUpdate != null
                     ? 'Update to ${_availableUpdate!.version}'
                     : _isCheckingForUpdate
                     ? 'Checking for updates'
@@ -132,6 +137,15 @@ class _HomePageState extends ConsumerState<HomePage> {
   }
 
   Future<void> _onUpdatePressed() async {
+    if (_isDownloadingUpdate) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('The update is downloading in the background.'),
+        ),
+      );
+      return;
+    }
+
     final availableUpdate = _availableUpdate;
     if (availableUpdate != null) {
       await _confirmAndInstallUpdate(availableUpdate);
@@ -214,33 +228,56 @@ class _HomePageState extends ConsumerState<HomePage> {
     if (!mounted || shouldUpdate != true) return;
 
     var progressDialogVisible = true;
+    void closeProgressDialog({bool showBackgroundMessage = false}) {
+      if (!mounted || !progressDialogVisible) return;
+      progressDialogVisible = false;
+      Navigator.of(context, rootNavigator: true).pop();
+      if (showBackgroundMessage) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Update download continues in the background. '
+              'You’ll be prompted to install it when ready.',
+            ),
+          ),
+        );
+      }
+    }
+
+    setState(() => _isDownloadingUpdate = true);
     unawaited(
       showDialog<void>(
         context: context,
         barrierDismissible: false,
         builder:
-            (context) => const AlertDialog(
-              title: Text('Downloading update'),
+            (context) => AlertDialog(
+              title: const Text('Downloading update'),
               content: Row(
                 children: [
-                  SizedBox(
+                  const SizedBox(
                     width: 28,
                     height: 28,
                     child: CircularProgressIndicator(strokeWidth: 3),
                   ),
-                  SizedBox(width: 16),
-                  Expanded(child: Text('The installer will open when ready.')),
+                  const SizedBox(width: 16),
+                  const Expanded(
+                    child: Text(
+                      'You can keep using WoolyTube while this downloads. '
+                      'The installer will open when it is ready.',
+                    ),
+                  ),
                 ],
               ),
+              actions: [
+                TextButton(
+                  onPressed:
+                      () => closeProgressDialog(showBackgroundMessage: true),
+                  child: const Text('Close — keep downloading'),
+                ),
+              ],
             ),
       ),
     );
-
-    void closeProgressDialog() {
-      if (!mounted || !progressDialogVisible) return;
-      progressDialogVisible = false;
-      Navigator.of(context, rootNavigator: true).pop();
-    }
 
     try {
       await ref.read(updateServiceProvider).downloadAndInstallUpdate(update);
@@ -256,6 +293,10 @@ class _HomePageState extends ConsumerState<HomePage> {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(message)));
+    } finally {
+      if (mounted) {
+        setState(() => _isDownloadingUpdate = false);
+      }
     }
   }
 

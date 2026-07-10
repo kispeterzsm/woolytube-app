@@ -36,7 +36,7 @@ class UpdateService {
   Future<AppUpdate?> checkForUpdate({String? currentVersion}) async {
     final installedVersion =
         currentVersion ?? (await PackageInfo.fromPlatform()).version;
-    final release = await _fetchLatestRelease();
+    final release = await _fetchLatestRelease(await _getSupportedAbis());
     if (release == null || !isVersionNewer(release.version, installedVersion)) {
       return null;
     }
@@ -57,7 +57,21 @@ class UpdateService {
     });
   }
 
-  Future<_GitHubRelease?> _fetchLatestRelease() async {
+  Future<List<String>> _getSupportedAbis() async {
+    try {
+      return await _appUpdateChannel.invokeListMethod<String>(
+            'getSupportedAbis',
+          ) ??
+          const [];
+    } on PlatformException {
+      // Older Android hosts can still use a universal APK release asset.
+      return const [];
+    }
+  }
+
+  Future<_GitHubRelease?> _fetchLatestRelease(
+    List<String> supportedAbis,
+  ) async {
     final request = await _httpClient.getUrl(_latestReleaseUri);
     request.headers.set(
       HttpHeaders.acceptHeader,
@@ -92,7 +106,7 @@ class UpdateService {
       throw const FormatException('Missing GitHub release fields');
     }
 
-    final apkUri = _findApkUri(assets);
+    final apkUri = findCompatibleApkUri(assets, supportedAbis);
     if (apkUri == null) {
       return null;
     }
@@ -103,22 +117,56 @@ class UpdateService {
       downloadUri: apkUri,
     );
   }
+}
 
-  Uri? _findApkUri(List<dynamic> assets) {
-    for (final asset in assets) {
-      if (asset is! Map<String, dynamic>) continue;
+/// Finds the smallest APK that Android can install on this device.
+///
+/// Releases contain one APK per ABI plus a universal APK for older app
+/// versions. An ABI-specific APK avoids downloading native libraries for the
+/// other three architectures.
+Uri? findCompatibleApkUri(
+  List<dynamic> assets,
+  Iterable<String> supportedAbis,
+) {
+  final apkAssets =
+      assets
+          .whereType<Map<String, dynamic>>()
+          .map(
+            (asset) => (
+              name: asset['name'],
+              downloadUrl: asset['browser_download_url'],
+            ),
+          )
+          .where((asset) => asset.name is String && asset.downloadUrl is String)
+          .map(
+            (asset) => (
+              name: (asset.name as String).toLowerCase(),
+              downloadUri: Uri.parse(asset.downloadUrl as String),
+            ),
+          )
+          .where((asset) => asset.name.endsWith('.apk'))
+          .toList();
 
-      final name = asset['name'];
-      final downloadUrl = asset['browser_download_url'];
-      if (name is! String || downloadUrl is! String) continue;
-
-      if (name.toLowerCase().endsWith('.apk')) {
-        return Uri.parse(downloadUrl);
-      }
+  for (final abi in supportedAbis) {
+    final suffix = '-${abi.toLowerCase()}.apk';
+    for (final asset in apkAssets) {
+      if (asset.name.endsWith(suffix)) return asset.downloadUri;
     }
-
-    return null;
   }
+
+  // Keep existing installs updateable while they transition from releases
+  // that published only a universal APK to ABI-specific release assets.
+  const abiSuffixes = [
+    '-arm64-v8a.apk',
+    '-armeabi-v7a.apk',
+    '-x86_64.apk',
+    '-x86.apk',
+  ];
+  for (final asset in apkAssets) {
+    if (!abiSuffixes.any(asset.name.endsWith)) return asset.downloadUri;
+  }
+
+  return null;
 }
 
 class _GitHubRelease {

@@ -78,6 +78,7 @@ class MainActivity : AudioServiceFragmentActivity() {
                     "downloadAndInstallApk" -> {
                         handleDownloadAndInstallApk(call.arguments as? Map<*, *>, result)
                     }
+                    "getSupportedAbis" -> result.success(Build.SUPPORTED_ABIS.toList())
                     else -> result.notImplemented()
                 }
             }

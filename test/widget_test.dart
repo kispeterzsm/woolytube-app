@@ -30,4 +30,39 @@ void main() {
       expect(normalizeVersion('1.2.3-beta.1'), '1.2.3');
     });
   });
+
+  group('findCompatibleApkUri', () {
+    final assets = [
+      {
+        'name': 'woolytube-1.2.2.apk',
+        'browser_download_url': 'https://example.com/woolytube-universal.apk',
+      },
+      {
+        'name': 'woolytube-1.2.2-arm64-v8a.apk',
+        'browser_download_url': 'https://example.com/woolytube-arm64.apk',
+      },
+      {
+        'name': 'woolytube-1.2.2-armeabi-v7a.apk',
+        'browser_download_url': 'https://example.com/woolytube-armv7.apk',
+      },
+    ];
+
+    test('prefers the first ABI supported by the device', () {
+      expect(
+        findCompatibleApkUri(assets, ['arm64-v8a', 'armeabi-v7a']),
+        Uri.parse('https://example.com/woolytube-arm64.apk'),
+      );
+    });
+
+    test('falls back to a universal APK for older releases', () {
+      expect(
+        findCompatibleApkUri(assets, ['x86_64']),
+        Uri.parse('https://example.com/woolytube-universal.apk'),
+      );
+    });
+
+    test('does not select an APK for a different ABI', () {
+      expect(findCompatibleApkUri(assets.skip(1).toList(), ['x86_64']), isNull);
+    });
+  });
 }

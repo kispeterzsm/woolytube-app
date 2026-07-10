@@ -84,6 +84,7 @@ REMOTE="${RELEASE_REMOTE:-origin}"
 ASSET_DIR="build/releases"
 ASSET_NAME="woolytube-$VERSION.apk"
 ASSET_PATH="$ASSET_DIR/$ASSET_NAME"
+ABI_NAMES=("arm64-v8a" "armeabi-v7a" "x86_64" "x86")
 
 if "$GH_BIN" release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   echo "Release $TAG already exists in $REPO" >&2
@@ -118,6 +119,15 @@ perl -0pi -e "s/^version: .*\$/version: $PUBSPEC_VERSION/m" pubspec.yaml
 mkdir -p "$ASSET_DIR"
 cp build/app/outputs/flutter-apk/app-release.apk "$ASSET_PATH"
 
+# Publish a device-sized APK for the in-app updater. Keep the universal APK
+# first for installed versions that predate ABI-aware update selection.
+RELEASE_ASSETS=("$ASSET_PATH")
+for ABI_NAME in "${ABI_NAMES[@]}"; do
+  ABI_ASSET_PATH="$ASSET_DIR/woolytube-$VERSION-$ABI_NAME.apk"
+  cp "build/app/outputs/flutter-apk/app-$ABI_NAME-release.apk" "$ABI_ASSET_PATH"
+  RELEASE_ASSETS+=("$ABI_ASSET_PATH")
+done
+
 if ! "$GIT_BIN" diff --quiet -- pubspec.yaml; then
   "$GIT_BIN" add pubspec.yaml
   "$GIT_BIN" commit -m "Release $VERSION"
@@ -125,7 +135,7 @@ if ! "$GIT_BIN" diff --quiet -- pubspec.yaml; then
   "$GIT_BIN" push "$REMOTE" "$CURRENT_BRANCH"
 fi
 
-"$GH_BIN" release create "$TAG" "$ASSET_PATH" \
+"$GH_BIN" release create "$TAG" "${RELEASE_ASSETS[@]}" \
   --repo "$REPO" \
   --target "$CURRENT_BRANCH" \
   --title "WoolyTube $VERSION" \
