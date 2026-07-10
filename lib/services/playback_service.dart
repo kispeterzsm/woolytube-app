@@ -164,9 +164,13 @@ class PlaybackService {
   // Shuffle state
   List<int> _shuffledIndices = [];
 
-  // Background/foreground transition safety net
+  // Background/foreground transition safety net.
   Duration _lastKnownPosition = Duration.zero;
   bool _wasPlayingBeforeBackground = false;
+  int? _trackIdBeforeBackground;
+  bool _appIsBackgrounded = false;
+  bool _videoTrackDisabledForBackground = false;
+  Future<void> _lifecycleTransition = Future.value();
   List<_SkipSegment> _activeSegments = [];
   bool _isSeekingPastSegment = false;
 
@@ -512,42 +516,94 @@ class PlaybackService {
     }
   }
 
+  /// Serializes video teardown/recovery. Android can report inactive, hidden,
+  /// and paused for one background transition, while the native property call
+  /// itself is asynchronous.
+  Future<void> _enqueueLifecycleTransition(Future<void> Function() transition) {
+    final next = _lifecycleTransition.then<void>((_) => transition());
+    _lifecycleTransition = next.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return _lifecycleTransition;
+  }
+
   /// Disable libmpv's video track before the Android GL surface is destroyed.
-  /// Without this, surface destruction makes libmpv pause and reset the file
-  /// on the next play action. Audio keeps decoding normally.
-  Future<void> handleAppInactive() async {
-    _lastKnownPosition = _player.state.position;
-    _wasPlayingBeforeBackground = _player.state.playing;
-    final native = _player.platform;
-    if (native is NativePlayer) {
-      await native.setProperty('vid', 'no');
-    }
+  /// This is intentionally idempotent because a single background transition
+  /// produces several Flutter lifecycle callbacks. Audio continues decoding.
+  Future<void> handleAppInactive() {
+    return _enqueueLifecycleTransition(() async {
+      if (_appIsBackgrounded) return;
+
+      _appIsBackgrounded = true;
+      _lastKnownPosition = _player.state.position;
+      _wasPlayingBeforeBackground = _player.state.playing;
+      _trackIdBeforeBackground = _currentTrack.value?.id;
+
+      // No video surface means there is nothing to tear down. In particular,
+      // don't modify an audio-only player's selected video track.
+      if (!hasVideoController || !isVideoContent) return;
+
+      final native = _player.platform;
+      if (native is NativePlayer) {
+        _videoTrackDisabledForBackground = true;
+        await native.setProperty('vid', 'no');
+      }
+    });
   }
 
-  /// Re-enable video decoding when the app returns to foreground so the
-  /// Video widget can render again. If libmpv reset position during the
-  /// surface teardown, seek back to where we were.
-  Future<void> handleAppResumed() async {
-    final native = _player.platform;
-    if (native is NativePlayer) {
-      await native.setProperty('vid', 'auto');
-    }
-    final current = _player.state.position;
-    if (_lastKnownPosition > Duration.zero &&
-        (current - _lastKnownPosition).abs() > const Duration(seconds: 2)) {
-      await _player.seek(_lastKnownPosition);
-    }
-    if (_wasPlayingBeforeBackground && !_player.state.playing) {
-      await _player.play();
-    }
+  /// Re-enable video decoding when the app returns to foreground. Only seek
+  /// when libmpv moved *backwards* (the surface teardown reset it); a normally
+  /// advancing background player must never be rewound on unlock.
+  Future<void> handleAppResumed() {
+    return _enqueueLifecycleTransition(() async {
+      if (!_appIsBackgrounded) return;
+
+      _appIsBackgrounded = false;
+      final shouldRestoreVideo = _videoTrackDisabledForBackground;
+      _videoTrackDisabledForBackground = false;
+      final trackIsUnchanged =
+          _currentTrack.value?.id == _trackIdBeforeBackground;
+      final lastKnownPosition = _lastKnownPosition;
+      final shouldResume = _wasPlayingBeforeBackground && trackIsUnchanged;
+
+      // Clear this transition's state before awaiting native work. A new
+      // lifecycle event that arrives afterwards will capture fresh state.
+      _lastKnownPosition = Duration.zero;
+      _wasPlayingBeforeBackground = false;
+      _trackIdBeforeBackground = null;
+
+      if (shouldRestoreVideo) {
+        final native = _player.platform;
+        if (native is NativePlayer) {
+          await native.setProperty('vid', 'auto');
+        }
+      }
+
+      final currentPosition = _player.state.position;
+      if (trackIsUnchanged &&
+          lastKnownPosition > Duration.zero &&
+          currentPosition + const Duration(seconds: 2) < lastKnownPosition) {
+        await _player.seek(lastKnownPosition);
+      }
+      if (shouldResume && !_player.state.playing && !_player.state.completed) {
+        await _player.play();
+      }
+    });
   }
 
-  Future<void> pause() => _player.pause();
+  Future<void> pause() async {
+    // A notification/headset pause while the app is backgrounded is explicit
+    // user intent and must not be undone when the app is opened again.
+    _wasPlayingBeforeBackground = false;
+    await _player.pause();
+  }
+
   Future<void> resume() => _player.play();
 
   Future<void> togglePlayPause() async {
     if (_player.state.playing) {
-      await _player.pause();
+      await pause();
     } else {
       await _player.play();
     }
@@ -683,6 +739,9 @@ class PlaybackService {
   }
 
   Future<void> stop() async {
+    _wasPlayingBeforeBackground = false;
+    _lastKnownPosition = Duration.zero;
+    _trackIdBeforeBackground = null;
     await _player.stop();
     _currentTrack.add(null);
     _currentPlaylist.add(null);

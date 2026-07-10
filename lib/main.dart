@@ -40,8 +40,11 @@ void main() async {
       config: const AudioServiceConfig(
         androidNotificationChannelId: 'com.woolytube.audio',
         androidNotificationChannelName: 'WoolyTube Playback',
-        androidNotificationOngoing: true,
-        androidStopForegroundOnPause: true,
+        // Keep the media service foregrounded across a pause. Android 12+
+        // can reject an attempt to promote a paused service again while the
+        // app is in the background, leaving playback without a wake lock.
+        androidNotificationOngoing: false,
+        androidStopForegroundOnPause: false,
       ),
     );
     audioHandler = handler;

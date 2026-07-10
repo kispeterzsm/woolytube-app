@@ -224,8 +224,10 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
   @override
   Future<void> onTaskRemoved() async {
     // Keep playing when task is removed (user swipes away from recents)
-    // Only stop if nothing is playing
-    if (!_playbackService.isPlaying) {
+    // and keep a paused item recoverable from its media notification. A
+    // transient player pause during video-surface teardown must not be
+    // mistaken for an explicit stop.
+    if (_playbackService.currentTrack == null) {
       await _playbackService.stop();
       await super.onTaskRemoved();
     }
