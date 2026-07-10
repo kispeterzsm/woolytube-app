@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -175,98 +173,6 @@ class InitWrapper extends ConsumerStatefulWidget {
 }
 
 class _InitWrapperState extends ConsumerState<InitWrapper> {
-  bool _checkedForUpdates = false;
-
-  void _checkForUpdatesAfterStartup() {
-    if (_checkedForUpdates) return;
-    _checkedForUpdates = true;
-
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (!mounted) return;
-
-      final updateService = ref.read(updateServiceProvider);
-      final log = ref.read(logServiceProvider);
-
-      try {
-        final update = await updateService.checkForUpdate();
-        if (!mounted || update == null) return;
-
-        final shouldUpdate = await showDialog<bool>(
-          context: context,
-          builder:
-              (context) => AlertDialog(
-                title: const Text('Update available'),
-                content: Text(
-                  'WoolyTube ${update.version} is available. '
-                  'You are running ${update.currentVersion}. '
-                  'Download and install the new APK?',
-                ),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.of(context).pop(false),
-                    child: const Text('Later'),
-                  ),
-                  FilledButton(
-                    onPressed: () => Navigator.of(context).pop(true),
-                    child: const Text('Update'),
-                  ),
-                ],
-              ),
-        );
-        if (!mounted || shouldUpdate != true) return;
-
-        var progressDialogVisible = true;
-        unawaited(
-          showDialog<void>(
-            context: context,
-            barrierDismissible: false,
-            builder:
-                (context) => const AlertDialog(
-                  title: Text('Downloading update'),
-                  content: Row(
-                    children: [
-                      SizedBox(
-                        width: 28,
-                        height: 28,
-                        child: CircularProgressIndicator(strokeWidth: 3),
-                      ),
-                      SizedBox(width: 16),
-                      Expanded(
-                        child: Text('The installer will open when ready.'),
-                      ),
-                    ],
-                  ),
-                ),
-          ),
-        );
-
-        void closeProgressDialog() {
-          if (!mounted || !progressDialogVisible) return;
-          progressDialogVisible = false;
-          Navigator.of(context, rootNavigator: true).pop();
-        }
-
-        try {
-          await updateService.downloadAndInstallUpdate(update);
-          closeProgressDialog();
-        } on PlatformException catch (e) {
-          closeProgressDialog();
-          if (!mounted) return;
-
-          final message =
-              e.code == 'INSTALL_PERMISSION_REQUIRED'
-                  ? 'Allow WoolyTube to install unknown apps, then tap Update again.'
-                  : e.message ?? 'Could not download and install the update.';
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(message)));
-        }
-      } catch (e) {
-        log.warn('update check failed: $e');
-      }
-    });
-  }
-
   @override
   Widget build(BuildContext context) {
     final init = ref.watch(initProvider);
@@ -301,10 +207,7 @@ class _InitWrapperState extends ConsumerState<InitWrapper> {
               ),
             ),
           ),
-      data: (_) {
-        _checkForUpdatesAfterStartup();
-        return const HomePage();
-      },
+      data: (_) => const HomePage(),
     );
   }
 }
