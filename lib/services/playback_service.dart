@@ -66,6 +66,30 @@ class PlaybackSponsorBlockSegment {
       action == SponsorBlockCategoryAction.autoSkip && actionType == 'skip';
 }
 
+/// A track that has a completed local file and can be opened by the player.
+bool isTrackPlayable(Track track) =>
+    track.status == 'complete' && track.filePath != null;
+
+/// Automatic playback honors the per-track always-skip preference. Explicit
+/// selections can opt a single track back in through [playableTracksForPlayback].
+bool isTrackAutomaticallyPlayable(Track track) =>
+    isTrackPlayable(track) && !track.alwaysSkip;
+
+/// Filters a playlist for playback. [directlySelectedTrackId] deliberately
+/// keeps that one always-skipped track, because tapping a track is an explicit
+/// request to play it.
+List<Track> playableTracksForPlayback(
+  List<Track> tracks, {
+  int? directlySelectedTrackId,
+}) =>
+    tracks
+        .where(
+          (track) =>
+              isTrackPlayable(track) &&
+              (!track.alwaysSkip || track.id == directlySelectedTrackId),
+        )
+        .toList();
+
 class PlaybackService {
   late final Player _player;
   final AppDatabase _db;
@@ -86,6 +110,7 @@ class PlaybackService {
   final _currentTrack = BehaviorSubject<Track?>.seeded(null);
   final _currentPlaylist = BehaviorSubject<Playlist?>.seeded(null);
   final _queue = BehaviorSubject<List<Track>>.seeded([]);
+  final _upNextQueue = BehaviorSubject<List<Track>>.seeded([]);
   final _queueIndex = BehaviorSubject<int>.seeded(0);
   final _shuffleEnabled = BehaviorSubject<bool>.seeded(false);
   final _autoplayEnabled = BehaviorSubject<bool>.seeded(true);
@@ -98,6 +123,7 @@ class PlaybackService {
   Stream<Track?> get currentTrackStream => _currentTrack.stream;
   Stream<Playlist?> get currentPlaylistStream => _currentPlaylist.stream;
   Stream<List<Track>> get queueStream => _queue.stream;
+  Stream<List<Track>> get upNextQueueStream => _upNextQueue.stream;
   Stream<int> get queueIndexStream => _queueIndex.stream;
   Stream<bool> get shuffleEnabledStream => _shuffleEnabled.stream;
   Stream<bool> get autoplayEnabledStream => _autoplayEnabled.stream;
@@ -123,6 +149,7 @@ class PlaybackService {
   Track? get currentTrack => _currentTrack.value;
   Playlist? get currentPlaylist => _currentPlaylist.value;
   List<Track> get queue => _queue.value;
+  List<Track> get upNextQueue => _upNextQueue.value;
   int get queueIndex => _queueIndex.value;
   bool get shuffleEnabled => _shuffleEnabled.value;
   bool get autoplayEnabled => _autoplayEnabled.value;
@@ -148,7 +175,9 @@ class PlaybackService {
 
     // Auto-advance on track completion
     _player.stream.completed.listen((completed) {
-      if (completed && _autoplayEnabled.value && _queue.value.isNotEmpty) {
+      if (completed &&
+          _autoplayEnabled.value &&
+          (_queue.value.isNotEmpty || _upNextQueue.value.isNotEmpty)) {
         next();
       }
     });
@@ -237,7 +266,10 @@ class PlaybackService {
     List<Track> allTracks, {
     Playlist? playlist,
   }) async {
-    final playable = _playableTracks(allTracks);
+    final playable = playableTracksForPlayback(
+      allTracks,
+      directlySelectedTrackId: track.id,
+    );
     if (playable.isEmpty) return;
 
     final index = playable.indexWhere((t) => t.id == track.id);
@@ -247,7 +279,7 @@ class PlaybackService {
   }
 
   Future<void> playAll(List<Track> allTracks, {Playlist? playlist}) async {
-    final playable = _playableTracks(allTracks);
+    final playable = playableTracksForPlayback(allTracks);
     if (playable.isEmpty) return;
 
     final index =
@@ -258,10 +290,74 @@ class PlaybackService {
     await _playPlayableTrack(playable, index, playlist: playlist);
   }
 
-  List<Track> _playableTracks(List<Track> tracks) =>
-      tracks
-          .where((t) => t.status == 'complete' && t.filePath != null)
-          .toList();
+  /// Adds exactly one track to the separate up-next queue. It intentionally
+  /// does not replace or append the source playlist's playback list.
+  Future<bool> addToUpNextQueue(Track track) async {
+    final fresh = await _db.getTrack(track.id);
+    if (fresh == null || !isTrackAutomaticallyPlayable(fresh)) return false;
+
+    _upNextQueue.add([..._upNextQueue.value, fresh]);
+    return true;
+  }
+
+  /// Starts the first queued item when nothing is currently playing. This
+  /// makes “Add to queue” useful before a playlist has been started.
+  Future<bool> startUpNextQueueIfIdle() async {
+    if (_currentTrack.value != null) return false;
+    return _playNextQueuedTrack();
+  }
+
+  void removeUpNextQueueAt(int index) {
+    final entries = List<Track>.of(_upNextQueue.value);
+    if (index < 0 || index >= entries.length) return;
+    entries.removeAt(index);
+    _upNextQueue.add(entries);
+  }
+
+  void clearUpNextQueue() => _upNextQueue.add([]);
+
+  /// Persists the always-skip preference and refreshes in-memory references
+  /// so a track already waiting in either queue is skipped immediately.
+  Future<void> setAlwaysSkip(Track track, bool alwaysSkip) async {
+    await _db.updateTrackAlwaysSkip(track.id, alwaysSkip);
+
+    List<Track> updateReferences(List<Track> entries) =>
+        entries
+            .map(
+              (entry) =>
+                  entry.id == track.id
+                      ? entry.copyWith(alwaysSkip: alwaysSkip)
+                      : entry,
+            )
+            .toList();
+
+    _queue.add(updateReferences(_queue.value));
+    _upNextQueue.add(updateReferences(_upNextQueue.value));
+
+    final current = _currentTrack.value;
+    if (current?.id == track.id) {
+      _currentTrack.add(current!.copyWith(alwaysSkip: alwaysSkip));
+    }
+  }
+
+  /// Pulls and consumes the next manually queued track, ignoring stale,
+  /// unavailable, deleted, or always-skipped entries along the way.
+  Future<bool> _playNextQueuedTrack() async {
+    final entries = List<Track>.of(_upNextQueue.value);
+    while (entries.isNotEmpty) {
+      final candidate = entries.removeAt(0);
+      _upNextQueue.add(List<Track>.of(entries));
+
+      final fresh = await _db.getTrack(candidate.id);
+      if (fresh == null || !isTrackAutomaticallyPlayable(fresh)) continue;
+
+      await _playlistForTrack(fresh);
+      _currentTrack.add(fresh);
+      await _loadAndPlay(fresh);
+      return true;
+    }
+    return false;
+  }
 
   Future<void> _playPlayableTrack(
     List<Track> playable,
@@ -503,55 +599,65 @@ class PlaybackService {
   }
 
   Future<void> next() async {
-    final q = _queue.value;
-    if (q.isEmpty) return;
-
-    int nextIndex;
-    if (_shuffleEnabled.value && _shuffledIndices.isNotEmpty) {
-      final currentShufflePos = _shuffledIndices.indexOf(_queueIndex.value);
-      final nextShufflePos = currentShufflePos + 1;
-      if (nextShufflePos >= _shuffledIndices.length) return;
-      nextIndex = _shuffledIndices[nextShufflePos];
-    } else {
-      nextIndex = _queueIndex.value + 1;
-      if (nextIndex >= q.length) return;
-    }
-
-    _queueIndex.add(nextIndex);
-    _currentTrack.add(q[nextIndex]);
-    await _loadAndPlay(q[nextIndex]);
+    if (await _playNextQueuedTrack()) return;
+    await _moveWithinPlaylistQueue(forward: true);
   }
 
   Future<void> previous() async {
-    final q = _queue.value;
-    if (q.isEmpty) return;
-
-    // If more than 3 seconds in, restart current track
+    // If more than 3 seconds in, restart current track.
     if (_player.state.position.inSeconds > 3) {
       seekTo(Duration.zero);
       return;
     }
+    await _moveWithinPlaylistQueue(forward: false);
+  }
 
-    int prevIndex;
+  /// Moves through the source playlist queue while bypassing any tracks that
+  /// have become unplayable or are marked always-skip. This is intentionally
+  /// checked at transition time so it applies to both ordered and shuffled
+  /// playback, including preferences changed after playback began.
+  Future<void> _moveWithinPlaylistQueue({required bool forward}) async {
+    final q = _queue.value;
+    if (q.isEmpty) return;
+
+    final currentIndex = _queueIndex.value.clamp(0, q.length - 1).toInt();
     if (_shuffleEnabled.value && _shuffledIndices.isNotEmpty) {
-      final currentShufflePos = _shuffledIndices.indexOf(_queueIndex.value);
-      final prevShufflePos = currentShufflePos - 1;
-      if (prevShufflePos < 0) {
-        seekTo(Duration.zero);
-        return;
+      var currentShufflePos = _shuffledIndices.indexOf(currentIndex);
+      if (currentShufflePos == -1) {
+        _generateShuffledIndices(currentIndex);
+        currentShufflePos = _shuffledIndices.indexOf(currentIndex);
       }
-      prevIndex = _shuffledIndices[prevShufflePos];
-    } else {
-      prevIndex = _queueIndex.value - 1;
-      if (prevIndex < 0) {
-        seekTo(Duration.zero);
-        return;
+
+      var candidateShufflePos = currentShufflePos + (forward ? 1 : -1);
+      while (candidateShufflePos >= 0 &&
+          candidateShufflePos < _shuffledIndices.length) {
+        final candidateIndex = _shuffledIndices[candidateShufflePos];
+        if (await _playAutomaticQueueTrack(q[candidateIndex], candidateIndex)) {
+          return;
+        }
+        candidateShufflePos += forward ? 1 : -1;
       }
+      return;
     }
 
-    _queueIndex.add(prevIndex);
-    _currentTrack.add(q[prevIndex]);
-    await _loadAndPlay(q[prevIndex]);
+    var candidateIndex = currentIndex + (forward ? 1 : -1);
+    while (candidateIndex >= 0 && candidateIndex < q.length) {
+      if (await _playAutomaticQueueTrack(q[candidateIndex], candidateIndex)) {
+        return;
+      }
+      candidateIndex += forward ? 1 : -1;
+    }
+  }
+
+  Future<bool> _playAutomaticQueueTrack(Track candidate, int index) async {
+    final fresh = await _db.getTrack(candidate.id);
+    if (fresh == null || !isTrackAutomaticallyPlayable(fresh)) return false;
+
+    _queueIndex.add(index);
+    await _playlistForTrack(fresh);
+    _currentTrack.add(fresh);
+    await _loadAndPlay(fresh);
+    return true;
   }
 
   void setShuffleEnabled(bool enabled) {
@@ -581,6 +687,7 @@ class PlaybackService {
     _currentTrack.add(null);
     _currentPlaylist.add(null);
     _queue.add([]);
+    _upNextQueue.add([]);
     _queueIndex.add(0);
     _shuffledIndices = [];
     _activeSegments = [];
@@ -593,6 +700,7 @@ class PlaybackService {
     _currentTrack.close();
     _currentPlaylist.close();
     _queue.close();
+    _upNextQueue.close();
     _queueIndex.close();
     _shuffleEnabled.close();
     _autoplayEnabled.close();

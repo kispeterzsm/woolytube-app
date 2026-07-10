@@ -143,6 +143,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     final audioOnlyMode = ref.watch(audioOnlyModeProvider).valueOrNull ?? false;
     final isVideoPlaylist = _playlist?.audioOnly == false;
     final playbackService = ref.watch(playbackServiceProvider);
+    final upNextQueue = ref.watch(upNextQueueProvider).valueOrNull ?? const [];
     final downloadProgress =
         ref.watch(downloadProgressProvider).valueOrNull ??
         DownloadProgress.idle;
@@ -154,6 +155,43 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
       appBar: AppBar(
         title: Text(_playlist?.name ?? 'Playlist'),
         actions: [
+          IconButton(
+            icon: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                const Icon(Icons.queue_music),
+                if (upNextQueue.isNotEmpty)
+                  Positioned(
+                    top: -5,
+                    right: -7,
+                    child: Container(
+                      constraints: const BoxConstraints(minWidth: 16),
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF2196F3),
+                        borderRadius: BorderRadius.circular(9),
+                      ),
+                      child: Text(
+                        upNextQueue.length > 99
+                            ? '99+'
+                            : upNextQueue.length.toString(),
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            tooltip:
+                upNextQueue.isEmpty
+                    ? 'Up next queue'
+                    : 'Up next queue (${upNextQueue.length})',
+            onPressed: _showUpNextQueue,
+          ),
           IconButton(
             icon: Icon(
               _showSearch ? Icons.search_off : Icons.search,
@@ -193,7 +231,11 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                       .toList();
 
           final playableTracks =
-              tracks.where((t) => t.status == 'complete').toList();
+              tracks
+                  .where(
+                    (track) => track.status == 'complete' && !track.alwaysSkip,
+                  )
+                  .toList();
 
           _followCurrentTrack(currentTrack, filteredTracks);
 
@@ -365,12 +407,18 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     final hasLocalFile =
         track.status == 'complete' && track.unavailableReason != null;
     final hasError = track.status == 'error' && track.lastError != null;
-    final subtitle = _trackSubtitle(
+    final trackSubtitle = _trackSubtitle(
       track,
       hasError: hasError,
       isUnavailable: isUnavailable,
       hasLocalFile: hasLocalFile,
     );
+    final subtitle =
+        track.alwaysSkip
+            ? trackSubtitle.isEmpty
+                ? 'Always skip'
+                : 'Always skip · $trackSubtitle'
+            : trackSubtitle;
     final thumbnailWidth =
         MediaQuery.sizeOf(context).width < 360 ? 96.0 : 112.0;
 
@@ -466,7 +514,9 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                         subtitle,
                         style: TextStyle(
                           color:
-                              hasError
+                              track.alwaysSkip
+                                  ? const Color(0xFFE57373)
+                                  : hasError
                                   ? const Color(0xFFAA6666)
                                   : isUnavailable
                                   ? const Color(0xFFAA6666)
@@ -759,7 +809,128 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     }
   }
 
+  Future<void> _showUpNextQueue() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF2A2A2A),
+      builder:
+          (sheetContext) => Consumer(
+            builder: (context, ref, _) {
+              final queue =
+                  ref.watch(upNextQueueProvider).valueOrNull ?? const <Track>[];
+              final playlists =
+                  ref.watch(playlistsProvider).valueOrNull ??
+                  const <Playlist>[];
+              final playlistNames = {
+                for (final playlist in playlists) playlist.id: playlist.name,
+              };
+              final playbackService = ref.read(playbackServiceProvider);
+
+              return SafeArea(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 16, 12, 8),
+                      child: Row(
+                        children: [
+                          const Expanded(
+                            child: Text(
+                              'Up next',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          TextButton(
+                            onPressed:
+                                queue.isEmpty
+                                    ? null
+                                    : playbackService.clearUpNextQueue,
+                            child: const Text('Clear'),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (queue.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.fromLTRB(24, 16, 24, 28),
+                        child: Text(
+                          'Long-press a downloaded track and choose Add to queue.',
+                          style: TextStyle(color: Color(0xFF888888)),
+                          textAlign: TextAlign.center,
+                        ),
+                      )
+                    else
+                      ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxHeight: MediaQuery.sizeOf(context).height * 0.65,
+                        ),
+                        child: ListView.separated(
+                          shrinkWrap: true,
+                          itemCount: queue.length,
+                          separatorBuilder:
+                              (_, __) => const Divider(
+                                height: 1,
+                                color: Color(0xFF383838),
+                              ),
+                          itemBuilder: (context, index) {
+                            final track = queue[index];
+                            final playlistName =
+                                playlistNames[track.playlistId] ??
+                                'Playlist #${track.playlistId}';
+                            return ListTile(
+                              key: ValueKey('up-next-$index-${track.id}'),
+                              leading: const Icon(
+                                Icons.queue_music,
+                                color: Color(0xFF64B5F6),
+                              ),
+                              title: Text(
+                                track.title,
+                                style: const TextStyle(color: Colors.white),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              subtitle: Text(
+                                '$playlistName · #${track.index}',
+                                style: const TextStyle(
+                                  color: Color(0xFF888888),
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              trailing: IconButton(
+                                icon: const Icon(
+                                  Icons.close,
+                                  color: Colors.white70,
+                                ),
+                                tooltip: 'Remove from queue',
+                                onPressed:
+                                    () => playbackService.removeUpNextQueueAt(
+                                      index,
+                                    ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    const SizedBox(height: 8),
+                  ],
+                ),
+              );
+            },
+          ),
+    );
+  }
+
   void _showTrackActions(Track track) {
+    final canAddToQueue =
+        track.status == 'complete' &&
+        track.filePath != null &&
+        !track.alwaysSkip;
+
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF2A2A2A),
@@ -784,6 +955,96 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                       textAlign: TextAlign.center,
                     ),
                   ),
+                  ListTile(
+                    leading: const Icon(
+                      Icons.queue_music,
+                      color: Color(0xFF64B5F6),
+                    ),
+                    title: const Text(
+                      'Add to queue',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    subtitle: Text(
+                      track.alwaysSkip
+                          ? 'Turn off Always skip before queueing this track'
+                          : canAddToQueue
+                          ? 'Play only this track after the current one'
+                          : 'Download this track before adding it to the queue',
+                      style: const TextStyle(color: Color(0xFF888888)),
+                    ),
+                    enabled: canAddToQueue,
+                    onTap:
+                        canAddToQueue
+                            ? () async {
+                              Navigator.pop(sheetContext);
+                              final playbackService = ref.read(
+                                playbackServiceProvider,
+                              );
+                              final added = await playbackService
+                                  .addToUpNextQueue(track);
+                              if (!mounted) return;
+                              if (!added) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text(
+                                      'That track cannot be added to the queue',
+                                    ),
+                                  ),
+                                );
+                                return;
+                              }
+                              final started =
+                                  await playbackService
+                                      .startUpNextQueueIfIdle();
+                              if (!mounted) return;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    started
+                                        ? 'Added to queue and started playback'
+                                        : 'Added to queue',
+                                  ),
+                                ),
+                              );
+                            }
+                            : null,
+                  ),
+                  ListTile(
+                    leading: Icon(
+                      track.alwaysSkip ? Icons.play_arrow : Icons.skip_next,
+                      color:
+                          track.alwaysSkip
+                              ? const Color(0xFF64B5F6)
+                              : const Color(0xFFE57373),
+                    ),
+                    title: Text(
+                      track.alwaysSkip ? 'Stop always skipping' : 'Always skip',
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                    subtitle: Text(
+                      track.alwaysSkip
+                          ? 'Allow this track during automatic playback again'
+                          : 'Skip it during autoplay and shuffle; tap it directly to play',
+                      style: const TextStyle(color: Color(0xFF888888)),
+                    ),
+                    onTap: () async {
+                      Navigator.pop(sheetContext);
+                      await ref
+                          .read(playbackServiceProvider)
+                          .setAlwaysSkip(track, !track.alwaysSkip);
+                      if (!mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            track.alwaysSkip
+                                ? 'Always skip turned off'
+                                : 'This track will be skipped automatically',
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                  const Divider(height: 1, color: Color(0xFF3A3A3A)),
                   // Always: Copy video ID
                   ListTile(
                     leading: const Icon(Icons.copy, color: Colors.white70),

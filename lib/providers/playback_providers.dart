@@ -72,6 +72,11 @@ final queueProvider = StreamProvider<List<Track>>((ref) {
   return ref.watch(playbackServiceProvider).queueStream;
 });
 
+/// Tracks explicitly added by the user to play ahead of the current playlist.
+final upNextQueueProvider = StreamProvider<List<Track>>((ref) {
+  return ref.watch(playbackServiceProvider).upNextQueueStream;
+});
+
 final queueIndexProvider = StreamProvider<int>((ref) {
   return ref.watch(playbackServiceProvider).queueIndexStream;
 });
