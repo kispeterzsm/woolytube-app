@@ -14,6 +14,7 @@ class DiscoveredTrack {
   final String status;
   final String? unavailableReason;
   final bool isLocalReplacement;
+  final bool alwaysSkip;
   final DateTime? sponsorBlockCheckedAt;
   final String? fileName;
   final List<DiscoveredSponsorBlockSegment> sponsorBlockSegments;
@@ -27,6 +28,7 @@ class DiscoveredTrack {
     required this.status,
     this.unavailableReason,
     this.isLocalReplacement = false,
+    this.alwaysSkip = false,
     this.sponsorBlockCheckedAt,
     this.fileName,
     this.sponsorBlockSegments = const [],
@@ -118,6 +120,7 @@ class MetadataService {
         'status': t.status,
         'unavailableReason': t.unavailableReason,
         'isLocalReplacement': t.isLocalReplacement,
+        'alwaysSkip': t.alwaysSkip,
         'sponsorBlockCheckedAt':
             t.sponsorBlockCheckedAt?.toUtc().toIso8601String(),
         'fileName': t.filePath != null ? p.basename(t.filePath!) : null,
@@ -480,6 +483,7 @@ class MetadataService {
           status: Value(status),
           unavailableReason: Value(dt.unavailableReason),
           isLocalReplacement: Value(dt.isLocalReplacement),
+          alwaysSkip: Value(dt.alwaysSkip),
           filePath: Value(filePath),
           downloadedAt: Value(status == 'complete' ? DateTime.now() : null),
           sponsorBlockCheckedAt: Value(dt.sponsorBlockCheckedAt),
@@ -546,6 +550,7 @@ class MetadataService {
             status: m['status'] as String? ?? 'pending',
             unavailableReason: m['unavailableReason'] as String?,
             isLocalReplacement: m['isLocalReplacement'] as bool? ?? false,
+            alwaysSkip: m['alwaysSkip'] as bool? ?? false,
             sponsorBlockCheckedAt:
                 m['sponsorBlockCheckedAt'] != null
                     ? DateTime.tryParse(m['sponsorBlockCheckedAt'] as String)

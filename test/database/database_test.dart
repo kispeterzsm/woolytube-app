@@ -92,6 +92,18 @@ void main() {
     expect(updated.lastError, isNull);
   });
 
+  test('persists an always-skip preference for a track', () async {
+    final playlist = await insertTestPlaylist(db);
+    final track = await insertTestTrack(db, playlistId: playlist.id);
+
+    expect(track.alwaysSkip, isFalse);
+    await db.updateTrackAlwaysSkip(track.id, true);
+    expect((await db.getTrack(track.id))!.alwaysSkip, isTrue);
+
+    await db.updateTrackAlwaysSkip(track.id, false);
+    expect((await db.getTrack(track.id))!.alwaysSkip, isFalse);
+  });
+
   test('finds only playlists that are due for automatic update', () async {
     final now = DateTime.now();
     final neverUpdated = await insertTestPlaylist(

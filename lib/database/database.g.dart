@@ -1070,6 +1070,21 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
     ),
     defaultValue: const Constant(false),
   );
+  static const VerificationMeta _alwaysSkipMeta = const VerificationMeta(
+    'alwaysSkip',
+  );
+  @override
+  late final GeneratedColumn<bool> alwaysSkip = GeneratedColumn<bool>(
+    'always_skip',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("always_skip" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
   static const VerificationMeta _downloadedAtMeta = const VerificationMeta(
     'downloadedAt',
   );
@@ -1117,6 +1132,7 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
     status,
     unavailableReason,
     isLocalReplacement,
+    alwaysSkip,
     downloadedAt,
     sponsorBlockCheckedAt,
     lastError,
@@ -1225,6 +1241,12 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
         ),
       );
     }
+    if (data.containsKey('always_skip')) {
+      context.handle(
+        _alwaysSkipMeta,
+        alwaysSkip.isAcceptableOrUnknown(data['always_skip']!, _alwaysSkipMeta),
+      );
+    }
     if (data.containsKey('downloaded_at')) {
       context.handle(
         _downloadedAtMeta,
@@ -1313,6 +1335,11 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
             DriftSqlType.bool,
             data['${effectivePrefix}is_local_replacement'],
           )!,
+      alwaysSkip:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.bool,
+            data['${effectivePrefix}always_skip'],
+          )!,
       downloadedAt: attachedDatabase.typeMapping.read(
         DriftSqlType.dateTime,
         data['${effectivePrefix}downloaded_at'],
@@ -1347,6 +1374,10 @@ class Track extends DataClass implements Insertable<Track> {
   final String status;
   final String? unavailableReason;
   final bool isLocalReplacement;
+
+  /// Exclude this track from automatic playback, while still allowing an
+  /// explicit tap to play it.
+  final bool alwaysSkip;
   final DateTime? downloadedAt;
   final DateTime? sponsorBlockCheckedAt;
   final String? lastError;
@@ -1363,6 +1394,7 @@ class Track extends DataClass implements Insertable<Track> {
     required this.status,
     this.unavailableReason,
     required this.isLocalReplacement,
+    required this.alwaysSkip,
     this.downloadedAt,
     this.sponsorBlockCheckedAt,
     this.lastError,
@@ -1392,6 +1424,7 @@ class Track extends DataClass implements Insertable<Track> {
       map['unavailable_reason'] = Variable<String>(unavailableReason);
     }
     map['is_local_replacement'] = Variable<bool>(isLocalReplacement);
+    map['always_skip'] = Variable<bool>(alwaysSkip);
     if (!nullToAbsent || downloadedAt != null) {
       map['downloaded_at'] = Variable<DateTime>(downloadedAt);
     }
@@ -1435,6 +1468,7 @@ class Track extends DataClass implements Insertable<Track> {
               ? const Value.absent()
               : Value(unavailableReason),
       isLocalReplacement: Value(isLocalReplacement),
+      alwaysSkip: Value(alwaysSkip),
       downloadedAt:
           downloadedAt == null && nullToAbsent
               ? const Value.absent()
@@ -1470,6 +1504,7 @@ class Track extends DataClass implements Insertable<Track> {
         json['unavailableReason'],
       ),
       isLocalReplacement: serializer.fromJson<bool>(json['isLocalReplacement']),
+      alwaysSkip: serializer.fromJson<bool>(json['alwaysSkip']),
       downloadedAt: serializer.fromJson<DateTime?>(json['downloadedAt']),
       sponsorBlockCheckedAt: serializer.fromJson<DateTime?>(
         json['sponsorBlockCheckedAt'],
@@ -1493,6 +1528,7 @@ class Track extends DataClass implements Insertable<Track> {
       'status': serializer.toJson<String>(status),
       'unavailableReason': serializer.toJson<String?>(unavailableReason),
       'isLocalReplacement': serializer.toJson<bool>(isLocalReplacement),
+      'alwaysSkip': serializer.toJson<bool>(alwaysSkip),
       'downloadedAt': serializer.toJson<DateTime?>(downloadedAt),
       'sponsorBlockCheckedAt': serializer.toJson<DateTime?>(
         sponsorBlockCheckedAt,
@@ -1514,6 +1550,7 @@ class Track extends DataClass implements Insertable<Track> {
     String? status,
     Value<String?> unavailableReason = const Value.absent(),
     bool? isLocalReplacement,
+    bool? alwaysSkip,
     Value<DateTime?> downloadedAt = const Value.absent(),
     Value<DateTime?> sponsorBlockCheckedAt = const Value.absent(),
     Value<String?> lastError = const Value.absent(),
@@ -1535,6 +1572,7 @@ class Track extends DataClass implements Insertable<Track> {
             ? unavailableReason.value
             : this.unavailableReason,
     isLocalReplacement: isLocalReplacement ?? this.isLocalReplacement,
+    alwaysSkip: alwaysSkip ?? this.alwaysSkip,
     downloadedAt: downloadedAt.present ? downloadedAt.value : this.downloadedAt,
     sponsorBlockCheckedAt:
         sponsorBlockCheckedAt.present
@@ -1572,6 +1610,8 @@ class Track extends DataClass implements Insertable<Track> {
           data.isLocalReplacement.present
               ? data.isLocalReplacement.value
               : this.isLocalReplacement,
+      alwaysSkip:
+          data.alwaysSkip.present ? data.alwaysSkip.value : this.alwaysSkip,
       downloadedAt:
           data.downloadedAt.present
               ? data.downloadedAt.value
@@ -1599,6 +1639,7 @@ class Track extends DataClass implements Insertable<Track> {
           ..write('status: $status, ')
           ..write('unavailableReason: $unavailableReason, ')
           ..write('isLocalReplacement: $isLocalReplacement, ')
+          ..write('alwaysSkip: $alwaysSkip, ')
           ..write('downloadedAt: $downloadedAt, ')
           ..write('sponsorBlockCheckedAt: $sponsorBlockCheckedAt, ')
           ..write('lastError: $lastError')
@@ -1620,6 +1661,7 @@ class Track extends DataClass implements Insertable<Track> {
     status,
     unavailableReason,
     isLocalReplacement,
+    alwaysSkip,
     downloadedAt,
     sponsorBlockCheckedAt,
     lastError,
@@ -1640,6 +1682,7 @@ class Track extends DataClass implements Insertable<Track> {
           other.status == this.status &&
           other.unavailableReason == this.unavailableReason &&
           other.isLocalReplacement == this.isLocalReplacement &&
+          other.alwaysSkip == this.alwaysSkip &&
           other.downloadedAt == this.downloadedAt &&
           other.sponsorBlockCheckedAt == this.sponsorBlockCheckedAt &&
           other.lastError == this.lastError);
@@ -1658,6 +1701,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
   final Value<String> status;
   final Value<String?> unavailableReason;
   final Value<bool> isLocalReplacement;
+  final Value<bool> alwaysSkip;
   final Value<DateTime?> downloadedAt;
   final Value<DateTime?> sponsorBlockCheckedAt;
   final Value<String?> lastError;
@@ -1674,6 +1718,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
     this.status = const Value.absent(),
     this.unavailableReason = const Value.absent(),
     this.isLocalReplacement = const Value.absent(),
+    this.alwaysSkip = const Value.absent(),
     this.downloadedAt = const Value.absent(),
     this.sponsorBlockCheckedAt = const Value.absent(),
     this.lastError = const Value.absent(),
@@ -1691,6 +1736,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
     this.status = const Value.absent(),
     this.unavailableReason = const Value.absent(),
     this.isLocalReplacement = const Value.absent(),
+    this.alwaysSkip = const Value.absent(),
     this.downloadedAt = const Value.absent(),
     this.sponsorBlockCheckedAt = const Value.absent(),
     this.lastError = const Value.absent(),
@@ -1711,6 +1757,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
     Expression<String>? status,
     Expression<String>? unavailableReason,
     Expression<bool>? isLocalReplacement,
+    Expression<bool>? alwaysSkip,
     Expression<DateTime>? downloadedAt,
     Expression<DateTime>? sponsorBlockCheckedAt,
     Expression<String>? lastError,
@@ -1729,6 +1776,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
       if (unavailableReason != null) 'unavailable_reason': unavailableReason,
       if (isLocalReplacement != null)
         'is_local_replacement': isLocalReplacement,
+      if (alwaysSkip != null) 'always_skip': alwaysSkip,
       if (downloadedAt != null) 'downloaded_at': downloadedAt,
       if (sponsorBlockCheckedAt != null)
         'sponsor_block_checked_at': sponsorBlockCheckedAt,
@@ -1749,6 +1797,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
     Value<String>? status,
     Value<String?>? unavailableReason,
     Value<bool>? isLocalReplacement,
+    Value<bool>? alwaysSkip,
     Value<DateTime?>? downloadedAt,
     Value<DateTime?>? sponsorBlockCheckedAt,
     Value<String?>? lastError,
@@ -1766,6 +1815,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
       status: status ?? this.status,
       unavailableReason: unavailableReason ?? this.unavailableReason,
       isLocalReplacement: isLocalReplacement ?? this.isLocalReplacement,
+      alwaysSkip: alwaysSkip ?? this.alwaysSkip,
       downloadedAt: downloadedAt ?? this.downloadedAt,
       sponsorBlockCheckedAt:
           sponsorBlockCheckedAt ?? this.sponsorBlockCheckedAt,
@@ -1812,6 +1862,9 @@ class TracksCompanion extends UpdateCompanion<Track> {
     if (isLocalReplacement.present) {
       map['is_local_replacement'] = Variable<bool>(isLocalReplacement.value);
     }
+    if (alwaysSkip.present) {
+      map['always_skip'] = Variable<bool>(alwaysSkip.value);
+    }
     if (downloadedAt.present) {
       map['downloaded_at'] = Variable<DateTime>(downloadedAt.value);
     }
@@ -1841,6 +1894,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
           ..write('status: $status, ')
           ..write('unavailableReason: $unavailableReason, ')
           ..write('isLocalReplacement: $isLocalReplacement, ')
+          ..write('alwaysSkip: $alwaysSkip, ')
           ..write('downloadedAt: $downloadedAt, ')
           ..write('sponsorBlockCheckedAt: $sponsorBlockCheckedAt, ')
           ..write('lastError: $lastError')
@@ -3153,6 +3207,7 @@ typedef $$TracksTableCreateCompanionBuilder =
       Value<String> status,
       Value<String?> unavailableReason,
       Value<bool> isLocalReplacement,
+      Value<bool> alwaysSkip,
       Value<DateTime?> downloadedAt,
       Value<DateTime?> sponsorBlockCheckedAt,
       Value<String?> lastError,
@@ -3171,6 +3226,7 @@ typedef $$TracksTableUpdateCompanionBuilder =
       Value<String> status,
       Value<String?> unavailableReason,
       Value<bool> isLocalReplacement,
+      Value<bool> alwaysSkip,
       Value<DateTime?> downloadedAt,
       Value<DateTime?> sponsorBlockCheckedAt,
       Value<String?> lastError,
@@ -3287,6 +3343,11 @@ class $$TracksTableFilterComposer
 
   ColumnFilters<bool> get isLocalReplacement => $composableBuilder(
     column: $table.isLocalReplacement,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get alwaysSkip => $composableBuilder(
+    column: $table.alwaysSkip,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -3418,6 +3479,11 @@ class $$TracksTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<bool> get alwaysSkip => $composableBuilder(
+    column: $table.alwaysSkip,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<DateTime> get downloadedAt => $composableBuilder(
     column: $table.downloadedAt,
     builder: (column) => ColumnOrderings(column),
@@ -3506,6 +3572,11 @@ class $$TracksTableAnnotationComposer
 
   GeneratedColumn<bool> get isLocalReplacement => $composableBuilder(
     column: $table.isLocalReplacement,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<bool> get alwaysSkip => $composableBuilder(
+    column: $table.alwaysSkip,
     builder: (column) => column,
   );
 
@@ -3615,6 +3686,7 @@ class $$TracksTableTableManager
                 Value<String> status = const Value.absent(),
                 Value<String?> unavailableReason = const Value.absent(),
                 Value<bool> isLocalReplacement = const Value.absent(),
+                Value<bool> alwaysSkip = const Value.absent(),
                 Value<DateTime?> downloadedAt = const Value.absent(),
                 Value<DateTime?> sponsorBlockCheckedAt = const Value.absent(),
                 Value<String?> lastError = const Value.absent(),
@@ -3631,6 +3703,7 @@ class $$TracksTableTableManager
                 status: status,
                 unavailableReason: unavailableReason,
                 isLocalReplacement: isLocalReplacement,
+                alwaysSkip: alwaysSkip,
                 downloadedAt: downloadedAt,
                 sponsorBlockCheckedAt: sponsorBlockCheckedAt,
                 lastError: lastError,
@@ -3649,6 +3722,7 @@ class $$TracksTableTableManager
                 Value<String> status = const Value.absent(),
                 Value<String?> unavailableReason = const Value.absent(),
                 Value<bool> isLocalReplacement = const Value.absent(),
+                Value<bool> alwaysSkip = const Value.absent(),
                 Value<DateTime?> downloadedAt = const Value.absent(),
                 Value<DateTime?> sponsorBlockCheckedAt = const Value.absent(),
                 Value<String?> lastError = const Value.absent(),
@@ -3665,6 +3739,7 @@ class $$TracksTableTableManager
                 status: status,
                 unavailableReason: unavailableReason,
                 isLocalReplacement: isLocalReplacement,
+                alwaysSkip: alwaysSkip,
                 downloadedAt: downloadedAt,
                 sponsorBlockCheckedAt: sponsorBlockCheckedAt,
                 lastError: lastError,

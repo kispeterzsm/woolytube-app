@@ -48,6 +48,9 @@ class Tracks extends Table {
   TextColumn get unavailableReason => text().nullable()();
   BoolColumn get isLocalReplacement =>
       boolean().withDefault(const Constant(false))();
+  /// Exclude this track from automatic playback, while still allowing an
+  /// explicit tap to play it.
+  BoolColumn get alwaysSkip => boolean().withDefault(const Constant(false))();
   DateTimeColumn get downloadedAt => dateTime().nullable()();
   DateTimeColumn get sponsorBlockCheckedAt => dateTime().nullable()();
   TextColumn get lastError => text().nullable()();
@@ -86,7 +89,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 8;
+  int get schemaVersion => 9;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -160,6 +163,9 @@ class AppDatabase extends _$AppDatabase {
       if (from < 8) {
         await migrator.addColumn(tracks, tracks.sponsorBlockCheckedAt);
       }
+      if (from < 9) {
+        await migrator.addColumn(tracks, tracks.alwaysSkip);
+      }
     },
   );
 
@@ -189,6 +195,9 @@ class AppDatabase extends _$AppDatabase {
             ..where((t) => t.playlistId.equals(playlistId))
             ..orderBy([(t) => OrderingTerm.asc(t.index)]))
           .get();
+
+  Future<Track?> getTrack(int id) =>
+      (select(tracks)..where((t) => t.id.equals(id))).getSingleOrNull();
 
   Stream<List<Track>> watchTracksForPlaylist(int playlistId) =>
       (select(tracks)
@@ -368,6 +377,12 @@ class AppDatabase extends _$AppDatabase {
     await (update(tracks)..where(
       (t) => t.id.equals(trackId),
     )).write(TracksCompanion(isLocalReplacement: Value(isLocalReplacement)));
+  }
+
+  Future<void> updateTrackAlwaysSkip(int trackId, bool alwaysSkip) async {
+    await (update(tracks)..where((t) => t.id.equals(trackId))).write(
+      TracksCompanion(alwaysSkip: Value(alwaysSkip)),
+    );
   }
 
   Future<void> updateTrackSponsorBlockCheckedAt(

@@ -112,6 +112,7 @@ void main() {
         filePath: mediaPath,
         durationSeconds: 123,
         status: 'complete',
+        alwaysSkip: true,
       );
       await db.replaceSponsorBlockSegments(track.id, [
         SponsorBlockSegmentsCompanion.insert(
@@ -139,6 +140,7 @@ void main() {
       expect(tracks, hasLength(1));
       expect(tracks.single['videoId'], 'video-1');
       expect(tracks.single['fileName'], '00001_Song.m4a');
+      expect(tracks.single['alwaysSkip'], isTrue);
       expect(tracks.single['sponsorBlockSegments'], [
         {
           'source': 'sponsorblock',
@@ -250,6 +252,7 @@ void main() {
               title: 'Existing',
               status: 'complete',
               fileName: '00001_Existing.m4a',
+              alwaysSkip: true,
               sponsorBlockSegments: const [
                 DiscoveredSponsorBlockSegment(
                   source: 'local',
@@ -300,6 +303,7 @@ void main() {
       ]);
       expect(tracks[0].status, 'complete');
       expect(tracks[0].filePath, p.join(tempDir.path, '00001_Existing.m4a'));
+      expect(tracks[0].alwaysSkip, isTrue);
       expect(tracks[1].status, 'pending');
       expect(tracks[1].filePath, isNull);
       expect(tracks[2].status, 'unavailable');
