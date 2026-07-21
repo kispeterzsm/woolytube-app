@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../database/database.dart';
 import '../providers/providers.dart';
 import '../services/sponsorblock_service.dart';
+import 'sponsorblock_settings_page.dart';
 
 class PlaylistSettingsPage extends ConsumerStatefulWidget {
   final int playlistId;
@@ -15,6 +17,14 @@ class PlaylistSettingsPage extends ConsumerStatefulWidget {
 }
 
 class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
+  static const _updateFrequencyOptions = <int, String>{
+    1: '1 hour',
+    12: '12 hours',
+    24: '1 day',
+    72: '3 days',
+    168: '1 week',
+  };
+
   Playlist? _playlist;
   late TextEditingController _nameController;
   bool _audioOnly = false;
@@ -41,7 +51,9 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
       _nameController.text = playlist.name;
       _audioOnly = playlist.audioOnly;
       _autoUpdate = playlist.autoUpdate;
-      _updateFrequencyHours = playlist.updateFrequencyHours;
+      _updateFrequencyHours = _nearestUpdateFrequency(
+        playlist.updateFrequencyHours,
+      );
       _includeThumbnails = playlist.includeThumbnails;
       _sponsorBlockEnabled = playlist.sponsorBlockEnabled;
       _sponsorBlockCategoryActions = decodeSponsorBlockCategoryActions(
@@ -104,6 +116,37 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
     }
   }
 
+  Future<void> _openPlaylistOnYouTube() async {
+    final url = _playlist?.url;
+    if (url == null) return;
+
+    final launched = await launchUrl(
+      Uri.parse(url),
+      mode: LaunchMode.externalApplication,
+    );
+    if (!launched && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not open this playlist.')),
+      );
+    }
+  }
+
+  Future<void> _openSponsorBlockSettings() async {
+    final actions = await Navigator.of(
+      context,
+    ).push<Map<String, SponsorBlockCategoryAction>>(
+      MaterialPageRoute(
+        builder:
+            (_) => SponsorBlockSettingsPage(
+              categoryActions: _sponsorBlockCategoryActions,
+            ),
+      ),
+    );
+    if (actions != null && mounted) {
+      setState(() => _sponsorBlockCategoryActions = actions);
+    }
+  }
+
   @override
   void dispose() {
     _nameController.dispose();
@@ -149,13 +192,30 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
                 labelStyle: TextStyle(color: Color(0xFF888888)),
               ),
             ),
-            if (_playlist?.url != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                _playlist!.url,
-                style: const TextStyle(color: Color(0xFF666666), fontSize: 12),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+            if (_playlist != null) ...[
+              const SizedBox(height: 16),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Expanded(
+                    child: TextFormField(
+                      initialValue: _playlist!.url,
+                      readOnly: true,
+                      maxLines: null,
+                      style: const TextStyle(color: Color(0xFFBBBBBB)),
+                      decoration: const InputDecoration(
+                        labelText: 'Playlist link',
+                        labelStyle: TextStyle(color: Color(0xFF888888)),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  OutlinedButton.icon(
+                    onPressed: _openPlaylistOnYouTube,
+                    icon: const Icon(Icons.open_in_new, size: 18),
+                    label: const Text('YouTube'),
+                  ),
+                ],
               ),
             ],
             const SizedBox(height: 32),
@@ -171,6 +231,38 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
               _autoUpdate,
               (v) => setState(() => _autoUpdate = v),
             ),
+            const SizedBox(height: 8),
+            Opacity(
+              opacity: _autoUpdate ? 1 : 0.45,
+              child: DropdownButtonFormField<int>(
+                value: _updateFrequencyHours,
+                isExpanded: true,
+                dropdownColor: const Color(0xFF2A2A2A),
+                decoration: const InputDecoration(
+                  labelText: 'Auto-update frequency',
+                  labelStyle: TextStyle(color: Color(0xFF888888)),
+                  border: OutlineInputBorder(),
+                ),
+                items:
+                    _updateFrequencyOptions.entries
+                        .map(
+                          (entry) => DropdownMenuItem(
+                            value: entry.key,
+                            child: Text(entry.value),
+                          ),
+                        )
+                        .toList(),
+                onChanged:
+                    _autoUpdate
+                        ? (value) {
+                          if (value != null) {
+                            setState(() => _updateFrequencyHours = value);
+                          }
+                        }
+                        : null,
+              ),
+            ),
+            const SizedBox(height: 12),
             _settingsToggle(
               'Include thumbnails',
               'Embed thumbnails in downloaded files',
@@ -184,47 +276,15 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
               _sponsorBlockEnabled,
               (v) => setState(() => _sponsorBlockEnabled = v),
             ),
-            if (_sponsorBlockEnabled) ...[
-              const SizedBox(height: 8),
-              for (final definition in sponsorBlockCategoryDefinitions)
-                _sponsorBlockCategoryActionRow(definition),
-            ],
-            if (_autoUpdate) ...[
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  const Text(
-                    'Update every',
-                    style: TextStyle(color: Colors.white, fontSize: 14),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Slider(
-                      value: _updateFrequencyHours.toDouble(),
-                      min: 1,
-                      max: 168,
-                      divisions: 167,
-                      activeColor: const Color(0xFF2196F3),
-                      inactiveColor: const Color(0xFF333333),
-                      onChanged:
-                          (v) =>
-                              setState(() => _updateFrequencyHours = v.round()),
-                    ),
-                  ),
-                  SizedBox(
-                    width: 60,
-                    child: Text(
-                      _formatFrequency(_updateFrequencyHours),
-                      style: const TextStyle(
-                        color: Color(0xFF888888),
-                        fontSize: 13,
-                      ),
-                      textAlign: TextAlign.right,
-                    ),
-                  ),
-                ],
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: _openSponsorBlockSettings,
+              icon: const Icon(Icons.tune),
+              label: const Text('SponsorBlock settings'),
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 14),
               ),
-            ],
+            ),
             const SizedBox(height: 48),
             OutlinedButton(
               onPressed: _delete,
@@ -285,65 +345,10 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
     );
   }
 
-  Widget _sponsorBlockCategoryActionRow(
-    SponsorBlockCategoryDefinition definition,
-  ) {
-    final action =
-        _sponsorBlockCategoryActions[definition.id] ?? definition.defaultAction;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 5),
-      child: Row(
-        children: [
-          Container(
-            width: 12,
-            height: 12,
-            decoration: BoxDecoration(
-              color: Color(definition.colorValue),
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              definition.label,
-              style: const TextStyle(color: Colors.white, fontSize: 14),
-            ),
-          ),
-          DropdownButtonHideUnderline(
-            child: DropdownButton<SponsorBlockCategoryAction>(
-              value: action,
-              dropdownColor: const Color(0xFF2A2A2A),
-              style: const TextStyle(color: Colors.white, fontSize: 13),
-              iconEnabledColor: const Color(0xFF888888),
-              items:
-                  SponsorBlockCategoryAction.values
-                      .map(
-                        (value) => DropdownMenuItem(
-                          value: value,
-                          child: Text(value.label),
-                        ),
-                      )
-                      .toList(),
-              onChanged:
-                  (value) => setState(() {
-                    if (value != null) {
-                      _sponsorBlockCategoryActions = {
-                        ..._sponsorBlockCategoryActions,
-                        definition.id: value,
-                      };
-                    }
-                  }),
-            ),
-          ),
-        ],
-      ),
+  int _nearestUpdateFrequency(int hours) {
+    return _updateFrequencyOptions.keys.reduce(
+      (nearest, option) =>
+          (option - hours).abs() < (nearest - hours).abs() ? option : nearest,
     );
-  }
-
-  String _formatFrequency(int hours) {
-    if (hours < 24) return '${hours}h';
-    final days = hours ~/ 24;
-    if (days == 7) return '1 week';
-    return '${days}d';
   }
 }
