@@ -17,6 +17,8 @@ import '../services/download_service.dart';
 import '../services/metadata_service.dart';
 import '../services/sponsorblock_service.dart';
 
+enum _TrackActionGroup { youtube, storage, playback }
+
 class PlaylistDetailPage extends ConsumerStatefulWidget {
   final int playlistId;
 
@@ -935,303 +937,439 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
         track.status == 'complete' &&
         track.filePath != null &&
         !track.alwaysSkip;
+    _TrackActionGroup? selectedGroup;
 
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF2A2A2A),
       isScrollControlled: true,
       builder:
-          (sheetContext) => SafeArea(
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Text(
-                      track.title,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                      ),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-                  ListTile(
-                    leading: const Icon(
-                      Icons.queue_music,
-                      color: Color(0xFF64B5F6),
-                    ),
-                    title: const Text(
-                      'Add to queue',
-                      style: TextStyle(color: Colors.white),
-                    ),
-                    subtitle: Text(
-                      track.alwaysSkip
-                          ? 'Turn off Always skip before queueing this track'
-                          : canAddToQueue
-                          ? 'Play only this track after the current one'
-                          : 'Download this track before adding it to the queue',
-                      style: const TextStyle(color: Color(0xFF888888)),
-                    ),
-                    enabled: canAddToQueue,
-                    onTap:
-                        canAddToQueue
-                            ? () async {
+          (sheetContext) => StatefulBuilder(
+            builder:
+                (sheetContext, setSheetState) => SafeArea(
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Text(
+                            track.title,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                            ),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                        ListTile(
+                          leading: const Icon(
+                            Icons.queue_music,
+                            color: Color(0xFF64B5F6),
+                          ),
+                          title: const Text(
+                            'Add to queue',
+                            style: TextStyle(color: Colors.white),
+                          ),
+                          subtitle: Text(
+                            track.alwaysSkip
+                                ? 'Turn off Always skip before queueing this track'
+                                : canAddToQueue
+                                ? 'Play only this track after the current one'
+                                : 'Download this track before adding it to the queue',
+                            style: const TextStyle(color: Color(0xFF888888)),
+                          ),
+                          enabled: canAddToQueue,
+                          onTap:
+                              canAddToQueue
+                                  ? () async {
+                                    Navigator.pop(sheetContext);
+                                    final playbackService = ref.read(
+                                      playbackServiceProvider,
+                                    );
+                                    final added = await playbackService
+                                        .addToUpNextQueue(track);
+                                    if (!mounted) return;
+                                    if (!added) {
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        const SnackBar(
+                                          content: Text(
+                                            'That track cannot be added to the queue',
+                                          ),
+                                        ),
+                                      );
+                                      return;
+                                    }
+                                    final started =
+                                        await playbackService
+                                            .startUpNextQueueIfIdle();
+                                    if (!mounted) return;
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text(
+                                          started
+                                              ? 'Added to queue and started playback'
+                                              : 'Added to queue',
+                                        ),
+                                      ),
+                                    );
+                                  }
+                                  : null,
+                        ),
+                        const Divider(height: 1, color: Color(0xFF3A3A3A)),
+                        if (selectedGroup == null) ...[
+                          ListTile(
+                            key: const ValueKey('track-actions-group-youtube'),
+                            leading: const Icon(
+                              Icons.smart_display,
+                              color: Color(0xFFE57373),
+                            ),
+                            title: const Text(
+                              'YouTube',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                            subtitle: const Text(
+                              'Links, video ID, sharing, and archives',
+                              style: TextStyle(color: Color(0xFF888888)),
+                            ),
+                            trailing: const Icon(
+                              Icons.chevron_right,
+                              color: Colors.white70,
+                            ),
+                            onTap:
+                                () => setSheetState(
+                                  () =>
+                                      selectedGroup = _TrackActionGroup.youtube,
+                                ),
+                          ),
+                          ListTile(
+                            key: const ValueKey('track-actions-group-storage'),
+                            leading: const Icon(
+                              Icons.folder,
+                              color: Color(0xFFFFB74D),
+                            ),
+                            title: const Text(
+                              'Storage',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                            subtitle: const Text(
+                              'Local files, naming, and downloads',
+                              style: TextStyle(color: Color(0xFF888888)),
+                            ),
+                            trailing: const Icon(
+                              Icons.chevron_right,
+                              color: Colors.white70,
+                            ),
+                            onTap:
+                                () => setSheetState(
+                                  () =>
+                                      selectedGroup = _TrackActionGroup.storage,
+                                ),
+                          ),
+                          ListTile(
+                            key: const ValueKey('track-actions-group-playback'),
+                            leading: const Icon(
+                              Icons.tune,
+                              color: Color(0xFF64B5F6),
+                            ),
+                            title: const Text(
+                              'Playback settings',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                            subtitle: const Text(
+                              'Skip segments and automatic skipping',
+                              style: TextStyle(color: Color(0xFF888888)),
+                            ),
+                            trailing: const Icon(
+                              Icons.chevron_right,
+                              color: Colors.white70,
+                            ),
+                            onTap:
+                                () => setSheetState(
+                                  () =>
+                                      selectedGroup =
+                                          _TrackActionGroup.playback,
+                                ),
+                          ),
+                        ] else
+                          ListTile(
+                            key: const ValueKey('track-actions-groups-back'),
+                            leading: const Icon(
+                              Icons.arrow_back,
+                              color: Colors.white70,
+                            ),
+                            title: Text(
+                              selectedGroup == _TrackActionGroup.youtube
+                                  ? 'YouTube'
+                                  : selectedGroup == _TrackActionGroup.storage
+                                  ? 'Storage'
+                                  : 'Playback settings',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            subtitle: const Text(
+                              'Back to action groups',
+                              style: TextStyle(color: Color(0xFF888888)),
+                            ),
+                            onTap:
+                                () => setSheetState(() => selectedGroup = null),
+                          ),
+                        if (selectedGroup == _TrackActionGroup.playback)
+                          ListTile(
+                            leading: Icon(
+                              track.alwaysSkip
+                                  ? Icons.play_arrow
+                                  : Icons.skip_next,
+                              color:
+                                  track.alwaysSkip
+                                      ? const Color(0xFF64B5F6)
+                                      : const Color(0xFFE57373),
+                            ),
+                            title: Text(
+                              track.alwaysSkip
+                                  ? 'Stop always skipping'
+                                  : 'Always skip',
+                              style: const TextStyle(color: Colors.white),
+                            ),
+                            subtitle: Text(
+                              track.alwaysSkip
+                                  ? 'Allow this track during automatic playback again'
+                                  : 'Skip it during autoplay and shuffle; tap it directly to play',
+                              style: const TextStyle(color: Color(0xFF888888)),
+                            ),
+                            onTap: () async {
                               Navigator.pop(sheetContext);
-                              final playbackService = ref.read(
-                                playbackServiceProvider,
-                              );
-                              final added = await playbackService
-                                  .addToUpNextQueue(track);
-                              if (!mounted) return;
-                              if (!added) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text(
-                                      'That track cannot be added to the queue',
-                                    ),
-                                  ),
-                                );
-                                return;
-                              }
-                              final started =
-                                  await playbackService
-                                      .startUpNextQueueIfIdle();
+                              await ref
+                                  .read(playbackServiceProvider)
+                                  .setAlwaysSkip(track, !track.alwaysSkip);
                               if (!mounted) return;
                               ScaffoldMessenger.of(context).showSnackBar(
                                 SnackBar(
                                   content: Text(
-                                    started
-                                        ? 'Added to queue and started playback'
-                                        : 'Added to queue',
+                                    track.alwaysSkip
+                                        ? 'Always skip turned off'
+                                        : 'This track will be skipped automatically',
                                   ),
                                 ),
                               );
-                            }
-                            : null,
-                  ),
-                  ListTile(
-                    leading: Icon(
-                      track.alwaysSkip ? Icons.play_arrow : Icons.skip_next,
-                      color:
-                          track.alwaysSkip
-                              ? const Color(0xFF64B5F6)
-                              : const Color(0xFFE57373),
-                    ),
-                    title: Text(
-                      track.alwaysSkip ? 'Stop always skipping' : 'Always skip',
-                      style: const TextStyle(color: Colors.white),
-                    ),
-                    subtitle: Text(
-                      track.alwaysSkip
-                          ? 'Allow this track during automatic playback again'
-                          : 'Skip it during autoplay and shuffle; tap it directly to play',
-                      style: const TextStyle(color: Color(0xFF888888)),
-                    ),
-                    onTap: () async {
-                      Navigator.pop(sheetContext);
-                      await ref
-                          .read(playbackServiceProvider)
-                          .setAlwaysSkip(track, !track.alwaysSkip);
-                      if (!mounted) return;
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text(
-                            track.alwaysSkip
-                                ? 'Always skip turned off'
-                                : 'This track will be skipped automatically',
+                            },
                           ),
-                        ),
-                      );
-                    },
+                        if (selectedGroup == _TrackActionGroup.youtube)
+                          ListTile(
+                            leading: const Icon(
+                              Icons.open_in_new,
+                              color: Colors.white70,
+                            ),
+                            title: const Text(
+                              'Open on YouTube',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                            onTap: () {
+                              Navigator.pop(sheetContext);
+                              launchUrl(Uri.parse(_videoUrl(track)));
+                            },
+                          ),
+                        if (selectedGroup == _TrackActionGroup.youtube)
+                          ListTile(
+                            leading: const Icon(
+                              Icons.copy,
+                              color: Colors.white70,
+                            ),
+                            title: const Text(
+                              'Copy ID',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                            subtitle: Text(
+                              track.videoId,
+                              style: const TextStyle(color: Color(0xFF888888)),
+                            ),
+                            onTap: () {
+                              Clipboard.setData(
+                                ClipboardData(text: track.videoId),
+                              );
+                              Navigator.pop(sheetContext);
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Video ID copied'),
+                                ),
+                              );
+                            },
+                          ),
+                        if (selectedGroup == _TrackActionGroup.youtube)
+                          ListTile(
+                            leading: const Icon(
+                              Icons.share,
+                              color: Colors.white70,
+                            ),
+                            title: const Text(
+                              'Share',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                            subtitle: const Text(
+                              'Share original YouTube link',
+                              style: TextStyle(color: Color(0xFF888888)),
+                            ),
+                            onTap: () async {
+                              Navigator.pop(sheetContext);
+                              await _shareTrack(track);
+                            },
+                          ),
+                        if (selectedGroup == _TrackActionGroup.youtube)
+                          ListTile(
+                            key: const ValueKey(
+                              'track-actions-find-quietaplaylist',
+                            ),
+                            leading: const Icon(
+                              Icons.travel_explore,
+                              color: Colors.white70,
+                            ),
+                            title: const Text(
+                              'Find on quiteaplaylist',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                            subtitle: const Text(
+                              'Find this video in web archives',
+                              style: TextStyle(color: Color(0xFF888888)),
+                            ),
+                            onTap: () {
+                              Navigator.pop(sheetContext);
+                              launchUrl(
+                                Uri.https('quiteaplaylist.com', '/search', {
+                                  'url': _videoUrl(track),
+                                }),
+                              );
+                            },
+                          ),
+                        if (selectedGroup == _TrackActionGroup.storage)
+                          ListTile(
+                            leading: const Icon(
+                              Icons.file_upload,
+                              color: Colors.white70,
+                            ),
+                            title: const Text(
+                              'Pick local replacement',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                            subtitle: const Text(
+                              'Choose a video/audio file from your device',
+                              style: TextStyle(color: Color(0xFF888888)),
+                            ),
+                            onTap: () async {
+                              Navigator.pop(sheetContext);
+                              await _pickLocalReplacement(track);
+                            },
+                          ),
+                        if (selectedGroup == _TrackActionGroup.playback)
+                          ListTile(
+                            leading: const Icon(
+                              Icons.bookmarks,
+                              color: Colors.white70,
+                            ),
+                            title: const Text(
+                              'Skip segments',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                            subtitle: const Text(
+                              'View, edit, hide, or delete skip segments',
+                              style: TextStyle(color: Color(0xFF888888)),
+                            ),
+                            onTap: () async {
+                              Navigator.pop(sheetContext);
+                              await _showSkipSegments(track);
+                            },
+                          ),
+                        if (selectedGroup == _TrackActionGroup.storage)
+                          ListTile(
+                            leading: const Icon(
+                              Icons.edit,
+                              color: Colors.white70,
+                            ),
+                            title: const Text(
+                              'Override title / filename',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                            subtitle: const Text(
+                              'Edit the stored title or on-disk name',
+                              style: TextStyle(color: Color(0xFF888888)),
+                            ),
+                            onTap: () async {
+                              Navigator.pop(sheetContext);
+                              await _showOverrideDialog(track);
+                            },
+                          ),
+                        if (selectedGroup == _TrackActionGroup.storage &&
+                            track.status == 'complete')
+                          ListTile(
+                            leading: const Icon(
+                              Icons.refresh,
+                              color: Colors.white70,
+                            ),
+                            title: const Text(
+                              'Redownload',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                            subtitle: const Text(
+                              'Delete file and re-download from YouTube',
+                              style: TextStyle(color: Color(0xFF888888)),
+                            ),
+                            onTap: () async {
+                              Navigator.pop(sheetContext);
+                              await _redownloadTrack(track);
+                            },
+                          ),
+                        if (selectedGroup == _TrackActionGroup.storage &&
+                            track.status == 'error' &&
+                            track.lastError != null)
+                          ListTile(
+                            leading: const Icon(
+                              Icons.error_outline,
+                              color: Colors.white70,
+                            ),
+                            title: const Text(
+                              'Show error details',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                            subtitle: Text(
+                              _friendlyError(track.lastError!),
+                              style: const TextStyle(color: Color(0xFFAA6666)),
+                            ),
+                            onTap: () {
+                              Navigator.pop(sheetContext);
+                              _showErrorDetails(track);
+                            },
+                          ),
+                        if (selectedGroup == _TrackActionGroup.storage &&
+                            track.status == 'error')
+                          ListTile(
+                            leading: const Icon(
+                              Icons.replay,
+                              color: Colors.white70,
+                            ),
+                            title: const Text(
+                              'Retry download',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                            subtitle: const Text(
+                              'Download just this video now',
+                              style: TextStyle(color: Color(0xFF888888)),
+                            ),
+                            onTap: () async {
+                              Navigator.pop(sheetContext);
+                              await _startTrackDownload(track);
+                            },
+                          ),
+                        const SizedBox(height: 8),
+                      ],
+                    ),
                   ),
-                  const Divider(height: 1, color: Color(0xFF3A3A3A)),
-                  // Always: Copy video ID
-                  ListTile(
-                    leading: const Icon(Icons.copy, color: Colors.white70),
-                    title: const Text(
-                      'Copy video ID',
-                      style: TextStyle(color: Colors.white),
-                    ),
-                    subtitle: Text(
-                      track.videoId,
-                      style: const TextStyle(color: Color(0xFF888888)),
-                    ),
-                    onTap: () {
-                      Clipboard.setData(ClipboardData(text: track.videoId));
-                      Navigator.pop(sheetContext);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Video ID copied')),
-                      );
-                    },
-                  ),
-                  // Always: Open on YouTube
-                  ListTile(
-                    leading: const Icon(
-                      Icons.open_in_new,
-                      color: Colors.white70,
-                    ),
-                    title: const Text(
-                      'Open on YouTube',
-                      style: TextStyle(color: Colors.white),
-                    ),
-                    onTap: () {
-                      Navigator.pop(sheetContext);
-                      launchUrl(Uri.parse(_videoUrl(track)));
-                    },
-                  ),
-                  // Always: Share original YouTube link
-                  ListTile(
-                    leading: const Icon(Icons.share, color: Colors.white70),
-                    title: const Text(
-                      'Share',
-                      style: TextStyle(color: Colors.white),
-                    ),
-                    subtitle: const Text(
-                      'Share original YouTube link',
-                      style: TextStyle(color: Color(0xFF888888)),
-                    ),
-                    onTap: () async {
-                      Navigator.pop(sheetContext);
-                      await _shareTrack(track);
-                    },
-                  ),
-                  // Unavailable: Search on quiteaplaylist.com
-                  if (track.status == 'unavailable')
-                    ListTile(
-                      leading: const Icon(
-                        Icons.travel_explore,
-                        color: Colors.white70,
-                      ),
-                      title: const Text(
-                        'Search on quiteaplaylist.com',
-                        style: TextStyle(color: Colors.white),
-                      ),
-                      subtitle: const Text(
-                        'Find this video in web archives',
-                        style: TextStyle(color: Color(0xFF888888)),
-                      ),
-                      onTap: () {
-                        Navigator.pop(sheetContext);
-                        launchUrl(
-                          Uri.https('quiteaplaylist.com', '/search', {
-                            'url': _videoUrl(track),
-                          }),
-                        );
-                      },
-                    ),
-                  // Always: Pick local replacement
-                  ListTile(
-                    leading: const Icon(
-                      Icons.file_upload,
-                      color: Colors.white70,
-                    ),
-                    title: const Text(
-                      'Pick local replacement',
-                      style: TextStyle(color: Colors.white),
-                    ),
-                    subtitle: const Text(
-                      'Choose a video/audio file from your device',
-                      style: TextStyle(color: Color(0xFF888888)),
-                    ),
-                    onTap: () async {
-                      Navigator.pop(sheetContext);
-                      await _pickLocalReplacement(track);
-                    },
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.bookmarks, color: Colors.white70),
-                    title: const Text(
-                      'Skip segments',
-                      style: TextStyle(color: Colors.white),
-                    ),
-                    subtitle: const Text(
-                      'View, edit, hide, or delete skip segments',
-                      style: TextStyle(color: Color(0xFF888888)),
-                    ),
-                    onTap: () async {
-                      Navigator.pop(sheetContext);
-                      await _showSkipSegments(track);
-                    },
-                  ),
-                  // Always: Override title / filename
-                  ListTile(
-                    leading: const Icon(Icons.edit, color: Colors.white70),
-                    title: const Text(
-                      'Override title / filename',
-                      style: TextStyle(color: Colors.white),
-                    ),
-                    subtitle: const Text(
-                      'Edit the stored title or on-disk name',
-                      style: TextStyle(color: Color(0xFF888888)),
-                    ),
-                    onTap: () async {
-                      Navigator.pop(sheetContext);
-                      await _showOverrideDialog(track);
-                    },
-                  ),
-                  // Complete: Redownload
-                  if (track.status == 'complete')
-                    ListTile(
-                      leading: const Icon(Icons.refresh, color: Colors.white70),
-                      title: const Text(
-                        'Redownload',
-                        style: TextStyle(color: Colors.white),
-                      ),
-                      subtitle: const Text(
-                        'Delete file and re-download from YouTube',
-                        style: TextStyle(color: Color(0xFF888888)),
-                      ),
-                      onTap: () async {
-                        Navigator.pop(sheetContext);
-                        await _redownloadTrack(track);
-                      },
-                    ),
-                  // Error: Show details
-                  if (track.status == 'error' && track.lastError != null)
-                    ListTile(
-                      leading: const Icon(
-                        Icons.error_outline,
-                        color: Colors.white70,
-                      ),
-                      title: const Text(
-                        'Show error details',
-                        style: TextStyle(color: Colors.white),
-                      ),
-                      subtitle: Text(
-                        _friendlyError(track.lastError!),
-                        style: const TextStyle(color: Color(0xFFAA6666)),
-                      ),
-                      onTap: () {
-                        Navigator.pop(sheetContext);
-                        _showErrorDetails(track);
-                      },
-                    ),
-                  // Error: Retry download
-                  if (track.status == 'error')
-                    ListTile(
-                      leading: const Icon(Icons.replay, color: Colors.white70),
-                      title: const Text(
-                        'Retry download',
-                        style: TextStyle(color: Colors.white),
-                      ),
-                      subtitle: const Text(
-                        'Download just this video now',
-                        style: TextStyle(color: Color(0xFF888888)),
-                      ),
-                      onTap: () async {
-                        Navigator.pop(sheetContext);
-                        await _startTrackDownload(track);
-                      },
-                    ),
-                  const SizedBox(height: 8),
-                ],
-              ),
-            ),
+                ),
           ),
     );
   }
