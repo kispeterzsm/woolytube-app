@@ -1,0 +1,19 @@
+name: woolytube_ytdlp
+description: Native yt-dlp bridge used by WoolyTube.
+publish_to: 'none'
+version: 1.0.0
+
+environment:
+  sdk: ^3.7.2
+  flutter: ">=3.27.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.woolytube.ytdlp
+        pluginClass: YtDlpPlugin

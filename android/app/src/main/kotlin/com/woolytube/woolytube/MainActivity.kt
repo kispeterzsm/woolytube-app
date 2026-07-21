@@ -5,13 +5,11 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
-import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
 import android.util.Log
 import androidx.core.content.FileProvider
 import com.ryanheise.audioservice.AudioServiceFragmentActivity
-import com.ryanheise.audioservice.AudioServicePlugin
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.CoroutineScope
@@ -35,32 +33,12 @@ class MainActivity : AudioServiceFragmentActivity() {
 
     private val updateScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        configureWoolyTubeEngine(AudioServicePlugin.getFlutterEngine(this))
-        super.onCreate(savedInstanceState)
-    }
-
-    override fun provideFlutterEngine(context: Context): FlutterEngine {
-        val flutterEngine = AudioServicePlugin.getFlutterEngine(context)
-        configureWoolyTubeEngine(flutterEngine)
-        return flutterEngine
-    }
-
-    override fun getCachedEngineId(): String {
-        configureWoolyTubeEngine(AudioServicePlugin.getFlutterEngine(this))
-        return AudioServicePlugin.getFlutterEngineId()
-    }
-
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         configureWoolyTubeEngine(flutterEngine)
     }
 
     private fun configureWoolyTubeEngine(flutterEngine: FlutterEngine) {
-        if (!flutterEngine.plugins.has(YtDlpPlugin::class.java)) {
-            flutterEngine.plugins.add(YtDlpPlugin())
-        }
-
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, BACKGROUND_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {

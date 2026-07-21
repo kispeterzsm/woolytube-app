@@ -1,4 +1,4 @@
-package com.woolytube.woolytube
+package com.woolytube.ytdlp
 
 import android.content.Context
 import android.content.Intent
@@ -41,6 +41,8 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 progressSink = null
             }
         })
+
+        Log.i(TAG, "yt-dlp channels attached to Flutter engine")
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {

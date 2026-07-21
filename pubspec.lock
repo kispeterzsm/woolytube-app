@@ -1165,6 +1165,13 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "5.13.0"
+  woolytube_ytdlp:
+    dependency: "direct main"
+    description:
+      path: "plugins/woolytube_ytdlp"
+      relative: true
+    source: path
+    version: "1.0.0"
   xdg_directories:
     dependency: transitive
     description:

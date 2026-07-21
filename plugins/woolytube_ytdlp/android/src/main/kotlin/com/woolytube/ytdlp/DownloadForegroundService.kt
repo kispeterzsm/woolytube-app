@@ -1,4 +1,4 @@
-package com.woolytube.woolytube
+package com.woolytube.ytdlp
 
 import android.app.Notification
 import android.app.NotificationChannel

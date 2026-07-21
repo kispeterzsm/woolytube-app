@@ -32,7 +32,6 @@ class AutoUpdateWorker(
                 flutterLoader.ensureInitializationComplete(applicationContext, null)
 
                 val engine = FlutterEngine(applicationContext)
-                engine.plugins.add(YtDlpPlugin())
 
                 // Set up a method channel so the Dart side can signal completion
                 val latch = CountDownLatch(1)
