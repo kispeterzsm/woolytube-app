@@ -16,6 +16,7 @@ import '../providers/playback_providers.dart';
 import '../services/download_service.dart';
 import '../services/metadata_service.dart';
 import '../services/sponsorblock_service.dart';
+import '../widgets/tap_to_place_cursor_text_field.dart';
 
 enum _TrackActionGroup { youtube, storage, playback }
 
@@ -1820,7 +1821,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                TextField(
+                TapToPlaceCursorTextField(
                   controller: titleController,
                   style: const TextStyle(color: Colors.white),
                   decoration: InputDecoration(
@@ -1832,7 +1833,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                   ),
                 ),
                 const SizedBox(height: 12),
-                TextField(
+                TapToPlaceCursorTextField(
                   controller: filenameController,
                   enabled: hasFile,
                   style: const TextStyle(color: Colors.white),
