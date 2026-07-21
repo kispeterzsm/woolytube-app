@@ -5,6 +5,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:rxdart/rxdart.dart';
 import 'package:path/path.dart' as p;
 import '../database/database.dart';
+import 'playback_notification_controller.dart';
 import 'sponsorblock_service.dart';
 
 class SegmentMarkResult {
@@ -90,7 +91,7 @@ List<Track> playableTracksForPlayback(
         )
         .toList();
 
-class PlaybackService {
+class PlaybackService implements PlaybackNotificationController {
   late final Player _player;
   final AppDatabase _db;
   final Random _random;
@@ -120,11 +121,13 @@ class PlaybackService {
       BehaviorSubject<List<PlaybackSponsorBlockSegment>>.seeded([]);
 
   // Streams
+  @override
   Stream<Track?> get currentTrackStream => _currentTrack.stream;
   Stream<Playlist?> get currentPlaylistStream => _currentPlaylist.stream;
   Stream<List<Track>> get queueStream => _queue.stream;
   Stream<List<Track>> get upNextQueueStream => _upNextQueue.stream;
   Stream<int> get queueIndexStream => _queueIndex.stream;
+  @override
   Stream<bool> get shuffleEnabledStream => _shuffleEnabled.stream;
   Stream<bool> get autoplayEnabledStream => _autoplayEnabled.stream;
   Stream<bool> get audioOnlyModeStream => _audioOnlyMode.stream;
@@ -132,8 +135,11 @@ class PlaybackService {
       _pendingSegmentMarkStart.stream;
   Stream<List<PlaybackSponsorBlockSegment>> get sponsorBlockSegmentsStream =>
       _sponsorBlockSegments.stream;
+  @override
   Stream<Duration> get positionStream => _player.stream.position;
+  @override
   Stream<Duration> get durationStream => _player.stream.duration;
+  @override
   Stream<bool> get isPlayingStream => _player.stream.playing;
   Stream<bool> get isCompletedStream => _player.stream.completed;
   Stream<int?> get videoWidthStream => _player.stream.width;
@@ -146,18 +152,22 @@ class PlaybackService {
   );
 
   // Current values
+  @override
   Track? get currentTrack => _currentTrack.value;
   Playlist? get currentPlaylist => _currentPlaylist.value;
   List<Track> get queue => _queue.value;
   List<Track> get upNextQueue => _upNextQueue.value;
   int get queueIndex => _queueIndex.value;
+  @override
   bool get shuffleEnabled => _shuffleEnabled.value;
   bool get autoplayEnabled => _autoplayEnabled.value;
   bool get audioOnlyMode => _audioOnlyMode.value;
   Duration? get pendingSegmentMarkStart => _pendingSegmentMarkStart.value;
   List<PlaybackSponsorBlockSegment> get sponsorBlockSegments =>
       _sponsorBlockSegments.value;
+  @override
   bool get isPlaying => _player.state.playing;
+  @override
   Duration get position => _player.state.position;
   Duration get duration => _player.state.duration;
 
@@ -265,6 +275,7 @@ class PlaybackService {
   );
 
   /// Start playing a track from a list of tracks
+  @override
   Future<void> playTrack(
     Track track,
     List<Track> allTracks, {
@@ -592,6 +603,7 @@ class PlaybackService {
     });
   }
 
+  @override
   Future<void> pause() async {
     // A notification/headset pause while the app is backgrounded is explicit
     // user intent and must not be undone when the app is opened again.
@@ -599,6 +611,7 @@ class PlaybackService {
     await _player.pause();
   }
 
+  @override
   Future<void> resume() => _player.play();
 
   Future<void> togglePlayPause() async {
@@ -609,6 +622,7 @@ class PlaybackService {
     }
   }
 
+  @override
   Future<void> seekTo(Duration position) => _player.seek(position);
 
   Future<SegmentMarkResult> markLocalSegmentBoundary(String category) async {
@@ -654,11 +668,13 @@ class PlaybackService {
     _pendingSegmentMarkStart.add(null);
   }
 
+  @override
   Future<void> next() async {
     if (await _playNextQueuedTrack()) return;
     await _moveWithinPlaylistQueue(forward: true);
   }
 
+  @override
   Future<void> previous() async {
     // If more than 3 seconds in, restart current track.
     if (_player.state.position.inSeconds > 3) {
@@ -723,11 +739,13 @@ class PlaybackService {
     }
   }
 
+  @override
   void toggleShuffle() => setShuffleEnabled(!_shuffleEnabled.value);
 
   void setAutoplayEnabled(bool enabled) => _autoplayEnabled.add(enabled);
   void toggleAutoplay() => setAutoplayEnabled(!_autoplayEnabled.value);
 
+  @override
   void setAudioOnlyMode(bool enabled) => _audioOnlyMode.add(enabled);
   void toggleAudioOnlyMode() => setAudioOnlyMode(!_audioOnlyMode.value);
 
@@ -738,6 +756,7 @@ class PlaybackService {
     _shuffledIndices = [currentIndex, ...indices];
   }
 
+  @override
   Future<void> stop() async {
     _wasPlayingBeforeBackground = false;
     _lastKnownPosition = Duration.zero;

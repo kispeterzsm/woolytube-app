@@ -3,10 +3,39 @@ import 'dart:io';
 import 'package:audio_service/audio_service.dart';
 import 'package:rxdart/rxdart.dart';
 import '../database/database.dart';
-import 'playback_service.dart';
+import 'playback_notification_controller.dart';
+
+Uri? resolveNotificationArtwork({
+  String? localPath,
+  String? remoteUrl,
+  String? youtubeVideoId,
+}) {
+  if (localPath != null &&
+      localPath.isNotEmpty &&
+      File(localPath).existsSync()) {
+    return Uri.file(localPath);
+  }
+
+  if (remoteUrl != null && remoteUrl.isNotEmpty) {
+    final uri = Uri.tryParse(remoteUrl);
+    if (uri != null && (uri.scheme == 'https' || uri.scheme == 'http')) {
+      return uri;
+    }
+  }
+
+  if (youtubeVideoId != null && youtubeVideoId.isNotEmpty) {
+    return Uri(
+      scheme: 'https',
+      host: 'i.ytimg.com',
+      pathSegments: ['vi', youtubeVideoId, 'hqdefault.jpg'],
+    );
+  }
+
+  return null;
+}
 
 class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
-  final PlaybackService _playbackService;
+  final PlaybackNotificationController _playbackService;
   final AppDatabase _db;
   final List<StreamSubscription> _subscriptions = [];
 
@@ -34,7 +63,11 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
                 track.durationSeconds != null
                     ? Duration(seconds: track.durationSeconds!)
                     : null,
-            artUri: _resolveArt(track.thumbnailPath, track.thumbnailUrl),
+            artUri: resolveNotificationArtwork(
+              localPath: track.thumbnailPath,
+              remoteUrl: track.thumbnailUrl,
+              youtubeVideoId: track.videoId,
+            ),
           ),
         );
         _broadcastState();
@@ -91,7 +124,6 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
           MediaControl.skipToPrevious,
           playing ? MediaControl.pause : MediaControl.play,
           MediaControl.skipToNext,
-          MediaControl.stop,
           shuffleOn ? _shuffleOnControl : _shuffleOffControl,
         ],
         systemActions: const {
@@ -107,20 +139,12 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
         playing: playing,
         updatePosition: _playbackService.position,
         speed: 1.0,
+        shuffleMode:
+            shuffleOn
+                ? AudioServiceShuffleMode.all
+                : AudioServiceShuffleMode.none,
       ),
     );
-  }
-
-  Uri? _resolveArt(String? localPath, String? remoteUrl) {
-    if (localPath != null &&
-        localPath.isNotEmpty &&
-        File(localPath).existsSync()) {
-      return Uri.file(localPath);
-    }
-    if (remoteUrl != null && remoteUrl.isNotEmpty) {
-      return Uri.parse(remoteUrl);
-    }
-    return null;
   }
 
   @override
@@ -136,7 +160,10 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
             id: 'playlist:${p.id}',
             title: p.name,
             playable: false,
-            artUri: _resolveArt(p.thumbnailPath, p.thumbnailUrl),
+            artUri: resolveNotificationArtwork(
+              localPath: p.thumbnailPath,
+              remoteUrl: p.thumbnailUrl,
+            ),
           ),
       ];
     }
@@ -154,7 +181,11 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
                       ? Duration(seconds: t.durationSeconds!)
                       : null,
               playable: true,
-              artUri: _resolveArt(t.thumbnailPath, t.thumbnailUrl),
+              artUri: resolveNotificationArtwork(
+                localPath: t.thumbnailPath,
+                remoteUrl: t.thumbnailUrl,
+                youtubeVideoId: t.videoId,
+              ),
             ),
       ];
     }
@@ -189,6 +220,26 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
 
   @override
   Future<void> pause() async => await _playbackService.pause();
+
+  /// Android may deliver headset and notification previous/next events through
+  /// [click] instead of the dedicated skip callbacks. Route every media button
+  /// explicitly so notification controls cannot silently fall back to the
+  /// no-op implementation inherited by a future handler refactor.
+  @override
+  Future<void> click([MediaButton button = MediaButton.media]) async {
+    switch (button) {
+      case MediaButton.media:
+        if (_playbackService.isPlaying) {
+          await _playbackService.pause();
+        } else {
+          await _playbackService.resume();
+        }
+      case MediaButton.next:
+        await _playbackService.next();
+      case MediaButton.previous:
+        await _playbackService.previous();
+    }
+  }
 
   @override
   Future<void> stop() async {
