@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -102,6 +104,10 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
         playbackService.handleAppResumed();
         break;
       case AppLifecycleState.detached:
+        // Detached means the UI engine is being torn down, not merely covered
+        // by another app. Stop foreground downloads while platform channels
+        // are still available. Native task-removal handling is the fallback.
+        unawaited(ref.read(downloadServiceProvider).cancelActiveDownloads());
         break;
     }
   }

@@ -49,8 +49,8 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   Future<void> _loadPlaylist() async {
     final db = ref.read(databaseProvider);
     final playlist = await db.getPlaylist(widget.playlistId);
-    setState(() => _playlist = playlist);
-    unawaited(ref.read(metadataServiceProvider).reconcilePlaylist(playlist));
+    await ref.read(metadataServiceProvider).reconcilePlaylist(playlist);
+    if (mounted) setState(() => _playlist = playlist);
   }
 
   @override
@@ -1304,8 +1304,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                               await _showOverrideDialog(track);
                             },
                           ),
-                        if (selectedGroup == _TrackActionGroup.storage &&
-                            track.status == 'complete')
+                        if (selectedGroup == _TrackActionGroup.storage)
                           ListTile(
                             leading: const Icon(
                               Icons.refresh,
@@ -1316,7 +1315,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                               style: TextStyle(color: Colors.white),
                             ),
                             subtitle: const Text(
-                              'Delete file and re-download from YouTube',
+                              'Clear local state and download from YouTube',
                               style: TextStyle(color: Color(0xFF888888)),
                             ),
                             onTap: () async {
@@ -1343,26 +1342,6 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                             onTap: () {
                               Navigator.pop(sheetContext);
                               _showErrorDetails(track);
-                            },
-                          ),
-                        if (selectedGroup == _TrackActionGroup.storage &&
-                            track.status == 'error')
-                          ListTile(
-                            leading: const Icon(
-                              Icons.replay,
-                              color: Colors.white70,
-                            ),
-                            title: const Text(
-                              'Retry download',
-                              style: TextStyle(color: Colors.white),
-                            ),
-                            subtitle: const Text(
-                              'Download just this video now',
-                              style: TextStyle(color: Color(0xFF888888)),
-                            ),
-                            onTap: () async {
-                              Navigator.pop(sheetContext);
-                              await _startTrackDownload(track);
                             },
                           ),
                         const SizedBox(height: 8),

@@ -90,6 +90,16 @@ class DownloadForegroundService : Service() {
         super.onDestroy()
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        val cancelled = YtDlpPlugin.cancelAllActiveDownloads()
+        if (cancelled > 0) {
+            Log.i(TAG, "App task removed; cancelled $cancelled active download(s)")
+        }
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
+    }
+
     private fun ensureNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager

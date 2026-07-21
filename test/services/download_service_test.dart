@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -15,6 +16,9 @@ import '../helpers/test_database.dart';
 
 class FakeYtDlpService extends YtDlpService {
   final downloadedUrls = <String>[];
+  Completer<void>? downloadCompleter;
+  Completer<void>? downloadStarted;
+  bool cancelCalled = false;
 
   @override
   Stream<Map<String, dynamic>> get progressStream =>
@@ -30,7 +34,20 @@ class FakeYtDlpService extends YtDlpService {
     String? outputTemplate,
   }) async {
     downloadedUrls.add(url);
+    downloadStarted?.complete();
+    if (downloadCompleter != null) await downloadCompleter!.future;
   }
+
+  @override
+  Future<void> cancelDownloads() async {
+    cancelCalled = true;
+    if (downloadCompleter != null && !downloadCompleter!.isCompleted) {
+      downloadCompleter!.completeError(StateError('cancelled'));
+    }
+  }
+
+  @override
+  Future<bool> hasActiveDownloads() async => false;
 
   @override
   Future<void> startDownloadService(String playlistName) async {}
@@ -251,4 +268,53 @@ void main() {
 
     expect(sponsorBlock.fetchedVideoIds, isEmpty);
   });
+
+  test('explicit update recovers a stale downloading row', () async {
+    final playlist = await insertTestPlaylist(
+      db,
+      outputPath: tempDir.path,
+      audioOnly: true,
+    );
+    final track = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      videoId: 'stale-download',
+      status: 'downloading',
+    );
+
+    await service.downloadPlaylist(playlist);
+
+    expect(ytdlp.downloadedUrls, hasLength(1));
+    expect((await db.getTrack(track.id))!.status, 'complete');
+  });
+
+  test(
+    'cancelling returns the active track to pending and removes partials',
+    () async {
+      final playlist = await insertTestPlaylist(
+        db,
+        outputPath: tempDir.path,
+        audioOnly: true,
+      );
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        videoId: 'cancelled-download',
+      );
+      ytdlp.downloadCompleter = Completer<void>();
+      ytdlp.downloadStarted = Completer<void>();
+
+      final download = service.downloadTrack(playlist, track);
+      await ytdlp.downloadStarted!.future;
+      final partial = File(p.join(tempDir.path, '00001_Cancelled.m4a.part'));
+      await partial.writeAsString('partial');
+
+      await service.cancelActiveDownloads();
+      await download;
+
+      expect(ytdlp.cancelCalled, isTrue);
+      expect((await db.getTrack(track.id))!.status, 'pending');
+      expect(await partial.exists(), isFalse);
+    },
+  );
 }

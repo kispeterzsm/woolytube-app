@@ -48,6 +48,7 @@ class Tracks extends Table {
   TextColumn get unavailableReason => text().nullable()();
   BoolColumn get isLocalReplacement =>
       boolean().withDefault(const Constant(false))();
+
   /// Exclude this track from automatic playback, while still allowing an
   /// explicit tap to play it.
   BoolColumn get alwaysSkip => boolean().withDefault(const Constant(false))();
@@ -380,9 +381,9 @@ class AppDatabase extends _$AppDatabase {
   }
 
   Future<void> updateTrackAlwaysSkip(int trackId, bool alwaysSkip) async {
-    await (update(tracks)..where((t) => t.id.equals(trackId))).write(
-      TracksCompanion(alwaysSkip: Value(alwaysSkip)),
-    );
+    await (update(tracks)..where(
+      (t) => t.id.equals(trackId),
+    )).write(TracksCompanion(alwaysSkip: Value(alwaysSkip)));
   }
 
   Future<void> updateTrackSponsorBlockCheckedAt(
@@ -404,6 +405,23 @@ class AppDatabase extends _$AppDatabase {
         downloadedAt: const Value(null),
         sponsorBlockCheckedAt: const Value(null),
         lastError: const Value(null),
+      ),
+    );
+  }
+
+  /// Returns a track left in the transient `downloading` state to the queue.
+  ///
+  /// A process can disappear between setting `downloading` and recording the
+  /// completed file. This deliberately preserves playlist/index metadata while
+  /// clearing state that only applies to a finished download.
+  Future<void> resetInterruptedTrack(int trackId) async {
+    await (update(tracks)..where((t) => t.id.equals(trackId))).write(
+      const TracksCompanion(
+        status: Value('pending'),
+        filePath: Value(null),
+        isLocalReplacement: Value(false),
+        downloadedAt: Value(null),
+        lastError: Value(null),
       ),
     );
   }

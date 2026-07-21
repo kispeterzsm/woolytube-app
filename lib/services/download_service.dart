@@ -49,6 +49,9 @@ class DownloadService {
 
   StreamSubscription? _ytdlpProgressSub;
   bool _isDownloading = false;
+  bool _cancelRequested = false;
+  int? _activeTrackId;
+  Playlist? _activePlaylist;
   bool get isDownloading => _isDownloading;
 
   DownloadService(
@@ -80,41 +83,57 @@ class DownloadService {
   Future<void> downloadPlaylist(Playlist playlist) async {
     if (_isDownloading) return;
     _isDownloading = true;
-
-    final pendingTracks = await _db.getPendingTracks(playlist.id);
-    final totalTracks = await _db.getTotalTrackCount(playlist.id);
-
-    _log.info(
-      'Updating "${playlist.name}": ${pendingTracks.length} of $totalTracks tracks to download',
-    );
-
-    if (pendingTracks.isEmpty) {
-      await _backfillMissingSponsorBlockSegments(playlist);
-      await _writeMetadataForPlaylist(playlist.id);
-      _isDownloading = false;
-      _progressController.add(
-        DownloadProgress(
-          playlistId: playlist.id,
-          currentTrackIndex: totalTracks,
-          totalTracks: totalTracks,
-          trackProgress: 100,
-          status: 'complete',
-        ),
-      );
-      return;
-    }
-
-    final downloadedSoFar = totalTracks - pendingTracks.length;
-    var currentTrackNum = downloadedSoFar + 1;
-
-    await _startDownloadReporting(
-      playlist: playlist,
-      currentTrackIndex: () => currentTrackNum,
-      totalTracks: totalTracks,
-    );
+    _cancelRequested = false;
+    _activePlaylist = playlist;
+    var totalTracks = 0;
 
     try {
+      // A manual or scheduled update is an explicit download trigger. Repair
+      // anything a previous process left behind before selecting pending work.
+      final recovered = await _metadata.recoverInterruptedPlaylist(playlist);
+      if (recovered > 0) {
+        _log.info('Recovered $recovered interrupted download files/states');
+        await _writeMetadataForPlaylist(playlist.id);
+      }
+
+      final pendingTracks = await _db.getPendingTracks(playlist.id);
+      totalTracks = await _db.getTotalTrackCount(playlist.id);
+
+      _log.info(
+        'Updating "${playlist.name}": ${pendingTracks.length} of $totalTracks tracks to download',
+      );
+
+      if (_cancelRequested) {
+        _progressController.add(DownloadProgress.idle);
+        return;
+      }
+
+      if (pendingTracks.isEmpty) {
+        await _backfillMissingSponsorBlockSegments(playlist);
+        await _writeMetadataForPlaylist(playlist.id);
+        _progressController.add(
+          DownloadProgress(
+            playlistId: playlist.id,
+            currentTrackIndex: totalTracks,
+            totalTracks: totalTracks,
+            trackProgress: 100,
+            status: 'complete',
+          ),
+        );
+        return;
+      }
+
+      final downloadedSoFar = totalTracks - pendingTracks.length;
+      var currentTrackNum = downloadedSoFar + 1;
+
+      await _startDownloadReporting(
+        playlist: playlist,
+        currentTrackIndex: () => currentTrackNum,
+        totalTracks: totalTracks,
+      );
+
       for (var i = 0; i < pendingTracks.length; i++) {
+        if (_cancelRequested) break;
         final track = pendingTracks[i];
         final trackNum = downloadedSoFar + i + 1;
         currentTrackNum = trackNum;
@@ -128,6 +147,13 @@ class DownloadService {
           trackLabel: '[$trackNum/$totalTracks] ${track.title}',
           reuseExistingFile: true,
         );
+      }
+
+      if (_cancelRequested) {
+        _log.info('Playlist download stopped');
+        await _writeMetadataForPlaylist(playlist.id);
+        _progressController.add(DownloadProgress.idle);
+        return;
       }
 
       _progressController.add(
@@ -157,6 +183,12 @@ class DownloadService {
 
       await _notifications?.showDownloadComplete(playlist.name);
     } catch (e) {
+      if (_cancelRequested) {
+        _log.info('Playlist download stopped');
+        await _writeMetadataForPlaylist(playlist.id);
+        _progressController.add(DownloadProgress.idle);
+        return;
+      }
       _log.error('Playlist download failed: $e');
       await _writeMetadataForPlaylist(playlist.id);
       try {
@@ -174,6 +206,8 @@ class DownloadService {
       );
     } finally {
       _isDownloading = false;
+      _activeTrackId = null;
+      _activePlaylist = null;
       _ytdlpProgressSub?.cancel();
       _ytdlpProgressSub = null;
       try {
@@ -187,18 +221,29 @@ class DownloadService {
   Future<void> downloadTrack(Playlist playlist, Track track) async {
     if (_isDownloading) return;
     _isDownloading = true;
-
-    final totalTracks = await _db.getTotalTrackCount(playlist.id);
+    _cancelRequested = false;
+    _activePlaylist = playlist;
+    var totalTracks = 0;
     const progressTrackIndex = 1;
     const progressTotalTracks = 1;
 
-    await _startDownloadReporting(
-      playlist: playlist,
-      currentTrackIndex: () => progressTrackIndex,
-      totalTracks: progressTotalTracks,
-    );
-
     try {
+      totalTracks = await _db.getTotalTrackCount(playlist.id);
+      if (_cancelRequested) {
+        _progressController.add(DownloadProgress.idle);
+        return;
+      }
+
+      await _startDownloadReporting(
+        playlist: playlist,
+        currentTrackIndex: () => progressTrackIndex,
+        totalTracks: progressTotalTracks,
+      );
+      if (_cancelRequested) {
+        _progressController.add(DownloadProgress.idle);
+        return;
+      }
+
       _log.info('Downloading "${track.title}" from "${playlist.name}"');
       await _db.resetTrackForRedownload(track.id);
 
@@ -213,6 +258,11 @@ class DownloadService {
       );
 
       if (!succeeded) {
+        if (_cancelRequested) {
+          await _writeMetadataForPlaylist(playlist.id);
+          _progressController.add(DownloadProgress.idle);
+          return;
+        }
         throw StateError('Download failed');
       }
 
@@ -240,6 +290,12 @@ class DownloadService {
 
       await _notifications?.showDownloadComplete(track.title);
     } catch (e) {
+      if (_cancelRequested) {
+        await _db.resetInterruptedTrack(track.id);
+        await _writeMetadataForPlaylist(playlist.id);
+        _progressController.add(DownloadProgress.idle);
+        return;
+      }
       _progressController.add(
         DownloadProgress(
           playlistId: playlist.id,
@@ -253,6 +309,8 @@ class DownloadService {
       rethrow;
     } finally {
       _isDownloading = false;
+      _activeTrackId = null;
+      _activePlaylist = null;
       _ytdlpProgressSub?.cancel();
       _ytdlpProgressSub = null;
       try {
@@ -355,6 +413,7 @@ class DownloadService {
       ),
     );
 
+    _activeTrackId = track.id;
     await _db.updateTrackStatus(track.id, 'downloading');
 
     final outputTemplate =
@@ -370,6 +429,11 @@ class DownloadService {
         outputTemplate: outputTemplate,
         trackLabel: trackLabel,
       );
+
+      if (_cancelRequested) {
+        await _db.resetInterruptedTrack(track.id);
+        return false;
+      }
 
       final actualPath = MetadataService.resolveMediaFile(
         playlist.outputPath,
@@ -398,10 +462,45 @@ class DownloadService {
       );
       return true;
     } catch (e) {
+      if (_cancelRequested) {
+        await _db.resetInterruptedTrack(track.id);
+        _log.info('$trackLabel Interrupted; returned to pending');
+        return false;
+      }
       final errorMsg = _cleanErrorMessage(e);
       await _db.updateTrackStatus(track.id, 'error', error: errorMsg);
       _log.error('$trackLabel Failed "${track.title}": $errorMsg');
       return false;
+    } finally {
+      if (_activeTrackId == track.id) _activeTrackId = null;
+    }
+  }
+
+  /// Stops this service's native yt-dlp process and makes its current track
+  /// eligible for a future manual or scheduled update. It does not resume it.
+  Future<void> cancelActiveDownloads() async {
+    if (!_isDownloading) return;
+    _cancelRequested = true;
+
+    try {
+      await _ytdlp.cancelDownloads();
+    } catch (e) {
+      _log.warn('Failed to cancel native download: $e');
+    }
+
+    final trackId = _activeTrackId;
+    if (trackId != null) {
+      await _db.resetInterruptedTrack(trackId);
+    }
+
+    final playlist = _activePlaylist;
+    if (playlist != null) {
+      try {
+        await MetadataService.cleanupPlaylistFolder(playlist.outputPath);
+        await _writeMetadataForPlaylist(playlist.id);
+      } catch (e) {
+        _log.warn('Interrupted download cleanup failed: $e');
+      }
     }
   }
 
@@ -459,6 +558,7 @@ class DownloadService {
     const backoffs = [Duration(seconds: 5), Duration(seconds: 15)];
     var attempt = 0;
     while (true) {
+      if (_cancelRequested) return;
       try {
         await _ytdlp.download(
           url: url,
@@ -479,6 +579,7 @@ class DownloadService {
           '$trackLabel: transient error (attempt $attempt), retrying in ${delay.inSeconds}s: $cleaned',
         );
         await Future.delayed(delay);
+        if (_cancelRequested) return;
       }
     }
   }

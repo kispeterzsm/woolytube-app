@@ -72,6 +72,15 @@ class YtDlpService {
     });
   }
 
+  Future<void> cancelDownloads() async {
+    await _methodChannel.invokeMethod('cancelDownloads');
+  }
+
+  Future<bool> hasActiveDownloads() async {
+    return await _methodChannel.invokeMethod<bool>('hasActiveDownloads') ??
+        false;
+  }
+
   Future<void> updateYtDlp() async {
     await _methodChannel.invokeMethod('updateYtDlp');
   }

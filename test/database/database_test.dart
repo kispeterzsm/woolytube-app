@@ -90,6 +90,13 @@ void main() {
     expect(updated.isLocalReplacement, isFalse);
     expect(updated.downloadedAt, isNull);
     expect(updated.lastError, isNull);
+
+    await db.updateTrackStatus(track.id, 'downloading');
+    await db.resetInterruptedTrack(track.id);
+    updated = (await db.getTracksForPlaylist(playlist.id)).single;
+    expect(updated.status, 'pending');
+    expect(updated.filePath, isNull);
+    expect(updated.downloadedAt, isNull);
   });
 
   test('persists an always-skip preference for a track', () async {

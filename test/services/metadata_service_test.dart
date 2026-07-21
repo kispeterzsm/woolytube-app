@@ -225,6 +225,50 @@ void main() {
   });
 
   test(
+    'startup recovery resolves interrupted downloads without starting them',
+    () async {
+      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+      final missing = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 1,
+        videoId: 'interrupted-missing',
+        status: 'downloading',
+      );
+      final finished = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 2,
+        videoId: 'interrupted-finished',
+        status: 'downloading',
+      );
+      final finishedPath = p.join(tempDir.path, '00002_Finished.m4a');
+      await File(finishedPath).writeAsString('audio');
+      final partialPath = p.join(tempDir.path, '00001_Missing.m4a.part');
+      await File(partialPath).writeAsString('partial');
+
+      final fixed = await metadata.recoverInterruptedDownloads();
+
+      expect(fixed, 3);
+      expect((await db.getTrack(missing.id))!.status, 'pending');
+      expect((await db.getTrack(finished.id))!.status, 'complete');
+      expect((await db.getTrack(finished.id))!.filePath, finishedPath);
+      expect(await File(partialPath).exists(), isFalse);
+
+      final sidecar =
+          jsonDecode(
+                await File(
+                  p.join(tempDir.path, 'woolytube_meta.json'),
+                ).readAsString(),
+              )
+              as Map<String, dynamic>;
+      final tracks = sidecar['tracks'] as List<dynamic>;
+      expect(tracks.first['status'], 'pending');
+      expect(tracks.last['status'], 'complete');
+    },
+  );
+
+  test(
     'imports discovered playlists and keeps only valid local segments',
     () async {
       await File(

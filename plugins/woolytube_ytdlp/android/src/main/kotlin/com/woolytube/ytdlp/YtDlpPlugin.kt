@@ -12,12 +12,32 @@ import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.*
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     companion object {
         private const val METHOD_CHANNEL = "com.woolytube/ytdlp"
         private const val EVENT_CHANNEL = "com.woolytube/ytdlp_progress"
         private const val TAG = "WoolyTube"
+
+        private val activeProcessIds = ConcurrentHashMap.newKeySet<String>()
+
+        fun hasActiveDownloads(): Boolean = activeProcessIds.isNotEmpty()
+
+        fun cancelAllActiveDownloads(): Int {
+            val ids = activeProcessIds.toList()
+            for (processId in ids) {
+                try {
+                    YoutubeDL.getInstance().destroyProcessById(processId)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to cancel yt-dlp process $processId", e)
+                } finally {
+                    activeProcessIds.remove(processId)
+                }
+            }
+            return ids.size
+        }
     }
 
     private lateinit var methodChannel: MethodChannel
@@ -25,6 +45,7 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private lateinit var context: Context
     private var progressSink: EventChannel.EventSink? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val ownedProcessIds = ConcurrentHashMap.newKeySet<String>()
     private var isInitialized = false
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -47,6 +68,13 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         methodChannel.setMethodCallHandler(null)
+        eventChannel.setStreamHandler(null)
+        progressSink = null
+        val hadActiveDownloads = ownedProcessIds.isNotEmpty()
+        cancelOwnedDownloads()
+        if (hadActiveDownloads) {
+            context.stopService(Intent(context, DownloadForegroundService::class.java))
+        }
         scope.cancel()
     }
 
@@ -57,6 +85,8 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "getVideoInfo" -> handleGetVideoInfo(call.arguments as Map<*, *>, result)
             "getPlaylistInfo" -> handleGetPlaylistInfo(call.arguments as Map<*, *>, result)
             "cancelDownload" -> handleCancelDownload(call.arguments as Map<*, *>, result)
+            "cancelDownloads" -> result.success(cancelOwnedDownloads())
+            "hasActiveDownloads" -> result.success(hasActiveDownloads())
             "updateYtDlp" -> handleUpdateYtDlp(result)
             "startDownloadService" -> handleStartDownloadService(call.arguments as Map<*, *>, result)
             "updateDownloadServiceProgress" -> handleUpdateDownloadServiceProgress(call.arguments as Map<*, *>, result)
@@ -97,8 +127,19 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         }
 
         scope.launch {
+            val processId = UUID.randomUUID().toString()
+            ownedProcessIds.add(processId)
+            activeProcessIds.add(processId)
             try {
-                startDownload(url, outputPath, audioOnly, embedThumbnail, outputTemplate, formatOption)
+                startDownload(
+                    url,
+                    outputPath,
+                    audioOnly,
+                    embedThumbnail,
+                    outputTemplate,
+                    formatOption,
+                    processId
+                )
                 withContext(Dispatchers.Main) {
                     sendProgress(mapOf("status" to "complete", "progress" to 100.0))
                     result.success(null)
@@ -113,6 +154,9 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     ))
                     result.error("DOWNLOAD_ERROR", e.message, null)
                 }
+            } finally {
+                ownedProcessIds.remove(processId)
+                activeProcessIds.remove(processId)
             }
         }
     }
@@ -203,10 +247,27 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         }
         try {
             YoutubeDL.getInstance().destroyProcessById(processId)
+            ownedProcessIds.remove(processId)
+            activeProcessIds.remove(processId)
             result.success(true)
         } catch (e: Exception) {
             result.error("CANCEL_ERROR", e.message, null)
         }
+    }
+
+    private fun cancelOwnedDownloads(): Int {
+        val ids = ownedProcessIds.toList()
+        for (processId in ids) {
+            try {
+                YoutubeDL.getInstance().destroyProcessById(processId)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to cancel owned yt-dlp process $processId", e)
+            } finally {
+                ownedProcessIds.remove(processId)
+                activeProcessIds.remove(processId)
+            }
+        }
+        return ids.size
     }
 
     private fun handleUpdateYtDlp(result: MethodChannel.Result) {
@@ -230,7 +291,8 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         audioOnly: Boolean,
         embedThumbnail: Boolean,
         outputTemplate: String?,
-        formatOption: String?
+        formatOption: String?,
+        processId: String
     ) {
         withContext(Dispatchers.Main) {
             sendProgress(mapOf("status" to "starting", "progress" to 0.0))
@@ -261,7 +323,7 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         request.addOption("--no-mtime")
         request.addOption("--no-playlist")
 
-        YoutubeDL.getInstance().execute(request) { progress, etaInSeconds, line ->
+        YoutubeDL.getInstance().execute(request, processId) { progress, etaInSeconds, line ->
             scope.launch(Dispatchers.Main) {
                 sendProgress(mapOf(
                     "status" to "downloading",

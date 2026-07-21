@@ -107,6 +107,24 @@ final initProvider = FutureProvider<bool>((ref) async {
   }
   log.info('init: permissions ${sw.elapsedMilliseconds}ms');
 
+  // A killed process cannot clear its transient database state. Reconcile it
+  // before exposing the UI, but never disturb a live scheduled download in a
+  // second Flutter engine in this process.
+  try {
+    if (!await ytdlp.hasActiveDownloads()) {
+      final repaired =
+          await ref
+              .watch(metadataServiceProvider)
+              .recoverInterruptedDownloads();
+      if (repaired > 0) {
+        log.info('init: recovered $repaired interrupted download files/states');
+      }
+    }
+  } catch (e) {
+    log.warn('Interrupted download recovery failed: $e');
+  }
+  log.info('init: recovery ${sw.elapsedMilliseconds}ms');
+
   // Scan for importable playlists from previous installation
   try {
     final metadata = ref.watch(metadataServiceProvider);

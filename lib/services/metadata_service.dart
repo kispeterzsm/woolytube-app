@@ -103,6 +103,31 @@ class MetadataService {
 
   MetadataService(this._db);
 
+  /// Reconciles a playlist only when it contains transient download state.
+  /// Normal pending-file reuse remains the download service's responsibility,
+  /// including its SponsorBlock refresh path.
+  Future<int> recoverInterruptedPlaylist(Playlist playlist) async {
+    final tracks = await _db.getTracksForPlaylist(playlist.id);
+    if (!tracks.any((track) => track.status == 'downloading')) return 0;
+    return reconcilePlaylist(playlist);
+  }
+
+  /// Repairs every playlist after an interrupted app process and rewrites any
+  /// sidecar whose database/filesystem state changed. This never starts a
+  /// download; recovered tracks remain pending until a later update trigger.
+  Future<int> recoverInterruptedDownloads() async {
+    var fixed = 0;
+    for (final playlist in await _db.getAllPlaylists()) {
+      final playlistFixed = await reconcilePlaylist(playlist);
+      fixed += playlistFixed;
+      if (playlistFixed > 0) {
+        final tracks = await _db.getTracksForPlaylist(playlist.id);
+        await writeMetadata(playlist, tracks);
+      }
+    }
+    return fixed;
+  }
+
   /// Writes playlist metadata as JSON sidecar file in the playlist folder.
   Future<void> writeMetadata(Playlist playlist, List<Track> tracks) async {
     final dir = Directory(playlist.outputPath);
@@ -216,7 +241,14 @@ class MetadataService {
   Future<int> reconcilePlaylist(Playlist playlist) async {
     final tracks = await _db.getTracksForPlaylist(playlist.id);
     final dir = Directory(playlist.outputPath);
-    if (!await dir.exists()) return 0;
+    if (!await dir.exists()) {
+      var fixed = 0;
+      for (final track in tracks.where((t) => t.status == 'downloading')) {
+        await _db.resetInterruptedTrack(track.id);
+        fixed++;
+      }
+      return fixed;
+    }
 
     const mediaExtensions = {
       '.m4a',
@@ -303,8 +335,12 @@ class MetadataService {
       if (fileOnDisk != null &&
           (track.status == 'pending' ||
               track.status == 'error' ||
+              track.status == 'downloading' ||
               track.status == 'unavailable')) {
         await _db.updateTrackStatus(track.id, 'complete', filePath: fileOnDisk);
+        fixed++;
+      } else if (fileOnDisk == null && track.status == 'downloading') {
+        await _db.resetInterruptedTrack(track.id);
         fixed++;
       } else if (fileOnDisk == null && track.status == 'complete') {
         await _db.updateTrackStatus(
