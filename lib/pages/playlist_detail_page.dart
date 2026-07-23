@@ -15,6 +15,7 @@ import '../providers/providers.dart';
 import '../providers/playback_providers.dart';
 import '../services/download_service.dart';
 import '../services/metadata_service.dart';
+import '../services/media_thumbnail_service.dart';
 import '../services/sponsorblock_service.dart';
 import '../widgets/tap_to_place_cursor_text_field.dart';
 
@@ -52,6 +53,17 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     final playlist = await db.getPlaylist(widget.playlistId);
     await ref.read(metadataServiceProvider).reconcilePlaylist(playlist);
     if (mounted) setState(() => _playlist = playlist);
+    unawaited(_backfillLocalThumbnails(playlist.id));
+  }
+
+  Future<void> _backfillLocalThumbnails(int playlistId) async {
+    try {
+      await ref
+          .read(playlistServiceProvider)
+          .backfillLocalThumbnails(playlistId);
+    } catch (_) {
+      // Embedded artwork is optional and should never block the playlist UI.
+    }
   }
 
   @override
@@ -565,38 +577,35 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   }
 
   Widget _buildTrackThumbnail(Track track) {
-    final url = _trackThumbnailUrl(track);
-    if (url != null) {
-      return CachedNetworkImage(
-        imageUrl: url,
+    final url = resolveRemoteThumbnailUrl(
+      thumbnailUrl: track.thumbnailUrl,
+      youtubeVideoId: track.videoId,
+    );
+    final fallback =
+        url != null
+            ? CachedNetworkImage(
+              imageUrl: url,
+              fit: BoxFit.cover,
+              placeholder: (_, __) => Container(color: const Color(0xFF333333)),
+              errorWidget: (_, __, ___) => _thumbnailPlaceholder(),
+            )
+            : _thumbnailPlaceholder();
+    final localPath = existingThumbnailPath(track.thumbnailPath);
+    if (localPath != null) {
+      return Image.file(
+        File(localPath),
         fit: BoxFit.cover,
-        placeholder: (_, __) => Container(color: const Color(0xFF333333)),
-        errorWidget:
-            (_, __, ___) => Container(
-              color: const Color(0xFF333333),
-              child: const Icon(
-                Icons.music_note,
-                color: Color(0xFF555555),
-                size: 24,
-              ),
-            ),
+        errorBuilder: (_, __, ___) => fallback,
       );
     }
+    return fallback;
+  }
+
+  Widget _thumbnailPlaceholder() {
     return Container(
       color: const Color(0xFF333333),
       child: const Icon(Icons.music_note, color: Color(0xFF555555), size: 24),
     );
-  }
-
-  /// Get thumbnail URL with YouTube fallback from video ID
-  String? _trackThumbnailUrl(Track track) {
-    if (track.thumbnailUrl != null && track.thumbnailUrl!.isNotEmpty) {
-      return track.thumbnailUrl;
-    }
-    if (track.videoId.isNotEmpty) {
-      return 'https://i.ytimg.com/vi/${track.videoId}/hqdefault.jpg';
-    }
-    return null;
   }
 
   String _videoUrl(Track track) =>
@@ -1405,51 +1414,27 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
       return;
     }
 
-    final db = ref.read(databaseProvider);
-    final totalTracks = await db.getTotalTrackCount(_playlist!.id);
-    final indexStr = MetadataService.paddedIndex(track.index, totalTracks);
-
-    final ext = p.extension(picked.name);
-    final base = p.basenameWithoutExtension(picked.name);
-    final sanitized = MetadataService.sanitizeFilename(base);
-    final newName = '${indexStr}_$sanitized$ext';
-    final newPath = p.join(_playlist!.outputPath, newName);
-
-    // Remove any existing file for this track's index prefix.
-    final existing = MetadataService.resolveMediaFile(
-      _playlist!.outputPath,
-      '${indexStr}_',
-    );
-    if (existing != null && existing != newPath) {
-      try {
-        await File(existing).delete();
-      } catch (_) {
-        // Non-fatal — the copy below may still overwrite it.
-      }
-    }
-
     try {
-      await File(sourcePath).copy(newPath);
+      final updated = await ref
+          .read(playlistServiceProvider)
+          .replaceWithLocalFile(
+            trackId: track.id,
+            sourcePath: sourcePath,
+            sourceFileName: picked.name,
+          );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Replaced with ${p.basename(updated.filePath!)}'),
+          ),
+        );
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('Copy failed: $e')));
       }
-      return;
-    }
-
-    await db.updateTrackStatus(
-      track.id,
-      'complete',
-      filePath: newPath,
-      isLocalReplacement: true,
-    );
-
-    if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Replaced with $newName')));
     }
   }
 

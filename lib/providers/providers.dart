@@ -10,6 +10,7 @@ import '../services/metadata_service.dart';
 import '../services/notification_service.dart';
 import '../services/update_service.dart';
 import '../services/sponsorblock_service.dart';
+import '../services/media_thumbnail_service.dart';
 
 // Core singletons
 final databaseProvider = Provider<AppDatabase>((ref) {
@@ -30,6 +31,10 @@ final metadataServiceProvider = Provider<MetadataService>((ref) {
   return MetadataService(ref.watch(databaseProvider));
 });
 
+final mediaThumbnailServiceProvider = Provider<MediaThumbnailService>((ref) {
+  return const MediaThumbnailService();
+});
+
 final pendingImportsProvider = StateProvider<List<DiscoveredPlaylist>>(
   (ref) => [],
 );
@@ -39,6 +44,7 @@ final playlistServiceProvider = Provider<PlaylistService>((ref) {
     ref.watch(databaseProvider),
     ref.watch(ytdlpServiceProvider),
     ref.watch(metadataServiceProvider),
+    ref.watch(mediaThumbnailServiceProvider),
   );
 });
 

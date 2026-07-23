@@ -393,6 +393,15 @@ class AppDatabase extends _$AppDatabase {
     )).write(TracksCompanion(isLocalReplacement: Value(isLocalReplacement)));
   }
 
+  Future<void> updateTrackThumbnailPath(
+    int trackId,
+    String? thumbnailPath,
+  ) async {
+    await (update(tracks)..where(
+      (t) => t.id.equals(trackId),
+    )).write(TracksCompanion(thumbnailPath: Value(thumbnailPath)));
+  }
+
   Future<void> updateTrackAlwaysSkip(int trackId, bool alwaysSkip) async {
     await (update(tracks)..where(
       (t) => t.id.equals(trackId),
@@ -413,6 +422,7 @@ class AppDatabase extends _$AppDatabase {
       TracksCompanion(
         status: const Value('pending'),
         filePath: const Value(null),
+        thumbnailPath: const Value(null),
         isLocalReplacement: const Value(false),
         unavailableReason: const Value(null),
         downloadedAt: const Value(null),

@@ -10,6 +10,7 @@ class DiscoveredTrack {
   final String videoId;
   final String title;
   final String? thumbnailUrl;
+  final String? thumbnailFileName;
   final int? durationSeconds;
   final String status;
   final String? unavailableReason;
@@ -24,6 +25,7 @@ class DiscoveredTrack {
     required this.videoId,
     required this.title,
     this.thumbnailUrl,
+    this.thumbnailFileName,
     this.durationSeconds,
     required this.status,
     this.unavailableReason,
@@ -141,6 +143,7 @@ class MetadataService {
         'videoId': t.videoId,
         'title': t.title,
         'thumbnailUrl': t.thumbnailUrl,
+        'thumbnailFileName': _thumbnailFileName(playlist.outputPath, t),
         'durationSeconds': t.durationSeconds,
         'status': t.status,
         'unavailableReason': t.unavailableReason,
@@ -189,6 +192,15 @@ class MetadataService {
 
     await tmpFile.writeAsString(jsonStr);
     await tmpFile.rename(targetFile.path);
+  }
+
+  String? _thumbnailFileName(String playlistPath, Track track) {
+    final thumbnailPath = track.thumbnailPath;
+    if (thumbnailPath == null || !File(thumbnailPath).existsSync()) return null;
+    final normalizedPlaylist = p.normalize(p.absolute(playlistPath));
+    final normalizedThumbnail = p.normalize(p.absolute(thumbnailPath));
+    if (!p.isWithin(normalizedPlaylist, normalizedThumbnail)) return null;
+    return p.relative(normalizedThumbnail, from: normalizedPlaylist);
   }
 
   /// Scans public WoolyTube folders for playlist metadata files.
@@ -491,6 +503,7 @@ class MetadataService {
     final discoveredByVideoId = <String, DiscoveredTrack>{};
     for (final dt in discovered.tracks) {
       String? filePath;
+      String? thumbnailPath;
       String status = dt.status;
 
       if (dt.fileName != null) {
@@ -500,6 +513,18 @@ class MetadataService {
           status = 'complete';
         } else if (status == 'complete') {
           status = 'pending'; // File gone, re-download
+        }
+      }
+
+      if (dt.thumbnailFileName != null) {
+        final candidate = p.normalize(
+          p.join(discovered.folderPath, dt.thumbnailFileName!),
+        );
+        final normalizedFolder = p.normalize(p.absolute(discovered.folderPath));
+        final normalizedCandidate = p.normalize(p.absolute(candidate));
+        if (p.isWithin(normalizedFolder, normalizedCandidate) &&
+            await File(normalizedCandidate).exists()) {
+          thumbnailPath = normalizedCandidate;
         }
       }
 
@@ -515,6 +540,7 @@ class MetadataService {
           videoId: dt.videoId,
           title: dt.title,
           thumbnailUrl: Value(dt.thumbnailUrl),
+          thumbnailPath: Value(thumbnailPath),
           durationSeconds: Value(dt.durationSeconds),
           status: Value(status),
           unavailableReason: Value(dt.unavailableReason),
@@ -582,6 +608,7 @@ class MetadataService {
             videoId: m['videoId'] as String? ?? '',
             title: m['title'] as String? ?? 'Unknown',
             thumbnailUrl: m['thumbnailUrl'] as String?,
+            thumbnailFileName: m['thumbnailFileName'] as String?,
             durationSeconds: m['durationSeconds'] as int?,
             status: m['status'] as String? ?? 'pending',
             unavailableReason: m['unavailableReason'] as String?,

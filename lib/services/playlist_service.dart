@@ -6,6 +6,7 @@ import '../database/database.dart';
 import 'ytdlp_service.dart';
 import 'metadata_service.dart';
 import 'sponsorblock_service.dart';
+import 'media_thumbnail_service.dart' as media_thumbnail_service;
 
 class ForceInsertException implements Exception {
   final String message;
@@ -53,7 +54,8 @@ class SyncResult {
 }
 
 class PlaylistService {
-  static const forcedInsertVideoIdPrefix = 'force-insert:';
+  static const forcedInsertVideoIdPrefix =
+      media_thumbnail_service.forcedInsertVideoIdPrefix;
   static const allowedAudioExtensions = [
     'm4a',
     'mp3',
@@ -67,8 +69,15 @@ class PlaylistService {
   final AppDatabase _db;
   final YtDlpService _ytdlp;
   final MetadataService _metadata;
+  final media_thumbnail_service.MediaThumbnailService _thumbnails;
 
-  PlaylistService(this._db, this._ytdlp, this._metadata);
+  PlaylistService(
+    this._db,
+    this._ytdlp,
+    this._metadata, [
+    media_thumbnail_service.MediaThumbnailService? thumbnails,
+  ]) : _thumbnails =
+           thumbnails ?? const media_thumbnail_service.MediaThumbnailService();
 
   Stream<List<Playlist>> watchAllPlaylists() => _db.watchAllPlaylists();
 
@@ -575,6 +584,11 @@ class PlaylistService {
       throw ForceInsertException('Could not insert the selected file: $error');
     }
 
+    await _refreshEmbeddedThumbnail(
+      playlist: playlist,
+      trackId: insertedTrackId,
+      mediaPath: destinationPath,
+    );
     await _writeMetadata(playlistId);
     final insertedTrack = await _db.getTrack(insertedTrackId);
     if (insertedTrack == null) {
@@ -583,6 +597,130 @@ class PlaylistService {
       );
     }
     return insertedTrack;
+  }
+
+  /// Copies a user-selected file over a playlist entry and records any cover
+  /// art embedded in that file as the track's local thumbnail.
+  Future<Track> replaceWithLocalFile({
+    required int trackId,
+    required String sourcePath,
+    required String sourceFileName,
+  }) async {
+    final track = await _db.getTrack(trackId);
+    if (track == null) throw StateError('The selected track no longer exists.');
+    final playlist = await _db.getPlaylist(track.playlistId);
+    final source = File(sourcePath);
+    if (!await source.exists()) {
+      throw StateError('The selected file no longer exists.');
+    }
+
+    final pickedName = p.basename(sourceFileName.trim());
+    final extension = p.extension(pickedName).toLowerCase();
+    final extensionWithoutDot =
+        extension.startsWith('.') ? extension.substring(1) : extension;
+    if (!allowedAudioExtensions.contains(extensionWithoutDot) &&
+        !allowedVideoExtensions.contains(extensionWithoutDot)) {
+      throw StateError('Select a supported audio or video file.');
+    }
+
+    final totalTracks = await _db.getTotalTrackCount(playlist.id);
+    final indexPrefix = MetadataService.paddedIndex(track.index, totalTracks);
+    final baseName = p.basenameWithoutExtension(pickedName);
+    final safeName = MetadataService.sanitizeFilename(baseName);
+    final destinationPath = p.join(
+      playlist.outputPath,
+      '${indexPrefix}_$safeName$extension',
+    );
+    final operationId = DateTime.now().microsecondsSinceEpoch;
+    final stagedPath = p.join(
+      playlist.outputPath,
+      '.woolytube-local-replacement-$operationId$extension',
+    );
+    final stagedFile = File(stagedPath);
+
+    await Directory(playlist.outputPath).create(recursive: true);
+    try {
+      await source.copy(stagedPath);
+      final existing = MetadataService.resolveMediaFile(
+        playlist.outputPath,
+        '${indexPrefix}_',
+      );
+      if (existing != null && await File(existing).exists()) {
+        await File(existing).delete();
+      }
+      final destination = File(destinationPath);
+      if (await destination.exists()) await destination.delete();
+      await stagedFile.rename(destinationPath);
+
+      await _db.updateTrackStatus(
+        track.id,
+        'complete',
+        filePath: destinationPath,
+        isLocalReplacement: true,
+      );
+      await _refreshEmbeddedThumbnail(
+        playlist: playlist,
+        trackId: track.id,
+        mediaPath: destinationPath,
+      );
+      await _writeMetadata(playlist.id);
+    } catch (_) {
+      if (await stagedFile.exists()) {
+        try {
+          await stagedFile.delete();
+        } catch (_) {}
+      }
+      rethrow;
+    }
+
+    final updated = await _db.getTrack(track.id);
+    if (updated == null)
+      throw StateError('The replacement could not be loaded.');
+    return updated;
+  }
+
+  /// Extracts artwork for local files created before thumbnail extraction was
+  /// added. This is intentionally limited to user-supplied replacements.
+  Future<int> backfillLocalThumbnails(int playlistId) async {
+    final playlist = await _db.getPlaylist(playlistId);
+    final tracks = await _db.getTracksForPlaylist(playlistId);
+    var extracted = 0;
+    for (final track in tracks) {
+      if (!track.isLocalReplacement ||
+          track.filePath == null ||
+          !await File(track.filePath!).exists() ||
+          media_thumbnail_service.existingThumbnailPath(track.thumbnailPath) !=
+              null) {
+        continue;
+      }
+      final path = await _refreshEmbeddedThumbnail(
+        playlist: playlist,
+        trackId: track.id,
+        mediaPath: track.filePath!,
+      );
+      if (path != null) extracted++;
+    }
+    if (extracted > 0) await _writeMetadata(playlistId);
+    return extracted;
+  }
+
+  Future<String?> _refreshEmbeddedThumbnail({
+    required Playlist playlist,
+    required int trackId,
+    required String mediaPath,
+  }) async {
+    try {
+      final thumbnailPath = await _thumbnails.extractEmbeddedThumbnail(
+        mediaPath: mediaPath,
+        playlistPath: playlist.outputPath,
+        trackId: trackId,
+      );
+      await _db.updateTrackThumbnailPath(trackId, thumbnailPath);
+      return thumbnailPath;
+    } catch (_) {
+      // Artwork is optional; a local media operation must still succeed.
+      return null;
+    }
   }
 
   void _validateForcedInsertTargets(

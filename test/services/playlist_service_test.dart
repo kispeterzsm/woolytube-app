@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/services/metadata_service.dart';
+import 'package:woolytube/services/media_thumbnail_service.dart';
 import 'package:woolytube/services/playlist_service.dart';
 import 'package:woolytube/services/ytdlp_service.dart';
 
@@ -21,17 +22,39 @@ class FakeYtDlpService extends YtDlpService {
   }
 }
 
+class FakeMediaThumbnailService extends MediaThumbnailService {
+  bool hasEmbeddedThumbnail = false;
+  final requestedMediaPaths = <String>[];
+
+  @override
+  Future<String?> extractEmbeddedThumbnail({
+    required String mediaPath,
+    required String playlistPath,
+    required int trackId,
+  }) async {
+    requestedMediaPaths.add(mediaPath);
+    if (!hasEmbeddedThumbnail) return null;
+    final directory = Directory(p.join(playlistPath, '.woolytube_thumbnails'));
+    await directory.create(recursive: true);
+    final thumbnail = File(p.join(directory.path, 'track_$trackId.jpg'));
+    await thumbnail.writeAsBytes(const [0xff, 0xd8, 0xff, 0xd9]);
+    return thumbnail.path;
+  }
+}
+
 void main() {
   late AppDatabase db;
   late Directory tempDir;
   late FakeYtDlpService ytdlp;
+  late FakeMediaThumbnailService thumbnails;
   late PlaylistService service;
 
   setUp(() async {
     db = openTestDatabase();
     tempDir = await Directory.systemTemp.createTemp('woolytube_playlist_test_');
     ytdlp = FakeYtDlpService();
-    service = PlaylistService(db, ytdlp, MetadataService(db));
+    thumbnails = FakeMediaThumbnailService();
+    service = PlaylistService(db, ytdlp, MetadataService(db), thumbnails);
   });
 
   tearDown(() async {
@@ -264,6 +287,7 @@ void main() {
   test(
     'force insert copies a video and shifts track indexes and filenames',
     () async {
+      thumbnails.hasEmbeddedThumbnail = true;
       final outputDir = Directory(p.join(tempDir.path, 'video-playlist'));
       await outputDir.create();
       final playlist = await insertTestPlaylist(db, outputPath: outputDir.path);
@@ -312,6 +336,9 @@ void main() {
       expect(PlaylistService.isForcedInsertVideoId(inserted.videoId), isTrue);
       expect(p.basename(inserted.filePath!), '00002_Lost Video.mp4');
       expect(await File(inserted.filePath!).readAsString(), 'replacement');
+      expect(inserted.thumbnailPath, isNotNull);
+      expect(await File(inserted.thumbnailPath!).exists(), isTrue);
+      expect(thumbnails.requestedMediaPaths, [inserted.filePath]);
       expect((await db.getTrack(first.id))!.filePath, firstPath);
       final shiftedSecond = (await db.getTrack(second.id))!;
       expect(shiftedSecond.index, 3);
@@ -331,6 +358,65 @@ void main() {
       expect(metadataTracks.map((track) => track['index']), [1, 2, 3]);
       expect(metadataTracks[1]['videoId'], inserted.videoId);
       expect(metadataTracks[1]['fileName'], '00002_Lost Video.mp4');
+      expect(
+        metadataTracks[1]['thumbnailFileName'],
+        p.join('.woolytube_thumbnails', 'track_${inserted.id}.jpg'),
+      );
+    },
+  );
+
+  test('local replacement extracts and stores embedded artwork', () async {
+    thumbnails.hasEmbeddedThumbnail = true;
+    final outputDir = Directory(p.join(tempDir.path, 'local-replacement'));
+    await outputDir.create();
+    final playlist = await insertTestPlaylist(db, outputPath: outputDir.path);
+    final oldPath = p.join(outputDir.path, '00001_Old.mp4');
+    await File(oldPath).writeAsString('old');
+    final track = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      videoId: 'original-id',
+      title: 'Original title',
+      filePath: oldPath,
+      status: 'complete',
+    );
+    final source = File(p.join(tempDir.path, 'Replacement.m4a'));
+    await source.writeAsString('new');
+
+    final updated = await service.replaceWithLocalFile(
+      trackId: track.id,
+      sourcePath: source.path,
+      sourceFileName: 'Replacement.m4a',
+    );
+
+    expect(updated.isLocalReplacement, isTrue);
+    expect(p.basename(updated.filePath!), '00001_Replacement.m4a');
+    expect(await File(updated.filePath!).readAsString(), 'new');
+    expect(await File(oldPath).exists(), isFalse);
+    expect(updated.thumbnailPath, isNotNull);
+    expect(await File(updated.thumbnailPath!).exists(), isTrue);
+  });
+
+  test(
+    'backfills embedded artwork for an existing local replacement',
+    () async {
+      thumbnails.hasEmbeddedThumbnail = true;
+      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+      final media = File(p.join(tempDir.path, '00001_Existing.mp3'));
+      await media.writeAsString('audio');
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        filePath: media.path,
+        status: 'complete',
+        isLocalReplacement: true,
+      );
+
+      expect(await service.backfillLocalThumbnails(playlist.id), 1);
+      final updated = await db.getTrack(track.id);
+      expect(updated!.thumbnailPath, isNotNull);
+      expect(await File(updated.thumbnailPath!).exists(), isTrue);
+      expect(await service.backfillLocalThumbnails(playlist.id), 0);
     },
   );
 

@@ -159,6 +159,16 @@ void main() {
         handler.mediaItem.value?.artUri,
         Uri.parse('https://i.ytimg.com/vi/safe-fallback/hqdefault.jpg'),
       );
+
+      playback.setCurrentTrack(
+        track.copyWith(
+          videoId: 'force-insert:123',
+          thumbnailPath: const Value(null),
+          thumbnailUrl: const Value(null),
+        ),
+      );
+      await _flushStreams();
+      expect(handler.mediaItem.value?.artUri, null);
     },
   );
 }

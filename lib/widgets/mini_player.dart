@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
@@ -6,6 +8,7 @@ import '../providers/playback_providers.dart';
 import '../providers/lifecycle_provider.dart';
 import '../pages/player_page.dart';
 import 'sponsorblock_progress_bar.dart';
+import '../services/media_thumbnail_service.dart';
 
 class MiniPlayerBar extends ConsumerStatefulWidget {
   final VoidCallback? onOpenPlayer;
@@ -95,7 +98,7 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
                                 controller: playbackService.videoController,
                                 controls: noVideoControls,
                               )
-                              : _buildThumbnail(_thumbnailUrl(currentTrack)),
+                              : _buildThumbnail(currentTrack),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -178,16 +181,29 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
     Navigator.maybeOf(context)?.push(playerPageRoute());
   }
 
-  Widget _buildThumbnail(String? url) {
-    if (url != null && url.isNotEmpty) {
-      return CachedNetworkImage(
-        imageUrl: url,
+  Widget _buildThumbnail(dynamic track) {
+    final url = resolveRemoteThumbnailUrl(
+      thumbnailUrl: track.thumbnailUrl as String?,
+      youtubeVideoId: track.videoId as String?,
+    );
+    final fallback =
+        url != null && url.isNotEmpty
+            ? CachedNetworkImage(
+              imageUrl: url,
+              fit: BoxFit.cover,
+              placeholder: (_, __) => Container(color: const Color(0xFF333333)),
+              errorWidget: (_, __, ___) => _placeholderIcon(),
+            )
+            : _placeholderIcon();
+    final path = existingThumbnailPath(track.thumbnailPath as String?);
+    if (path != null) {
+      return Image.file(
+        File(path),
         fit: BoxFit.cover,
-        placeholder: (_, __) => Container(color: const Color(0xFF333333)),
-        errorWidget: (_, __, ___) => _placeholderIcon(),
+        errorBuilder: (_, __, ___) => fallback,
       );
     }
-    return _placeholderIcon();
+    return fallback;
   }
 
   Widget _placeholderIcon() {
@@ -195,18 +211,6 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
       color: const Color(0xFF333333),
       child: const Icon(Icons.music_note, color: Color(0xFF555555), size: 24),
     );
-  }
-
-  /// Get thumbnail URL with YouTube fallback from video ID
-  String? _thumbnailUrl(dynamic track) {
-    if (track.thumbnailUrl != null &&
-        (track.thumbnailUrl as String).isNotEmpty) {
-      return track.thumbnailUrl;
-    }
-    if (track.videoId != null && (track.videoId as String).isNotEmpty) {
-      return 'https://i.ytimg.com/vi/${track.videoId}/hqdefault.jpg';
-    }
-    return null;
   }
 
   String _formatDuration(Duration pos, Duration dur) {

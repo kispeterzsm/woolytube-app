@@ -271,6 +271,11 @@ void main() {
   test(
     'imports discovered playlists and keeps only valid local segments',
     () async {
+      final thumbnail = File(
+        p.join(tempDir.path, '.woolytube_thumbnails', 'track_7.jpg'),
+      );
+      await thumbnail.parent.create();
+      await thumbnail.writeAsString('image');
       await File(
         p.join(tempDir.path, '00001_Existing.m4a'),
       ).writeAsString('audio');
@@ -296,6 +301,7 @@ void main() {
               title: 'Existing',
               status: 'complete',
               fileName: '00001_Existing.m4a',
+              thumbnailFileName: p.join('.woolytube_thumbnails', 'track_7.jpg'),
               alwaysSkip: true,
               sponsorBlockSegments: const [
                 DiscoveredSponsorBlockSegment(
@@ -347,6 +353,7 @@ void main() {
       ]);
       expect(tracks[0].status, 'complete');
       expect(tracks[0].filePath, p.join(tempDir.path, '00001_Existing.m4a'));
+      expect(tracks[0].thumbnailPath, thumbnail.path);
       expect(tracks[0].alwaysSkip, isTrue);
       expect(tracks[1].status, 'pending');
       expect(tracks[1].filePath, isNull);

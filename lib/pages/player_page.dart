@@ -11,6 +11,7 @@ import '../providers/playback_providers.dart';
 import '../providers/lifecycle_provider.dart';
 import '../widgets/player_controls.dart';
 import '../widgets/segment_mark_button.dart';
+import '../services/media_thumbnail_service.dart';
 
 class PlayerPage extends ConsumerWidget {
   const PlayerPage({super.key});
@@ -1169,19 +1170,14 @@ class _AudioImagePlaceholder extends StatelessWidget {
 }
 
 String? _thumbnailPath(Track track) {
-  final path = track.thumbnailPath;
-  if (path == null || path.isEmpty) return null;
-  return File(path).existsSync() ? path : null;
+  return existingThumbnailPath(track.thumbnailPath);
 }
 
 String? _thumbnailUrl(Track track) {
-  if (track.thumbnailUrl != null && track.thumbnailUrl!.isNotEmpty) {
-    return track.thumbnailUrl;
-  }
-  if (track.videoId.isNotEmpty) {
-    return 'https://i.ytimg.com/vi/${track.videoId}/hqdefault.jpg';
-  }
-  return null;
+  return resolveRemoteThumbnailUrl(
+    thumbnailUrl: track.thumbnailUrl,
+    youtubeVideoId: track.videoId,
+  );
 }
 
 String _formatClock(Duration d) {

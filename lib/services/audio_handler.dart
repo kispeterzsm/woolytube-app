@@ -4,6 +4,7 @@ import 'package:audio_service/audio_service.dart';
 import 'package:rxdart/rxdart.dart';
 import '../database/database.dart';
 import 'playback_notification_controller.dart';
+import 'media_thumbnail_service.dart';
 
 Uri? resolveNotificationArtwork({
   String? localPath,
@@ -23,12 +24,9 @@ Uri? resolveNotificationArtwork({
     }
   }
 
-  if (youtubeVideoId != null && youtubeVideoId.isNotEmpty) {
-    return Uri(
-      scheme: 'https',
-      host: 'i.ytimg.com',
-      pathSegments: ['vi', youtubeVideoId, 'hqdefault.jpg'],
-    );
+  final fallback = resolveRemoteThumbnailUrl(youtubeVideoId: youtubeVideoId);
+  if (fallback != null) {
+    return Uri.parse(fallback);
   }
 
   return null;

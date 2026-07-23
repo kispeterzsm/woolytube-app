@@ -4,6 +4,7 @@ import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.media.MediaMetadataRetriever
 import android.os.Build
 import android.os.Environment
 import android.provider.Settings
@@ -27,6 +28,7 @@ class MainActivity : AudioServiceFragmentActivity() {
     companion object {
         private const val BACKGROUND_CHANNEL = "com.woolytube/background"
         private const val APP_UPDATE_CHANNEL = "com.woolytube/app_update"
+        private const val MEDIA_METADATA_CHANNEL = "com.woolytube/media_metadata"
         private const val APK_MIME_TYPE = "application/vnd.android.package-archive"
         private const val TAG = "WoolyTubeUpdate"
     }
@@ -60,6 +62,16 @@ class MainActivity : AudioServiceFragmentActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, MEDIA_METADATA_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "extractEmbeddedThumbnail" -> {
+                        handleExtractEmbeddedThumbnail(call.arguments as? Map<*, *>, result)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
     }
 
     override fun onDestroy() {
@@ -83,6 +95,78 @@ class MainActivity : AudioServiceFragmentActivity() {
             ExistingPeriodicWorkPolicy.KEEP,
             request
         )
+    }
+
+    private fun handleExtractEmbeddedThumbnail(
+        args: Map<*, *>?,
+        result: MethodChannel.Result
+    ) {
+        val mediaPath = args?.get("mediaPath") as? String
+        val playlistPath = args?.get("playlistPath") as? String
+        val trackId = (args?.get("trackId") as? Number)?.toLong()
+        if (mediaPath.isNullOrBlank() || playlistPath.isNullOrBlank() || trackId == null) {
+            result.error("INVALID_ARGS", "mediaPath, playlistPath, and trackId are required", null)
+            return
+        }
+
+        updateScope.launch {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(mediaPath)
+                val artwork = retriever.embeddedPicture
+                val thumbnailDir = File(playlistPath, ".woolytube_thumbnails")
+                val filePrefix = "track_${trackId}."
+
+                // A replacement without artwork must not retain the previous
+                // replacement's thumbnail.
+                thumbnailDir.listFiles()
+                    ?.filter { it.isFile && it.name.startsWith(filePrefix) }
+                    ?.forEach { it.delete() }
+
+                if (artwork == null || artwork.isEmpty()) {
+                    withContext(Dispatchers.Main) { result.success(null) }
+                    return@launch
+                }
+
+                if (!thumbnailDir.exists() && !thumbnailDir.mkdirs()) {
+                    throw IllegalStateException("Could not create thumbnail directory")
+                }
+                val extension = imageExtension(artwork)
+                val target = File(thumbnailDir, "track_${trackId}.$extension")
+                val temporary = File(thumbnailDir, "${target.name}.tmp")
+                temporary.writeBytes(artwork)
+                if (target.exists()) target.delete()
+                if (!temporary.renameTo(target)) {
+                    target.writeBytes(artwork)
+                    temporary.delete()
+                }
+                withContext(Dispatchers.Main) { result.success(target.absolutePath) }
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not extract embedded artwork from $mediaPath", e)
+                withContext(Dispatchers.Main) { result.success(null) }
+            } finally {
+                retriever.release()
+            }
+        }
+    }
+
+    private fun imageExtension(bytes: ByteArray): String {
+        fun byteAt(index: Int): Int = bytes[index].toInt() and 0xff
+        if (bytes.size >= 3 && byteAt(0) == 0xff && byteAt(1) == 0xd8 && byteAt(2) == 0xff) {
+            return "jpg"
+        }
+        if (bytes.size >= 4 && byteAt(0) == 0x89 && bytes[1].toInt().toChar() == 'P' &&
+            bytes[2].toInt().toChar() == 'N' && bytes[3].toInt().toChar() == 'G') {
+            return "png"
+        }
+        if (bytes.size >= 12 && String(bytes, 0, 4, Charsets.US_ASCII) == "RIFF" &&
+            String(bytes, 8, 4, Charsets.US_ASCII) == "WEBP") {
+            return "webp"
+        }
+        if (bytes.size >= 3 && String(bytes, 0, 3, Charsets.US_ASCII) == "GIF") {
+            return "gif"
+        }
+        return "jpg"
     }
 
     private fun handleDownloadAndInstallApk(
