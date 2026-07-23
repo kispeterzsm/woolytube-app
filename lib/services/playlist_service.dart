@@ -1,10 +1,35 @@
 import 'dart:io';
 import 'dart:convert';
 import 'package:drift/drift.dart';
+import 'package:path/path.dart' as p;
 import '../database/database.dart';
 import 'ytdlp_service.dart';
 import 'metadata_service.dart';
 import 'sponsorblock_service.dart';
+
+class ForceInsertException implements Exception {
+  final String message;
+
+  const ForceInsertException(this.message);
+
+  @override
+  String toString() => message;
+}
+
+class _ForcedInsertFileMove {
+  final int trackId;
+  final String originalPath;
+  final String temporaryPath;
+  final String targetPath;
+  String currentPath;
+
+  _ForcedInsertFileMove({
+    required this.trackId,
+    required this.originalPath,
+    required this.temporaryPath,
+    required this.targetPath,
+  }) : currentPath = originalPath;
+}
 
 class SyncResult {
   final int added;
@@ -28,6 +53,17 @@ class SyncResult {
 }
 
 class PlaylistService {
+  static const forcedInsertVideoIdPrefix = 'force-insert:';
+  static const allowedAudioExtensions = [
+    'm4a',
+    'mp3',
+    'opus',
+    'ogg',
+    'flac',
+    'wav',
+  ];
+  static const allowedVideoExtensions = ['mp4', 'mkv', 'webm', 'avi', 'mov'];
+
   final AppDatabase _db;
   final YtDlpService _ytdlp;
   final MetadataService _metadata;
@@ -206,6 +242,12 @@ class PlaylistService {
     final info = await _ytdlp.getPlaylistInfo(playlist.url);
     final freshEntries = info['entries'] as List<dynamic>? ?? [];
     final existingTracks = await _db.getTracksForPlaylist(playlist.id);
+    final forcedInsertIndices =
+        existingTracks
+            .where((track) => isForcedInsertVideoId(track.videoId))
+            .map((track) => track.index)
+            .toList()
+          ..sort();
 
     final existingByVideoId = <String, Track>{};
     for (final t in existingTracks) {
@@ -213,10 +255,18 @@ class PlaylistService {
     }
 
     final freshByVideoId = <String, Map<String, dynamic>>{};
+    final freshIndexByVideoId = <String, int>{};
     for (var i = 0; i < freshEntries.length; i++) {
       final entry = freshEntries[i] as Map<String, dynamic>;
       final vid = entry['id'] as String? ?? '';
-      if (vid.isNotEmpty) freshByVideoId[vid] = entry;
+      if (vid.isNotEmpty) {
+        freshByVideoId[vid] = entry;
+        final remoteIndex = entry['playlist_index'] as int? ?? (i + 1);
+        freshIndexByVideoId[vid] = _remoteToLocalIndex(
+          remoteIndex,
+          forcedInsertIndices,
+        );
+      }
     }
 
     int added = 0, markedUnavailable = 0, markedAvailable = 0, removed = 0;
@@ -228,6 +278,7 @@ class PlaylistService {
 
     // Process existing tracks against fresh data
     for (final track in existingTracks) {
+      if (isForcedInsertVideoId(track.videoId)) continue;
       final freshEntry = freshByVideoId[track.videoId];
 
       if (freshEntry == null) {
@@ -247,7 +298,7 @@ class PlaylistService {
       }
 
       final reason = _detectUnavailability(freshEntry);
-      final freshIndex = freshEntry['playlist_index'] as int? ?? track.index;
+      final freshIndex = freshIndexByVideoId[track.videoId] ?? track.index;
 
       if (reason != null) {
         // Video is unavailable online
@@ -301,7 +352,11 @@ class PlaylistService {
       if (vid.isEmpty || existingByVideoId.containsKey(vid)) continue;
 
       final reason = _detectUnavailability(entry);
-      final playlistIndex = entry['playlist_index'] as int? ?? (i + 1);
+      final remoteIndex = entry['playlist_index'] as int? ?? (i + 1);
+      final playlistIndex = _remoteToLocalIndex(
+        remoteIndex,
+        forcedInsertIndices,
+      );
       newTracks.add(
         TracksCompanion.insert(
           playlistId: playlist.id,
@@ -349,6 +404,244 @@ class PlaylistService {
 
   Future<int> getTotalCount(int playlistId) =>
       _db.getTotalTrackCount(playlistId);
+
+  static bool isForcedInsertVideoId(String videoId) =>
+      videoId.startsWith(forcedInsertVideoIdPrefix);
+
+  static int _remoteToLocalIndex(
+    int remoteIndex,
+    List<int> forcedInsertIndices,
+  ) {
+    var localIndex = remoteIndex;
+    for (final forcedIndex in forcedInsertIndices) {
+      if (forcedIndex <= localIndex) localIndex++;
+    }
+    return localIndex;
+  }
+
+  /// Inserts a user-supplied local file at an exact archive position.
+  ///
+  /// Later entries and their on-disk filename prefixes move forward together.
+  /// The synthetic video ID keeps this local-only entry out of remote YouTube
+  /// reconciliation while still preserving it in the metadata sidecar.
+  Future<Track> forceInsert({
+    required int playlistId,
+    required int index,
+    required String sourcePath,
+    String? sourceFileName,
+  }) async {
+    final playlist = await _db.getPlaylist(playlistId);
+    final source = File(sourcePath);
+    if (!await source.exists()) {
+      throw const ForceInsertException('The selected file no longer exists.');
+    }
+
+    final pickedName =
+        sourceFileName == null || sourceFileName.trim().isEmpty
+            ? p.basename(sourcePath)
+            : p.basename(sourceFileName.trim());
+    final extension = p.extension(pickedName).toLowerCase();
+    final extensionWithoutDot =
+        extension.startsWith('.') ? extension.substring(1) : extension;
+    final allowedExtensions =
+        playlist.audioOnly ? allowedAudioExtensions : allowedVideoExtensions;
+    if (!allowedExtensions.contains(extensionWithoutDot)) {
+      final expected = playlist.audioOnly ? 'audio' : 'video';
+      throw ForceInsertException(
+        'Select a supported $expected file (${allowedExtensions.join(', ')}).',
+      );
+    }
+
+    final tracks = await _db.getTracksForPlaylist(playlistId);
+    var highestIndex = 0;
+    for (final track in tracks) {
+      if (track.index > highestIndex) highestIndex = track.index;
+    }
+    final maximumIndex = tracks.isEmpty ? 1 : highestIndex + 1;
+    if (index < 1 || index > maximumIndex) {
+      throw ForceInsertException('Index must be between 1 and $maximumIndex.');
+    }
+
+    final outputDirectory = Directory(playlist.outputPath);
+    await outputDirectory.create(recursive: true);
+
+    final title = p.basenameWithoutExtension(pickedName).trim();
+    final resolvedTitle = title.isEmpty ? 'Local file' : title;
+    final safeTitle = MetadataService.sanitizeFilename(resolvedTitle);
+    final newTrackCount = tracks.length + 1;
+    final indexPrefix = MetadataService.paddedIndex(index, newTrackCount);
+    final destinationPath = p.join(
+      outputDirectory.path,
+      '${indexPrefix}_$safeTitle$extension',
+    );
+    final operationId = DateTime.now().microsecondsSinceEpoch.toString();
+    final stagedSourcePath = p.join(
+      outputDirectory.path,
+      '.woolytube-force-insert-$operationId$extension',
+    );
+    final stagedSource = File(stagedSourcePath);
+    final moves = <_ForcedInsertFileMove>[];
+    final prefixPattern = RegExp(r'^\d+_(.*)$');
+
+    for (var i = 0; i < tracks.length; i++) {
+      final track = tracks[i];
+      final oldPath = track.filePath;
+      if (oldPath == null || !await File(oldPath).exists()) continue;
+
+      final newIndex = track.index >= index ? track.index + 1 : track.index;
+      final oldName = p.basename(oldPath);
+      final prefixMatch = prefixPattern.firstMatch(oldName);
+      final nameWithoutPrefix = prefixMatch?.group(1) ?? oldName;
+      final newPrefix = MetadataService.paddedIndex(newIndex, newTrackCount);
+      final targetPath = p.join(
+        outputDirectory.path,
+        '${newPrefix}_$nameWithoutPrefix',
+      );
+      if (p.equals(oldPath, targetPath)) continue;
+
+      moves.add(
+        _ForcedInsertFileMove(
+          trackId: track.id,
+          originalPath: oldPath,
+          temporaryPath: p.join(
+            outputDirectory.path,
+            '.woolytube-force-move-$operationId-$i${p.extension(oldPath)}',
+          ),
+          targetPath: targetPath,
+        ),
+      );
+    }
+
+    late final int insertedTrackId;
+    var insertedFilePlaced = false;
+    try {
+      await source.copy(stagedSourcePath);
+      _validateForcedInsertTargets(moves, destinationPath);
+
+      for (final move in moves) {
+        await File(move.currentPath).rename(move.temporaryPath);
+        move.currentPath = move.temporaryPath;
+      }
+      for (final move in moves) {
+        await File(move.currentPath).rename(move.targetPath);
+        move.currentPath = move.targetPath;
+      }
+      await stagedSource.rename(destinationPath);
+      insertedFilePlaced = true;
+
+      await _db.transaction(() async {
+        final movesByTrackId = {for (final move in moves) move.trackId: move};
+        for (final track in tracks) {
+          final newIndex = track.index >= index ? track.index + 1 : track.index;
+          final move = movesByTrackId[track.id];
+          if (newIndex != track.index || move != null) {
+            await _db.updateTrackPlacement(
+              track.id,
+              index: newIndex,
+              filePath: move?.targetPath,
+            );
+          }
+        }
+
+        insertedTrackId = await _db.insertTrack(
+          TracksCompanion.insert(
+            playlistId: playlistId,
+            index: index,
+            videoId: '$forcedInsertVideoIdPrefix$operationId',
+            title: resolvedTitle,
+            filePath: Value(destinationPath),
+            status: const Value('complete'),
+            isLocalReplacement: const Value(true),
+            downloadedAt: Value(DateTime.now()),
+          ),
+        );
+      });
+    } catch (error) {
+      try {
+        final destination = File(destinationPath);
+        if (insertedFilePlaced && await destination.exists()) {
+          await destination.delete();
+        }
+      } catch (_) {
+        // Best-effort rollback continues with the pre-existing files.
+      }
+      await _rollbackForcedInsertMoves(moves);
+      try {
+        if (await stagedSource.exists()) await stagedSource.delete();
+      } catch (_) {
+        // Best effort.
+      }
+      if (error is ForceInsertException) rethrow;
+      throw ForceInsertException('Could not insert the selected file: $error');
+    }
+
+    await _writeMetadata(playlistId);
+    final insertedTrack = await _db.getTrack(insertedTrackId);
+    if (insertedTrack == null) {
+      throw const ForceInsertException(
+        'The inserted track could not be loaded.',
+      );
+    }
+    return insertedTrack;
+  }
+
+  void _validateForcedInsertTargets(
+    List<_ForcedInsertFileMove> moves,
+    String destinationPath,
+  ) {
+    final originalPaths = moves.map((move) => move.originalPath).toSet();
+    if (File(destinationPath).existsSync() &&
+        !originalPaths.contains(destinationPath)) {
+      throw const ForceInsertException(
+        'A file already occupies the requested index in this playlist.',
+      );
+    }
+    final targetPaths = <String>{destinationPath};
+    for (final move in moves) {
+      if (!targetPaths.add(move.targetPath)) {
+        throw const ForceInsertException(
+          'Existing playlist files have conflicting index prefixes.',
+        );
+      }
+      if (File(move.targetPath).existsSync() &&
+          !originalPaths.contains(move.targetPath)) {
+        throw ForceInsertException(
+          'Cannot move ${p.basename(move.originalPath)} because '
+          '${p.basename(move.targetPath)} already exists.',
+        );
+      }
+    }
+  }
+
+  Future<void> _rollbackForcedInsertMoves(
+    List<_ForcedInsertFileMove> moves,
+  ) async {
+    for (final move in moves.reversed) {
+      if (move.currentPath == move.originalPath ||
+          move.currentPath == move.temporaryPath) {
+        continue;
+      }
+      try {
+        if (await File(move.currentPath).exists()) {
+          await File(move.currentPath).rename(move.temporaryPath);
+          move.currentPath = move.temporaryPath;
+        }
+      } catch (_) {
+        // Continue restoring any other files.
+      }
+    }
+    for (final move in moves.reversed) {
+      if (move.currentPath != move.temporaryPath) continue;
+      try {
+        if (await File(move.currentPath).exists()) {
+          await File(move.currentPath).rename(move.originalPath);
+          move.currentPath = move.originalPath;
+        }
+      } catch (_) {
+        // Best effort.
+      }
+    }
+  }
 
   Future<void> _writeMetadata(int playlistId) async {
     try {

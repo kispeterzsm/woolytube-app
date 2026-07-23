@@ -1,8 +1,11 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../database/database.dart';
 import '../providers/providers.dart';
+import '../services/playlist_service.dart';
 import '../services/sponsorblock_service.dart';
 import 'sponsorblock_settings_page.dart';
 
@@ -35,6 +38,7 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
   Map<String, SponsorBlockCategoryAction> _sponsorBlockCategoryActions =
       defaultSponsorBlockCategoryActions();
   bool _loaded = false;
+  bool _isForceInserting = false;
 
   @override
   void initState() {
@@ -145,6 +149,83 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
     if (actions != null && mounted) {
       setState(() => _sponsorBlockCategoryActions = actions);
     }
+  }
+
+  Future<void> _forceInsert() async {
+    final playlist = _playlist;
+    if (playlist == null || _isForceInserting) return;
+
+    setState(() => _isForceInserting = true);
+    try {
+      final service = ref.read(playlistServiceProvider);
+      final tracks = await service.getTracksForPlaylist(playlist.id);
+      var highestIndex = 0;
+      for (final track in tracks) {
+        if (track.index > highestIndex) highestIndex = track.index;
+      }
+      final maximumIndex = tracks.isEmpty ? 1 : highestIndex + 1;
+      if (!mounted) return;
+
+      final index = await _askForceInsertIndex(maximumIndex);
+      if (index == null || !mounted) return;
+
+      final allowedExtensions =
+          playlist.audioOnly
+              ? PlaylistService.allowedAudioExtensions
+              : PlaylistService.allowedVideoExtensions;
+      FilePickerResult? result;
+      try {
+        result = await FilePicker.platform.pickFiles(
+          type: FileType.custom,
+          allowedExtensions: allowedExtensions,
+          withData: false,
+        );
+      } catch (_) {
+        // Some Android document providers reject custom filters. The service
+        // still validates the selected extension after this fallback.
+        result = await FilePicker.platform.pickFiles(
+          type: FileType.any,
+          withData: false,
+        );
+      }
+      if (result == null || result.files.isEmpty || !mounted) return;
+
+      final picked = result.files.single;
+      final sourcePath = picked.path;
+      if (sourcePath == null) {
+        _showMessage('Could not access the selected file.');
+        return;
+      }
+
+      final inserted = await service.forceInsert(
+        playlistId: playlist.id,
+        index: index,
+        sourcePath: sourcePath,
+        sourceFileName: picked.name,
+      );
+      if (mounted) {
+        _showMessage('Inserted "${inserted.title}" at #$index.');
+      }
+    } on ForceInsertException catch (error) {
+      if (mounted) _showMessage(error.message);
+    } catch (error) {
+      if (mounted) _showMessage('Could not insert the selected file: $error');
+    } finally {
+      if (mounted) setState(() => _isForceInserting = false);
+    }
+  }
+
+  Future<int?> _askForceInsertIndex(int maximumIndex) async {
+    return showDialog<int>(
+      context: context,
+      builder: (_) => _ForceInsertIndexDialog(maximumIndex: maximumIndex),
+    );
+  }
+
+  void _showMessage(String message) {
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
@@ -285,6 +366,28 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
                 padding: const EdgeInsets.symmetric(vertical: 14),
               ),
             ),
+            const SizedBox(height: 32),
+            Text(
+              playlistForceInsertDescription(_playlist!.audioOnly),
+              style: const TextStyle(color: Color(0xFF888888), fontSize: 12),
+            ),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              key: const ValueKey('force-insert-button'),
+              onPressed: _isForceInserting ? null : _forceInsert,
+              icon:
+                  _isForceInserting
+                      ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                      : const Icon(Icons.playlist_add),
+              label: const Text('Force Insert'),
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 14),
+              ),
+            ),
             const SizedBox(height: 48),
             OutlinedButton(
               onPressed: _delete,
@@ -349,6 +452,88 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
     return _updateFrequencyOptions.keys.reduce(
       (nearest, option) =>
           (option - hours).abs() < (nearest - hours).abs() ? option : nearest,
+    );
+  }
+}
+
+String playlistForceInsertDescription(bool audioOnly) {
+  final kind = audioOnly ? 'audio' : 'video';
+  return 'Insert a local $kind file at an exact playlist index. Later items '
+      'will be moved forward.';
+}
+
+class _ForceInsertIndexDialog extends StatefulWidget {
+  final int maximumIndex;
+
+  const _ForceInsertIndexDialog({required this.maximumIndex});
+
+  @override
+  State<_ForceInsertIndexDialog> createState() =>
+      _ForceInsertIndexDialogState();
+}
+
+class _ForceInsertIndexDialogState extends State<_ForceInsertIndexDialog> {
+  final _controller = TextEditingController();
+  String? _errorText;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final index = int.tryParse(_controller.text);
+    if (index == null || index < 1 || index > widget.maximumIndex) {
+      setState(
+        () => _errorText = 'Enter a number from 1 to ${widget.maximumIndex}.',
+      );
+      return;
+    }
+    Navigator.pop(context, index);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: const Color(0xFF2A2A2A),
+      title: const Text('Force Insert', style: TextStyle(color: Colors.white)),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Choose an index from 1 to ${widget.maximumIndex}. Items at '
+            'that index and later will move forward.',
+            style: const TextStyle(color: Color(0xFFBBBBBB)),
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            key: const ValueKey('force-insert-index-field'),
+            controller: _controller,
+            autofocus: true,
+            keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            decoration: InputDecoration(
+              labelText: 'Index',
+              errorText: _errorText,
+              border: const OutlineInputBorder(),
+            ),
+            onSubmitted: (_) => _submit(),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          key: const ValueKey('force-insert-select-file'),
+          onPressed: _submit,
+          child: const Text('Select file'),
+        ),
+      ],
     );
   }
 }

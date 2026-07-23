@@ -362,6 +362,19 @@ class AppDatabase extends _$AppDatabase {
     )).write(TracksCompanion(index: Value(newIndex)));
   }
 
+  Future<void> updateTrackPlacement(
+    int trackId, {
+    required int index,
+    String? filePath,
+  }) async {
+    await (update(tracks)..where((t) => t.id.equals(trackId))).write(
+      TracksCompanion(
+        index: Value(index),
+        filePath: filePath != null ? Value(filePath) : const Value.absent(),
+      ),
+    );
+  }
+
   Future<void> updateTrackOnlineStatus(
     int trackId,
     String? unavailableReason,

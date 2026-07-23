@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -257,6 +258,216 @@ void main() {
         await File(p.join(tempDir.path, 'woolytube_meta.json')).exists(),
         isTrue,
       );
+    },
+  );
+
+  test(
+    'force insert copies a video and shifts track indexes and filenames',
+    () async {
+      final outputDir = Directory(p.join(tempDir.path, 'video-playlist'));
+      await outputDir.create();
+      final playlist = await insertTestPlaylist(db, outputPath: outputDir.path);
+      final firstPath = p.join(outputDir.path, '00001_First.mp4');
+      final secondPath = p.join(outputDir.path, '00002_Second.mp4');
+      await File(firstPath).writeAsString('first');
+      await File(secondPath).writeAsString('second');
+      final first = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 1,
+        videoId: 'first',
+        title: 'First',
+        status: 'complete',
+        filePath: firstPath,
+      );
+      final second = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 2,
+        videoId: 'second',
+        title: 'Second',
+        status: 'complete',
+        filePath: secondPath,
+      );
+      final source = File(p.join(tempDir.path, 'Lost Video.MP4'));
+      await source.writeAsString('replacement');
+
+      final inserted = await service.forceInsert(
+        playlistId: playlist.id,
+        index: 2,
+        sourcePath: source.path,
+        sourceFileName: 'Lost Video.MP4',
+      );
+
+      final tracks = await db.getTracksForPlaylist(playlist.id);
+      expect(tracks.map((track) => track.index), [1, 2, 3]);
+      expect(tracks.map((track) => track.id), [
+        first.id,
+        inserted.id,
+        second.id,
+      ]);
+      expect(inserted.title, 'Lost Video');
+      expect(inserted.status, 'complete');
+      expect(inserted.isLocalReplacement, isTrue);
+      expect(PlaylistService.isForcedInsertVideoId(inserted.videoId), isTrue);
+      expect(p.basename(inserted.filePath!), '00002_Lost Video.mp4');
+      expect(await File(inserted.filePath!).readAsString(), 'replacement');
+      expect((await db.getTrack(first.id))!.filePath, firstPath);
+      final shiftedSecond = (await db.getTrack(second.id))!;
+      expect(shiftedSecond.index, 3);
+      expect(p.basename(shiftedSecond.filePath!), '00003_Second.mp4');
+      expect(await File(shiftedSecond.filePath!).readAsString(), 'second');
+      expect(await File(secondPath).exists(), isFalse);
+      expect(await source.exists(), isTrue);
+
+      final metadata =
+          jsonDecode(
+                await File(
+                  p.join(outputDir.path, 'woolytube_meta.json'),
+                ).readAsString(),
+              )
+              as Map<String, dynamic>;
+      final metadataTracks = metadata['tracks'] as List<dynamic>;
+      expect(metadataTracks.map((track) => track['index']), [1, 2, 3]);
+      expect(metadataTracks[1]['videoId'], inserted.videoId);
+      expect(metadataTracks[1]['fileName'], '00002_Lost Video.mp4');
+    },
+  );
+
+  test('force insert enforces the playlist media type', () async {
+    final videoDir = Directory(p.join(tempDir.path, 'video'));
+    final audioDir = Directory(p.join(tempDir.path, 'audio'));
+    await videoDir.create();
+    await audioDir.create();
+    final videoPlaylist = await insertTestPlaylist(
+      db,
+      url: 'https://example.com/video-playlist',
+      outputPath: videoDir.path,
+    );
+    final audioPlaylist = await insertTestPlaylist(
+      db,
+      url: 'https://example.com/audio-playlist',
+      audioOnly: true,
+      outputPath: audioDir.path,
+    );
+    final audioSource = File(p.join(tempDir.path, 'audio.mp3'));
+    final videoSource = File(p.join(tempDir.path, 'video.mp4'));
+    await audioSource.writeAsString('audio');
+    await videoSource.writeAsString('video');
+
+    await expectLater(
+      service.forceInsert(
+        playlistId: videoPlaylist.id,
+        index: 1,
+        sourcePath: audioSource.path,
+      ),
+      throwsA(
+        isA<ForceInsertException>().having(
+          (error) => error.message,
+          'message',
+          contains('video file'),
+        ),
+      ),
+    );
+    await expectLater(
+      service.forceInsert(
+        playlistId: audioPlaylist.id,
+        index: 1,
+        sourcePath: videoSource.path,
+      ),
+      throwsA(
+        isA<ForceInsertException>().having(
+          (error) => error.message,
+          'message',
+          contains('audio file'),
+        ),
+      ),
+    );
+
+    final insertedAudio = await service.forceInsert(
+      playlistId: audioPlaylist.id,
+      index: 1,
+      sourcePath: audioSource.path,
+    );
+    expect(insertedAudio.filePath, endsWith('.mp3'));
+    expect(insertedAudio.status, 'complete');
+    expect(await db.getTracksForPlaylist(videoPlaylist.id), isEmpty);
+  });
+
+  test('force insert rejects an index beyond the end', () async {
+    final outputDir = Directory(p.join(tempDir.path, 'index-playlist'));
+    await outputDir.create();
+    final playlist = await insertTestPlaylist(db, outputPath: outputDir.path);
+    await insertTestTrack(db, playlistId: playlist.id, index: 1);
+    final source = File(p.join(tempDir.path, 'video.mp4'));
+    await source.writeAsString('video');
+
+    await expectLater(
+      service.forceInsert(
+        playlistId: playlist.id,
+        index: 3,
+        sourcePath: source.path,
+      ),
+      throwsA(
+        isA<ForceInsertException>().having(
+          (error) => error.message,
+          'message',
+          contains('between 1 and 2'),
+        ),
+      ),
+    );
+  });
+
+  test(
+    'sync preserves forced insert positions for pending and new tracks',
+    () async {
+      final outputDir = Directory(p.join(tempDir.path, 'sync-force-insert'));
+      await outputDir.create();
+      final playlist = await insertTestPlaylist(
+        db,
+        url: 'https://www.youtube.com/playlist?list=force-sync',
+        outputPath: outputDir.path,
+      );
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 1,
+        videoId: 'first',
+        title: 'First',
+      );
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 2,
+        videoId: 'third',
+        title: 'Third',
+      );
+      final source = File(p.join(tempDir.path, 'Restored.mp4'));
+      await source.writeAsString('restored');
+      final forced = await service.forceInsert(
+        playlistId: playlist.id,
+        index: 2,
+        sourcePath: source.path,
+      );
+
+      ytdlp.playlistInfo = {
+        'entries': [
+          {'id': 'first', 'playlist_index': 1, 'title': 'First'},
+          {'id': 'third', 'playlist_index': 2, 'title': 'Third'},
+          {'id': 'fourth', 'playlist_index': 3, 'title': 'Fourth'},
+        ],
+      };
+      final result = await service.syncPlaylist(playlist);
+
+      final tracks = await db.getTracksForPlaylist(playlist.id);
+      final byVideoId = {for (final track in tracks) track.videoId: track};
+      expect(result.added, 1);
+      expect(result.removed, 0);
+      expect(byVideoId[forced.videoId]!.index, 2);
+      expect(byVideoId[forced.videoId]!.unavailableReason, isNull);
+      expect(byVideoId['third']!.index, 3);
+      expect(byVideoId['fourth']!.index, 4);
+      expect(tracks.map((track) => track.index), [1, 2, 3, 4]);
     },
   );
 }
