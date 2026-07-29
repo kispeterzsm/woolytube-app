@@ -209,7 +209,7 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
 
     // Force audio-only when launched from the car so libmpv doesn't allocate
     // a video surface that has no rendering target.
-    _playbackService.setAudioOnlyMode(true);
+    await _playbackService.setAudioOnlyMode(true);
     await _playbackService.playTrack(track, tracks, playlist: playlist);
   }
 

@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../database/database.dart';
 import '../services/playback_service.dart';
 import '../services/audio_handler.dart';
+import '../services/picture_in_picture_service.dart';
 
 // These are overridden in main() with real instances
 final playbackServiceProvider = Provider<PlaybackService>((ref) {
@@ -11,6 +12,16 @@ final playbackServiceProvider = Provider<PlaybackService>((ref) {
 
 final audioHandlerProvider = Provider<WoolyTubeAudioHandler>((ref) {
   throw UnimplementedError('Must be overridden');
+});
+
+final pictureInPictureServiceProvider = Provider<PictureInPictureService>((
+  ref,
+) {
+  throw UnimplementedError('Must be overridden');
+});
+
+final isInPictureInPictureProvider = StreamProvider<bool>((ref) {
+  return ref.watch(pictureInPictureServiceProvider).modeStream;
 });
 
 final currentTrackProvider = StreamProvider<Track?>((ref) {

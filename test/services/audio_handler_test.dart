@@ -274,7 +274,7 @@ class _FakePlaybackController implements PlaybackNotificationController {
   }
 
   @override
-  void setAudioOnlyMode(bool enabled) {
+  Future<void> setAudioOnlyMode(bool enabled) async {
     audioOnlyMode = enabled;
   }
 

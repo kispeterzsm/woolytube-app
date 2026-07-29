@@ -23,7 +23,7 @@ abstract interface class PlaybackNotificationController {
   Future<void> previous();
   Future<void> seekTo(Duration position);
   void toggleShuffle();
-  void setAudioOnlyMode(bool enabled);
+  Future<void> setAudioOnlyMode(bool enabled);
   Future<void> playTrack(
     Track track,
     List<Track> allTracks, {

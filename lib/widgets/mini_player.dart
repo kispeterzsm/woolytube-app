@@ -5,7 +5,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import '../providers/playback_providers.dart';
-import '../providers/lifecycle_provider.dart';
 import '../pages/player_page.dart';
 import 'sponsorblock_progress_bar.dart';
 import '../services/media_thumbnail_service.dart';
@@ -56,7 +55,6 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
     final sponsorBlockSegments =
         ref.watch(playbackSponsorBlockSegmentsProvider).valueOrNull ?? const [];
     final isVideo = ref.watch(isVideoContentProvider).valueOrNull ?? false;
-    final foregrounded = ref.watch(isAppForegroundedProvider);
     final playbackService = ref.watch(playbackServiceProvider);
 
     final progress =
@@ -93,10 +91,11 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
                       width: 48,
                       height: 48,
                       child:
-                          isVideo && foregrounded
+                          isVideo
                               ? Video(
                                 controller: playbackService.videoController,
                                 controls: noVideoControls,
+                                pauseUponEnteringBackgroundMode: false,
                               )
                               : _buildThumbnail(currentTrack),
                     ),

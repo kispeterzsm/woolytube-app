@@ -1,14 +1,26 @@
 package com.woolytube.woolytube
 
 import android.app.DownloadManager
+import android.app.PendingIntent
+import android.app.PictureInPictureParams
+import android.app.RemoteAction
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.graphics.Rect
+import android.graphics.drawable.Icon
 import android.net.Uri
 import android.media.MediaMetadataRetriever
 import android.os.Build
+import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
 import android.util.Log
+import android.util.Rational
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.ryanheise.audioservice.AudioServiceFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -29,11 +41,82 @@ class MainActivity : AudioServiceFragmentActivity() {
         private const val BACKGROUND_CHANNEL = "com.woolytube/background"
         private const val APP_UPDATE_CHANNEL = "com.woolytube/app_update"
         private const val MEDIA_METADATA_CHANNEL = "com.woolytube/media_metadata"
+        private const val PLAYBACK_CHANNEL = "com.woolytube/playback"
+        private const val ACTION_AUDIO_ONLY = "com.woolytube.action.AUDIO_ONLY"
+        private const val ACTION_TOGGLE_PLAYBACK = "com.woolytube.action.TOGGLE_PLAYBACK"
+        private const val ACTION_SKIP_NEXT = "com.woolytube.action.SKIP_NEXT"
+        private const val AUDIO_ONLY_REQUEST_CODE = 501
+        private const val TOGGLE_PLAYBACK_REQUEST_CODE = 502
+        private const val SKIP_NEXT_REQUEST_CODE = 503
         private const val APK_MIME_TYPE = "application/vnd.android.package-archive"
         private const val TAG = "WoolyTubeUpdate"
     }
 
     private val updateScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var playbackChannel: MethodChannel? = null
+    private var pipVideoActive = false
+    private var pipPlaying = false
+    private var pipAspectRatio = 16.0 / 9.0
+    private var pipReceiverRegistered = false
+
+    private val pipActionReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                ACTION_TOGGLE_PLAYBACK ->
+                    playbackChannel?.invokeMethod("togglePlayPause", null)
+                ACTION_SKIP_NEXT -> playbackChannel?.invokeMethod("skipNext", null)
+                ACTION_AUDIO_ONLY -> {
+                    playbackChannel?.invokeMethod(
+                        "enableAudioOnly",
+                        null,
+                        object : MethodChannel.Result {
+                            override fun success(result: Any?) {
+                                pipVideoActive = false
+                                updatePictureInPictureParams()
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N &&
+                                    isInPictureInPictureMode
+                                ) {
+                                    // Playback is now owned by the foreground media
+                                    // service, so the video task no longer needs to be visible.
+                                    moveTaskToBack(true)
+                                }
+                            }
+
+                            override fun error(
+                                errorCode: String,
+                                errorMessage: String?,
+                                errorDetails: Any?
+                            ) {
+                                Log.w(TAG, "Could not enable audio-only PiP action: $errorMessage")
+                            }
+
+                            override fun notImplemented() {
+                                Log.w(TAG, "Audio-only PiP action is not implemented")
+                            }
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && supportsPictureInPicture()) {
+            val filter = IntentFilter().apply {
+                addAction(ACTION_AUDIO_ONLY)
+                addAction(ACTION_TOGGLE_PLAYBACK)
+                addAction(ACTION_SKIP_NEXT)
+            }
+            ContextCompat.registerReceiver(
+                this,
+                pipActionReceiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            pipReceiverRegistered = true
+        }
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -72,11 +155,150 @@ class MainActivity : AudioServiceFragmentActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        playbackChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            PLAYBACK_CHANNEL
+        ).also { channel ->
+            channel.setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "updatePictureInPicture" -> {
+                        val args = call.arguments as? Map<*, *>
+                        pipVideoActive = args?.get("videoActive") as? Boolean ?: false
+                        pipPlaying = args?.get("playing") as? Boolean ?: false
+                        pipAspectRatio =
+                            (args?.get("aspectRatio") as? Number)?.toDouble()
+                                ?.takeIf { it.isFinite() && it > 0.0 }
+                                ?: 16.0 / 9.0
+                        updatePictureInPictureParams()
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+        }
     }
 
     override fun onDestroy() {
+        if (pipReceiverRegistered) {
+            unregisterReceiver(pipActionReceiver)
+            pipReceiverRegistered = false
+        }
+        playbackChannel = null
         updateScope.cancel()
         super.onDestroy()
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (Build.VERSION.SDK_INT in Build.VERSION_CODES.O..Build.VERSION_CODES.R &&
+            pipVideoActive && pipPlaying && supportsPictureInPicture()
+        ) {
+            notifyPictureInPictureMode(true)
+            try {
+                val entered = enterPictureInPictureMode(buildPictureInPictureParams())
+                if (!entered) notifyPictureInPictureMode(false)
+            } catch (error: IllegalStateException) {
+                notifyPictureInPictureMode(false)
+                Log.w(TAG, "Could not enter picture-in-picture", error)
+            }
+        }
+    }
+
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        notifyPictureInPictureMode(isInPictureInPictureMode)
+    }
+
+    private fun supportsPictureInPicture(): Boolean =
+        packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+
+    private fun notifyPictureInPictureMode(enabled: Boolean) {
+        playbackChannel?.invokeMethod("pictureInPictureChanged", enabled)
+    }
+
+    private fun updatePictureInPictureParams() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || !supportsPictureInPicture()) {
+            return
+        }
+        setPictureInPictureParams(buildPictureInPictureParams())
+    }
+
+    private fun buildPictureInPictureParams(): PictureInPictureParams {
+        val safeAspect = pipAspectRatio.coerceIn(0.42, 2.38)
+        val builder = PictureInPictureParams.Builder()
+            .setAspectRatio(Rational((safeAspect * 1000).toInt(), 1000))
+            .setActions(
+                if (pipVideoActive) {
+                    listOf(audioOnlyAction(), playPauseAction(), skipNextAction())
+                } else {
+                    emptyList()
+                }
+            )
+
+        val sourceRect = Rect()
+        if (window.decorView.getGlobalVisibleRect(sourceRect) && !sourceRect.isEmpty) {
+            builder.setSourceRectHint(sourceRect)
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            builder
+                .setAutoEnterEnabled(pipVideoActive && pipPlaying)
+                .setSeamlessResizeEnabled(true)
+        }
+
+        return builder.build()
+    }
+
+    private fun audioOnlyAction(): RemoteAction {
+        return pipAction(
+            action = ACTION_AUDIO_ONLY,
+            requestCode = AUDIO_ONLY_REQUEST_CODE,
+            iconResource = R.drawable.ic_headphones,
+            title = "Audio only",
+            description = "Continue with audio only"
+        )
+    }
+
+    private fun playPauseAction(): RemoteAction = pipAction(
+        action = ACTION_TOGGLE_PLAYBACK,
+        requestCode = TOGGLE_PLAYBACK_REQUEST_CODE,
+        iconResource = if (pipPlaying) R.drawable.ic_pause else R.drawable.ic_play_arrow,
+        title = if (pipPlaying) "Pause" else "Play",
+        description = if (pipPlaying) "Pause playback" else "Resume playback"
+    )
+
+    private fun skipNextAction(): RemoteAction = pipAction(
+        action = ACTION_SKIP_NEXT,
+        requestCode = SKIP_NEXT_REQUEST_CODE,
+        iconResource = R.drawable.ic_skip_next,
+        title = "Next",
+        description = "Skip to next"
+    )
+
+    private fun pipAction(
+        action: String,
+        requestCode: Int,
+        iconResource: Int,
+        title: String,
+        description: String
+    ): RemoteAction {
+        val intent = Intent(action).setPackage(packageName)
+        val pendingIntent = PendingIntent.getBroadcast(
+            this,
+            requestCode,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        return RemoteAction(
+            Icon.createWithResource(this, iconResource),
+            title,
+            description,
+            pendingIntent
+        )
     }
 
     private fun scheduleAutoUpdate() {

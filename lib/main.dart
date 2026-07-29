@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:media_kit/media_kit.dart' hide Track;
+import 'package:media_kit_video/media_kit_video.dart';
 import 'package:audio_service/audio_service.dart';
 import 'database/database.dart';
 import 'providers/providers.dart';
@@ -11,6 +12,7 @@ import 'providers/playback_providers.dart';
 import 'providers/lifecycle_provider.dart';
 import 'services/playback_service.dart';
 import 'services/audio_handler.dart';
+import 'services/picture_in_picture_service.dart';
 import 'services/background_worker.dart' as background_worker;
 import 'pages/home_page.dart';
 import 'pages/player_page.dart';
@@ -35,6 +37,8 @@ void main() async {
 
   final database = AppDatabase();
   final playbackService = PlaybackService(database);
+  final pictureInPictureService = PictureInPictureService(playbackService);
+  await pictureInPictureService.initialize();
   WoolyTubeAudioHandler? audioHandler;
   try {
     final handler = await AudioService.init(
@@ -59,6 +63,9 @@ void main() async {
       overrides: [
         databaseProvider.overrideWithValue(database),
         playbackServiceProvider.overrideWithValue(playbackService),
+        pictureInPictureServiceProvider.overrideWithValue(
+          pictureInPictureService,
+        ),
         if (audioHandler != null)
           audioHandlerProvider.overrideWithValue(audioHandler),
       ],
@@ -93,15 +100,13 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     ref.read(appLifecycleProvider.notifier).state = state;
-    final playbackService = ref.read(playbackServiceProvider);
     switch (state) {
       case AppLifecycleState.inactive:
       case AppLifecycleState.paused:
       case AppLifecycleState.hidden:
-        playbackService.handleAppInactive();
         break;
       case AppLifecycleState.resumed:
-        playbackService.handleAppResumed();
+        unawaited(ref.read(pictureInPictureServiceProvider).handleAppResumed());
         break;
       case AppLifecycleState.detached:
         // Detached means the UI engine is being torn down, not merely covered
@@ -114,6 +119,9 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
 
   @override
   Widget build(BuildContext context) {
+    final inPictureInPicture =
+        ref.watch(isInPictureInPictureProvider).valueOrNull ?? false;
+
     // Auto-open the full-screen player when a video track starts.
     ref.listen<AsyncValue<Track?>>(currentTrackProvider, (prev, next) {
       final track = next.valueOrNull;
@@ -152,20 +160,41 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
         ),
       ),
       builder: (context, child) {
-        return Column(
+        return Stack(
+          fit: StackFit.expand,
           children: [
-            Expanded(
-              child: MediaQuery.removePadding(
-                context: context,
-                removeBottom: true,
-                child: child!,
+            Offstage(
+              offstage: inPictureInPicture,
+              child: Column(
+                children: [
+                  Expanded(
+                    child: MediaQuery.removePadding(
+                      context: context,
+                      removeBottom: true,
+                      child: child!,
+                    ),
+                  ),
+                  MiniPlayerBar(
+                    onOpenPlayer: () {
+                      _navigatorKey.currentState?.push(playerPageRoute());
+                    },
+                  ),
+                ],
               ),
             ),
-            MiniPlayerBar(
-              onOpenPlayer: () {
-                _navigatorKey.currentState?.push(playerPageRoute());
-              },
-            ),
+            if (inPictureInPicture)
+              Positioned.fill(
+                child: ColoredBox(
+                  color: Colors.black,
+                  child: Video(
+                    controller:
+                        ref.read(playbackServiceProvider).videoController,
+                    controls: _noPictureInPictureControls,
+                    pauseUponEnteringBackgroundMode: false,
+                    fit: BoxFit.contain,
+                  ),
+                ),
+              ),
           ],
         );
       },
@@ -173,6 +202,8 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
     );
   }
 }
+
+Widget _noPictureInPictureControls(VideoState state) => const SizedBox.shrink();
 
 class InitWrapper extends ConsumerStatefulWidget {
   const InitWrapper({super.key});

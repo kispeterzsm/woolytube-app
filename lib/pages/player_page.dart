@@ -8,7 +8,6 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import '../database/database.dart';
 import '../providers/playback_providers.dart';
-import '../providers/lifecycle_provider.dart';
 import '../widgets/player_controls.dart';
 import '../widgets/segment_mark_button.dart';
 import '../services/media_thumbnail_service.dart';
@@ -238,9 +237,7 @@ class _VideoPlayerViewState extends ConsumerState<_VideoPlayerView> {
     });
   }
 
-  Widget _buildVideo(double? aspect, bool foregrounded) {
-    if (!foregrounded) return Container(color: Colors.black);
-
+  Widget _buildVideo(double? aspect) {
     final svc = ref.read(playbackServiceProvider);
     final effectiveAspect = aspect ?? 16 / 9;
 
@@ -248,6 +245,7 @@ class _VideoPlayerViewState extends ConsumerState<_VideoPlayerView> {
       return Video(
         controller: svc.videoController,
         controls: _noVideoControls,
+        pauseUponEnteringBackgroundMode: false,
         fit: BoxFit.cover,
       );
     }
@@ -258,6 +256,7 @@ class _VideoPlayerViewState extends ConsumerState<_VideoPlayerView> {
         child: Video(
           controller: svc.videoController,
           controls: _noVideoControls,
+          pauseUponEnteringBackgroundMode: false,
           fit: BoxFit.contain,
         ),
       ),
@@ -283,14 +282,13 @@ class _VideoPlayerViewState extends ConsumerState<_VideoPlayerView> {
     });
 
     final aspect = ref.watch(videoAspectProvider).valueOrNull;
-    final foregrounded = ref.watch(isAppForegroundedProvider);
 
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         fit: StackFit.expand,
         children: [
-          _buildVideo(aspect, foregrounded),
+          _buildVideo(aspect),
 
           // Gesture layer
           Positioned.fill(

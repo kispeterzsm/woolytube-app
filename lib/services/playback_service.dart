@@ -6,6 +6,7 @@ import 'package:rxdart/rxdart.dart';
 import 'package:path/path.dart' as p;
 import '../database/database.dart';
 import 'playback_notification_controller.dart';
+import 'picture_in_picture_service.dart';
 import 'sponsorblock_service.dart';
 
 class SegmentMarkResult {
@@ -91,7 +92,10 @@ List<Track> playableTracksForPlayback(
         )
         .toList();
 
-class PlaybackService implements PlaybackNotificationController {
+class PlaybackService
+    implements
+        PlaybackNotificationController,
+        PictureInPicturePlaybackController {
   late final Player _player;
   final AppDatabase _db;
   final Random _random;
@@ -144,6 +148,7 @@ class PlaybackService implements PlaybackNotificationController {
   Stream<bool> get isCompletedStream => _player.stream.completed;
   Stream<int?> get videoWidthStream => _player.stream.width;
   Stream<int?> get videoHeightStream => _player.stream.height;
+  @override
   Stream<double?> get videoAspectStream => Rx.combineLatest2(
     _player.stream.width,
     _player.stream.height,
@@ -174,13 +179,7 @@ class PlaybackService implements PlaybackNotificationController {
   // Shuffle state
   List<int> _shuffledIndices = [];
 
-  // Background/foreground transition safety net.
-  Duration _lastKnownPosition = Duration.zero;
-  bool _wasPlayingBeforeBackground = false;
-  int? _trackIdBeforeBackground;
-  bool _appIsBackgrounded = false;
-  bool _videoTrackDisabledForBackground = false;
-  Future<void> _lifecycleTransition = Future.value();
+  Future<void> _videoTrackTransition = Future.value();
   List<_SkipSegment> _activeSegments = [];
   bool _isSeekingPastSegment = false;
 
@@ -255,6 +254,7 @@ class PlaybackService implements PlaybackNotificationController {
   }
 
   /// Whether the current track is a video file (not audio-only)
+  @override
   bool get isVideoContent {
     final track = _currentTrack.value;
     if (track == null || _audioOnlyMode.value) return false;
@@ -263,6 +263,7 @@ class PlaybackService implements PlaybackNotificationController {
     return _isVideoFile(resolved);
   }
 
+  @override
   Stream<bool> get isVideoContentStream => Rx.combineLatest2(
     _currentTrack.stream,
     _audioOnlyMode.stream,
@@ -527,93 +528,15 @@ class PlaybackService implements PlaybackNotificationController {
     }
   }
 
-  /// Serializes video teardown/recovery. Android can report inactive, hidden,
-  /// and paused for one background transition, while the native property call
-  /// itself is asynchronous.
-  Future<void> _enqueueLifecycleTransition(Future<void> Function() transition) {
-    final next = _lifecycleTransition.then<void>((_) => transition());
-    _lifecycleTransition = next.then<void>(
-      (_) {},
-      onError: (Object _, StackTrace _) {},
-    );
-    return _lifecycleTransition;
-  }
-
-  /// Disable libmpv's video track before the Android GL surface is destroyed.
-  /// This is intentionally idempotent because a single background transition
-  /// produces several Flutter lifecycle callbacks. Audio continues decoding.
-  Future<void> handleAppInactive() {
-    return _enqueueLifecycleTransition(() async {
-      if (_appIsBackgrounded) return;
-
-      _appIsBackgrounded = true;
-      _lastKnownPosition = _player.state.position;
-      _wasPlayingBeforeBackground = _player.state.playing;
-      _trackIdBeforeBackground = _currentTrack.value?.id;
-
-      // No video surface means there is nothing to tear down. In particular,
-      // don't modify an audio-only player's selected video track.
-      if (!hasVideoController || !isVideoContent) return;
-
-      final native = _player.platform;
-      if (native is NativePlayer) {
-        _videoTrackDisabledForBackground = true;
-        await native.setProperty('vid', 'no');
-      }
-    });
-  }
-
-  /// Re-enable video decoding when the app returns to foreground. Only seek
-  /// when libmpv moved *backwards* (the surface teardown reset it); a normally
-  /// advancing background player must never be rewound on unlock.
-  Future<void> handleAppResumed() {
-    return _enqueueLifecycleTransition(() async {
-      if (!_appIsBackgrounded) return;
-
-      _appIsBackgrounded = false;
-      final shouldRestoreVideo = _videoTrackDisabledForBackground;
-      _videoTrackDisabledForBackground = false;
-      final trackIsUnchanged =
-          _currentTrack.value?.id == _trackIdBeforeBackground;
-      final lastKnownPosition = _lastKnownPosition;
-      final shouldResume = _wasPlayingBeforeBackground && trackIsUnchanged;
-
-      // Clear this transition's state before awaiting native work. A new
-      // lifecycle event that arrives afterwards will capture fresh state.
-      _lastKnownPosition = Duration.zero;
-      _wasPlayingBeforeBackground = false;
-      _trackIdBeforeBackground = null;
-
-      if (shouldRestoreVideo) {
-        final native = _player.platform;
-        if (native is NativePlayer) {
-          await native.setProperty('vid', 'auto');
-        }
-      }
-
-      final currentPosition = _player.state.position;
-      if (trackIsUnchanged &&
-          lastKnownPosition > Duration.zero &&
-          currentPosition + const Duration(seconds: 2) < lastKnownPosition) {
-        await _player.seek(lastKnownPosition);
-      }
-      if (shouldResume && !_player.state.playing && !_player.state.completed) {
-        await _player.play();
-      }
-    });
-  }
-
   @override
   Future<void> pause() async {
-    // A notification/headset pause while the app is backgrounded is explicit
-    // user intent and must not be undone when the app is opened again.
-    _wasPlayingBeforeBackground = false;
     await _player.pause();
   }
 
   @override
   Future<void> resume() => _player.play();
 
+  @override
   Future<void> togglePlayPause() async {
     if (_player.state.playing) {
       await pause();
@@ -746,8 +669,26 @@ class PlaybackService implements PlaybackNotificationController {
   void toggleAutoplay() => setAutoplayEnabled(!_autoplayEnabled.value);
 
   @override
-  void setAudioOnlyMode(bool enabled) => _audioOnlyMode.add(enabled);
-  void toggleAudioOnlyMode() => setAudioOnlyMode(!_audioOnlyMode.value);
+  Future<void> setAudioOnlyMode(bool enabled) {
+    final transition = _videoTrackTransition.then<void>((_) async {
+      if (_audioOnlyMode.value == enabled) return;
+
+      // Select the native video track before changing the Flutter surface.
+      // Audio-only therefore stops video decoding instead of just hiding it.
+      final native = _player.platform;
+      if (native is NativePlayer) {
+        await native.setProperty('vid', enabled ? 'no' : 'auto');
+      }
+      _audioOnlyMode.add(enabled);
+    });
+    _videoTrackTransition = transition.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return transition;
+  }
+
+  Future<void> toggleAudioOnlyMode() => setAudioOnlyMode(!_audioOnlyMode.value);
 
   void _generateShuffledIndices(int currentIndex) {
     final indices = List.generate(_queue.value.length, (i) => i);
@@ -758,9 +699,6 @@ class PlaybackService implements PlaybackNotificationController {
 
   @override
   Future<void> stop() async {
-    _wasPlayingBeforeBackground = false;
-    _lastKnownPosition = Duration.zero;
-    _trackIdBeforeBackground = null;
     await _player.stop();
     _currentTrack.add(null);
     _currentPlaylist.add(null);
