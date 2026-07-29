@@ -13,11 +13,32 @@ import '../widgets/player_controls.dart';
 import '../widgets/segment_mark_button.dart';
 import '../services/media_thumbnail_service.dart';
 
-class PlayerPage extends ConsumerWidget {
+class PlayerPage extends ConsumerStatefulWidget {
   const PlayerPage({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<PlayerPage> createState() => _PlayerPageState();
+}
+
+class _PlayerPageState extends ConsumerState<PlayerPage> {
+  @override
+  void initState() {
+    super.initState();
+    // Own mini-player visibility at the route level. The audio/video provider
+    // streams can resolve on different frames, replacing one player view with
+    // the other; tying this flag to either child lets the disposed child make
+    // the global mini-player visible over the newly mounted video player.
+    videoFullscreenNotifier.value = true;
+  }
+
+  @override
+  void dispose() {
+    videoFullscreenNotifier.value = false;
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final currentTrack = ref.watch(currentTrackProvider).valueOrNull;
     final isVideo = ref.watch(isVideoContentProvider).valueOrNull ?? false;
 
@@ -104,9 +125,12 @@ class _VideoPlayerViewState extends ConsumerState<_VideoPlayerView> {
   void initState() {
     super.initState();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    videoFullscreenNotifier.value = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
+      // The aspect provider can already contain its last value when the user
+      // reopens the player. In that case its listener does not emit again, so
+      // explicitly restore the matching orientation on every video mount.
+      _applyOrientationFor(ref.read(videoAspectProvider).valueOrNull);
       _scheduleAutoHide();
     });
   }
@@ -126,7 +150,6 @@ class _VideoPlayerViewState extends ConsumerState<_VideoPlayerView> {
     // simply allowing all orientations won't force a re-rotation if the
     // device is currently in landscape.
     SystemChrome.setPreferredOrientations(const [DeviceOrientation.portraitUp]);
-    videoFullscreenNotifier.value = false;
     super.dispose();
   }
 
@@ -649,7 +672,6 @@ class _AudioPlayerViewState extends ConsumerState<_AudioPlayerView> {
   @override
   void initState() {
     super.initState();
-    videoFullscreenNotifier.value = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _updateOverlayHeight();
     });
@@ -658,7 +680,6 @@ class _AudioPlayerViewState extends ConsumerState<_AudioPlayerView> {
   @override
   void dispose() {
     audioPlayerOverlayHeightNotifier.value = 0;
-    videoFullscreenNotifier.value = false;
     super.dispose();
   }
 

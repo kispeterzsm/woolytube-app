@@ -41,9 +41,11 @@ final videoAspectProvider = StreamProvider<double?>((ref) {
   return ref.watch(playbackServiceProvider).videoAspectStream;
 });
 
-/// True while a full-screen player view is mounted. The global MiniPlayerBar
+/// True while the expanded player route is mounted. The global MiniPlayerBar
 /// uses this to hide itself so expanded playback can use the full app surface.
-/// Plain ValueNotifier (not Riverpod) so player pages can flip it from
+/// The route owns this value rather than its audio/video children because
+/// those children can be replaced while playback metadata is resolving.
+/// Plain ValueNotifier (not Riverpod) so the route can flip it from
 /// initState/dispose without violating lifecycle rules.
 final ValueNotifier<bool> videoFullscreenNotifier = ValueNotifier<bool>(false);
 
