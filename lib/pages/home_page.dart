@@ -122,7 +122,7 @@ class _HomePageState extends ConsumerState<HomePage> {
                     ),
                   );
                 }
-                return _buildPlaylistGrid(playlists, downloadProgress);
+                return _buildPlaylistList(playlists, downloadProgress);
               },
             ),
           ),
@@ -300,41 +300,33 @@ class _HomePageState extends ConsumerState<HomePage> {
     }
   }
 
-  Widget _buildPlaylistGrid(
+  Widget _buildPlaylistList(
     List<Playlist> playlists,
     DownloadProgress downloadProgress,
   ) {
     _refreshCounts(playlists);
 
-    return Padding(
+    return ListView.separated(
       padding: const EdgeInsets.all(12),
-      child: GridView.builder(
-        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: 2,
-          crossAxisSpacing: 12,
-          mainAxisSpacing: 12,
-          childAspectRatio: 0.75,
-        ),
-        itemCount: playlists.length,
-        itemBuilder: (context, index) {
-          final playlist = playlists[index];
-          final isDownloading =
-              downloadProgress.status == 'downloading' &&
-              downloadProgress.playlistId == playlist.id;
+      itemCount: playlists.length,
+      separatorBuilder: (_, __) => const SizedBox(height: 12),
+      itemBuilder: (context, index) {
+        final playlist = playlists[index];
+        final isDownloading =
+            downloadProgress.status == 'downloading' &&
+            downloadProgress.playlistId == playlist.id;
 
-          return PlaylistCard(
-            playlist: playlist,
-            downloadedCount: _downloadedCounts[playlist.id] ?? 0,
-            totalCount: _totalCounts[playlist.id] ?? 0,
-            isDownloading: isDownloading,
-            downloadProgress:
-                isDownloading ? downloadProgress.trackProgress : 0,
-            onTap: () => _navigateToDetail(context, playlist),
-            onUpdate: () => _startUpdate(playlist),
-            onSettings: () => _navigateToSettings(context, playlist),
-          );
-        },
-      ),
+        return PlaylistCard(
+          playlist: playlist,
+          downloadedCount: _downloadedCounts[playlist.id] ?? 0,
+          totalCount: _totalCounts[playlist.id] ?? 0,
+          isDownloading: isDownloading,
+          downloadProgress: isDownloading ? downloadProgress.trackProgress : 0,
+          onTap: () => _navigateToDetail(context, playlist),
+          onUpdate: () => _startUpdate(playlist),
+          onSettings: () => _navigateToSettings(context, playlist),
+        );
+      },
     );
   }
 

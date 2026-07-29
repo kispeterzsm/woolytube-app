@@ -26,65 +26,93 @@ class PlaylistCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        decoration: BoxDecoration(
-          color: const Color(0xFF2A2A2A),
-          borderRadius: BorderRadius.circular(12),
-        ),
+    return SizedBox(
+      height: 96,
+      child: Material(
+        color: const Color(0xFF2A2A2A),
+        borderRadius: BorderRadius.circular(12),
         clipBehavior: Clip.antiAlias,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            AspectRatio(aspectRatio: 16 / 9, child: _buildThumbnail()),
-            if (isDownloading)
-              LinearProgressIndicator(
-                value: downloadProgress / 100.0,
-                minHeight: 3,
-                backgroundColor: const Color(0xFF333333),
-                valueColor: const AlwaysStoppedAnimation<Color>(
-                  Color(0xFF2196F3),
-                ),
-              ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
-              child: Row(
+        child: InkWell(
+          onTap: onTap,
+          child: Stack(
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
+                  AspectRatio(aspectRatio: 16 / 9, child: _buildThumbnail()),
                   Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          playlist.name,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 6, 4, 2),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            playlist.name,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                            ),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
                           ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          _subtitle(),
-                          style: const TextStyle(
-                            color: Color(0xFF888888),
-                            fontSize: 12,
+                          const Spacer(),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: FittedBox(
+                                  fit: BoxFit.scaleDown,
+                                  alignment: Alignment.centerLeft,
+                                  child: Text(
+                                    _subtitle(),
+                                    style: const TextStyle(
+                                      color: Color(0xFF888888),
+                                      fontSize: 12,
+                                    ),
+                                    maxLines: 1,
+                                  ),
+                                ),
+                              ),
+                              _iconButton(
+                                icon:
+                                    isDownloading
+                                        ? Icons.hourglass_top
+                                        : Icons.sync,
+                                tooltip:
+                                    isDownloading
+                                        ? 'Downloading playlist'
+                                        : 'Update playlist',
+                                onTap: isDownloading ? null : onUpdate,
+                              ),
+                              _iconButton(
+                                icon: Icons.settings,
+                                tooltip: 'Playlist settings',
+                                onTap: onSettings,
+                              ),
+                            ],
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
-                  _iconButton(
-                    icon: isDownloading ? Icons.hourglass_top : Icons.sync,
-                    onTap: isDownloading ? null : onUpdate,
-                  ),
-                  _iconButton(icon: Icons.settings, onTap: onSettings),
                 ],
               ),
-            ),
-          ],
+              if (isDownloading)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: LinearProgressIndicator(
+                    value: downloadProgress / 100.0,
+                    minHeight: 4,
+                    backgroundColor: const Color(0xFF333333),
+                    valueColor: const AlwaysStoppedAnimation<Color>(
+                      Color(0xFF2196F3),
+                    ),
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -94,7 +122,7 @@ class PlaylistCard extends StatelessWidget {
     if (playlist.thumbnailUrl != null && playlist.thumbnailUrl!.isNotEmpty) {
       return CachedNetworkImage(
         imageUrl: playlist.thumbnailUrl!,
-        fit: BoxFit.cover,
+        fit: BoxFit.contain,
         placeholder: (_, __) => _placeholderBox(),
         errorWidget: (_, __, ___) => _placeholderBox(),
       );
@@ -117,7 +145,7 @@ class PlaylistCard extends StatelessWidget {
     }
     if (totalCount > 0) {
       final parts = <String>[];
-      parts.add('$downloadedCount / $totalCount');
+      parts.add('$downloadedCount/$totalCount');
       if (playlist.lastUpdated != null) {
         parts.add(_timeAgo(playlist.lastUpdated!));
       }
@@ -138,14 +166,19 @@ class PlaylistCard extends StatelessWidget {
     return '${dt.month}/${dt.day}';
   }
 
-  Widget _iconButton({required IconData icon, VoidCallback? onTap}) {
+  Widget _iconButton({
+    required IconData icon,
+    required String tooltip,
+    VoidCallback? onTap,
+  }) {
     return SizedBox(
-      width: 36,
-      height: 36,
+      width: 48,
+      height: 48,
       child: IconButton(
-        icon: Icon(icon, size: 18),
+        icon: Icon(icon, size: 26),
         color: const Color(0xFF888888),
         padding: EdgeInsets.zero,
+        tooltip: tooltip,
         onPressed: onTap,
       ),
     );
