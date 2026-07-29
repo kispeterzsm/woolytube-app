@@ -402,6 +402,10 @@ class PlaylistService {
   Future<List<Track>> getPendingTracks(int playlistId) =>
       _db.getPendingTracks(playlistId);
 
+  Future<List<Track>> getAllTracks() => _db.getAllTracks();
+
+  Stream<List<Track>> watchAllTracks() => _db.watchAllTracks();
+
   Future<List<Track>> getTracksForPlaylist(int playlistId) =>
       _db.getTracksForPlaylist(playlistId);
 

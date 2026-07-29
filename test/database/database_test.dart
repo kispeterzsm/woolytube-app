@@ -60,6 +60,50 @@ void main() {
     expect(await db.getTotalTrackCount(playlist.id), 4);
   });
 
+  test('returns and watches tracks from every playlist', () async {
+    final firstPlaylist = await insertTestPlaylist(
+      db,
+      url: 'https://example.com/first',
+      name: 'First',
+    );
+    final secondPlaylist = await insertTestPlaylist(
+      db,
+      url: 'https://example.com/second',
+      name: 'Second',
+    );
+    await insertTestTrack(
+      db,
+      playlistId: secondPlaylist.id,
+      index: 1,
+      videoId: 'second-1',
+    );
+    await insertTestTrack(
+      db,
+      playlistId: firstPlaylist.id,
+      index: 2,
+      videoId: 'first-2',
+    );
+    await insertTestTrack(
+      db,
+      playlistId: firstPlaylist.id,
+      index: 1,
+      videoId: 'first-1',
+    );
+
+    final allTracks = await db.getAllTracks();
+    expect(allTracks.map((track) => track.videoId), [
+      'first-1',
+      'first-2',
+      'second-1',
+    ]);
+
+    final watchedTracks = await db.watchAllTracks().first;
+    expect(
+      watchedTracks.map((track) => track.videoId),
+      allTracks.map((track) => track.videoId),
+    );
+  });
+
   test('keeps track status metadata consistent', () async {
     final playlist = await insertTestPlaylist(db);
     final track = await insertTestTrack(db, playlistId: playlist.id);

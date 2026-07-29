@@ -152,6 +152,10 @@ final playlistsProvider = StreamProvider<List<Playlist>>((ref) {
   return ref.watch(playlistServiceProvider).watchAllPlaylists();
 });
 
+final allTracksProvider = StreamProvider<List<Track>>((ref) {
+  return ref.watch(playlistServiceProvider).watchAllTracks();
+});
+
 final tracksProvider = StreamProvider.family<List<Track>, int>((
   ref,
   playlistId,

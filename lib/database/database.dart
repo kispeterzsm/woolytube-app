@@ -191,6 +191,18 @@ class AppDatabase extends _$AppDatabase {
       (select(playlists)..where((p) => p.url.equals(url))).getSingleOrNull();
 
   // Track queries
+  Future<List<Track>> getAllTracks() =>
+      (select(tracks)..orderBy([
+        (t) => OrderingTerm.asc(t.playlistId),
+        (t) => OrderingTerm.asc(t.index),
+      ])).get();
+
+  Stream<List<Track>> watchAllTracks() =>
+      (select(tracks)..orderBy([
+        (t) => OrderingTerm.asc(t.playlistId),
+        (t) => OrderingTerm.asc(t.index),
+      ])).watch();
+
   Future<List<Track>> getTracksForPlaylist(int playlistId) =>
       (select(tracks)
             ..where((t) => t.playlistId.equals(playlistId))
