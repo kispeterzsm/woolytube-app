@@ -9,6 +9,7 @@ import 'package:woolytube/database/database.dart';
 import 'package:woolytube/services/download_service.dart';
 import 'package:woolytube/services/log_service.dart';
 import 'package:woolytube/services/metadata_service.dart';
+import 'package:woolytube/services/notification_service.dart';
 import 'package:woolytube/services/sponsorblock_service.dart';
 import 'package:woolytube/services/ytdlp_service.dart';
 
@@ -18,6 +19,7 @@ class FakeYtDlpService extends YtDlpService {
   final downloadedUrls = <String>[];
   Completer<void>? downloadCompleter;
   Completer<void>? downloadStarted;
+  Object? downloadError;
   bool cancelCalled = false;
 
   @override
@@ -35,6 +37,7 @@ class FakeYtDlpService extends YtDlpService {
   }) async {
     downloadedUrls.add(url);
     downloadStarted?.complete();
+    if (downloadError != null) throw downloadError!;
     if (downloadCompleter != null) await downloadCompleter!.future;
   }
 
@@ -62,6 +65,20 @@ class FakeYtDlpService extends YtDlpService {
 
   @override
   Future<void> stopDownloadService() async {}
+}
+
+class FakeDownloadNotificationService extends DownloadNotificationService {
+  final playlistNames = <String>[];
+  final downloadedCounts = <int>[];
+
+  @override
+  Future<void> showDownloadComplete(
+    String playlistName, {
+    int downloadedCount = 1,
+  }) async {
+    playlistNames.add(playlistName);
+    downloadedCounts.add(downloadedCount);
+  }
 }
 
 class FakeSponsorBlockService extends SponsorBlockService {
@@ -110,6 +127,7 @@ void main() {
   late LogService log;
   late FakeYtDlpService ytdlp;
   late FakeSponsorBlockService sponsorBlock;
+  late FakeDownloadNotificationService notifications;
   late DownloadService service;
 
   setUp(() async {
@@ -118,12 +136,13 @@ void main() {
     log = LogService();
     ytdlp = FakeYtDlpService();
     sponsorBlock = FakeSponsorBlockService(db, log);
+    notifications = FakeDownloadNotificationService();
     service = DownloadService(
       db,
       ytdlp,
       log,
       MetadataService(db),
-      null,
+      notifications,
       sponsorBlock,
     );
   });
@@ -159,6 +178,7 @@ void main() {
       await service.downloadPlaylist(playlist);
 
       expect(ytdlp.downloadedUrls, isEmpty);
+      expect(notifications.playlistNames, isEmpty);
       expect(sponsorBlock.refreshedTracks, hasLength(1));
       expect(sponsorBlock.refreshedTracks.single.isLocalReplacement, isFalse);
 
@@ -171,6 +191,58 @@ void main() {
       expect(segments.map((segment) => segment.category), ['sponsor']);
     },
   );
+
+  test('an unchanged playlist starts a new auto-update interval', () async {
+    final oldUpdate = DateTime.now().subtract(const Duration(days: 2));
+    final playlist = await insertTestPlaylist(
+      db,
+      outputPath: tempDir.path,
+      lastUpdated: oldUpdate,
+    );
+
+    await service.downloadPlaylist(playlist);
+
+    final updated = await db.getPlaylist(playlist.id);
+    expect(updated.lastUpdated, isNotNull);
+    expect(updated.lastUpdated!.isAfter(oldUpdate), isTrue);
+    expect(
+      DateTime.now().difference(updated.lastUpdated!),
+      lessThan(const Duration(seconds: 2)),
+    );
+    expect(notifications.playlistNames, isEmpty);
+  });
+
+  test('playlist completion notification counts actual downloads', () async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 1,
+      videoId: 'new-video-1',
+    );
+    await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 2,
+      videoId: 'new-video-2',
+    );
+
+    await service.downloadPlaylist(playlist);
+
+    expect(ytdlp.downloadedUrls, hasLength(2));
+    expect(notifications.playlistNames, [playlist.name]);
+    expect(notifications.downloadedCounts, [2]);
+  });
+
+  test('a failed playlist download does not notify', () async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    await insertTestTrack(db, playlistId: playlist.id);
+    ytdlp.downloadError = StateError('permanent failure');
+
+    await service.downloadPlaylist(playlist);
+
+    expect(notifications.playlistNames, isEmpty);
+  });
 
   test(
     'playlist update repairs legacy reused files missing remote segments',

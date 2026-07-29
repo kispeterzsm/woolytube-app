@@ -92,7 +92,10 @@ class MainActivity : AudioServiceFragmentActivity() {
 
         WorkManager.getInstance(applicationContext).enqueueUniquePeriodicWork(
             "woolytube_auto_update",
-            ExistingPeriodicWorkPolicy.KEEP,
+            // Refresh the installed periodic request on every app start so
+            // changes to its interval or constraints are not hidden behind an
+            // older request left by a previous app version.
+            ExistingPeriodicWorkPolicy.UPDATE,
             request
         )
     }

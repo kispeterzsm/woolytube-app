@@ -125,11 +125,25 @@ void main() {
       name: 'Expired',
       lastUpdated: now.subtract(const Duration(hours: 25)),
     );
+    final hourly = await insertTestPlaylist(
+      db,
+      url: 'https://example.com/hourly',
+      name: 'Hourly',
+      updateFrequencyHours: 1,
+      lastUpdated: now.subtract(const Duration(minutes: 61)),
+    );
     await insertTestPlaylist(
       db,
       url: 'https://example.com/fresh',
       name: 'Fresh',
       lastUpdated: now.subtract(const Duration(hours: 2)),
+    );
+    await insertTestPlaylist(
+      db,
+      url: 'https://example.com/hourly-fresh',
+      name: 'Hourly Fresh',
+      updateFrequencyHours: 1,
+      lastUpdated: now.subtract(const Duration(minutes: 59)),
     );
     await insertTestPlaylist(
       db,
@@ -140,7 +154,11 @@ void main() {
     );
 
     final due = await db.getPlaylistsDueForUpdate();
-    expect(due.map((playlist) => playlist.id), [neverUpdated.id, expired.id]);
+    expect(due.map((playlist) => playlist.id), [
+      neverUpdated.id,
+      expired.id,
+      hourly.id,
+    ]);
   });
 
   test('replaces SponsorBlock segments for a track', () async {

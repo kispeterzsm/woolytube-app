@@ -36,6 +36,8 @@ class DownloadProgress {
   );
 }
 
+enum _TrackDownloadResult { downloaded, reused, failed, cancelled }
+
 class DownloadService {
   final AppDatabase _db;
   final YtDlpService _ytdlp;
@@ -86,6 +88,7 @@ class DownloadService {
     _cancelRequested = false;
     _activePlaylist = playlist;
     var totalTracks = 0;
+    var downloadedCount = 0;
 
     try {
       // A manual or scheduled update is an explicit download trigger. Repair
@@ -109,6 +112,10 @@ class DownloadService {
       }
 
       if (pendingTracks.isEmpty) {
+        // A successful check with no pending work still starts the next
+        // auto-update interval. Without this, an unchanged playlist remains
+        // overdue and gets checked on every background-worker run.
+        await _markPlaylistUpdated(playlist);
         await _backfillMissingSponsorBlockSegments(playlist);
         await _writeMetadataForPlaylist(playlist.id);
         _progressController.add(
@@ -138,7 +145,7 @@ class DownloadService {
         final trackNum = downloadedSoFar + i + 1;
         currentTrackNum = trackNum;
 
-        await _downloadTrackFile(
+        final result = await _downloadTrackFile(
           playlist: playlist,
           track: track,
           totalTracks: totalTracks,
@@ -147,6 +154,7 @@ class DownloadService {
           trackLabel: '[$trackNum/$totalTracks] ${track.title}',
           reuseExistingFile: true,
         );
+        if (result == _TrackDownloadResult.downloaded) downloadedCount++;
       }
 
       if (_cancelRequested) {
@@ -181,7 +189,12 @@ class DownloadService {
         _log.warn('Cleanup failed: $e');
       }
 
-      await _notifications?.showDownloadComplete(playlist.name);
+      if (downloadedCount > 0) {
+        await _notifications?.showDownloadComplete(
+          playlist.name,
+          downloadedCount: downloadedCount,
+        );
+      }
     } catch (e) {
       if (_cancelRequested) {
         _log.info('Playlist download stopped');
@@ -247,7 +260,7 @@ class DownloadService {
       _log.info('Downloading "${track.title}" from "${playlist.name}"');
       await _db.resetTrackForRedownload(track.id);
 
-      final succeeded = await _downloadTrackFile(
+      final result = await _downloadTrackFile(
         playlist: playlist,
         track: track,
         totalTracks: totalTracks,
@@ -257,7 +270,7 @@ class DownloadService {
         reuseExistingFile: false,
       );
 
-      if (!succeeded) {
+      if (result != _TrackDownloadResult.downloaded) {
         if (_cancelRequested) {
           await _writeMetadataForPlaylist(playlist.id);
           _progressController.add(DownloadProgress.idle);
@@ -357,7 +370,7 @@ class DownloadService {
     });
   }
 
-  Future<bool> _downloadTrackFile({
+  Future<_TrackDownloadResult> _downloadTrackFile({
     required Playlist playlist,
     required Track track,
     required int totalTracks,
@@ -399,7 +412,7 @@ class DownloadService {
             status: 'downloading',
           ),
         );
-        return true;
+        return _TrackDownloadResult.reused;
       }
     }
 
@@ -432,7 +445,7 @@ class DownloadService {
 
       if (_cancelRequested) {
         await _db.resetInterruptedTrack(track.id);
-        return false;
+        return _TrackDownloadResult.cancelled;
       }
 
       final actualPath = MetadataService.resolveMediaFile(
@@ -460,17 +473,17 @@ class DownloadService {
           status: 'downloading',
         ),
       );
-      return true;
+      return _TrackDownloadResult.downloaded;
     } catch (e) {
       if (_cancelRequested) {
         await _db.resetInterruptedTrack(track.id);
         _log.info('$trackLabel Interrupted; returned to pending');
-        return false;
+        return _TrackDownloadResult.cancelled;
       }
       final errorMsg = _cleanErrorMessage(e);
       await _db.updateTrackStatus(track.id, 'error', error: errorMsg);
       _log.error('$trackLabel Failed "${track.title}": $errorMsg');
-      return false;
+      return _TrackDownloadResult.failed;
     } finally {
       if (_activeTrackId == track.id) _activeTrackId = null;
     }
