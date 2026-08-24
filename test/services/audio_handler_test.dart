@@ -28,7 +28,11 @@ void main() {
       filePath: '/tmp/track.m4a',
     );
     playback = _FakePlaybackController(track);
-    handler = WoolyTubeAudioHandler(playback, db);
+    handler = WoolyTubeAudioHandler(
+      playback,
+      db,
+      mediaButtonDoubleClickInterval: const Duration(milliseconds: 20),
+    );
     await _flushStreams();
   });
 
@@ -67,20 +71,46 @@ void main() {
     expect(playback.seekPositions, [const Duration(seconds: 42)]);
   });
 
-  test('routes every Android media-button callback to playback', () async {
-    await handler.click(MediaButton.media);
+  test('routes next and previous media-button callbacks to playback', () async {
     await handler.click(MediaButton.next);
     await handler.click(MediaButton.previous);
 
-    expect(playback.resumeCalls, 1);
     expect(playback.nextCalls, 1);
     expect(playback.previousCalls, 1);
+  });
+
+  test('a single headset-button click toggles playback', () async {
+    await handler.click(MediaButton.media);
+    expect(playback.resumeCalls, 0);
+
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(playback.resumeCalls, 1);
 
     playback.setPlaying(true);
     await _flushStreams();
     await handler.click(MediaButton.media);
+    expect(playback.pauseCalls, 0);
 
+    await Future<void>.delayed(const Duration(milliseconds: 30));
     expect(playback.pauseCalls, 1);
+  });
+
+  test('a double headset-button click skips to the next track', () async {
+    await handler.click(MediaButton.media);
+    await handler.click(MediaButton.media);
+
+    expect(playback.nextCalls, 1);
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(playback.resumeCalls, 0);
+    expect(playback.pauseCalls, 0);
+  });
+
+  test('stopping cancels a pending headset-button click', () async {
+    await handler.click(MediaButton.media);
+    await handler.stop();
+
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(playback.resumeCalls, 0);
   });
 
   test('shuffle control updates both its action and system state', () async {

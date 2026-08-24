@@ -35,9 +35,15 @@ Uri? resolveNotificationArtwork({
 class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
   final PlaybackNotificationController _playbackService;
   final AppDatabase _db;
+  final Duration _mediaButtonDoubleClickInterval;
   final List<StreamSubscription> _subscriptions = [];
+  Timer? _pendingMediaButtonClick;
 
-  WoolyTubeAudioHandler(this._playbackService, this._db) {
+  WoolyTubeAudioHandler(
+    this._playbackService,
+    this._db, {
+    Duration mediaButtonDoubleClickInterval = const Duration(milliseconds: 300),
+  }) : _mediaButtonDoubleClickInterval = mediaButtonDoubleClickInterval {
     // Sync playing state to notification
     _subscriptions.add(
       _playbackService.isPlayingStream.listen((playing) {
@@ -214,10 +220,16 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   @override
-  Future<void> play() async => await _playbackService.resume();
+  Future<void> play() async {
+    _cancelPendingMediaButtonClick();
+    await _playbackService.resume();
+  }
 
   @override
-  Future<void> pause() async => await _playbackService.pause();
+  Future<void> pause() async {
+    _cancelPendingMediaButtonClick();
+    await _playbackService.pause();
+  }
 
   /// Android may deliver headset and notification previous/next events through
   /// [click] instead of the dedicated skip callbacks. Route every media button
@@ -227,20 +239,40 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> click([MediaButton button = MediaButton.media]) async {
     switch (button) {
       case MediaButton.media:
-        if (_playbackService.isPlaying) {
-          await _playbackService.pause();
-        } else {
-          await _playbackService.resume();
+        if (_pendingMediaButtonClick != null) {
+          _cancelPendingMediaButtonClick();
+          await _playbackService.next();
+          return;
         }
+        _pendingMediaButtonClick = Timer(_mediaButtonDoubleClickInterval, () {
+          _pendingMediaButtonClick = null;
+          unawaited(_togglePlayback());
+        });
       case MediaButton.next:
+        _cancelPendingMediaButtonClick();
         await _playbackService.next();
       case MediaButton.previous:
+        _cancelPendingMediaButtonClick();
         await _playbackService.previous();
     }
   }
 
+  Future<void> _togglePlayback() async {
+    if (_playbackService.isPlaying) {
+      await _playbackService.pause();
+    } else {
+      await _playbackService.resume();
+    }
+  }
+
+  void _cancelPendingMediaButtonClick() {
+    _pendingMediaButtonClick?.cancel();
+    _pendingMediaButtonClick = null;
+  }
+
   @override
   Future<void> stop() async {
+    _cancelPendingMediaButtonClick();
     await _playbackService.stop();
     playbackState.add(
       PlaybackState(processingState: AudioProcessingState.idle, playing: false),
@@ -249,10 +281,16 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   @override
-  Future<void> skipToNext() async => _playbackService.next();
+  Future<void> skipToNext() async {
+    _cancelPendingMediaButtonClick();
+    await _playbackService.next();
+  }
 
   @override
-  Future<void> skipToPrevious() async => _playbackService.previous();
+  Future<void> skipToPrevious() async {
+    _cancelPendingMediaButtonClick();
+    await _playbackService.previous();
+  }
 
   @override
   Future<void> seek(Duration position) async =>
@@ -283,6 +321,7 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   void dispose() {
+    _cancelPendingMediaButtonClick();
     for (final sub in _subscriptions) {
       sub.cancel();
     }
