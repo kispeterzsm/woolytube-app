@@ -18,6 +18,7 @@ import '../services/metadata_service.dart';
 import '../services/media_thumbnail_service.dart';
 import '../services/sponsorblock_service.dart';
 import '../widgets/tap_to_place_cursor_text_field.dart';
+import '../widgets/mobile_data_download_guard.dart';
 
 enum _TrackActionGroup { youtube, storage, playback }
 
@@ -750,6 +751,13 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('A download is already in progress')),
       );
+      return;
+    }
+
+    if (!await confirmManualDownload(
+      context,
+      ref.read(downloadNetworkPolicyProvider),
+    )) {
       return;
     }
 
@@ -2010,6 +2018,13 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
           const SnackBar(content: Text('A download is already in progress')),
         );
       }
+      return;
+    }
+
+    if (!await confirmManualDownload(
+      context,
+      ref.read(downloadNetworkPolicyProvider),
+    )) {
       return;
     }
 

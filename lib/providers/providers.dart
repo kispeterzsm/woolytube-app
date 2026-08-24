@@ -11,6 +11,8 @@ import '../services/notification_service.dart';
 import '../services/update_service.dart';
 import '../services/sponsorblock_service.dart';
 import '../services/media_thumbnail_service.dart';
+import '../services/app_settings_service.dart';
+import '../services/download_network_policy.dart';
 
 // Core singletons
 final databaseProvider = Provider<AppDatabase>((ref) {
@@ -58,6 +60,14 @@ final notificationServiceProvider = Provider<DownloadNotificationService>((
 
 final updateServiceProvider = Provider<UpdateService>((ref) {
   return UpdateService();
+});
+
+final appSettingsServiceProvider = Provider<AppSettingsService>((ref) {
+  return AppSettingsService();
+});
+
+final downloadNetworkPolicyProvider = Provider<DownloadNetworkPolicy>((ref) {
+  return DownloadNetworkPolicy(ref.watch(appSettingsServiceProvider));
 });
 
 final sponsorBlockServiceProvider = Provider<SponsorBlockService>((ref) {

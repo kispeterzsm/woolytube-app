@@ -4,7 +4,6 @@ import 'dart:io';
 import 'package:cached_network_image/cached_network_image.dart'
     hide DownloadProgress;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/providers.dart';
 import '../providers/playback_providers.dart';
@@ -14,10 +13,12 @@ import '../services/media_thumbnail_service.dart';
 import '../services/metadata_service.dart';
 import '../services/update_service.dart';
 import '../widgets/playlist_card.dart';
+import '../widgets/mobile_data_download_guard.dart';
 import 'add_playlist_page.dart';
 import 'playlist_detail_page.dart';
 import 'playlist_settings_page.dart';
 import 'debug_log_page.dart';
+import 'settings_page.dart';
 
 class HomePage extends ConsumerStatefulWidget {
   const HomePage({super.key});
@@ -34,7 +35,6 @@ class _HomePageState extends ConsumerState<HomePage> {
   AppUpdate? _availableUpdate;
   Future<void>? _updateCheck;
   bool _isCheckingForUpdate = false;
-  bool _isDownloadingUpdate = false;
 
   @override
   void initState() {
@@ -79,24 +79,20 @@ class _HomePageState extends ConsumerState<HomePage> {
           ),
           IconButton(
             icon: Icon(
-              _isDownloadingUpdate ? Icons.downloading : Icons.system_update,
+              Icons.settings,
               color:
-                  _isDownloadingUpdate
-                      ? const Color(0xFF2196F3)
-                      : _availableUpdate == null
+                  _availableUpdate == null
                       ? const Color(0xFF888888)
                       : const Color(0xFF2196F3),
               size: 20,
             ),
             tooltip:
-                _isDownloadingUpdate
-                    ? 'Update is downloading'
-                    : _availableUpdate != null
-                    ? 'Update to ${_availableUpdate!.version}'
+                _availableUpdate != null
+                    ? 'Settings — update to ${_availableUpdate!.version} available'
                     : _isCheckingForUpdate
-                    ? 'Checking for updates'
-                    : 'Check for update',
-            onPressed: _onUpdatePressed,
+                    ? 'Settings — checking for updates'
+                    : 'Settings',
+            onPressed: _navigateToAppSettings,
           ),
           IconButton(
             icon: const Icon(
@@ -518,38 +514,6 @@ class _HomePageState extends ConsumerState<HomePage> {
     }
   }
 
-  Future<void> _onUpdatePressed() async {
-    if (_isDownloadingUpdate) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('The update is downloading in the background.'),
-        ),
-      );
-      return;
-    }
-
-    final availableUpdate = _availableUpdate;
-    if (availableUpdate != null) {
-      await _confirmAndInstallUpdate(availableUpdate);
-      return;
-    }
-
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Checking for update...')));
-    await _checkForUpdate();
-    if (!mounted) return;
-
-    final update = _availableUpdate;
-    final message =
-        update != null
-            ? 'WoolyTube ${update.version} is available.'
-            : 'WoolyTube is up to date.';
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
-  }
-
   Future<void> _checkForUpdate() {
     final existingCheck = _updateCheck;
     if (existingCheck != null) return existingCheck;
@@ -580,104 +544,6 @@ class _HomePageState extends ConsumerState<HomePage> {
     } finally {
       if (mounted) {
         setState(() => _isCheckingForUpdate = false);
-      }
-    }
-  }
-
-  Future<void> _confirmAndInstallUpdate(AppUpdate update) async {
-    final shouldUpdate = await showDialog<bool>(
-      context: context,
-      builder:
-          (context) => AlertDialog(
-            title: const Text('Update available'),
-            content: Text(
-              'WoolyTube ${update.version} is available. '
-              'You are running ${update.currentVersion}. '
-              'Download and install the new APK?',
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(false),
-                child: const Text('Later'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.of(context).pop(true),
-                child: const Text('Update'),
-              ),
-            ],
-          ),
-    );
-    if (!mounted || shouldUpdate != true) return;
-
-    var progressDialogVisible = true;
-    void closeProgressDialog({bool showBackgroundMessage = false}) {
-      if (!mounted || !progressDialogVisible) return;
-      progressDialogVisible = false;
-      Navigator.of(context, rootNavigator: true).pop();
-      if (showBackgroundMessage) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Update download continues in the background. '
-              'You’ll be prompted to install it when ready.',
-            ),
-          ),
-        );
-      }
-    }
-
-    setState(() => _isDownloadingUpdate = true);
-    unawaited(
-      showDialog<void>(
-        context: context,
-        barrierDismissible: false,
-        builder:
-            (context) => AlertDialog(
-              title: const Text('Downloading update'),
-              content: Row(
-                children: [
-                  const SizedBox(
-                    width: 28,
-                    height: 28,
-                    child: CircularProgressIndicator(strokeWidth: 3),
-                  ),
-                  const SizedBox(width: 16),
-                  const Expanded(
-                    child: Text(
-                      'You can keep using WoolyTube while this downloads. '
-                      'The installer will open when it is ready.',
-                    ),
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed:
-                      () => closeProgressDialog(showBackgroundMessage: true),
-                  child: const Text('Close — keep downloading'),
-                ),
-              ],
-            ),
-      ),
-    );
-
-    try {
-      await ref.read(updateServiceProvider).downloadAndInstallUpdate(update);
-      closeProgressDialog();
-    } on PlatformException catch (e) {
-      closeProgressDialog();
-      if (!mounted) return;
-
-      final message =
-          e.code == 'INSTALL_PERMISSION_REQUIRED'
-              ? 'Allow WoolyTube to install unknown apps, then tap Update again.'
-              : e.message ?? 'Could not download and install the update.';
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(message)));
-    } finally {
-      if (mounted) {
-        setState(() => _isDownloadingUpdate = false);
       }
     }
   }
@@ -734,6 +600,13 @@ class _HomePageState extends ConsumerState<HomePage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('A download is already in progress')),
       );
+      return;
+    }
+
+    if (!await confirmManualDownload(
+      context,
+      ref.read(downloadNetworkPolicyProvider),
+    )) {
       return;
     }
 
@@ -903,6 +776,20 @@ class _HomePageState extends ConsumerState<HomePage> {
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => PlaylistSettingsPage(playlistId: playlist.id),
+      ),
+    );
+  }
+
+  void _navigateToAppSettings() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder:
+            (_) => SettingsPage(
+              initialUpdate: _availableUpdate,
+              onUpdateChanged: (update) {
+                if (mounted) setState(() => _availableUpdate = update);
+              },
+            ),
       ),
     );
   }

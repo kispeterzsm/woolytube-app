@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../providers/providers.dart';
+import '../widgets/mobile_data_download_guard.dart';
 
 class AddPlaylistPage extends ConsumerStatefulWidget {
   const AddPlaylistPage({super.key});
@@ -63,6 +64,13 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
 
   Future<void> _addPlaylist() async {
     if (_playlistInfo == null || _playlistTitle == null) return;
+
+    if (!await confirmManualDownload(
+      context,
+      ref.read(downloadNetworkPolicyProvider),
+    )) {
+      return;
+    }
 
     setState(() => _adding = true);
 

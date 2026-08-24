@@ -128,7 +128,10 @@ class MainActivity : AudioServiceFragmentActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "scheduleAutoUpdate" -> {
-                        scheduleAutoUpdate()
+                        val arguments = call.arguments as? Map<*, *>
+                        val allowMobileData =
+                            arguments?.get("allowMobileData") as? Boolean ?: false
+                        scheduleAutoUpdate(allowMobileData)
                         result.success(null)
                     }
                     else -> result.notImplemented()
@@ -301,7 +304,7 @@ class MainActivity : AudioServiceFragmentActivity() {
         )
     }
 
-    private fun scheduleAutoUpdate() {
+    private fun scheduleAutoUpdate(allowMobileData: Boolean) {
         val constraints = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.CONNECTED)
             .build()
@@ -310,6 +313,11 @@ class MainActivity : AudioServiceFragmentActivity() {
             1, TimeUnit.HOURS
         )
             .setConstraints(constraints)
+            .setInputData(
+                workDataOf(
+                    AutoUpdateWorker.INPUT_ALLOW_MOBILE_DATA to allowMobileData
+                )
+            )
             .build()
 
         WorkManager.getInstance(applicationContext).enqueueUniquePeriodicWork(

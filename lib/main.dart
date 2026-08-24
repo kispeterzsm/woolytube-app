@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:media_kit/media_kit.dart' hide Track;
 import 'package:media_kit_video/media_kit_video.dart';
@@ -14,6 +13,7 @@ import 'services/playback_service.dart';
 import 'services/audio_handler.dart';
 import 'services/picture_in_picture_service.dart';
 import 'services/background_worker.dart' as background_worker;
+import 'services/app_settings_service.dart';
 import 'pages/home_page.dart';
 import 'pages/player_page.dart';
 import 'widgets/mini_player.dart';
@@ -27,12 +27,11 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
 
-  // Schedule background auto-update via native WorkManager
-  const backgroundChannel = MethodChannel('com.woolytube/background');
+  // Schedule background auto-update with the user's network preference.
   try {
-    await backgroundChannel.invokeMethod('scheduleAutoUpdate');
+    await AppSettingsService().scheduleAutoUpdate();
   } catch (_) {
-    // Non-critical — don't block app startup
+    // Non-critical — don't block app startup.
   }
 
   final database = AppDatabase();

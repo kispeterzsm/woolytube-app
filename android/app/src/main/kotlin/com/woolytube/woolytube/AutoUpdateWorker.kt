@@ -1,6 +1,8 @@
 package com.woolytube.woolytube
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
@@ -20,11 +22,21 @@ class AutoUpdateWorker(
 
     companion object {
         private const val TAG = "WoolyTube.AutoUpdate"
+        const val INPUT_ALLOW_MOBILE_DATA = "allow_mobile_data"
     }
 
     override suspend fun doWork(): Result {
         return withContext(Dispatchers.Main) {
             try {
+                val allowMobileData = inputData.getBoolean(
+                    INPUT_ALLOW_MOBILE_DATA,
+                    false
+                )
+                if (!allowMobileData && isUsingMobileData()) {
+                    Log.i(TAG, "Skipping auto-update on mobile data")
+                    return@withContext Result.success()
+                }
+
                 Log.i(TAG, "Starting auto-update check")
 
                 val flutterLoader = FlutterLoader()
@@ -78,5 +90,16 @@ class AutoUpdateWorker(
                 Result.retry()
             }
         }
+    }
+
+    private fun isUsingMobileData(): Boolean {
+        val connectivityManager = applicationContext.getSystemService(
+            Context.CONNECTIVITY_SERVICE
+        ) as? ConnectivityManager ?: return false
+        val network = connectivityManager.activeNetwork ?: return false
+        val capabilities =
+            connectivityManager.getNetworkCapabilities(network) ?: return false
+        return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) &&
+            !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
     }
 }
