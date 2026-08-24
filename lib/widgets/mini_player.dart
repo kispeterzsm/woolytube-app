@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -32,10 +33,10 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
   }
 
   void _onFullscreenChanged() {
-    // Defer setState — the notifier may be flipped while the popping route
-    // is still being disposed, and synchronous setState during that phase
-    // is silently dropped.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    // Route teardown may flip the notifier while Flutter is finishing a
+    // frame. Defer to the next event-loop turn so setState schedules a fresh
+    // frame instead of being coalesced into the frame that is already ending.
+    Timer(const Duration(milliseconds: 1), () {
       if (mounted) setState(() {});
     });
   }
