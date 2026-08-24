@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../providers/playback_providers.dart';
 import '../providers/providers.dart';
 import '../services/update_service.dart';
 
@@ -20,6 +21,7 @@ class SettingsPage extends ConsumerStatefulWidget {
 class _SettingsPageState extends ConsumerState<SettingsPage> {
   AppUpdate? _availableUpdate;
   bool _autoDownloadWithMobileData = false;
+  bool _pauseOnAudioInterruption = true;
   bool _isLoadingSettings = true;
   bool _isSavingSettings = false;
   bool _isCheckingForUpdate = false;
@@ -34,11 +36,17 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
   Future<void> _loadSettings() async {
     try {
-      final enabled =
-          await ref
-              .read(appSettingsServiceProvider)
-              .getAutoDownloadWithMobileData();
-      if (mounted) setState(() => _autoDownloadWithMobileData = enabled);
+      final settings = ref.read(appSettingsServiceProvider);
+      final values = await Future.wait([
+        settings.getAutoDownloadWithMobileData(),
+        settings.getPauseOnAudioInterruption(),
+      ]);
+      if (mounted) {
+        setState(() {
+          _autoDownloadWithMobileData = values[0];
+          _pauseOnAudioInterruption = values[1];
+        });
+      }
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -46,6 +54,29 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       );
     } finally {
       if (mounted) setState(() => _isLoadingSettings = false);
+    }
+  }
+
+  Future<void> _setPauseOnAudioInterruption(bool enabled) async {
+    setState(() {
+      _pauseOnAudioInterruption = enabled;
+      _isSavingSettings = true;
+    });
+    try {
+      await ref
+          .read(appSettingsServiceProvider)
+          .setPauseOnAudioInterruption(enabled);
+      await ref
+          .read(playbackServiceProvider)
+          .setPauseOnAudioInterruption(enabled);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _pauseOnAudioInterruption = !enabled);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Could not save setting: $error')));
+    } finally {
+      if (mounted) setState(() => _isSavingSettings = false);
     }
   }
 
@@ -75,6 +106,20 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       appBar: AppBar(title: const Text('Settings')),
       body: ListView(
         children: [
+          const _SectionHeader('Playback'),
+          SwitchListTile(
+            secondary: const Icon(Icons.pause_circle_outline),
+            title: const Text('Pause for other apps'),
+            subtitle: const Text(
+              'Pause WoolyTube when another app starts playing audio',
+            ),
+            value: _pauseOnAudioInterruption,
+            onChanged:
+                _isLoadingSettings || _isSavingSettings
+                    ? null
+                    : _setPauseOnAudioInterruption,
+          ),
+          const Divider(height: 1),
           const _SectionHeader('Downloads'),
           SwitchListTile(
             secondary: const Icon(Icons.mobile_friendly),

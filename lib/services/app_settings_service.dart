@@ -8,6 +8,7 @@ class AppSettingsService {
     : _preferencesLoader = preferencesLoader ?? SharedPreferences.getInstance;
 
   static const autoDownloadWithMobileDataKey = 'auto_download_with_mobile_data';
+  static const pauseOnAudioInterruptionKey = 'pause_on_audio_interruption';
   static const _backgroundChannel = MethodChannel('com.woolytube/background');
 
   final PreferencesLoader _preferencesLoader;
@@ -21,6 +22,16 @@ class AppSettingsService {
     final preferences = await _preferencesLoader();
     await preferences.setBool(autoDownloadWithMobileDataKey, enabled);
     await scheduleAutoUpdate();
+  }
+
+  Future<bool> getPauseOnAudioInterruption() async {
+    final preferences = await _preferencesLoader();
+    return preferences.getBool(pauseOnAudioInterruptionKey) ?? true;
+  }
+
+  Future<void> setPauseOnAudioInterruption(bool enabled) async {
+    final preferences = await _preferencesLoader();
+    await preferences.setBool(pauseOnAudioInterruptionKey, enabled);
   }
 
   Future<void> scheduleAutoUpdate() async {

@@ -33,6 +33,20 @@ void main() {
     expect(await settings.getAutoDownloadWithMobileData(), isTrue);
   });
 
+  test('pausing for other apps is on by default', () async {
+    final settings = AppSettingsService();
+
+    expect(await settings.getPauseOnAudioInterruption(), isTrue);
+  });
+
+  test('pausing for other apps preference is persisted', () async {
+    final settings = AppSettingsService();
+
+    await settings.setPauseOnAudioInterruption(false);
+
+    expect(await settings.getPauseOnAudioInterruption(), isFalse);
+  });
+
   test('reschedules automatic updates with the new preference', () async {
     final calls = <MethodCall>[];
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger

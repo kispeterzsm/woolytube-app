@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 import 'package:media_kit/media_kit.dart' hide Track, Playlist;
@@ -5,6 +6,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:rxdart/rxdart.dart';
 import 'package:path/path.dart' as p;
 import '../database/database.dart';
+import 'audio_focus_controller.dart';
 import 'playback_notification_controller.dart';
 import 'picture_in_picture_service.dart';
 import 'sleep_timer_controller.dart';
@@ -101,6 +103,7 @@ class PlaybackService
   late final SleepTimerController _sleepTimer;
   final AppDatabase _db;
   final Random _random;
+  AudioFocusController? _audioFocusController;
 
   // VideoController is lazy — only created when video playback is needed.
   // Attaching it eagerly causes Android to create a GL surface that gets
@@ -202,6 +205,23 @@ class PlaybackService
     });
 
     _player.stream.position.listen(_maybeSkipSponsorBlockSegment);
+  }
+
+  Future<void> initializeAudioFocus({
+    required bool pauseOnAudioInterruption,
+    PlaybackAudioSession? audioSession,
+  }) async {
+    final controller = AudioFocusController(
+      session: audioSession ?? await PlatformPlaybackAudioSession.create(),
+      pausePlayback: pause,
+      isPlaying: () => isPlaying,
+    );
+    await controller.initialize(enabled: pauseOnAudioInterruption);
+    _audioFocusController = controller;
+  }
+
+  Future<void> setPauseOnAudioInterruption(bool enabled) async {
+    await _audioFocusController?.setEnabled(enabled);
   }
 
   /// Resolve stored file path (without extension) to actual file on disk
@@ -408,7 +428,16 @@ class PlaybackService
       return;
     }
 
-    await _player.open(Media('file://$filePath'));
+    final hasFocus =
+        _audioFocusController == null ||
+        await _audioFocusController!.requestFocus();
+    if (!hasFocus) return;
+    try {
+      await _player.open(Media('file://$filePath'));
+    } catch (_) {
+      await _audioFocusController?.abandonFocus();
+      rethrow;
+    }
   }
 
   Future<void> refreshCurrentSegments() async {
@@ -537,17 +566,29 @@ class PlaybackService
   @override
   Future<void> pause() async {
     await _player.pause();
+    await _audioFocusController?.abandonFocus();
   }
 
   @override
-  Future<void> resume() => _player.play();
+  Future<void> resume() async {
+    final hasFocus =
+        _audioFocusController == null ||
+        await _audioFocusController!.requestFocus();
+    if (!hasFocus) return;
+    try {
+      await _player.play();
+    } catch (_) {
+      await _audioFocusController?.abandonFocus();
+      rethrow;
+    }
+  }
 
   @override
   Future<void> togglePlayPause() async {
     if (_player.state.playing) {
       await pause();
     } else {
-      await _player.play();
+      await resume();
     }
   }
 
@@ -711,6 +752,7 @@ class PlaybackService
   Future<void> stop() async {
     _sleepTimer.cancel();
     await _player.stop();
+    await _audioFocusController?.abandonFocus();
     _currentTrack.add(null);
     _currentPlaylist.add(null);
     _queue.add([]);
@@ -724,6 +766,7 @@ class PlaybackService
 
   void dispose() {
     _sleepTimer.dispose();
+    unawaited(_audioFocusController?.dispose());
     _player.dispose();
     _currentTrack.close();
     _currentPlaylist.close();

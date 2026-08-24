@@ -27,9 +27,11 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
 
+  final appSettingsService = AppSettingsService();
+
   // Schedule background auto-update with the user's network preference.
   try {
-    await AppSettingsService().scheduleAutoUpdate();
+    await appSettingsService.scheduleAutoUpdate();
   } catch (_) {
     // Non-critical — don't block app startup.
   }
@@ -57,10 +59,20 @@ void main() async {
     debugPrint('AudioService init failed: $e');
   }
 
+  try {
+    await playbackService.initializeAudioFocus(
+      pauseOnAudioInterruption:
+          await appSettingsService.getPauseOnAudioInterruption(),
+    );
+  } catch (e) {
+    debugPrint('Audio focus init failed: $e');
+  }
+
   runApp(
     ProviderScope(
       overrides: [
         databaseProvider.overrideWithValue(database),
+        appSettingsServiceProvider.overrideWithValue(appSettingsService),
         playbackServiceProvider.overrideWithValue(playbackService),
         pictureInPictureServiceProvider.overrideWithValue(
           pictureInPictureService,
