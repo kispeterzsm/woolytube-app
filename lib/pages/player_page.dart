@@ -10,6 +10,7 @@ import '../database/database.dart';
 import '../providers/playback_providers.dart';
 import '../widgets/player_controls.dart';
 import '../widgets/segment_mark_button.dart';
+import '../widgets/sleep_timer_button.dart';
 import '../services/media_thumbnail_service.dart';
 
 class PlayerPage extends ConsumerStatefulWidget {
@@ -569,6 +570,10 @@ class _VideoOverlay extends ConsumerWidget {
                           inactiveColor: Colors.white,
                           onAction: onAnyAction,
                         ),
+                        SleepTimerButton(
+                          inactiveColor: Colors.white,
+                          onAction: onAnyAction,
+                        ),
                         IconButton(
                           icon: const Icon(
                             Icons.videocam_off,
@@ -950,6 +955,10 @@ class _AudioControlPanel extends StatelessWidget {
                     onPressed: onToggleShuffle,
                   ),
                   const SegmentMarkButton(
+                    activeColor: Color(0xFF64B5F6),
+                    inactiveColor: Colors.white70,
+                  ),
+                  const SleepTimerButton(
                     activeColor: Color(0xFF64B5F6),
                     inactiveColor: Colors.white70,
                   ),

@@ -78,6 +78,10 @@ final audioOnlyModeProvider = StreamProvider<bool>((ref) {
   return ref.watch(playbackServiceProvider).audioOnlyModeStream;
 });
 
+final sleepTimerRemainingProvider = StreamProvider<Duration?>((ref) {
+  return ref.watch(playbackServiceProvider).sleepTimerRemainingStream;
+});
+
 final pendingSegmentMarkStartProvider = StreamProvider<Duration?>((ref) {
   return ref.watch(playbackServiceProvider).pendingSegmentMarkStartStream;
 });

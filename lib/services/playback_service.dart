@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 import '../database/database.dart';
 import 'playback_notification_controller.dart';
 import 'picture_in_picture_service.dart';
+import 'sleep_timer_controller.dart';
 import 'sponsorblock_service.dart';
 
 class SegmentMarkResult {
@@ -97,6 +98,7 @@ class PlaybackService
         PlaybackNotificationController,
         PictureInPicturePlaybackController {
   late final Player _player;
+  late final SleepTimerController _sleepTimer;
   final AppDatabase _db;
   final Random _random;
 
@@ -139,6 +141,8 @@ class PlaybackService
       _pendingSegmentMarkStart.stream;
   Stream<List<PlaybackSponsorBlockSegment>> get sponsorBlockSegmentsStream =>
       _sponsorBlockSegments.stream;
+  Stream<Duration?> get sleepTimerRemainingStream =>
+      _sleepTimer.remainingStream;
   @override
   Stream<Duration> get positionStream => _player.stream.position;
   @override
@@ -175,6 +179,7 @@ class PlaybackService
   @override
   Duration get position => _player.state.position;
   Duration get duration => _player.state.duration;
+  Duration? get sleepTimerRemaining => _sleepTimer.remaining;
 
   // Shuffle state
   List<int> _shuffledIndices = [];
@@ -185,6 +190,7 @@ class PlaybackService
 
   PlaybackService(this._db, {Random? random}) : _random = random ?? Random() {
     _player = Player();
+    _sleepTimer = SleepTimerController(onElapsed: pause);
 
     // Auto-advance on track completion
     _player.stream.completed.listen((completed) {
@@ -690,6 +696,10 @@ class PlaybackService
 
   Future<void> toggleAudioOnlyMode() => setAudioOnlyMode(!_audioOnlyMode.value);
 
+  void startSleepTimer(Duration duration) => _sleepTimer.start(duration);
+
+  void cancelSleepTimer() => _sleepTimer.cancel();
+
   void _generateShuffledIndices(int currentIndex) {
     final indices = List.generate(_queue.value.length, (i) => i);
     indices.remove(currentIndex);
@@ -699,6 +709,7 @@ class PlaybackService
 
   @override
   Future<void> stop() async {
+    _sleepTimer.cancel();
     await _player.stop();
     _currentTrack.add(null);
     _currentPlaylist.add(null);
@@ -712,6 +723,7 @@ class PlaybackService
   }
 
   void dispose() {
+    _sleepTimer.dispose();
     _player.dispose();
     _currentTrack.close();
     _currentPlaylist.close();

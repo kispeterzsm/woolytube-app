@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/playback_providers.dart';
 import 'segment_mark_button.dart';
+import 'sleep_timer_button.dart';
 import 'sponsorblock_progress_bar.dart';
 
 class PlayerControls extends ConsumerWidget {
@@ -63,6 +64,8 @@ class PlayerControls extends ConsumerWidget {
                 ),
                 const SizedBox(width: 16),
                 const SegmentMarkButton(),
+                const SizedBox(width: 16),
+                const SleepTimerButton(),
                 const SizedBox(width: 16),
                 IconButton(
                   icon: Icon(
