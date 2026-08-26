@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Five original logo directions for the WoolyTube Android app."
+    />
+    <title>WoolyTube — Logo Concepts</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --ink: #f7f9ff;
+        --muted: #9aa7bd;
+        --canvas: #0a0f1c;
+        --panel: #111827;
+        --line: rgba(255, 255, 255, 0.09);
+        --blue: #2196f3;
+        --cyan: #18c3de;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        background:
+          radial-gradient(circle at 8% -8%, rgba(33, 150, 243, 0.19), transparent 28rem),
+          radial-gradient(circle at 92% 18%, rgba(24, 195, 222, 0.09), transparent 24rem),
+          var(--canvas);
+        color: var(--ink);
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        min-height: 100vh;
+      }
+
+      .shell {
+        width: min(1180px, calc(100% - 40px));
+        margin: 0 auto;
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 28px 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-size: 15px;
+        font-weight: 750;
+        letter-spacing: -0.02em;
+      }
+
+      .brand-dot {
+        width: 13px;
+        height: 13px;
+        border: 3px solid var(--blue);
+        border-radius: 50%;
+        box-shadow: 0 0 22px rgba(33, 150, 243, 0.85);
+      }
+
+      .meta {
+        color: var(--muted);
+        font-size: 12px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .intro {
+        display: grid;
+        grid-template-columns: minmax(0, 1.4fr) minmax(260px, 0.6fr);
+        gap: 64px;
+        align-items: end;
+        padding: 88px 0 68px;
+      }
+
+      .eyebrow {
+        color: #65ccff;
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        max-width: 800px;
+        margin: 18px 0 0;
+        font-size: clamp(48px, 8vw, 92px);
+        line-height: 0.92;
+        letter-spacing: -0.065em;
+      }
+
+      .intro-copy {
+        margin: 0;
+        color: var(--muted);
+        font-size: 16px;
+        line-height: 1.7;
+      }
+
+      .toolbar {
+        display: flex;
+        justify-content: space-between;
+        gap: 20px;
+        align-items: center;
+        margin-bottom: 20px;
+      }
+
+      .toolbar h2 {
+        margin: 0;
+        font-size: 13px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .surface-picker {
+        display: flex;
+        gap: 5px;
+        padding: 5px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.035);
+      }
+
+      button {
+        appearance: none;
+        border: 0;
+        border-radius: 999px;
+        padding: 8px 13px;
+        background: transparent;
+        color: var(--muted);
+        font: inherit;
+        font-size: 12px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      button[aria-pressed="true"] {
+        background: #f2f6ff;
+        color: #101727;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 20px;
+        padding-bottom: 20px;
+      }
+
+      .card {
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        background: rgba(17, 24, 39, 0.78);
+        box-shadow: 0 24px 72px rgba(0, 0, 0, 0.16);
+      }
+
+      .card:first-child {
+        grid-column: 1 / -1;
+      }
+
+      .stage {
+        position: relative;
+        display: grid;
+        place-items: center;
+        min-height: 390px;
+        background: #f5f7fb;
+        transition: background 180ms ease;
+      }
+
+      .card:first-child .stage {
+        min-height: 480px;
+      }
+
+      .stage.dark {
+        background: #151d2c;
+      }
+
+      .stage.checker {
+        background-color: #f2f4f8;
+        background-image:
+          linear-gradient(45deg, #dfe3ea 25%, transparent 25%),
+          linear-gradient(-45deg, #dfe3ea 25%, transparent 25%),
+          linear-gradient(45deg, transparent 75%, #dfe3ea 75%),
+          linear-gradient(-45deg, transparent 75%, #dfe3ea 75%);
+        background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+        background-size: 20px 20px;
+      }
+
+      .logo {
+        display: block;
+        width: min(62%, 330px);
+        aspect-ratio: 1;
+        object-fit: contain;
+        transition: transform 180ms ease;
+      }
+
+      .card:hover .logo {
+        transform: scale(1.025);
+      }
+
+      .number {
+        position: absolute;
+        top: 22px;
+        left: 24px;
+        color: rgba(12, 20, 34, 0.48);
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+      }
+
+      .dark .number {
+        color: rgba(255, 255, 255, 0.5);
+      }
+
+      .sizes {
+        position: absolute;
+        right: 22px;
+        bottom: 20px;
+        display: flex;
+        align-items: end;
+        gap: 8px;
+      }
+
+      .sizes span {
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+        border-radius: 23%;
+        background: #1e1e1e;
+        box-shadow: 0 5px 18px rgba(0, 0, 0, 0.2);
+      }
+
+      .sizes img {
+        width: 82%;
+        height: 82%;
+        object-fit: contain;
+      }
+
+      .size-l {
+        width: 58px;
+        height: 58px;
+      }
+
+      .size-s {
+        width: 34px;
+        height: 34px;
+      }
+
+      .content {
+        padding: 27px 28px 30px;
+      }
+
+      .content-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 24px;
+        align-items: start;
+      }
+
+      h3 {
+        margin: 0;
+        font-size: 25px;
+        letter-spacing: -0.035em;
+      }
+
+      .concept {
+        margin: 10px 0 22px;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      .tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .tag {
+        padding: 7px 10px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: #c4cddd;
+        font-size: 11px;
+        font-weight: 700;
+      }
+
+      .download {
+        flex: 0 0 auto;
+        color: #70ceff;
+        font-size: 12px;
+        font-weight: 750;
+        text-decoration: none;
+      }
+
+      .download:hover {
+        text-decoration: underline;
+        text-underline-offset: 4px;
+      }
+
+      .note {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 16px;
+        align-items: start;
+        margin: 20px 0 80px;
+        padding: 24px;
+        border: 1px solid rgba(33, 150, 243, 0.22);
+        border-radius: 20px;
+        background: rgba(33, 150, 243, 0.07);
+        color: #bec9db;
+        line-height: 1.6;
+      }
+
+      .note-mark {
+        display: grid;
+        place-items: center;
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+        background: var(--blue);
+        color: white;
+        font-weight: 900;
+      }
+
+      footer {
+        display: flex;
+        justify-content: space-between;
+        gap: 20px;
+        padding: 28px 0 48px;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      @media (max-width: 780px) {
+        .shell {
+          width: min(100% - 24px, 680px);
+        }
+
+        .intro {
+          grid-template-columns: 1fr;
+          gap: 28px;
+          padding: 64px 0 52px;
+        }
+
+        .toolbar {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+
+        .grid {
+          grid-template-columns: 1fr;
+        }
+
+        .card:first-child {
+          grid-column: auto;
+        }
+
+        .stage,
+        .card:first-child .stage {
+          min-height: 340px;
+        }
+
+        .meta {
+          display: none;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        * {
+          scroll-behavior: auto !important;
+          transition: none !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header>
+        <div class="brand"><span class="brand-dot"></span>WoolyTube</div>
+        <div class="meta">Mammoth exploration / Round 02</div>
+      </header>
+
+      <main>
+        <section class="intro">
+          <div>
+            <div class="eyebrow">Five new directions</div>
+            <h1>Meet the mammoths.</h1>
+          </div>
+          <p class="intro-copy">
+            A sharper second round built around the name’s real origin: the
+            woolly mammoth, combined with listening, playback, and downloads.
+          </p>
+        </section>
+
+        <div class="toolbar">
+          <h2>Logo concepts</h2>
+          <div class="surface-picker" aria-label="Preview background">
+            <button type="button" data-surface="light" aria-pressed="true">Light</button>
+            <button type="button" data-surface="dark" aria-pressed="false">Dark</button>
+            <button type="button" data-surface="checker" aria-pressed="false">Alpha</button>
+          </div>
+        </div>
+
+        <section class="grid" aria-label="WoolyTube logo concepts">
+          <article class="card">
+            <div class="stage">
+              <span class="number">01 / 05</span>
+              <img class="logo" src="assets/round-2/01-w-headphones.png" alt="Bold blue W wearing cyan over-ear headphones with small ivory tusks" />
+              <div class="sizes" aria-label="Small app icon previews">
+                <span class="size-l"><img src="assets/round-2/01-w-headphones.png" alt="" /></span>
+                <span class="size-s"><img src="assets/round-2/01-w-headphones.png" alt="" /></span>
+              </div>
+            </div>
+            <div class="content">
+              <div class="content-top">
+                <div>
+                  <h3>W + Headphones</h3>
+                  <p class="concept">The name distilled to one unmistakable letter, with listening built directly into its silhouette and small tusks as the mammoth signature.</p>
+                </div>
+                <a class="download" href="assets/round-2/01-w-headphones.png" download>PNG ↓</a>
+              </div>
+              <div class="tags"><span class="tag">Name-led</span><span class="tag">Audio-first</span><span class="tag">Best at small sizes</span></div>
+            </div>
+          </article>
+
+          <article class="card">
+            <div class="stage">
+              <span class="number">02 / 05</span>
+              <img class="logo" src="assets/round-2/02-mammoth-play.png" alt="Front-facing blue woolly mammoth head with ivory tusks and a play-button cutout" />
+              <div class="sizes" aria-label="Small app icon previews">
+                <span class="size-l"><img src="assets/round-2/02-mammoth-play.png" alt="" /></span>
+                <span class="size-s"><img src="assets/round-2/02-mammoth-play.png" alt="" /></span>
+              </div>
+            </div>
+            <div class="content">
+              <div class="content-top">
+                <div>
+                  <h3>Mammoth Play</h3>
+                  <p class="concept">A bold, frontal mammoth with playback cut into its shaggy brow. The clearest expression of both the name and the product.</p>
+                </div>
+                <a class="download" href="assets/round-2/02-mammoth-play.png" download>PNG ↓</a>
+              </div>
+              <div class="tags"><span class="tag">Iconic</span><span class="tag">Literal</span><span class="tag">Brand character</span></div>
+            </div>
+          </article>
+
+          <article class="card">
+            <div class="stage">
+              <span class="number">03 / 05</span>
+              <img class="logo" src="assets/round-2/03-tusk-play.png" alt="Abstract blue mammoth trunk and ivory tusks forming a play triangle" />
+              <div class="sizes" aria-label="Small app icon previews">
+                <span class="size-l"><img src="assets/round-2/03-tusk-play.png" alt="" /></span>
+                <span class="size-s"><img src="assets/round-2/03-tusk-play.png" alt="" /></span>
+              </div>
+            </div>
+            <div class="content">
+              <div class="content-top">
+                <div>
+                  <h3>Tusk Play</h3>
+                  <p class="concept">Two tusks and a central trunk reduce the mammoth to a sharp play silhouette. Abstract at first, obvious on a second look.</p>
+                </div>
+                <a class="download" href="assets/round-2/03-tusk-play.png" download>PNG ↓</a>
+              </div>
+              <div class="tags"><span class="tag">Abstract</span><span class="tag">Media-first</span><span class="tag">Bold silhouette</span></div>
+            </div>
+          </article>
+
+          <article class="card">
+            <div class="stage">
+              <span class="number">04 / 05</span>
+              <img class="logo" src="assets/round-2/04-mammoth-profile.png" alt="Minimal blue woolly mammoth profile with a raised trunk and ivory tusk" />
+              <div class="sizes" aria-label="Small app icon previews">
+                <span class="size-l"><img src="assets/round-2/04-mammoth-profile.png" alt="" /></span>
+                <span class="size-s"><img src="assets/round-2/04-mammoth-profile.png" alt="" /></span>
+              </div>
+            </div>
+            <div class="content">
+              <div class="content-top">
+                <div>
+                  <h3>Mammoth Profile</h3>
+                  <p class="concept">A compact side profile led by the curled trunk and tusk. The most expressive mammoth mark without becoming a full mascot.</p>
+                </div>
+                <a class="download" href="assets/round-2/04-mammoth-profile.png" download>PNG ↓</a>
+              </div>
+              <div class="tags"><span class="tag">Expressive</span><span class="tag">Mammoth-first</span><span class="tag">Mascot potential</span></div>
+            </div>
+          </article>
+
+          <article class="card">
+            <div class="stage">
+              <span class="number">05 / 05</span>
+              <img class="logo" src="assets/round-2/05-single-line-mammoth.png" alt="Continuous cyan and blue line suggesting a mammoth around a navy play triangle" />
+              <div class="sizes" aria-label="Small app icon previews">
+                <span class="size-l"><img src="assets/round-2/05-single-line-mammoth.png" alt="" /></span>
+                <span class="size-s"><img src="assets/round-2/05-single-line-mammoth.png" alt="" /></span>
+              </div>
+            </div>
+            <div class="content">
+              <div class="content-top">
+                <div>
+                  <h3>Single-Line Mammoth</h3>
+                  <p class="concept">A continuous gesture sketches the shaggy head, trunk, tusk, and a central play core. The lightest and most contemporary direction.</p>
+                </div>
+                <a class="download" href="assets/round-2/05-single-line-mammoth.png" download>PNG ↓</a>
+              </div>
+              <div class="tags"><span class="tag">Minimal</span><span class="tag">Contemporary</span><span class="tag">Flexible</span></div>
+            </div>
+          </article>
+        </section>
+
+        <aside class="note">
+          <div class="note-mark">i</div>
+          <div>Round two is shown above; the first-round PNGs remain in the assets folder for comparison. These are exploration-ready transparent PNGs. Once a direction is chosen, it should be redrawn as a precise vector and tested in Android’s adaptive-icon safe zones before replacing the launcher icon.</div>
+        </aside>
+      </main>
+
+      <footer>
+        <span>WoolyTube mammoth logo study</span>
+        <span>Blue accent matched to the app’s current UI</span>
+      </footer>
+    </div>
+
+    <script>
+      const buttons = document.querySelectorAll("[data-surface]");
+      const stages = document.querySelectorAll(".stage");
+
+      buttons.forEach((button) => {
+        button.addEventListener("click", () => {
+          buttons.forEach((item) => item.setAttribute("aria-pressed", "false"));
+          button.setAttribute("aria-pressed", "true");
+
+          stages.forEach((stage) => {
+            stage.classList.remove("dark", "checker");
+            if (button.dataset.surface !== "light") {
+              stage.classList.add(button.dataset.surface);
+            }
+          });
+        });
+      });
+    </script>
+  </body>
+</html>

@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -33,10 +32,19 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
   }
 
   void _onFullscreenChanged() {
-    // Route teardown may flip the notifier while Flutter is finishing a
-    // frame. Defer to the next event-loop turn so setState schedules a fresh
-    // frame instead of being coalesced into the frame that is already ending.
-    Timer(const Duration(milliseconds: 1), () {
+    debugPrint(
+      '[DEBUG-a4f2] notify fullscreen=${videoFullscreenNotifier.value} '
+      'phase=${WidgetsBinding.instance.schedulerPhase}',
+    );
+    // Route teardown flips the notifier during Flutter's persistent frame
+    // callbacks. Wait for that frame to finish before scheduling a rebuild;
+    // a wall-clock delay can still fire before a slow frame has completed.
+    WidgetsBinding.instance.endOfFrame.then((_) {
+      debugPrint(
+        '[DEBUG-a4f2] end-of-frame mounted=$mounted '
+        'fullscreen=${videoFullscreenNotifier.value} '
+        'phase=${WidgetsBinding.instance.schedulerPhase}',
+      );
       if (mounted) setState(() {});
     });
   }
@@ -44,6 +52,11 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
   @override
   Widget build(BuildContext context) {
     final currentTrack = ref.watch(currentTrackProvider).valueOrNull;
+    debugPrint(
+      '[DEBUG-a4f2] build track=${currentTrack?.id} '
+      'fullscreen=${videoFullscreenNotifier.value} '
+      'phase=${WidgetsBinding.instance.schedulerPhase}',
+    );
     if (currentTrack == null) return const SizedBox.shrink();
     if (videoFullscreenNotifier.value) return const SizedBox.shrink();
     return _buildBar(context, ref, currentTrack);

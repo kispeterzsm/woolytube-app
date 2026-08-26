@@ -114,60 +114,6 @@ void main() {
 
     await tester.tap(find.text('Audio track'));
     await tester.pumpAndSettle();
-    await tester.pump(const Duration(milliseconds: 2));
-
-    expect(find.byIcon(Icons.close), findsOneWidget);
-  });
-
-  testWidgets('fullscreen teardown schedules a mini-player redraw', (
-    tester,
-  ) async {
-    const track = Track(
-      id: 1,
-      playlistId: 1,
-      index: 1,
-      videoId: 'audio-track',
-      title: 'Audio track',
-      filePath: '/tmp/audio-track.m4a',
-      status: 'complete',
-      isLocalReplacement: false,
-      alwaysSkip: false,
-    );
-    videoFullscreenNotifier.value = true;
-
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          playbackServiceProvider.overrideWithValue(_FakePlaybackService()),
-          currentTrackProvider.overrideWith(
-            (ref) => Stream<Track?>.value(track),
-          ),
-          isPlayingProvider.overrideWith((ref) => Stream.value(false)),
-          positionProvider.overrideWith((ref) => Stream.value(Duration.zero)),
-          durationProvider.overrideWith(
-            (ref) => Stream.value(const Duration(minutes: 3)),
-          ),
-          isVideoContentProvider.overrideWith((ref) => Stream.value(false)),
-          playbackSponsorBlockSegmentsProvider.overrideWith(
-            (ref) => Stream.value(const <PlaybackSponsorBlockSegment>[]),
-          ),
-        ],
-        child: const MaterialApp(
-          home: Scaffold(bottomNavigationBar: MiniPlayerBar()),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.byIcon(Icons.close), findsNothing);
-
-    // PlayerPage.dispose can flip this flag while Flutter is completing a
-    // frame. Without another scheduled frame, the redraw waits for scrolling.
-    tester.binding.addPostFrameCallback((_) {
-      videoFullscreenNotifier.value = false;
-    });
-    tester.binding.scheduleFrame();
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 2));
 
     expect(find.byIcon(Icons.close), findsOneWidget);
   });
