@@ -8,6 +8,7 @@ import '../providers/playback_providers.dart';
 import '../pages/player_page.dart';
 import 'sponsorblock_progress_bar.dart';
 import '../services/media_thumbnail_service.dart';
+import 'next_file_button.dart';
 
 class MiniPlayerBar extends ConsumerStatefulWidget {
   final VoidCallback? onOpenPlayer;
@@ -163,6 +164,7 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
                     padding: EdgeInsets.zero,
                     constraints: const BoxConstraints(minWidth: 40),
                   ),
+                  const NextFileButton(iconSize: 28),
                   // Close button
                   IconButton(
                     icon: const Icon(

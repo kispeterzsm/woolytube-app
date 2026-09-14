@@ -79,6 +79,7 @@ class ChapterData {
   final DateTime? checkedAt;
   final int? durationMs;
   final bool valid;
+  final bool shuffleChapters;
 
   const ChapterData({
     this.downloaded = const [],
@@ -86,6 +87,7 @@ class ChapterData {
     this.checkedAt,
     this.durationMs,
     this.valid = true,
+    this.shuffleChapters = false,
   });
 
   List<MediaChapter> get active => valid ? (custom ?? downloaded) : const [];
@@ -95,6 +97,15 @@ class ChapterData {
     checkedAt: checkedAt,
     durationMs: durationMs,
     valid: valid,
+    shuffleChapters: shuffleChapters,
+  );
+  ChapterData withShuffleChapters(bool enabled) => ChapterData(
+    downloaded: downloaded,
+    custom: custom,
+    checkedAt: checkedAt,
+    durationMs: durationMs,
+    valid: valid,
+    shuffleChapters: enabled,
   );
   ChapterData invalidate() => ChapterData(
     downloaded: downloaded,
@@ -102,6 +113,7 @@ class ChapterData {
     checkedAt: checkedAt,
     durationMs: durationMs,
     valid: false,
+    shuffleChapters: shuffleChapters,
   );
   Map<String, dynamic> toJson() => {
     'downloaded': downloaded.map((c) => c.toJson()).toList(),
@@ -109,6 +121,7 @@ class ChapterData {
     'checkedAt': checkedAt?.toUtc().toIso8601String(),
     'durationMs': durationMs,
     'valid': valid,
+    'shuffleChapters': shuffleChapters,
   };
   String encode() => jsonEncode(toJson());
   static ChapterData decode(String? value) {
@@ -130,6 +143,7 @@ class ChapterData {
       durationMs:
           value['durationMs'] is int ? value['durationMs'] as int : null,
       valid: value['valid'] != false,
+      shuffleChapters: value['shuffleChapters'] == true,
     );
   }
 

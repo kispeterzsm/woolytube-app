@@ -51,7 +51,7 @@ List<PlaybackItem> chapterPlaybackItems(
   final data = ChapterData.decode(track.chaptersJson);
   final chapters = data.active;
   if (whole ||
-      !(track.chaptersEnabled ?? playlist.playChapters ?? false) ||
+      !(track.chaptersEnabled ?? playlist.playChapters ?? true) ||
       chapters.isEmpty) {
     return [PlaybackItem(track)];
   }
@@ -62,6 +62,8 @@ class PlaybackAlbum {
   final List<PlaybackItem> items;
   PlaybackAlbum(Iterable<PlaybackItem> items) : items = List.of(items);
   int get trackId => items.first.track.id;
+  bool get shuffleChapters =>
+      ChapterData.decode(items.first.track.chaptersJson).shuffleChapters;
 }
 
 /// Two finite shuffle pools, with history separate from unconsumed items.
@@ -69,6 +71,7 @@ class PlaybackAlbum {
 class AlbumPlaybackQueue {
   final Random random;
   bool shuffle = false;
+  bool _shuffleCurrentChapters = false;
   final List<PlaybackItem> _history = [];
   int _historyIndex = -1;
   final List<PlaybackItem> _remaining = [];
@@ -134,6 +137,8 @@ class AlbumPlaybackQueue {
   }
 
   void _openAlbum(PlaybackAlbum album, {String? chapterId}) {
+    _shuffleCurrentChapters = album.shuffleChapters;
+    final shuffleEntries = shuffle && _shuffleCurrentChapters;
     final entries = List<PlaybackItem>.of(album.items);
     final selected =
         chapterId == null
@@ -142,9 +147,9 @@ class AlbumPlaybackQueue {
     PlaybackItem? first;
     if (selected >= 0) {
       first = entries.removeAt(selected);
-      if (!shuffle) entries.removeRange(0, selected);
+      if (!shuffleEntries) entries.removeRange(0, selected);
     }
-    if (shuffle) entries.shuffle(random);
+    if (shuffleEntries) entries.shuffle(random);
     _remaining.addAll([if (first != null) first, ...entries]);
   }
 
@@ -164,6 +169,25 @@ class AlbumPlaybackQueue {
     return item;
   }
 
+  /// Discard the current file's unplayed chapters without adding them to history.
+  PlaybackItem? nextFile() {
+    final trackId = current?.track.id;
+    while (_historyIndex + 1 < _history.length) {
+      final item = _history[++_historyIndex];
+      if (item.track.id != trackId) return item;
+    }
+    _remaining.clear();
+    while (_queued.isNotEmpty && _queued.first.trackId == trackId) {
+      _queued.removeAt(0);
+    }
+    if (_queued.isEmpty) {
+      while (_albums.isNotEmpty && _albums.first.trackId == trackId) {
+        _albums.removeAt(0);
+      }
+    }
+    return next();
+  }
+
   PlaybackItem? previous() =>
       _historyIndex > 0 ? _history[--_historyIndex] : null;
 
@@ -171,7 +195,7 @@ class AlbumPlaybackQueue {
     if (shuffle == value) return;
     shuffle = value;
     if (value) {
-      _remaining.shuffle(random);
+      if (_shuffleCurrentChapters) _remaining.shuffle(random);
       _albums.shuffle(random);
     } else {
       _remaining.sort((a, b) => a.startMs.compareTo(b.startMs));

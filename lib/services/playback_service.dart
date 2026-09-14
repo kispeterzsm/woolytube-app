@@ -478,8 +478,13 @@ class PlaybackService
     }
   }
 
-  Future<bool> _advance({bool forward = true}) async {
-    var item = forward ? _albumQueue.next() : _albumQueue.previous();
+  Future<bool> _advance({bool forward = true, bool skipFile = false}) async {
+    var item =
+        skipFile
+            ? _albumQueue.nextFile()
+            : forward
+            ? _albumQueue.next()
+            : _albumQueue.previous();
     while (item != null) {
       final fresh = await _db.getTrack(item.track.id);
       if (fresh != null &&
@@ -799,6 +804,14 @@ class PlaybackService
   @override
   Future<void> next() => _transition(() async {
     await _advance();
+  });
+
+  @override
+  Future<void> nextFile() => _transition(() async {
+    if (!await _advance(skipFile: true)) {
+      _completionHandled = true;
+      await _player.pause();
+    }
   });
 
   @override

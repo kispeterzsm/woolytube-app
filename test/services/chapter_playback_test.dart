@@ -39,7 +39,9 @@ void main() {
                 ),
               );
       track = track.copyWith(
-        chaptersJson: Value(ChapterData(downloaded: chapters).encode()),
+        chaptersJson: Value(
+          ChapterData(downloaded: chapters, shuffleChapters: true).encode(),
+        ),
       );
       albums.add(PlaybackAlbum(chapterPlaybackItems(track, playlist)));
     }
@@ -153,6 +155,86 @@ void main() {
       );
     },
   );
+
+  test('chapters default to tracks while explicit whole-file settings win', () {
+    final track = albums.first.items.first.track;
+    final defaults = playlist.copyWith(playChapters: const Value(null));
+    expect(chapterPlaybackItems(track, defaults), hasLength(3));
+    expect(
+      chapterPlaybackItems(
+        track,
+        defaults.copyWith(playChapters: const Value(false)),
+      ).single.chapter,
+      isNull,
+    );
+  });
+
+  test('chapter shuffle is opt-in and only applies with playlist shuffle', () {
+    final source = albums.first.items.first.track;
+    final ordered = PlaybackAlbum(
+      chapterPlaybackItems(
+        source.copyWith(
+          chaptersJson: Value(
+            ChapterData.decode(
+              source.chaptersJson,
+            ).withShuffleChapters(false).encode(),
+          ),
+        ),
+        playlist,
+      ),
+    );
+    final shuffledOrders = <String>{};
+    for (var seed = 0; seed < 30; seed++) {
+      for (final shuffle in [false, true]) {
+        final q = AlbumPlaybackQueue(random: Random(seed));
+        final first = q.start([ordered], shuffled: shuffle)!;
+        q.setShuffle(!shuffle);
+        final ids = [first.id, q.next()!.id, q.next()!.id];
+        expect(ids, ordered.items.map((i) => i.id).toList());
+      }
+      final q = AlbumPlaybackQueue(random: Random(seed));
+      final first = q.start([albums.first], shuffled: true)!;
+      shuffledOrders.add([first.id, q.next()!.id, q.next()!.id].join(','));
+      final linear = AlbumPlaybackQueue(random: Random(seed));
+      expect(
+        linear.start([albums.first], shuffled: false)!.id,
+        albums.first.items.first.id,
+      );
+      expect(linear.next()!.id, albums.first.items[1].id);
+    }
+    expect(shuffledOrders.length, greaterThan(1));
+  });
+
+  test(
+    'next file drops unplayed chapters and previous uses played history',
+    () {
+      final q = AlbumPlaybackQueue();
+      final first = q.start(albums, shuffled: false)!;
+      final second = q.nextFile()!;
+      expect(second.track.id, albums[1].trackId);
+      expect(q.previous()!.id, first.id);
+      expect(q.nextFile()!.id, second.id);
+      expect(q.next()!.id, albums.last.items.first.id);
+      expect(q.nextFile(), isNull);
+      expect(q.next(), isNull);
+    },
+  );
+
+  test('next file selects queued requests before remaining playlist files', () {
+    final q = AlbumPlaybackQueue(random: Random(4));
+    q.start(albums, shuffled: true, trackId: albums.first.trackId);
+    q.enqueue(PlaybackAlbum([albums.last.items.last]));
+    expect(q.nextFile()!.id, albums.last.items.last.id);
+  });
+
+  test('next file preserves a later explicitly queued replay of this file', () {
+    final q = AlbumPlaybackQueue();
+    q.start([albums.first], shuffled: false);
+    q.enqueue(albums[1]);
+    q.enqueue(albums.first);
+    expect(q.nextFile()!.track.id, albums[1].trackId);
+    expect(q.nextFile()!.track.id, albums.first.trackId);
+  });
 
   test('chapter timeline and identity differ for ranges of the same file', () {
     final item = albums.first.items[1];

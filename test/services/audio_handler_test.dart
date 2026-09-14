@@ -220,6 +220,7 @@ class _FakePlaybackController implements PlaybackNotificationController {
   int pauseCalls = 0;
   int stopCalls = 0;
   int nextCalls = 0;
+  int nextFileCalls = 0;
   int previousCalls = 0;
   int toggleShuffleCalls = 0;
   final List<Duration> seekPositions = [];
@@ -287,6 +288,11 @@ class _FakePlaybackController implements PlaybackNotificationController {
   @override
   Future<void> next() async {
     nextCalls++;
+  }
+
+  @override
+  Future<void> nextFile() async {
+    nextFileCalls++;
   }
 
   @override

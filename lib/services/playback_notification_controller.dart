@@ -21,6 +21,7 @@ abstract interface class PlaybackNotificationController {
   Future<void> pause();
   Future<void> stop();
   Future<void> next();
+  Future<void> nextFile();
   Future<void> previous();
   Future<void> seekTo(Duration position);
   void toggleShuffle();

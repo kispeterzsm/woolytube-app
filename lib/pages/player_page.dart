@@ -14,6 +14,7 @@ import '../widgets/sleep_timer_button.dart';
 import '../widgets/chapters_button.dart';
 import '../widgets/subtitle_button.dart';
 import '../services/media_thumbnail_service.dart';
+import '../widgets/next_file_button.dart';
 
 class PlayerPage extends ConsumerStatefulWidget {
   const PlayerPage({super.key});
@@ -518,6 +519,7 @@ class _VideoOverlay extends ConsumerWidget {
                     onAnyAction();
                   },
                 ),
+                NextFileButton(iconSize: 44, onAction: onAnyAction),
               ],
             ),
           ),
@@ -1093,6 +1095,7 @@ class _AudioTransportControls extends StatelessWidget {
             onPressed: onNext,
             tooltip: 'Next',
           ),
+          const NextFileButton(iconSize: 40),
           const SizedBox(width: 8),
           _AudioPrimaryButton(
             icon: Icons.forward_10,

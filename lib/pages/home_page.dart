@@ -19,6 +19,7 @@ import 'playlist_detail_page.dart';
 import 'playlist_settings_page.dart';
 import 'debug_log_page.dart';
 import 'settings_page.dart';
+import '../services/track_search.dart';
 
 class HomePage extends ConsumerStatefulWidget {
   const HomePage({super.key});
@@ -205,7 +206,7 @@ class _HomePageState extends ConsumerState<HomePage> {
                       : tracks
                           .where(
                             (track) =>
-                                _matchesTrackSearch(track, normalizedQuery),
+                                matchesTrackSearch(track, normalizedQuery),
                           )
                           .toList();
 
@@ -467,13 +468,6 @@ class _HomePageState extends ConsumerState<HomePage> {
       default:
         return const Icon(Icons.download, color: Color(0xFF555555), size: 20);
     }
-  }
-
-  bool _matchesTrackSearch(Track track, String query) {
-    final index = track.index.toString();
-    return track.title.toLowerCase().contains(query) ||
-        index.contains(query) ||
-        '#$index'.contains(query);
   }
 
   String _searchTrackDetails(

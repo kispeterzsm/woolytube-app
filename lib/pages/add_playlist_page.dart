@@ -14,7 +14,7 @@ class AddPlaylistPage extends ConsumerStatefulWidget {
 class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
   final _urlController = TextEditingController();
   bool _audioOnly = false;
-  bool _playChapters = false;
+  bool _playChapters = true;
   bool _autoUpdate = true;
   int _updateFrequencyHours = 24;
   bool _includeThumbnails = true;
@@ -254,7 +254,7 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
         ),
         _settingsToggle(
           'Play chapters as tracks',
-          'Finish each album before shuffling to another entry',
+          'Use chapter titles, progress, and next/previous controls',
           _playChapters,
           (v) => setState(() => _playChapters = v),
         ),

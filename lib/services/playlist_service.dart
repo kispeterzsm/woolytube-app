@@ -93,7 +93,7 @@ class PlaylistService {
     String? thumbnailUrl,
     bool audioOnly = false,
     bool autoUpdate = true,
-    bool playChapters = false,
+    bool playChapters = true,
     int updateFrequencyHours = 24,
     bool includeThumbnails = true,
     bool sponsorBlockEnabled = true,

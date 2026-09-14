@@ -4,6 +4,7 @@ import '../providers/playback_providers.dart';
 import 'segment_mark_button.dart';
 import 'sleep_timer_button.dart';
 import 'sponsorblock_progress_bar.dart';
+import 'next_file_button.dart';
 
 class PlayerControls extends ConsumerWidget {
   final bool showShuffleAutoplay;
@@ -107,6 +108,7 @@ class PlayerControls extends ConsumerWidget {
               color: Colors.white,
               onPressed: () => playbackService.next(),
             ),
+            NextFileButton(iconSize: iconSize),
           ],
         ),
       ],

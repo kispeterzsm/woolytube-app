@@ -32,7 +32,7 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
   Playlist? _playlist;
   late TextEditingController _nameController;
   bool _audioOnly = false;
-  bool _playChapters = false;
+  bool _playChapters = true;
   bool _fetchingChapters = false;
   bool _autoUpdate = true;
   int _updateFrequencyHours = 24;
@@ -57,7 +57,7 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
       _playlist = playlist;
       _nameController.text = playlist.name;
       _audioOnly = playlist.audioOnly;
-      _playChapters = playlist.playChapters ?? false;
+      _playChapters = playlist.playChapters ?? true;
       _autoUpdate = playlist.autoUpdate;
       _updateFrequencyHours = _nearestUpdateFrequency(
         playlist.updateFrequencyHours,
@@ -358,7 +358,7 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
             const SizedBox(height: 24),
             _settingsToggle(
               'Play chapters as tracks',
-              'Shuffle each album completely before moving to another entry',
+              'Use chapter titles, progress, and next/previous controls',
               _playChapters,
               (v) => setState(() => _playChapters = v),
             ),

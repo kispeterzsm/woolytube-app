@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart' as kit;
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/services/chapters.dart';
+import 'package:woolytube/services/audio_handler.dart';
 import 'package:woolytube/services/playback_service.dart';
 import '../helpers/test_database.dart';
 
@@ -215,6 +216,74 @@ void main() {
       expect(player.opened, hasLength(1));
     },
   );
+
+  test(
+    'default playback starts the first chapter with its own progress',
+    () async {
+      await db.updatePlaylist(
+        playlist.copyWith(playChapters: const Value(null)).toCompanion(true),
+      );
+      playback.setShuffleEnabled(true);
+      await playback.playTrack(track, [track]);
+      expect(playback.currentTrack!.title, 'First song');
+      expect(playback.duration, const Duration(seconds: 20));
+      player.tick(const Duration(seconds: 7));
+      expect(playback.position, const Duration(seconds: 7));
+      await playback.next();
+      expect(playback.currentTrack!.title, 'Second song');
+      expect(playback.position, Duration.zero);
+    },
+  );
+
+  test(
+    'notification next chapter and next file open the correct media',
+    () async {
+      final nextFile = await File('${dir.path}/next.m4a').writeAsString('next');
+      final next = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 2,
+        videoId: 'next',
+        title: 'Next file',
+        status: 'complete',
+        filePath: nextFile.path,
+      );
+      final handler = WoolyTubeAudioHandler(playback, db);
+      addTearDown(handler.dispose);
+      await playback.playTrack(track, [track, next]);
+      await Future<void>.delayed(Duration.zero);
+      expect(handler.mediaItem.value!.title, 'First song');
+      expect(handler.mediaItem.value!.duration, const Duration(seconds: 20));
+      final controls = handler.playbackState.value.controls;
+      expect(controls[3].label, 'Next file');
+      expect(controls[3].androidIcon, 'drawable/ic_next_file');
+      await handler.skipToNext();
+      await handler.seek(const Duration(seconds: 5));
+      expect(playback.currentTrack!.title, 'Second song');
+      expect(player.seeks.last, const Duration(seconds: 25));
+      await handler.customAction(controls[3].customAction!.name);
+      await Future<void>.delayed(Duration.zero);
+      expect(playback.currentTrack!.id, next.id);
+      expect(player.opened, hasLength(3));
+      expect(player.opened.last.start, isNull);
+      expect(handler.mediaItem.value!.title, 'Next file');
+      expect(handler.playbackState.value.controls, hasLength(4));
+      expect(
+        handler.playbackState.value.controls.any(
+          (control) => control.customAction?.name == 'nextFile',
+        ),
+        isFalse,
+      );
+    },
+  );
+
+  test('next file at the end pauses and discards remaining chapters', () async {
+    await playback.playTrack(track, [track]);
+    await playback.nextFile();
+    expect(player.state.playing, isFalse);
+    await playback.next();
+    expect(player.opened, hasLength(1));
+  });
 
   test('a replaced source cannot reuse queued chapter bounds', () async {
     await playback.playTrack(track, [track]);

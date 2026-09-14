@@ -6,6 +6,7 @@ import '../database/database.dart';
 import 'playback_notification_controller.dart';
 import 'media_thumbnail_service.dart';
 import 'chapter_playback.dart';
+import 'chapters.dart';
 
 Uri? resolveNotificationArtwork({
   String? localPath,
@@ -118,6 +119,12 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
     name: 'toggleShuffle',
   );
 
+  static final _nextFileControl = MediaControl.custom(
+    androidIcon: 'drawable/ic_next_file',
+    label: 'Next file',
+    name: 'nextFile',
+  );
+
   void _broadcastState() {
     final playing = _playbackService.isPlaying;
     final currentTrack = _playbackService.currentTrack;
@@ -129,6 +136,8 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
           MediaControl.skipToPrevious,
           playing ? MediaControl.pause : MediaControl.play,
           MediaControl.skipToNext,
+          if (ChapterData.decode(currentTrack?.chaptersJson).active.isNotEmpty)
+            _nextFileControl,
           shuffleOn ? _shuffleOnControl : _shuffleOffControl,
         ],
         systemActions: const {
@@ -310,6 +319,11 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
     String name, [
     Map<String, dynamic>? extras,
   ]) async {
+    if (name == 'nextFile') {
+      _cancelPendingMediaButtonClick();
+      await _playbackService.nextFile();
+      return;
+    }
     if (name == 'toggleShuffle') {
       _playbackService.toggleShuffle();
       return;

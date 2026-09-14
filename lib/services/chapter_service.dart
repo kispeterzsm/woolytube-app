@@ -22,6 +22,16 @@ class ChapterService {
     await persist(track.playlistId);
   }
 
+  Future<void> setShuffleChapters(Track track, bool enabled) async {
+    final fresh = await db.getTrack(track.id);
+    if (fresh == null) return;
+    await db.writeTrackChapters(
+      track.id,
+      ChapterData.decode(fresh.chaptersJson).withShuffleChapters(enabled),
+    );
+    await persist(track.playlistId);
+  }
+
   Future<(int, int)> fetchMissing(int playlistId) async {
     final tracks = await db.getTracksForPlaylist(playlistId);
     var checked = 0, failed = 0;
@@ -44,6 +54,7 @@ class ChapterService {
             ChapterData(
               downloaded: remote.downloaded,
               custom: old.custom,
+              shuffleChapters: old.shuffleChapters,
               checkedAt: remote.checkedAt,
               durationMs: remote.durationMs,
             ),
@@ -84,6 +95,7 @@ class ChapterService {
       ChapterData(
         downloaded: remote.downloaded,
         custom: old.valid ? old.custom : null,
+        shuffleChapters: old.shuffleChapters,
         checkedAt: remote.checkedAt,
         durationMs: remote.durationMs,
       ),
@@ -120,6 +132,7 @@ class ChapterService {
       ChapterData(
         downloaded: old.valid ? old.downloaded : const [],
         custom: entries,
+        shuffleChapters: old.shuffleChapters,
         checkedAt: old.valid ? old.checkedAt : null,
         durationMs: duration,
       ),

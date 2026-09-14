@@ -1,0 +1,5 @@
+improvement ideas for chapters:
+for any file with chapters have a separate toggle in playback settings: shuffle chapters when shuffle is on? if it is turned on, then during playback of the playlist if it gets to that file it will treat each chapter in it as if it were a separate file and shuffle them, but waits until all chapters have been played to play the next file. if it is on, then the whole file is played with each chapter in order, but the progress bar should still show them as if they were separate files, so skipping goes to the next chapter not the next file.
+when a file with chapters is playing display a separate skip forward button with two triangles instead of one, to the right of the usual skip button that skips to the next file, not the next chapter. for files without chapters change nothing. 
+the default should be to treat chapters as different files in playback, so when the user goes to a playlist, clicks a 30 minute audio file with 5 chapters in the progress bar show the title of the first chapter, start playing that
+

@@ -112,6 +112,30 @@ void main() {
     },
   );
 
+  test(
+    'chapter shuffle preference survives refresh, edit, and restore',
+    () async {
+      await service.setShuffleChapters(track, true);
+      await service.refresh(track);
+      await service.save(
+        track,
+        const MediaChapter(
+          id: 'custom',
+          title: 'Custom',
+          startMs: 60000,
+          endMs: 90000,
+        ),
+        durationMs: 120000,
+      );
+      await service.restore(track);
+      final data = ChapterData.decode(
+        (await db.getTrack(track.id))!.chaptersJson,
+      );
+      expect(data.shuffleChapters, isTrue);
+      expect(data.invalidate().shuffleChapters, isTrue);
+    },
+  );
+
   test('rejects overlaps and out-of-file custom chapters', () async {
     await service.refresh(track);
     await expectLater(
@@ -194,6 +218,7 @@ void main() {
         ),
       );
       await service.setOverride(track, true);
+      await service.setShuffleChapters(track, true);
       final contents =
           jsonDecode(
                 await File('${dir.path}/woolytube_meta.json').readAsString(),
@@ -230,6 +255,7 @@ void main() {
         );
         final result = (await imported.getAllTracks()).single;
         expect(result.chaptersEnabled, isTrue);
+        expect(ChapterData.decode(result.chaptersJson).shuffleChapters, isTrue);
         expect(
           ChapterData.decode(result.chaptersJson).active.first.title,
           'Local title',
@@ -242,7 +268,7 @@ void main() {
   );
 
   test(
-    'v9 migration keeps existing tracks playable with chapters disabled',
+    'v9 migration keeps existing tracks playable without chapter metadata',
     () async {
       final file = File('${dir.path}/migration.sqlite');
       var database = AppDatabase.forTesting(NativeDatabase(file));

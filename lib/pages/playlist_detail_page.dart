@@ -20,6 +20,7 @@ import '../services/media_thumbnail_service.dart';
 import '../services/sponsorblock_service.dart';
 import '../widgets/tap_to_place_cursor_text_field.dart';
 import '../widgets/mobile_data_download_guard.dart';
+import '../services/track_search.dart';
 
 enum _TrackActionGroup { youtube, storage, playback }
 
@@ -243,7 +244,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                   ? tracks
                   : tracks
                       .where(
-                        (t) => _matchesTrackSearch(t, normalizedSearchQuery),
+                        (t) => matchesTrackSearch(t, normalizedSearchQuery),
                       )
                       .toList();
 
@@ -647,13 +648,6 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
       default:
         return const Icon(Icons.download, color: Color(0xFF555555), size: 20);
     }
-  }
-
-  bool _matchesTrackSearch(Track track, String query) {
-    final index = track.index.toString();
-    return track.title.toLowerCase().contains(query) ||
-        index.contains(query) ||
-        '#$index'.contains(query);
   }
 
   String _trackSubtitle(

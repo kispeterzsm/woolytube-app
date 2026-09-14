@@ -170,6 +170,21 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                         ),
               ),
               const SizedBox(height: 12),
+              if (data.active.isNotEmpty)
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Shuffle chapters when shuffle is on'),
+                  subtitle: const Text(
+                    'When off, chapters play in order. Changes apply the next time you start this file.',
+                  ),
+                  value: data.shuffleChapters,
+                  onChanged:
+                      _busy
+                          ? null
+                          : (enabled) => _run(
+                            () => service.setShuffleChapters(track, enabled),
+                          ),
+                ),
               const Text(
                 'Shuffle finishes this album’s chapters before choosing another playlist entry.',
               ),
