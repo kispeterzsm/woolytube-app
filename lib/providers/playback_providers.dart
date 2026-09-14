@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:media_kit/media_kit.dart' show SubtitleTrack;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../database/database.dart';
 import '../services/playback_service.dart';
@@ -102,4 +103,12 @@ final upNextQueueProvider = StreamProvider<List<Track>>((ref) {
 
 final queueIndexProvider = StreamProvider<int>((ref) {
   return ref.watch(playbackServiceProvider).queueIndexStream;
+});
+
+final subtitleTracksProvider = StreamProvider<List<SubtitleTrack>>((ref) {
+  return ref.watch(playbackServiceProvider).subtitleTracksStream;
+});
+
+final selectedSubtitleTrackProvider = StreamProvider<SubtitleTrack>((ref) {
+  return ref.watch(playbackServiceProvider).selectedSubtitleTrackStream;
 });

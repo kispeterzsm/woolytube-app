@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import '../database/database.dart';
 import 'ytdlp_service.dart';
+import 'app_settings_service.dart';
 import 'log_service.dart';
 import 'metadata_service.dart';
 import 'notification_service.dart';
@@ -45,6 +46,7 @@ class DownloadService {
   final MetadataService _metadata;
   final DownloadNotificationService? _notifications;
   final SponsorBlockService? _sponsorBlock;
+  final AppSettingsService _settings;
 
   final _progressController = StreamController<DownloadProgress>.broadcast();
   Stream<DownloadProgress> get progressStream => _progressController.stream;
@@ -63,7 +65,8 @@ class DownloadService {
     this._metadata, [
     this._notifications,
     this._sponsorBlock,
-  ]);
+    AppSettingsService? settings,
+  ]) : _settings = settings ?? AppSettingsService();
 
   static Future<bool> acquireLock() async {
     final dir = await getApplicationDocumentsDirectory();
@@ -574,6 +577,10 @@ class DownloadService {
     required String outputTemplate,
     required String trackLabel,
   }) async {
+    final downloadSubtitles =
+        !audioOnly && await _settings.getDownloadSubtitles();
+    final subtitleLanguages =
+        downloadSubtitles ? await _settings.getSubtitleLanguages() : 'en';
     const backoffs = [Duration(seconds: 5), Duration(seconds: 15)];
     var attempt = 0;
     while (true) {
@@ -584,6 +591,8 @@ class DownloadService {
           outputPath: outputPath,
           audioOnly: audioOnly,
           embedThumbnail: embedThumbnail,
+          downloadSubtitles: downloadSubtitles,
+          subtitleLanguages: subtitleLanguages,
           outputTemplate: outputTemplate,
         );
         return;

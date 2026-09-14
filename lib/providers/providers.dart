@@ -95,6 +95,7 @@ final downloadServiceProvider = Provider<DownloadService>((ref) {
     ref.watch(metadataServiceProvider),
     ref.watch(notificationServiceProvider),
     ref.watch(sponsorBlockServiceProvider),
+    ref.watch(appSettingsServiceProvider),
   );
   ref.onDispose(() => service.dispose());
   return service;

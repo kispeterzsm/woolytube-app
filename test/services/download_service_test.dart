@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:drift/drift.dart' show Value;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:woolytube/services/app_settings_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:woolytube/database/database.dart';
@@ -17,6 +19,7 @@ import '../helpers/test_database.dart';
 
 class FakeYtDlpService extends YtDlpService {
   final downloadedUrls = <String>[];
+  final subtitleRequests = <(bool, String)>[];
   Completer<void>? downloadCompleter;
   Completer<void>? downloadStarted;
   Object? downloadError;
@@ -33,9 +36,12 @@ class FakeYtDlpService extends YtDlpService {
     String? formatOption,
     bool audioOnly = false,
     bool embedThumbnail = true,
+    bool downloadSubtitles = false,
+    String subtitleLanguages = 'en',
     String? outputTemplate,
   }) async {
     downloadedUrls.add(url);
+    subtitleRequests.add((downloadSubtitles, subtitleLanguages));
     downloadStarted?.complete();
     if (downloadError != null) throw downloadError!;
     if (downloadCompleter != null) await downloadCompleter!.future;
@@ -122,6 +128,7 @@ SponsorBlockSegmentsCompanion remoteSegment(Track track) =>
     );
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   late AppDatabase db;
   late Directory tempDir;
   late LogService log;
@@ -131,6 +138,7 @@ void main() {
   late DownloadService service;
 
   setUp(() async {
+    SharedPreferences.setMockInitialValues({});
     db = openTestDatabase();
     tempDir = await Directory.systemTemp.createTemp('woolytube_download_test_');
     log = LogService();
@@ -154,6 +162,38 @@ void main() {
     if (await tempDir.exists()) {
       await tempDir.delete(recursive: true);
     }
+  });
+
+  for (final audioOnly in [false, true]) {
+    test(
+      'subtitle setting reaches downloads only for video (audioOnly=$audioOnly)',
+      () async {
+        final settings = AppSettingsService();
+        await settings.setDownloadSubtitles(true);
+        await settings.setSubtitleLanguages('en, hu');
+        final playlist = await insertTestPlaylist(
+          db,
+          outputPath: tempDir.path,
+          audioOnly: audioOnly,
+        );
+        final track = await insertTestTrack(db, playlistId: playlist.id);
+
+        await service.downloadPlaylist(playlist);
+        await service.downloadTrack(playlist, track);
+
+        expect(ytdlp.subtitleRequests, [
+          (!audioOnly, audioOnly ? 'en' : 'en,hu'),
+          (!audioOnly, audioOnly ? 'en' : 'en,hu'),
+        ]);
+      },
+    );
+  }
+
+  test('video subtitle downloads are opt-in', () async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    await insertTestTrack(db, playlistId: playlist.id);
+    await service.downloadPlaylist(playlist);
+    expect(ytdlp.subtitleRequests, [(false, 'en')]);
   });
 
   test(

@@ -39,6 +39,8 @@ class YtDlpService {
     String? formatOption,
     bool audioOnly = false,
     bool embedThumbnail = true,
+    bool downloadSubtitles = false,
+    String subtitleLanguages = 'en',
     String? outputTemplate,
   }) async {
     await _methodChannel.invokeMethod('download', {
@@ -47,6 +49,8 @@ class YtDlpService {
       if (formatOption != null) 'format': formatOption,
       'audioOnly': audioOnly,
       'embedThumbnail': embedThumbnail,
+      'downloadSubtitles': downloadSubtitles && !audioOnly,
+      'subtitleLanguages': subtitleLanguages,
       if (outputTemplate != null) 'outputTemplate': outputTemplate,
     });
   }

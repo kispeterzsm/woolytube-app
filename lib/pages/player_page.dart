@@ -12,6 +12,7 @@ import '../widgets/player_controls.dart';
 import '../widgets/segment_mark_button.dart';
 import '../widgets/sleep_timer_button.dart';
 import '../widgets/chapters_button.dart';
+import '../widgets/subtitle_button.dart';
 import '../services/media_thumbnail_service.dart';
 
 class PlayerPage extends ConsumerStatefulWidget {
@@ -349,6 +350,7 @@ class _VideoPlayerViewState extends ConsumerState<_VideoPlayerView> {
                   _bumpAutoHide();
                 },
                 onAnyAction: _bumpAutoHide,
+                onSubtitleMenuOpened: () => _hideTimer?.cancel(),
               ),
             ),
           ),
@@ -389,12 +391,14 @@ class _VideoOverlay extends ConsumerWidget {
   final VoidCallback onLock;
   final VoidCallback onCycleFit;
   final VoidCallback onAnyAction;
+  final VoidCallback onSubtitleMenuOpened;
 
   const _VideoOverlay({
     required this.fitMode,
     required this.onLock,
     required this.onCycleFit,
     required this.onAnyAction,
+    required this.onSubtitleMenuOpened,
   });
 
   @override
@@ -459,6 +463,10 @@ class _VideoOverlay extends ConsumerWidget {
                           ),
                       ],
                     ),
+                  ),
+                  SubtitleButton(
+                    onOpened: onSubtitleMenuOpened,
+                    onClosed: onAnyAction,
                   ),
                   IconButton(
                     icon: const Icon(Icons.lock_open, color: Colors.white),

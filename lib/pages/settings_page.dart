@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/playback_providers.dart';
 import '../providers/providers.dart';
 import '../services/update_service.dart';
+import '../services/app_settings_service.dart';
 
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key, this.initialUpdate, this.onUpdateChanged});
@@ -22,6 +23,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   AppUpdate? _availableUpdate;
   bool _autoDownloadWithMobileData = false;
   bool _pauseOnAudioInterruption = true;
+  bool _downloadSubtitles = false;
+  String _subtitleLanguages = 'en';
   bool _isLoadingSettings = true;
   bool _isSavingSettings = false;
   bool _isCheckingForUpdate = false;
@@ -40,9 +43,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       final values = await Future.wait([
         settings.getAutoDownloadWithMobileData(),
         settings.getPauseOnAudioInterruption(),
+        settings.getDownloadSubtitles(),
       ]);
+      final languages = await settings.getSubtitleLanguages();
       if (mounted) {
         setState(() {
+          _downloadSubtitles = values[2];
+          _subtitleLanguages = languages;
           _autoDownloadWithMobileData = values[0];
           _pauseOnAudioInterruption = values[1];
         });
@@ -100,6 +107,44 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     }
   }
 
+  Future<void> _setDownloadSubtitles(bool enabled) async {
+    setState(() => _isSavingSettings = true);
+    try {
+      await ref.read(appSettingsServiceProvider).setDownloadSubtitles(enabled);
+      if (mounted) setState(() => _downloadSubtitles = enabled);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Could not save setting: $error')));
+    } finally {
+      if (mounted) setState(() => _isSavingSettings = false);
+    }
+  }
+
+  Future<void> _editSubtitleLanguages() async {
+    final languages = await showDialog<String>(
+      context: context,
+      builder:
+          (_) => _SubtitleLanguagesDialog(initialValue: _subtitleLanguages),
+    );
+    if (!mounted || languages == null) return;
+    setState(() => _isSavingSettings = true);
+    try {
+      await ref
+          .read(appSettingsServiceProvider)
+          .setSubtitleLanguages(languages);
+      if (mounted) setState(() => _subtitleLanguages = languages);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Could not save setting: $error')));
+    } finally {
+      if (mounted) setState(() => _isSavingSettings = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -121,6 +166,27 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           ),
           const Divider(height: 1),
           const _SectionHeader('Downloads'),
+          SwitchListTile(
+            secondary: const Icon(Icons.closed_caption_outlined),
+            title: const Text('Download subtitles'),
+            subtitle: const Text(
+              'Include available subtitles in future video downloads, including '
+              'automatic captions. Re-download existing videos to add subtitles.',
+            ),
+            value: _downloadSubtitles,
+            onChanged:
+                _isLoadingSettings || _isSavingSettings
+                    ? null
+                    : _setDownloadSubtitles,
+          ),
+          ListTile(
+            leading: const Icon(Icons.translate),
+            title: const Text('Subtitle languages'),
+            subtitle: Text(_subtitleLanguages),
+            enabled:
+                _downloadSubtitles && !_isLoadingSettings && !_isSavingSettings,
+            onTap: _editSubtitleLanguages,
+          ),
           SwitchListTile(
             secondary: const Icon(Icons.mobile_friendly),
             title: const Text('Auto download with mobile data'),
@@ -318,4 +384,67 @@ class _SectionHeader extends StatelessWidget {
       ),
     );
   }
+}
+
+class _SubtitleLanguagesDialog extends StatefulWidget {
+  const _SubtitleLanguagesDialog({required this.initialValue});
+
+  final String initialValue;
+
+  @override
+  State<_SubtitleLanguagesDialog> createState() =>
+      _SubtitleLanguagesDialogState();
+}
+
+class _SubtitleLanguagesDialogState extends State<_SubtitleLanguagesDialog> {
+  final _formKey = GlobalKey<FormState>();
+  late final _controller = TextEditingController(text: widget.initialValue);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _save() {
+    if (_formKey.currentState!.validate()) {
+      Navigator.pop(
+        context,
+        AppSettingsService.normalizeSubtitleLanguages(_controller.text),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Subtitle languages'),
+    content: Form(
+      key: _formKey,
+      child: TextFormField(
+        controller: _controller,
+        autofocus: true,
+        autocorrect: false,
+        decoration: const InputDecoration(
+          labelText: 'Language codes',
+          helperText: 'Separate codes with commas: en, hu, de',
+        ),
+        validator: (value) {
+          try {
+            AppSettingsService.normalizeSubtitleLanguages(value ?? '');
+            return null;
+          } on FormatException catch (error) {
+            return error.message;
+          }
+        },
+        onFieldSubmitted: (_) => _save(),
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(onPressed: _save, child: const Text('Save')),
+    ],
+  );
 }

@@ -19,6 +19,32 @@ void main() {
         .setMockMethodCallHandler(backgroundChannel, null);
   });
 
+  test(
+    'subtitle settings default to off and English and persist changes',
+    () async {
+      final settings = AppSettingsService();
+      expect(await settings.getDownloadSubtitles(), isFalse);
+      expect(await settings.getSubtitleLanguages(), 'en');
+      await settings.setDownloadSubtitles(true);
+      await settings.setSubtitleLanguages('hu, en,hu, pt-BR');
+      final reloaded = AppSettingsService();
+      expect(await reloaded.getDownloadSubtitles(), isTrue);
+      expect(await reloaded.getSubtitleLanguages(), 'hu,en,pt-BR');
+    },
+  );
+
+  test('invalid subtitle languages do not replace saved languages', () async {
+    final settings = AppSettingsService();
+    await settings.setSubtitleLanguages('hu');
+    for (final invalid in ['', 'en,', 'all', 'en.*', 'live_chat', '--help']) {
+      await expectLater(
+        settings.setSubtitleLanguages(invalid),
+        throwsFormatException,
+      );
+    }
+    expect(await settings.getSubtitleLanguages(), 'hu');
+  });
+
   test('mobile-data auto download is off by default', () async {
     final settings = AppSettingsService();
 

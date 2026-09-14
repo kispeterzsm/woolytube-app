@@ -173,6 +173,19 @@ class PlaybackService
   Stream<Duration> get durationStream => _duration.stream;
   @override
   Stream<bool> get isPlayingStream => _player.stream.playing;
+  Stream<List<SubtitleTrack>> get subtitleTracksStream async* {
+    yield _player.state.tracks.subtitle;
+    yield* _player.stream.tracks.map((tracks) => tracks.subtitle);
+  }
+
+  Stream<SubtitleTrack> get selectedSubtitleTrackStream async* {
+    yield _player.state.track.subtitle;
+    yield* _player.stream.track.map((track) => track.subtitle);
+  }
+
+  Future<void> setSubtitleTrack(SubtitleTrack track) =>
+      _player.setSubtitleTrack(track);
+
   Stream<bool> get isCompletedStream => _player.stream.completed;
   Stream<int?> get videoWidthStream => _player.stream.width;
   Stream<int?> get videoHeightStream => _player.stream.height;

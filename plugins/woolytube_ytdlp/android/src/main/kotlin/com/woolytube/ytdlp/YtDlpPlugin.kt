@@ -114,6 +114,8 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         val outputPath = args["outputPath"] as? String
         val audioOnly = args["audioOnly"] as? Boolean ?: false
         val embedThumbnail = args["embedThumbnail"] as? Boolean ?: true
+        val downloadSubtitles = args["downloadSubtitles"] as? Boolean ?: false
+        val subtitleLanguages = args["subtitleLanguages"] as? String ?: "en"
         val outputTemplate = args["outputTemplate"] as? String
         val formatOption = args["format"] as? String
 
@@ -136,6 +138,8 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     outputPath,
                     audioOnly,
                     embedThumbnail,
+                    downloadSubtitles,
+                    subtitleLanguages,
                     outputTemplate,
                     formatOption,
                     processId
@@ -291,6 +295,8 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         outputPath: String,
         audioOnly: Boolean,
         embedThumbnail: Boolean,
+        downloadSubtitles: Boolean,
+        subtitleLanguages: String,
         outputTemplate: String?,
         formatOption: String?,
         processId: String
@@ -315,6 +321,17 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             request.addOption("--audio-format", "m4a")
         } else {
             request.addOption("-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best")
+        }
+
+        if (downloadSubtitles && !audioOnly) {
+            // Embedding keeps captions with the media through renames/imports.
+            // yt-dlp prefers manual captions over automatic ones for each language.
+            request.addOption("--embed-subs")
+            request.addOption("--write-subs")
+            request.addOption("--write-auto-subs")
+            request.addOption("--sub-langs", subtitleLanguages)
+            request.addOption("--sub-format", "vtt/best")
+            request.addOption("--compat-options", "no-keep-subs")
         }
 
         if (embedThumbnail) {
