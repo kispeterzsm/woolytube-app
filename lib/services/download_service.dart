@@ -393,6 +393,10 @@ class DownloadService {
           filePath: existingFile,
           isLocalReplacement: false,
         );
+        await _metadata.captureChapterMetadata(
+          track.copyWith(isLocalReplacement: false),
+          playlist.outputPath,
+        );
         await _sponsorBlock?.refreshTrackSegments(
           track.copyWith(
             filePath: Value(existingFile),
@@ -461,6 +465,7 @@ class DownloadService {
       final updatedTrack = (await _db.getTracksForPlaylist(
         playlist.id,
       )).firstWhere((t) => t.id == track.id, orElse: () => track);
+      await _metadata.captureChapterMetadata(updatedTrack, playlist.outputPath);
       await _sponsorBlock?.refreshTrackSegments(updatedTrack);
       _log.info('$trackLabel Downloaded: ${track.title}');
 
@@ -527,6 +532,7 @@ class DownloadService {
         thumbnailPath: Value(playlist.thumbnailPath),
         audioOnly: Value(playlist.audioOnly),
         autoUpdate: Value(playlist.autoUpdate),
+        playChapters: Value(playlist.playChapters),
         updateFrequencyHours: Value(playlist.updateFrequencyHours),
         includeThumbnails: Value(playlist.includeThumbnails),
         sponsorBlockEnabled: Value(playlist.sponsorBlockEnabled),

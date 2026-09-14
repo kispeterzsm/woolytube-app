@@ -7,6 +7,8 @@ import 'package:rxdart/rxdart.dart';
 import 'package:path/path.dart' as p;
 import '../database/database.dart';
 import 'audio_focus_controller.dart';
+import 'chapter_playback.dart';
+import 'chapters.dart';
 import 'playback_notification_controller.dart';
 import 'picture_in_picture_service.dart';
 import 'sleep_timer_controller.dart';
@@ -102,7 +104,26 @@ class PlaybackService
   late final Player _player;
   late final SleepTimerController _sleepTimer;
   final AppDatabase _db;
-  final Random _random;
+  late final AlbumPlaybackQueue _albumQueue;
+  final _currentItem = BehaviorSubject<PlaybackItem?>.seeded(null);
+  final _position = BehaviorSubject<Duration>.seeded(Duration.zero);
+  final _duration = BehaviorSubject<Duration>.seeded(Duration.zero);
+  final List<StreamSubscription<dynamic>> _subscriptions = [];
+  Future<void> _playbackTransition = Future.value();
+  bool _loading = false;
+  bool _completionHandled = false;
+  bool _chapterEditing = false;
+  int _generation = 0;
+  int? _loadedTrackId;
+
+  PlaybackItem? get currentItem => _currentItem.value;
+  @override
+  String? get currentMediaId => currentItem?.id;
+  Stream<PlaybackItem?> get currentItemStream => _currentItem.stream;
+  Duration get sourcePosition =>
+      _loadedTrackId == null ? Duration.zero : _player.state.position;
+  Duration get sourceDuration =>
+      _loadedTrackId == null ? Duration.zero : _player.state.duration;
   AudioFocusController? _audioFocusController;
 
   // VideoController is lazy — only created when video playback is needed.
@@ -147,9 +168,9 @@ class PlaybackService
   Stream<Duration?> get sleepTimerRemainingStream =>
       _sleepTimer.remainingStream;
   @override
-  Stream<Duration> get positionStream => _player.stream.position;
+  Stream<Duration> get positionStream => _position.stream;
   @override
-  Stream<Duration> get durationStream => _player.stream.duration;
+  Stream<Duration> get durationStream => _duration.stream;
   @override
   Stream<bool> get isPlayingStream => _player.stream.playing;
   Stream<bool> get isCompletedStream => _player.stream.completed;
@@ -180,31 +201,70 @@ class PlaybackService
   @override
   bool get isPlaying => _player.state.playing;
   @override
-  Duration get position => _player.state.position;
-  Duration get duration => _player.state.duration;
+  Duration get position => _position.value;
+  Duration get duration => _duration.value;
   Duration? get sleepTimerRemaining => _sleepTimer.remaining;
-
-  // Shuffle state
-  List<int> _shuffledIndices = [];
 
   Future<void> _videoTrackTransition = Future.value();
   List<_SkipSegment> _activeSegments = [];
   bool _isSeekingPastSegment = false;
 
-  PlaybackService(this._db, {Random? random}) : _random = random ?? Random() {
-    _player = Player();
+  PlaybackService(this._db, {Random? random, Player? player}) {
+    _player = player ?? Player();
+    _albumQueue = AlbumPlaybackQueue(random: random);
     _sleepTimer = SleepTimerController(onElapsed: pause);
+    _subscriptions.add(
+      _player.stream.completed.listen((completed) {
+        if (completed && !_loading && !_chapterEditing && !_completionHandled) {
+          _completionHandled = true;
+          final generation = _generation;
+          unawaited(
+            _transition(() async {
+              if (generation != _generation) return;
+              if (autoplayEnabled) await _advance();
+            }),
+          );
+        }
+      }),
+    );
+    _subscriptions.add(
+      _player.stream.position.listen((position) {
+        if (_loading) return;
+        _position.add(currentItem?.relativePosition(position) ?? position);
+        unawaited(_maybeSkipSponsorBlockSegment(position));
+      }),
+    );
+    _subscriptions.add(
+      _player.stream.duration.listen((duration) {
+        if (!_loading) {
+          _duration.add(currentItem?.chapter?.duration ?? duration);
+        }
+      }),
+    );
+  }
 
-    // Auto-advance on track completion
-    _player.stream.completed.listen((completed) {
-      if (completed &&
-          _autoplayEnabled.value &&
-          (_queue.value.isNotEmpty || _upNextQueue.value.isNotEmpty)) {
-        next();
-      }
-    });
+  Future<void> _transition(Future<void> Function() action) {
+    final next = _playbackTransition.then((_) => action());
+    _playbackTransition = next.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace __) {},
+    );
+    return next;
+  }
 
-    _player.stream.position.listen(_maybeSkipSponsorBlockSegment);
+  void _publishQueue() {
+    _queue.add(_albumQueue.items.map((i) => i.displayTrack).toList());
+    _queueIndex.add(_albumQueue.index);
+    _upNextQueue.add(
+      _albumQueue.queued
+          .map(
+            (g) =>
+                g.items.length > 1
+                    ? g.items.first.track
+                    : g.items.first.displayTrack,
+          )
+          .toList(),
+    );
   }
 
   Future<void> initializeAudioFocus({
@@ -301,144 +361,191 @@ class PlaybackService
     },
   );
 
-  /// Start playing a track from a list of tracks
   @override
   Future<void> playTrack(
     Track track,
     List<Track> allTracks, {
     Playlist? playlist,
-  }) async {
+    String? chapterId,
+    bool whole = false,
+  }) => _transition(() async {
     final playable = playableTracksForPlayback(
       allTracks,
       directlySelectedTrackId: track.id,
     );
-    if (playable.isEmpty) return;
+    await _startQueue(
+      playable,
+      trackId: track.id,
+      chapterId: chapterId,
+      whole: whole,
+    );
+  });
 
-    final index = playable.indexWhere((t) => t.id == track.id);
-    if (index == -1) return;
+  Future<void> playAll(List<Track> tracks, {Playlist? playlist}) =>
+      _transition(() async {
+        await _startQueue(playableTracksForPlayback(tracks));
+      });
 
-    await _playPlayableTrack(playable, index, playlist: playlist);
+  Future<void> _startQueue(
+    List<Track> tracks, {
+    int? trackId,
+    String? chapterId,
+    bool whole = false,
+  }) async {
+    final groups = <PlaybackAlbum>[];
+    for (final track in tracks) {
+      final fresh = await _db.getTrack(track.id);
+      if (fresh == null || !isTrackPlayable(fresh)) continue;
+      final playlist = await _db.getPlaylist(fresh.playlistId);
+      var items = chapterPlaybackItems(
+        fresh,
+        playlist,
+        whole: whole && track.id == trackId,
+      );
+      if (chapterId != null && track.id == trackId) {
+        items =
+            ChapterData.decode(
+              fresh.chaptersJson,
+            ).active.map((c) => PlaybackItem(fresh, c)).toList();
+        if (!items.any((i) => i.chapter?.id == chapterId)) return;
+      }
+      groups.add(PlaybackAlbum(items));
+    }
+    final selected = _albumQueue.start(
+      groups,
+      trackId: trackId,
+      chapterId: chapterId,
+      shuffled: shuffleEnabled,
+    );
+    _publishQueue();
+    if (selected != null) await _loadAndPlay(selected);
   }
 
-  Future<void> playAll(List<Track> allTracks, {Playlist? playlist}) async {
-    final playable = playableTracksForPlayback(allTracks);
-    if (playable.isEmpty) return;
-
-    final index =
-        _shuffleEnabled.value && playable.length > 1
-            ? 1 + _random.nextInt(playable.length - 1)
-            : 0;
-
-    await _playPlayableTrack(playable, index, playlist: playlist);
-  }
-
-  /// Adds exactly one track to the separate up-next queue. It intentionally
-  /// does not replace or append the source playlist's playback list.
-  Future<bool> addToUpNextQueue(Track track) async {
+  Future<bool> addToUpNextQueue(Track track, {String? chapterId}) async {
     final fresh = await _db.getTrack(track.id);
     if (fresh == null || !isTrackAutomaticallyPlayable(fresh)) return false;
-
-    _upNextQueue.add([..._upNextQueue.value, fresh]);
+    final playlist = await _db.getPlaylist(fresh.playlistId);
+    var items = chapterPlaybackItems(fresh, playlist);
+    if (chapterId != null) {
+      items =
+          ChapterData.decode(fresh.chaptersJson).active
+              .where((c) => c.id == chapterId)
+              .map((c) => PlaybackItem(fresh, c))
+              .toList();
+    }
+    if (items.isEmpty) return false;
+    _albumQueue.enqueue(PlaybackAlbum(items));
+    _publishQueue();
     return true;
   }
 
-  /// Starts the first queued item when nothing is currently playing. This
-  /// makes “Add to queue” useful before a playlist has been started.
   Future<bool> startUpNextQueueIfIdle() async {
-    if (_currentTrack.value != null) return false;
-    return _playNextQueuedTrack();
+    if (currentTrack != null) return false;
+    var started = false;
+    await _transition(() async {
+      if (currentTrack == null) started = await _advance();
+    });
+    return started;
   }
 
   void removeUpNextQueueAt(int index) {
-    final entries = List<Track>.of(_upNextQueue.value);
-    if (index < 0 || index >= entries.length) return;
-    entries.removeAt(index);
-    _upNextQueue.add(entries);
+    _albumQueue.removeQueued(index);
+    _publishQueue();
   }
 
-  void clearUpNextQueue() => _upNextQueue.add([]);
+  void clearUpNextQueue() {
+    _albumQueue.clearQueued();
+    _publishQueue();
+  }
 
-  /// Persists the always-skip preference and refreshes in-memory references
-  /// so a track already waiting in either queue is skipped immediately.
   Future<void> setAlwaysSkip(Track track, bool alwaysSkip) async {
     await _db.updateTrackAlwaysSkip(track.id, alwaysSkip);
-
-    List<Track> updateReferences(List<Track> entries) =>
-        entries
-            .map(
-              (entry) =>
-                  entry.id == track.id
-                      ? entry.copyWith(alwaysSkip: alwaysSkip)
-                      : entry,
-            )
-            .toList();
-
-    _queue.add(updateReferences(_queue.value));
-    _upNextQueue.add(updateReferences(_upNextQueue.value));
-
-    final current = _currentTrack.value;
-    if (current?.id == track.id) {
-      _currentTrack.add(current!.copyWith(alwaysSkip: alwaysSkip));
+    if (currentTrack?.id == track.id) {
+      _currentTrack.add(currentTrack!.copyWith(alwaysSkip: alwaysSkip));
     }
   }
 
-  /// Pulls and consumes the next manually queued track, ignoring stale,
-  /// unavailable, deleted, or always-skipped entries along the way.
-  Future<bool> _playNextQueuedTrack() async {
-    final entries = List<Track>.of(_upNextQueue.value);
-    while (entries.isNotEmpty) {
-      final candidate = entries.removeAt(0);
-      _upNextQueue.add(List<Track>.of(entries));
-
-      final fresh = await _db.getTrack(candidate.id);
-      if (fresh == null || !isTrackAutomaticallyPlayable(fresh)) continue;
-
-      await _playlistForTrack(fresh);
-      _currentTrack.add(fresh);
-      await _loadAndPlay(fresh);
-      return true;
+  Future<bool> _advance({bool forward = true}) async {
+    var item = forward ? _albumQueue.next() : _albumQueue.previous();
+    while (item != null) {
+      final fresh = await _db.getTrack(item.track.id);
+      if (fresh != null &&
+          isTrackAutomaticallyPlayable(fresh) &&
+          fresh.filePath == item.track.filePath &&
+          fresh.downloadedAt == item.track.downloadedAt &&
+          (item.chapter == null ||
+              ChapterData.decode(fresh.chaptersJson).valid) &&
+          resolveFilePath(fresh.filePath!) != null) {
+        _publishQueue();
+        await _loadAndPlay(PlaybackItem(fresh, item.chapter));
+        return true;
+      }
+      item = forward ? _albumQueue.next() : _albumQueue.previous();
     }
+    _publishQueue();
     return false;
   }
 
-  Future<void> _playPlayableTrack(
-    List<Track> playable,
-    int index, {
-    Playlist? playlist,
-  }) async {
-    _queue.add(playable);
-    _queueIndex.add(index);
-    _currentTrack.add(playable[index]);
-    if (playlist != null) _currentPlaylist.add(playlist);
-
-    if (_shuffleEnabled.value) {
-      _generateShuffledIndices(index);
-    }
-
-    await _loadAndPlay(playable[index]);
-  }
-
-  Future<void> _loadAndPlay(Track track) async {
-    await _loadActiveSegments(track);
-    final filePath =
-        track.filePath != null ? resolveFilePath(track.filePath!) : null;
-    if (filePath == null) {
-      // File not found — don't auto-advance, leave track selected so user
-      // can see which track failed.
-      return;
-    }
-
-    final hasFocus =
-        _audioFocusController == null ||
-        await _audioFocusController!.requestFocus();
-    if (!hasFocus) return;
+  Future<void> _loadAndPlay(PlaybackItem item) async {
+    _loading = true;
+    _loadedTrackId = null;
+    _generation++;
+    _chapterEditing = false;
+    _completionHandled = false;
+    _isSeekingPastSegment = false;
+    _currentItem.add(item);
+    _currentTrack.add(item.displayTrack);
+    _position.add(Duration.zero);
+    _duration.add(item.duration ?? Duration.zero);
     try {
-      await _player.open(Media('file://$filePath'));
+      await _player.pause();
+      await _loadActiveSegments(item.track);
+      final filePath =
+          item.track.filePath == null
+              ? null
+              : resolveFilePath(item.track.filePath!);
+      if (filePath == null) return;
+      final hasFocus =
+          _audioFocusController == null ||
+          await _audioFocusController!.requestFocus();
+      if (!hasFocus) return;
+      await _player.open(
+        Media(
+          Uri.file(filePath).toString(),
+          start:
+              item.chapter == null
+                  ? null
+                  : Duration(milliseconds: item.startMs),
+          end:
+              item.chapter == null
+                  ? null
+                  : Duration(milliseconds: item.chapter!.endMs),
+        ),
+      );
+      _loadedTrackId = item.track.id;
     } catch (_) {
       await _audioFocusController?.abandonFocus();
       rethrow;
+    } finally {
+      _loading = false;
+      _duration.add(
+        _loadedTrackId == null
+            ? Duration.zero
+            : item.chapter?.duration ?? _player.state.duration,
+      );
+      _position.add(item.relativePosition(sourcePosition));
     }
   }
+
+  Future<void> beginChapterEditing(Track track) async {
+    await playTrack(track, [track], whole: true);
+    if (_loadedTrackId != track.id) {
+      throw StateError('The local media file could not be opened.');
+    }
+    _chapterEditing = true;
+  }
+
+  void endChapterEditing() => _chapterEditing = false;
 
   Future<void> refreshCurrentSegments() async {
     final track = _currentTrack.value;
@@ -498,7 +605,29 @@ class PlaybackService
             .toList()
           ..sort((a, b) => a.startMs.compareTo(b.startMs));
 
-    _sponsorBlockSegments.add(visible);
+    final chapter = currentItem?.chapter;
+    _sponsorBlockSegments.add(
+      chapter == null
+          ? visible
+          : visible
+              .where(
+                (s) => s.endMs > chapter.startMs && s.startMs < chapter.endMs,
+              )
+              .map(
+                (s) => PlaybackSponsorBlockSegment(
+                  id: s.id,
+                  source: s.source,
+                  category: s.category,
+                  label: s.label,
+                  colorValue: s.colorValue,
+                  action: s.action,
+                  actionType: s.actionType,
+                  startMs: max(s.startMs, chapter.startMs) - chapter.startMs,
+                  endMs: min(s.endMs, chapter.endMs) - chapter.startMs,
+                ),
+              )
+              .toList(),
+    );
     _activeSegments = _mergeSegments(
       visible
           .where((segment) => segment.shouldSkip)
@@ -509,9 +638,6 @@ class PlaybackService
 
   Future<Playlist?> _playlistForTrack(Track track) async {
     final current = _currentPlaylist.value;
-    if (current != null && current.id == track.playlistId) {
-      return current;
-    }
     try {
       final playlist = await _db.getPlaylist(track.playlistId);
       _currentPlaylist.add(playlist);
@@ -537,10 +663,16 @@ class PlaybackService
   }
 
   Future<void> _maybeSkipSponsorBlockSegment(Duration position) async {
-    if (_isSeekingPastSegment || !_player.state.playing) return;
+    if (_loading ||
+        _chapterEditing ||
+        _isSeekingPastSegment ||
+        !_player.state.playing) {
+      return;
+    }
     if (_activeSegments.isEmpty) return;
 
-    final durationMs = _player.state.duration.inMilliseconds;
+    final durationMs =
+        currentItem?.chapter?.endMs ?? _player.state.duration.inMilliseconds;
     final positionMs = position.inMilliseconds;
     for (final segment in _activeSegments) {
       if (positionMs < segment.startMs || positionMs >= segment.endMs) {
@@ -548,7 +680,12 @@ class PlaybackService
       }
       final targetMs = segment.endMs + 250;
       if (durationMs > 0 && targetMs >= durationMs - 500) {
-        await next();
+        _isSeekingPastSegment = true;
+        await pause();
+        if (autoplayEnabled && !_completionHandled) {
+          _completionHandled = true;
+          await next();
+        }
         return;
       }
       _isSeekingPastSegment = true;
@@ -576,6 +713,9 @@ class PlaybackService
         await _audioFocusController!.requestFocus();
     if (!hasFocus) return;
     try {
+      // Native playback restarts a completed range on Play. Allow that new
+      // traversal to advance when it reaches the end again.
+      _completionHandled = false;
       await _player.play();
     } catch (_) {
       await _audioFocusController?.abandonFocus();
@@ -593,7 +733,12 @@ class PlaybackService
   }
 
   @override
-  Future<void> seekTo(Duration position) => _player.seek(position);
+  Future<void> seekTo(Duration position) async {
+    final target = currentItem?.sourcePosition(position) ?? position;
+    await _player.seek(target);
+    _position.add(currentItem?.relativePosition(target) ?? target);
+    _completionHandled = false;
+  }
 
   Future<SegmentMarkResult> markLocalSegmentBoundary(String category) async {
     final track = _currentTrack.value;
@@ -639,74 +784,23 @@ class PlaybackService
   }
 
   @override
-  Future<void> next() async {
-    if (await _playNextQueuedTrack()) return;
-    await _moveWithinPlaylistQueue(forward: true);
-  }
+  Future<void> next() => _transition(() async {
+    await _advance();
+  });
 
   @override
-  Future<void> previous() async {
-    // If more than 3 seconds in, restart current track.
-    if (_player.state.position.inSeconds > 3) {
-      seekTo(Duration.zero);
+  Future<void> previous() => _transition(() async {
+    if (position.inSeconds > 3) {
+      await seekTo(Duration.zero);
       return;
     }
-    await _moveWithinPlaylistQueue(forward: false);
-  }
-
-  /// Moves through the source playlist queue while bypassing any tracks that
-  /// have become unplayable or are marked always-skip. This is intentionally
-  /// checked at transition time so it applies to both ordered and shuffled
-  /// playback, including preferences changed after playback began.
-  Future<void> _moveWithinPlaylistQueue({required bool forward}) async {
-    final q = _queue.value;
-    if (q.isEmpty) return;
-
-    final currentIndex = _queueIndex.value.clamp(0, q.length - 1).toInt();
-    if (_shuffleEnabled.value && _shuffledIndices.isNotEmpty) {
-      var currentShufflePos = _shuffledIndices.indexOf(currentIndex);
-      if (currentShufflePos == -1) {
-        _generateShuffledIndices(currentIndex);
-        currentShufflePos = _shuffledIndices.indexOf(currentIndex);
-      }
-
-      var candidateShufflePos = currentShufflePos + (forward ? 1 : -1);
-      while (candidateShufflePos >= 0 &&
-          candidateShufflePos < _shuffledIndices.length) {
-        final candidateIndex = _shuffledIndices[candidateShufflePos];
-        if (await _playAutomaticQueueTrack(q[candidateIndex], candidateIndex)) {
-          return;
-        }
-        candidateShufflePos += forward ? 1 : -1;
-      }
-      return;
-    }
-
-    var candidateIndex = currentIndex + (forward ? 1 : -1);
-    while (candidateIndex >= 0 && candidateIndex < q.length) {
-      if (await _playAutomaticQueueTrack(q[candidateIndex], candidateIndex)) {
-        return;
-      }
-      candidateIndex += forward ? 1 : -1;
-    }
-  }
-
-  Future<bool> _playAutomaticQueueTrack(Track candidate, int index) async {
-    final fresh = await _db.getTrack(candidate.id);
-    if (fresh == null || !isTrackAutomaticallyPlayable(fresh)) return false;
-
-    _queueIndex.add(index);
-    await _playlistForTrack(fresh);
-    _currentTrack.add(fresh);
-    await _loadAndPlay(fresh);
-    return true;
-  }
+    await _advance(forward: false);
+  });
 
   void setShuffleEnabled(bool enabled) {
     _shuffleEnabled.add(enabled);
-    if (enabled) {
-      _generateShuffledIndices(_queueIndex.value);
-    }
+    _albumQueue.setShuffle(enabled);
+    _publishQueue();
   }
 
   @override
@@ -741,15 +835,12 @@ class PlaybackService
 
   void cancelSleepTimer() => _sleepTimer.cancel();
 
-  void _generateShuffledIndices(int currentIndex) {
-    final indices = List.generate(_queue.value.length, (i) => i);
-    indices.remove(currentIndex);
-    indices.shuffle(_random);
-    _shuffledIndices = [currentIndex, ...indices];
-  }
-
   @override
-  Future<void> stop() async {
+  Future<void> stop() => _transition(() async {
+    _generation++;
+    _loadedTrackId = null;
+    _chapterEditing = false;
+    _completionHandled = true;
     _sleepTimer.cancel();
     await _player.stop();
     await _audioFocusController?.abandonFocus();
@@ -758,13 +849,22 @@ class PlaybackService
     _queue.add([]);
     _upNextQueue.add([]);
     _queueIndex.add(0);
-    _shuffledIndices = [];
+    _albumQueue.clear();
+    _currentItem.add(null);
+    _position.add(Duration.zero);
+    _duration.add(Duration.zero);
     _activeSegments = [];
     _sponsorBlockSegments.add([]);
     _pendingSegmentMarkStart.add(null);
-  }
+  });
 
   void dispose() {
+    for (final sub in _subscriptions) {
+      unawaited(sub.cancel());
+    }
+    _currentItem.close();
+    _position.close();
+    _duration.close();
     _sleepTimer.dispose();
     unawaited(_audioFocusController?.dispose());
     _player.dispose();

@@ -171,6 +171,7 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             try {
                 val request = YoutubeDLRequest(url)
                 request.addOption("--dump-json")
+                request.addOption("--no-playlist")
                 request.addOption("--no-download")
                 val response = YoutubeDL.getInstance().execute(request)
                 withContext(Dispatchers.Main) { result.success(response.out) }
@@ -322,6 +323,7 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         request.addOption("--restrict-filenames")
         request.addOption("--no-mtime")
         request.addOption("--no-playlist")
+        request.addOption("--write-info-json")
 
         YoutubeDL.getInstance().execute(request, processId) { progress, etaInSeconds, line ->
             scope.launch(Dispatchers.Main) {

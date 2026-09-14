@@ -1,3 +1,4 @@
+import 'chapters_page.dart';
 import 'dart:async';
 import 'dart:io';
 import 'package:drift/drift.dart' hide Column;
@@ -861,7 +862,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                         children: [
                           const Expanded(
                             child: Text(
-                              'Up next',
+                              'Up next · after this album',
                               style: TextStyle(
                                 color: Colors.white,
                                 fontSize: 18,
@@ -996,7 +997,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                             track.alwaysSkip
                                 ? 'Turn off Always skip before queueing this track'
                                 : canAddToQueue
-                                ? 'Play only this track after the current one'
+                                ? 'Play after the current album finishes'
                                 : 'Download this track before adding it to the queue',
                             style: const TextStyle(color: Color(0xFF888888)),
                           ),
@@ -1100,7 +1101,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                               style: TextStyle(color: Colors.white),
                             ),
                             subtitle: const Text(
-                              'Skip segments and automatic skipping',
+                              'Chapters, skip segments, and automatic skipping',
                               style: TextStyle(color: Color(0xFF888888)),
                             ),
                             trailing: const Icon(
@@ -1282,6 +1283,25 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                             onTap: () async {
                               Navigator.pop(sheetContext);
                               await _pickLocalReplacement(track);
+                            },
+                          ),
+                        if (selectedGroup == _TrackActionGroup.playback)
+                          ListTile(
+                            leading: const Icon(
+                              Icons.list_alt,
+                              color: Colors.white70,
+                            ),
+                            title: const Text('Chapters'),
+                            subtitle: const Text(
+                              'Play, mark, edit, and configure album chapters',
+                            ),
+                            onTap: () {
+                              Navigator.pop(sheetContext);
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) => ChaptersPage(track: track),
+                                ),
+                              );
                             },
                           ),
                         if (selectedGroup == _TrackActionGroup.playback)

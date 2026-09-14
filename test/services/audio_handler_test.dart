@@ -250,6 +250,9 @@ class _FakePlaybackController implements PlaybackNotificationController {
   Track? get currentTrack => _currentTrack.value;
 
   @override
+  String? get currentMediaId => currentTrack?.id.toString();
+
+  @override
   bool get isPlaying => _playing.value;
 
   @override
@@ -313,6 +316,8 @@ class _FakePlaybackController implements PlaybackNotificationController {
     Track track,
     List<Track> allTracks, {
     Playlist? playlist,
+    String? chapterId,
+    bool whole = false,
   }) async {
     playedTrack = track;
     playedQueue = allTracks;

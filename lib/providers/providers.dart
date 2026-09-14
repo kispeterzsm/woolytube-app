@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../database/database.dart';
 import '../services/ytdlp_service.dart';
+import '../services/chapter_service.dart';
 import '../services/playlist_service.dart';
 import '../services/download_service.dart';
 import '../services/log_service.dart';
@@ -13,6 +14,13 @@ import '../services/sponsorblock_service.dart';
 import '../services/media_thumbnail_service.dart';
 import '../services/app_settings_service.dart';
 import '../services/download_network_policy.dart';
+
+final chapterServiceProvider = Provider<ChapterService>(
+  (ref) => ChapterService(
+    ref.watch(databaseProvider),
+    ref.watch(ytdlpServiceProvider),
+  ),
+);
 
 // Core singletons
 final databaseProvider = Provider<AppDatabase>((ref) {

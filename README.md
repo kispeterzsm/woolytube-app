@@ -15,6 +15,7 @@ Per-architecture APKs are also available on the [Releases page](https://github.c
 - **Auto-update** -- playlists sync automatically on a configurable schedule (1 hour to 1 week)
 - **Media playback** -- built-in video player with mini-player and background audio support
 - **Shuffle & autoplay** -- queue controls with search within playlists
+- **Album chapters** -- play and shuffle chapters within an album before moving to another playlist entry; add or edit your own chapters without changing the media file
 - **Persistent storage** -- files are saved to accessible folders that survive app uninstall
 - **Audio-only mode** -- download and play just the audio from any video
 - **Thumbnails** -- download and display video thumbnails
@@ -26,6 +27,18 @@ Per-architecture APKs are also available on the [Releases page](https://github.c
 3. Open the APK and install
 
 **Requirements:** Android 7.0 (API 24) or higher.
+
+## Album chapters
+
+Enable **Play chapters as tracks** in playlist settings. Shuffle plays the current album's chapters in random order, then chooses another playlist entry. Each album and chapter is visited once per playback cycle. Scheduled up-next requests play after the current album finishes.
+
+Open **Chapters** from the player's list icon, or long-press a playlist entry and choose **Playback settings → Chapters**. **Album playback** can inherit the playlist setting or override it with **Whole video** or **Chapters**. Individual chapters have play and queue actions.
+
+New downloads retain YouTube chapter metadata automatically. For older downloads, use **Fetch YouTube chapters** on an album or **Fetch missing chapters for downloaded files** in playlist settings. Missing chapters fall back to whole-file playback.
+
+Use **Mark chapters** to play the full file, mark a start and end, and name the range. The **+** button also accepts manual timestamps. Tap a chapter to edit it; its menu includes deletion. Custom edits are kept separately from downloaded chapters, and **Restore downloaded chapters** switches back. Changes take effect when starting playback again.
+
+All chapter data lives in WoolyTube's database and `woolytube_meta.json`. The complete audio/video file remains unchanged and independently playable in other apps. Replacing a file disables its old chapter timings.
 
 ## Building from Source
 

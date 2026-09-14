@@ -4,10 +4,12 @@ import 'package:drift/native.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 import '../services/sponsorblock_categories.dart';
+import '../services/chapters.dart';
 
 part 'database.g.dart';
 
 class Playlists extends Table {
+  BoolColumn get playChapters => boolean().nullable()();
   IntColumn get id => integer().autoIncrement()();
   TextColumn get url => text()();
   TextColumn get name => text()();
@@ -35,6 +37,10 @@ class Playlists extends Table {
 }
 
 class Tracks extends Table {
+  TextColumn get chaptersJson => text().nullable()();
+
+  /// null inherits the playlist preference.
+  BoolColumn get chaptersEnabled => boolean().nullable()();
   IntColumn get id => integer().autoIncrement()();
   IntColumn get playlistId => integer().references(Playlists, #id)();
   IntColumn get index => integer()();
@@ -90,7 +96,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 9;
+  int get schemaVersion => 10;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -163,6 +169,11 @@ class AppDatabase extends _$AppDatabase {
       }
       if (from < 8) {
         await migrator.addColumn(tracks, tracks.sponsorBlockCheckedAt);
+      }
+      if (from < 10) {
+        await migrator.addColumn(playlists, playlists.playChapters);
+        await migrator.addColumn(tracks, tracks.chaptersJson);
+        await migrator.addColumn(tracks, tracks.chaptersEnabled);
       }
       if (from < 9) {
         await migrator.addColumn(tracks, tracks.alwaysSkip);
@@ -429,7 +440,28 @@ class AppDatabase extends _$AppDatabase {
     )).write(TracksCompanion(sponsorBlockCheckedAt: Value(checkedAt)));
   }
 
+  Future<void> writeTrackChapters(int trackId, ChapterData data) =>
+      (update(tracks)..where(
+        (t) => t.id.equals(trackId),
+      )).write(TracksCompanion(chaptersJson: Value(data.encode())));
+
+  Future<void> setTrackChapterOverride(int trackId, bool? enabled) =>
+      (update(tracks)..where(
+        (t) => t.id.equals(trackId),
+      )).write(TracksCompanion(chaptersEnabled: Value(enabled)));
+
+  Future<void> invalidateTrackChapters(int trackId) async {
+    final track = await getTrack(trackId);
+    if (track?.chaptersJson != null) {
+      await writeTrackChapters(
+        trackId,
+        ChapterData.decode(track!.chaptersJson).invalidate(),
+      );
+    }
+  }
+
   Future<void> resetTrackForRedownload(int trackId) async {
+    await invalidateTrackChapters(trackId);
     await (update(tracks)..where((t) => t.id.equals(trackId))).write(
       TracksCompanion(
         status: const Value('pending'),

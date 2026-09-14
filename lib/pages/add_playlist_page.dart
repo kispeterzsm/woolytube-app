@@ -14,6 +14,7 @@ class AddPlaylistPage extends ConsumerStatefulWidget {
 class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
   final _urlController = TextEditingController();
   bool _audioOnly = false;
+  bool _playChapters = false;
   bool _autoUpdate = true;
   int _updateFrequencyHours = 24;
   bool _includeThumbnails = true;
@@ -81,6 +82,7 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
         name: _playlistTitle!,
         thumbnailUrl: _playlistThumbnail,
         audioOnly: _audioOnly,
+        playChapters: _playChapters,
         autoUpdate: _autoUpdate,
         updateFrequencyHours: _updateFrequencyHours,
         includeThumbnails: _includeThumbnails,
@@ -249,6 +251,12 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
           'Automatically check for new videos',
           _autoUpdate,
           (v) => setState(() => _autoUpdate = v),
+        ),
+        _settingsToggle(
+          'Play chapters as tracks',
+          'Finish each album before shuffling to another entry',
+          _playChapters,
+          (v) => setState(() => _playChapters = v),
         ),
         _settingsToggle(
           'Include thumbnails',

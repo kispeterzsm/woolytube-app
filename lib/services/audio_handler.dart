@@ -5,6 +5,7 @@ import 'package:rxdart/rxdart.dart';
 import '../database/database.dart';
 import 'playback_notification_controller.dart';
 import 'media_thumbnail_service.dart';
+import 'chapter_playback.dart';
 
 Uri? resolveNotificationArtwork({
   String? localPath,
@@ -61,7 +62,7 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
         }
         mediaItem.add(
           MediaItem(
-            id: track.id.toString(),
+            id: _playbackService.currentMediaId ?? track.id.toString(),
             title: track.title,
             duration:
                 track.durationSeconds != null
@@ -174,23 +175,23 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
     if (parentMediaId.startsWith('playlist:')) {
       final playlistId = int.parse(parentMediaId.substring('playlist:'.length));
       final tracks = await _db.getTracksForPlaylist(playlistId);
+      final playlist = await _db.getPlaylist(playlistId);
       return [
         for (final t in tracks)
           if (t.status == 'complete' && t.filePath != null)
-            MediaItem(
-              id: 'track:${t.id}:$playlistId',
-              title: t.title,
-              duration:
-                  t.durationSeconds != null
-                      ? Duration(seconds: t.durationSeconds!)
-                      : null,
-              playable: true,
-              artUri: resolveNotificationArtwork(
-                localPath: t.thumbnailPath,
-                remoteUrl: t.thumbnailUrl,
-                youtubeVideoId: t.videoId,
+            for (final item in chapterPlaybackItems(t, playlist))
+              MediaItem(
+                id: item.id,
+                title: item.displayTrack.title,
+                album: item.chapter == null ? null : t.title,
+                duration: item.duration,
+                playable: true,
+                artUri: resolveNotificationArtwork(
+                  localPath: t.thumbnailPath,
+                  remoteUrl: t.thumbnailUrl,
+                  youtubeVideoId: t.videoId,
+                ),
               ),
-            ),
       ];
     }
     return const [];
@@ -201,7 +202,9 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
     String mediaId, [
     Map<String, dynamic>? extras,
   ]) async {
-    if (!mediaId.startsWith('track:')) return;
+    if (!mediaId.startsWith('track:') && !mediaId.startsWith('chapter:')) {
+      return;
+    }
     final parts = mediaId.split(':');
     if (parts.length < 3) return;
     final trackId = int.tryParse(parts[1]);
@@ -216,7 +219,13 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
     // Force audio-only when launched from the car so libmpv doesn't allocate
     // a video surface that has no rendering target.
     await _playbackService.setAudioOnlyMode(true);
-    await _playbackService.playTrack(track, tracks, playlist: playlist);
+    if (parts.first == 'chapter' && parts.length < 4) return;
+    await _playbackService.playTrack(
+      track,
+      tracks,
+      playlist: playlist,
+      chapterId: parts.first == 'chapter' ? parts.sublist(3).join(':') : null,
+    );
   }
 
   @override

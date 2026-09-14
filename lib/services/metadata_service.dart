@@ -4,6 +4,7 @@ import 'package:drift/drift.dart';
 import 'package:path/path.dart' as p;
 import '../database/database.dart';
 import 'sponsorblock_categories.dart';
+import 'chapters.dart';
 
 class DiscoveredTrack {
   final int index;
@@ -16,6 +17,8 @@ class DiscoveredTrack {
   final String? unavailableReason;
   final bool isLocalReplacement;
   final bool alwaysSkip;
+  final String? chaptersJson;
+  final bool? chaptersEnabled;
   final DateTime? sponsorBlockCheckedAt;
   final String? fileName;
   final List<DiscoveredSponsorBlockSegment> sponsorBlockSegments;
@@ -31,6 +34,8 @@ class DiscoveredTrack {
     this.unavailableReason,
     this.isLocalReplacement = false,
     this.alwaysSkip = false,
+    this.chaptersJson,
+    this.chaptersEnabled,
     this.sponsorBlockCheckedAt,
     this.fileName,
     this.sponsorBlockSegments = const [],
@@ -59,6 +64,7 @@ class DiscoveredPlaylist {
   final String name;
   final String? thumbnailUrl;
   final bool audioOnly;
+  final bool playChapters;
   final bool autoUpdate;
   final int updateFrequencyHours;
   final bool includeThumbnails;
@@ -75,6 +81,7 @@ class DiscoveredPlaylist {
     required this.name,
     this.thumbnailUrl,
     required this.audioOnly,
+    this.playChapters = false,
     required this.autoUpdate,
     required this.updateFrequencyHours,
     required this.includeThumbnails,
@@ -130,6 +137,38 @@ class MetadataService {
     return fixed;
   }
 
+  /// Consume yt-dlp's metadata without modifying the downloaded media.
+  Future<void> captureChapterMetadata(Track track, String folder) async {
+    final dir = Directory(folder);
+    if (!await dir.exists() || track.isLocalReplacement) return;
+    await for (final entity in dir.list()) {
+      if (entity is! File || !entity.path.endsWith('.info.json')) continue;
+      final prefix = RegExp(r'^(\d+)_').firstMatch(p.basename(entity.path));
+      if (prefix == null || int.tryParse(prefix[1]!) != track.index) continue;
+      try {
+        final info =
+            jsonDecode(await entity.readAsString()) as Map<String, dynamic>;
+        if (info['id'] != track.videoId) continue;
+        final fresh = await _db.getTrack(track.id);
+        if (fresh == null) return;
+        final old = ChapterData.decode(fresh.chaptersJson);
+        final data = ChapterData.fromVideoInfo(info);
+        await _db.writeTrackChapters(
+          track.id,
+          ChapterData(
+            downloaded: data.downloaded,
+            custom: old.valid ? old.custom : null,
+            checkedAt: data.checkedAt,
+            durationMs: data.durationMs,
+          ),
+        );
+        await entity.delete();
+      } catch (_) {
+        // A broken metadata sidecar must not fail a successful media download.
+      }
+    }
+  }
+
   /// Writes playlist metadata as JSON sidecar file in the playlist folder.
   Future<void> writeMetadata(Playlist playlist, List<Track> tracks) async {
     final dir = Directory(playlist.outputPath);
@@ -149,6 +188,8 @@ class MetadataService {
         'unavailableReason': t.unavailableReason,
         'isLocalReplacement': t.isLocalReplacement,
         'alwaysSkip': t.alwaysSkip,
+        'chapters': ChapterData.decode(t.chaptersJson).toJson(),
+        'chaptersEnabled': t.chaptersEnabled,
         'sponsorBlockCheckedAt':
             t.sponsorBlockCheckedAt?.toUtc().toIso8601String(),
         'fileName': t.filePath != null ? p.basename(t.filePath!) : null,
@@ -174,6 +215,7 @@ class MetadataService {
         'name': playlist.name,
         'thumbnailUrl': playlist.thumbnailUrl,
         'audioOnly': playlist.audioOnly,
+        'playChapters': playlist.playChapters ?? false,
         'autoUpdate': playlist.autoUpdate,
         'updateFrequencyHours': playlist.updateFrequencyHours,
         'includeThumbnails': playlist.includeThumbnails,
@@ -252,6 +294,9 @@ class MetadataService {
   /// short-prefix filenames, then matches tracks to files via O(1) map lookup.
   Future<int> reconcilePlaylist(Playlist playlist) async {
     final tracks = await _db.getTracksForPlaylist(playlist.id);
+    for (final track in tracks) {
+      await captureChapterMetadata(track, playlist.outputPath);
+    }
     final dir = Directory(playlist.outputPath);
     if (!await dir.exists()) {
       var fixed = 0;
@@ -485,6 +530,7 @@ class MetadataService {
         name: discovered.name,
         thumbnailUrl: Value(discovered.thumbnailUrl),
         audioOnly: Value(discovered.audioOnly),
+        playChapters: Value(discovered.playChapters),
         autoUpdate: Value(discovered.autoUpdate),
         updateFrequencyHours: Value(discovered.updateFrequencyHours),
         includeThumbnails: Value(discovered.includeThumbnails),
@@ -546,6 +592,8 @@ class MetadataService {
           unavailableReason: Value(dt.unavailableReason),
           isLocalReplacement: Value(dt.isLocalReplacement),
           alwaysSkip: Value(dt.alwaysSkip),
+          chaptersJson: Value(dt.chaptersJson),
+          chaptersEnabled: Value(dt.chaptersEnabled),
           filePath: Value(filePath),
           downloadedAt: Value(status == 'complete' ? DateTime.now() : null),
           sponsorBlockCheckedAt: Value(dt.sponsorBlockCheckedAt),
@@ -614,6 +662,11 @@ class MetadataService {
             unavailableReason: m['unavailableReason'] as String?,
             isLocalReplacement: m['isLocalReplacement'] as bool? ?? false,
             alwaysSkip: m['alwaysSkip'] as bool? ?? false,
+            chaptersJson:
+                m['chapters'] == null
+                    ? null
+                    : ChapterData.fromJson(m['chapters']).encode(),
+            chaptersEnabled: m['chaptersEnabled'] as bool?,
             sponsorBlockCheckedAt:
                 m['sponsorBlockCheckedAt'] != null
                     ? DateTime.tryParse(m['sponsorBlockCheckedAt'] as String)
@@ -631,6 +684,7 @@ class MetadataService {
       name: name,
       thumbnailUrl: pl['thumbnailUrl'] as String?,
       audioOnly: pl['audioOnly'] as bool? ?? false,
+      playChapters: pl['playChapters'] == true,
       autoUpdate: pl['autoUpdate'] as bool? ?? true,
       updateFrequencyHours: pl['updateFrequencyHours'] as int? ?? 24,
       includeThumbnails: pl['includeThumbnails'] as bool? ?? true,

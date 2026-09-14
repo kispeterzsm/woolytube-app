@@ -93,6 +93,7 @@ class PlaylistService {
     String? thumbnailUrl,
     bool audioOnly = false,
     bool autoUpdate = true,
+    bool playChapters = false,
     int updateFrequencyHours = 24,
     bool includeThumbnails = true,
     bool sponsorBlockEnabled = true,
@@ -117,6 +118,7 @@ class PlaylistService {
         thumbnailUrl: Value(thumbnailUrl),
         audioOnly: Value(audioOnly),
         autoUpdate: Value(autoUpdate),
+        playChapters: Value(playChapters),
         updateFrequencyHours: Value(updateFrequencyHours),
         includeThumbnails: Value(includeThumbnails),
         sponsorBlockEnabled: Value(sponsorBlockEnabled),
@@ -175,6 +177,7 @@ class PlaylistService {
     String? name,
     bool? audioOnly,
     bool? autoUpdate,
+    bool? playChapters,
     int? updateFrequencyHours,
     bool? includeThumbnails,
     bool? sponsorBlockEnabled,
@@ -216,6 +219,7 @@ class PlaylistService {
         thumbnailPath: Value(playlist.thumbnailPath),
         audioOnly: Value(audioOnly ?? playlist.audioOnly),
         autoUpdate: Value(autoUpdate ?? playlist.autoUpdate),
+        playChapters: Value(playChapters ?? playlist.playChapters),
         updateFrequencyHours: Value(
           updateFrequencyHours ?? playlist.updateFrequencyHours,
         ),
@@ -656,6 +660,7 @@ class PlaylistService {
       if (await destination.exists()) await destination.delete();
       await stagedFile.rename(destinationPath);
 
+      await _db.invalidateTrackChapters(track.id);
       await _db.updateTrackStatus(
         track.id,
         'complete',

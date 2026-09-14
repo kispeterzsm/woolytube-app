@@ -12,6 +12,7 @@ abstract interface class PlaybackNotificationController {
   Stream<bool> get shuffleEnabledStream;
 
   Track? get currentTrack;
+  String? get currentMediaId;
   bool get isPlaying;
   Duration get position;
   bool get shuffleEnabled;
@@ -28,5 +29,7 @@ abstract interface class PlaybackNotificationController {
     Track track,
     List<Track> allTracks, {
     Playlist? playlist,
+    String? chapterId,
+    bool whole = false,
   });
 }

@@ -9,6 +9,20 @@ class $PlaylistsTable extends Playlists
   final GeneratedDatabase attachedDatabase;
   final String? _alias;
   $PlaylistsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _playChaptersMeta = const VerificationMeta(
+    'playChapters',
+  );
+  @override
+  late final GeneratedColumn<bool> playChapters = GeneratedColumn<bool>(
+    'play_chapters',
+    aliasedName,
+    true,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("play_chapters" IN (0, 1))',
+    ),
+  );
   static const VerificationMeta _idMeta = const VerificationMeta('id');
   @override
   late final GeneratedColumn<int> id = GeneratedColumn<int>(
@@ -193,6 +207,7 @@ class $PlaylistsTable extends Playlists
   );
   @override
   List<GeneratedColumn> get $columns => [
+    playChapters,
     id,
     url,
     name,
@@ -221,6 +236,15 @@ class $PlaylistsTable extends Playlists
   }) {
     final context = VerificationContext();
     final data = instance.toColumns(true);
+    if (data.containsKey('play_chapters')) {
+      context.handle(
+        _playChaptersMeta,
+        playChapters.isAcceptableOrUnknown(
+          data['play_chapters']!,
+          _playChaptersMeta,
+        ),
+      );
+    }
     if (data.containsKey('id')) {
       context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
     }
@@ -349,6 +373,10 @@ class $PlaylistsTable extends Playlists
   Playlist map(Map<String, dynamic> data, {String? tablePrefix}) {
     final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
     return Playlist(
+      playChapters: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}play_chapters'],
+      ),
       id:
           attachedDatabase.typeMapping.read(
             DriftSqlType.int,
@@ -431,6 +459,7 @@ class $PlaylistsTable extends Playlists
 }
 
 class Playlist extends DataClass implements Insertable<Playlist> {
+  final bool? playChapters;
   final int id;
   final String url;
   final String name;
@@ -447,6 +476,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
   final DateTime createdAt;
   final String outputPath;
   const Playlist({
+    this.playChapters,
     required this.id,
     required this.url,
     required this.name,
@@ -466,6 +496,9 @@ class Playlist extends DataClass implements Insertable<Playlist> {
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
+    if (!nullToAbsent || playChapters != null) {
+      map['play_chapters'] = Variable<bool>(playChapters);
+    }
     map['id'] = Variable<int>(id);
     map['url'] = Variable<String>(url);
     map['name'] = Variable<String>(name);
@@ -494,6 +527,10 @@ class Playlist extends DataClass implements Insertable<Playlist> {
 
   PlaylistsCompanion toCompanion(bool nullToAbsent) {
     return PlaylistsCompanion(
+      playChapters:
+          playChapters == null && nullToAbsent
+              ? const Value.absent()
+              : Value(playChapters),
       id: Value(id),
       url: Value(url),
       name: Value(name),
@@ -527,6 +564,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
   }) {
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return Playlist(
+      playChapters: serializer.fromJson<bool?>(json['playChapters']),
       id: serializer.fromJson<int>(json['id']),
       url: serializer.fromJson<String>(json['url']),
       name: serializer.fromJson<String>(json['name']),
@@ -556,6 +594,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
   Map<String, dynamic> toJson({ValueSerializer? serializer}) {
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return <String, dynamic>{
+      'playChapters': serializer.toJson<bool?>(playChapters),
       'id': serializer.toJson<int>(id),
       'url': serializer.toJson<String>(url),
       'name': serializer.toJson<String>(name),
@@ -579,6 +618,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
   }
 
   Playlist copyWith({
+    Value<bool?> playChapters = const Value.absent(),
     int? id,
     String? url,
     String? name,
@@ -595,6 +635,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     DateTime? createdAt,
     String? outputPath,
   }) => Playlist(
+    playChapters: playChapters.present ? playChapters.value : this.playChapters,
     id: id ?? this.id,
     url: url ?? this.url,
     name: name ?? this.name,
@@ -616,6 +657,10 @@ class Playlist extends DataClass implements Insertable<Playlist> {
   );
   Playlist copyWithCompanion(PlaylistsCompanion data) {
     return Playlist(
+      playChapters:
+          data.playChapters.present
+              ? data.playChapters.value
+              : this.playChapters,
       id: data.id.present ? data.id.value : this.id,
       url: data.url.present ? data.url.value : this.url,
       name: data.name.present ? data.name.value : this.name,
@@ -661,6 +706,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
   @override
   String toString() {
     return (StringBuffer('Playlist(')
+          ..write('playChapters: $playChapters, ')
           ..write('id: $id, ')
           ..write('url: $url, ')
           ..write('name: $name, ')
@@ -682,6 +728,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
 
   @override
   int get hashCode => Object.hash(
+    playChapters,
     id,
     url,
     name,
@@ -702,6 +749,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
   bool operator ==(Object other) =>
       identical(this, other) ||
       (other is Playlist &&
+          other.playChapters == this.playChapters &&
           other.id == this.id &&
           other.url == this.url &&
           other.name == this.name &&
@@ -721,6 +769,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
 }
 
 class PlaylistsCompanion extends UpdateCompanion<Playlist> {
+  final Value<bool?> playChapters;
   final Value<int> id;
   final Value<String> url;
   final Value<String> name;
@@ -737,6 +786,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
   final Value<DateTime> createdAt;
   final Value<String> outputPath;
   const PlaylistsCompanion({
+    this.playChapters = const Value.absent(),
     this.id = const Value.absent(),
     this.url = const Value.absent(),
     this.name = const Value.absent(),
@@ -754,6 +804,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     this.outputPath = const Value.absent(),
   });
   PlaylistsCompanion.insert({
+    this.playChapters = const Value.absent(),
     this.id = const Value.absent(),
     required String url,
     required String name,
@@ -774,6 +825,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
        createdAt = Value(createdAt),
        outputPath = Value(outputPath);
   static Insertable<Playlist> custom({
+    Expression<bool>? playChapters,
     Expression<int>? id,
     Expression<String>? url,
     Expression<String>? name,
@@ -791,6 +843,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     Expression<String>? outputPath,
   }) {
     return RawValuesInsertable({
+      if (playChapters != null) 'play_chapters': playChapters,
       if (id != null) 'id': id,
       if (url != null) 'url': url,
       if (name != null) 'name': name,
@@ -814,6 +867,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
   }
 
   PlaylistsCompanion copyWith({
+    Value<bool?>? playChapters,
     Value<int>? id,
     Value<String>? url,
     Value<String>? name,
@@ -831,6 +885,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     Value<String>? outputPath,
   }) {
     return PlaylistsCompanion(
+      playChapters: playChapters ?? this.playChapters,
       id: id ?? this.id,
       url: url ?? this.url,
       name: name ?? this.name,
@@ -854,6 +909,9 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
+    if (playChapters.present) {
+      map['play_chapters'] = Variable<bool>(playChapters.value);
+    }
     if (id.present) {
       map['id'] = Variable<int>(id.value);
     }
@@ -909,6 +967,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
   @override
   String toString() {
     return (StringBuffer('PlaylistsCompanion(')
+          ..write('playChapters: $playChapters, ')
           ..write('id: $id, ')
           ..write('url: $url, ')
           ..write('name: $name, ')
@@ -934,6 +993,31 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
   final GeneratedDatabase attachedDatabase;
   final String? _alias;
   $TracksTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _chaptersJsonMeta = const VerificationMeta(
+    'chaptersJson',
+  );
+  @override
+  late final GeneratedColumn<String> chaptersJson = GeneratedColumn<String>(
+    'chapters_json',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _chaptersEnabledMeta = const VerificationMeta(
+    'chaptersEnabled',
+  );
+  @override
+  late final GeneratedColumn<bool> chaptersEnabled = GeneratedColumn<bool>(
+    'chapters_enabled',
+    aliasedName,
+    true,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("chapters_enabled" IN (0, 1))',
+    ),
+  );
   static const VerificationMeta _idMeta = const VerificationMeta('id');
   @override
   late final GeneratedColumn<int> id = GeneratedColumn<int>(
@@ -1120,6 +1204,8 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
   );
   @override
   List<GeneratedColumn> get $columns => [
+    chaptersJson,
+    chaptersEnabled,
     id,
     playlistId,
     index,
@@ -1149,6 +1235,24 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
   }) {
     final context = VerificationContext();
     final data = instance.toColumns(true);
+    if (data.containsKey('chapters_json')) {
+      context.handle(
+        _chaptersJsonMeta,
+        chaptersJson.isAcceptableOrUnknown(
+          data['chapters_json']!,
+          _chaptersJsonMeta,
+        ),
+      );
+    }
+    if (data.containsKey('chapters_enabled')) {
+      context.handle(
+        _chaptersEnabledMeta,
+        chaptersEnabled.isAcceptableOrUnknown(
+          data['chapters_enabled']!,
+          _chaptersEnabledMeta,
+        ),
+      );
+    }
     if (data.containsKey('id')) {
       context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
     }
@@ -1280,6 +1384,14 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
   Track map(Map<String, dynamic> data, {String? tablePrefix}) {
     final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
     return Track(
+      chaptersJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}chapters_json'],
+      ),
+      chaptersEnabled: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}chapters_enabled'],
+      ),
       id:
           attachedDatabase.typeMapping.read(
             DriftSqlType.int,
@@ -1362,6 +1474,10 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
 }
 
 class Track extends DataClass implements Insertable<Track> {
+  final String? chaptersJson;
+
+  /// null inherits the playlist preference.
+  final bool? chaptersEnabled;
   final int id;
   final int playlistId;
   final int index;
@@ -1382,6 +1498,8 @@ class Track extends DataClass implements Insertable<Track> {
   final DateTime? sponsorBlockCheckedAt;
   final String? lastError;
   const Track({
+    this.chaptersJson,
+    this.chaptersEnabled,
     required this.id,
     required this.playlistId,
     required this.index,
@@ -1402,6 +1520,12 @@ class Track extends DataClass implements Insertable<Track> {
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
+    if (!nullToAbsent || chaptersJson != null) {
+      map['chapters_json'] = Variable<String>(chaptersJson);
+    }
+    if (!nullToAbsent || chaptersEnabled != null) {
+      map['chapters_enabled'] = Variable<bool>(chaptersEnabled);
+    }
     map['id'] = Variable<int>(id);
     map['playlist_id'] = Variable<int>(playlistId);
     map['index'] = Variable<int>(index);
@@ -1441,6 +1565,14 @@ class Track extends DataClass implements Insertable<Track> {
 
   TracksCompanion toCompanion(bool nullToAbsent) {
     return TracksCompanion(
+      chaptersJson:
+          chaptersJson == null && nullToAbsent
+              ? const Value.absent()
+              : Value(chaptersJson),
+      chaptersEnabled:
+          chaptersEnabled == null && nullToAbsent
+              ? const Value.absent()
+              : Value(chaptersEnabled),
       id: Value(id),
       playlistId: Value(playlistId),
       index: Value(index),
@@ -1490,6 +1622,8 @@ class Track extends DataClass implements Insertable<Track> {
   }) {
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return Track(
+      chaptersJson: serializer.fromJson<String?>(json['chaptersJson']),
+      chaptersEnabled: serializer.fromJson<bool?>(json['chaptersEnabled']),
       id: serializer.fromJson<int>(json['id']),
       playlistId: serializer.fromJson<int>(json['playlistId']),
       index: serializer.fromJson<int>(json['index']),
@@ -1516,6 +1650,8 @@ class Track extends DataClass implements Insertable<Track> {
   Map<String, dynamic> toJson({ValueSerializer? serializer}) {
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return <String, dynamic>{
+      'chaptersJson': serializer.toJson<String?>(chaptersJson),
+      'chaptersEnabled': serializer.toJson<bool?>(chaptersEnabled),
       'id': serializer.toJson<int>(id),
       'playlistId': serializer.toJson<int>(playlistId),
       'index': serializer.toJson<int>(index),
@@ -1538,6 +1674,8 @@ class Track extends DataClass implements Insertable<Track> {
   }
 
   Track copyWith({
+    Value<String?> chaptersJson = const Value.absent(),
+    Value<bool?> chaptersEnabled = const Value.absent(),
     int? id,
     int? playlistId,
     int? index,
@@ -1555,6 +1693,9 @@ class Track extends DataClass implements Insertable<Track> {
     Value<DateTime?> sponsorBlockCheckedAt = const Value.absent(),
     Value<String?> lastError = const Value.absent(),
   }) => Track(
+    chaptersJson: chaptersJson.present ? chaptersJson.value : this.chaptersJson,
+    chaptersEnabled:
+        chaptersEnabled.present ? chaptersEnabled.value : this.chaptersEnabled,
     id: id ?? this.id,
     playlistId: playlistId ?? this.playlistId,
     index: index ?? this.index,
@@ -1582,6 +1723,14 @@ class Track extends DataClass implements Insertable<Track> {
   );
   Track copyWithCompanion(TracksCompanion data) {
     return Track(
+      chaptersJson:
+          data.chaptersJson.present
+              ? data.chaptersJson.value
+              : this.chaptersJson,
+      chaptersEnabled:
+          data.chaptersEnabled.present
+              ? data.chaptersEnabled.value
+              : this.chaptersEnabled,
       id: data.id.present ? data.id.value : this.id,
       playlistId:
           data.playlistId.present ? data.playlistId.value : this.playlistId,
@@ -1627,6 +1776,8 @@ class Track extends DataClass implements Insertable<Track> {
   @override
   String toString() {
     return (StringBuffer('Track(')
+          ..write('chaptersJson: $chaptersJson, ')
+          ..write('chaptersEnabled: $chaptersEnabled, ')
           ..write('id: $id, ')
           ..write('playlistId: $playlistId, ')
           ..write('index: $index, ')
@@ -1649,6 +1800,8 @@ class Track extends DataClass implements Insertable<Track> {
 
   @override
   int get hashCode => Object.hash(
+    chaptersJson,
+    chaptersEnabled,
     id,
     playlistId,
     index,
@@ -1670,6 +1823,8 @@ class Track extends DataClass implements Insertable<Track> {
   bool operator ==(Object other) =>
       identical(this, other) ||
       (other is Track &&
+          other.chaptersJson == this.chaptersJson &&
+          other.chaptersEnabled == this.chaptersEnabled &&
           other.id == this.id &&
           other.playlistId == this.playlistId &&
           other.index == this.index &&
@@ -1689,6 +1844,8 @@ class Track extends DataClass implements Insertable<Track> {
 }
 
 class TracksCompanion extends UpdateCompanion<Track> {
+  final Value<String?> chaptersJson;
+  final Value<bool?> chaptersEnabled;
   final Value<int> id;
   final Value<int> playlistId;
   final Value<int> index;
@@ -1706,6 +1863,8 @@ class TracksCompanion extends UpdateCompanion<Track> {
   final Value<DateTime?> sponsorBlockCheckedAt;
   final Value<String?> lastError;
   const TracksCompanion({
+    this.chaptersJson = const Value.absent(),
+    this.chaptersEnabled = const Value.absent(),
     this.id = const Value.absent(),
     this.playlistId = const Value.absent(),
     this.index = const Value.absent(),
@@ -1724,6 +1883,8 @@ class TracksCompanion extends UpdateCompanion<Track> {
     this.lastError = const Value.absent(),
   });
   TracksCompanion.insert({
+    this.chaptersJson = const Value.absent(),
+    this.chaptersEnabled = const Value.absent(),
     this.id = const Value.absent(),
     required int playlistId,
     required int index,
@@ -1745,6 +1906,8 @@ class TracksCompanion extends UpdateCompanion<Track> {
        videoId = Value(videoId),
        title = Value(title);
   static Insertable<Track> custom({
+    Expression<String>? chaptersJson,
+    Expression<bool>? chaptersEnabled,
     Expression<int>? id,
     Expression<int>? playlistId,
     Expression<int>? index,
@@ -1763,6 +1926,8 @@ class TracksCompanion extends UpdateCompanion<Track> {
     Expression<String>? lastError,
   }) {
     return RawValuesInsertable({
+      if (chaptersJson != null) 'chapters_json': chaptersJson,
+      if (chaptersEnabled != null) 'chapters_enabled': chaptersEnabled,
       if (id != null) 'id': id,
       if (playlistId != null) 'playlist_id': playlistId,
       if (index != null) 'index': index,
@@ -1785,6 +1950,8 @@ class TracksCompanion extends UpdateCompanion<Track> {
   }
 
   TracksCompanion copyWith({
+    Value<String?>? chaptersJson,
+    Value<bool?>? chaptersEnabled,
     Value<int>? id,
     Value<int>? playlistId,
     Value<int>? index,
@@ -1803,6 +1970,8 @@ class TracksCompanion extends UpdateCompanion<Track> {
     Value<String?>? lastError,
   }) {
     return TracksCompanion(
+      chaptersJson: chaptersJson ?? this.chaptersJson,
+      chaptersEnabled: chaptersEnabled ?? this.chaptersEnabled,
       id: id ?? this.id,
       playlistId: playlistId ?? this.playlistId,
       index: index ?? this.index,
@@ -1826,6 +1995,12 @@ class TracksCompanion extends UpdateCompanion<Track> {
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
+    if (chaptersJson.present) {
+      map['chapters_json'] = Variable<String>(chaptersJson.value);
+    }
+    if (chaptersEnabled.present) {
+      map['chapters_enabled'] = Variable<bool>(chaptersEnabled.value);
+    }
     if (id.present) {
       map['id'] = Variable<int>(id.value);
     }
@@ -1882,6 +2057,8 @@ class TracksCompanion extends UpdateCompanion<Track> {
   @override
   String toString() {
     return (StringBuffer('TracksCompanion(')
+          ..write('chaptersJson: $chaptersJson, ')
+          ..write('chaptersEnabled: $chaptersEnabled, ')
           ..write('id: $id, ')
           ..write('playlistId: $playlistId, ')
           ..write('index: $index, ')
@@ -2686,6 +2863,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
 
 typedef $$PlaylistsTableCreateCompanionBuilder =
     PlaylistsCompanion Function({
+      Value<bool?> playChapters,
       Value<int> id,
       required String url,
       required String name,
@@ -2704,6 +2882,7 @@ typedef $$PlaylistsTableCreateCompanionBuilder =
     });
 typedef $$PlaylistsTableUpdateCompanionBuilder =
     PlaylistsCompanion Function({
+      Value<bool?> playChapters,
       Value<int> id,
       Value<String> url,
       Value<String> name,
@@ -2754,6 +2933,11 @@ class $$PlaylistsTableFilterComposer
     super.$addJoinBuilderToRootComposer,
     super.$removeJoinBuilderFromRootComposer,
   });
+  ColumnFilters<bool> get playChapters => $composableBuilder(
+    column: $table.playChapters,
+    builder: (column) => ColumnFilters(column),
+  );
+
   ColumnFilters<int> get id => $composableBuilder(
     column: $table.id,
     builder: (column) => ColumnFilters(column),
@@ -2864,6 +3048,11 @@ class $$PlaylistsTableOrderingComposer
     super.$addJoinBuilderToRootComposer,
     super.$removeJoinBuilderFromRootComposer,
   });
+  ColumnOrderings<bool> get playChapters => $composableBuilder(
+    column: $table.playChapters,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<int> get id => $composableBuilder(
     column: $table.id,
     builder: (column) => ColumnOrderings(column),
@@ -2949,6 +3138,11 @@ class $$PlaylistsTableAnnotationComposer
     super.$addJoinBuilderToRootComposer,
     super.$removeJoinBuilderFromRootComposer,
   });
+  GeneratedColumn<bool> get playChapters => $composableBuilder(
+    column: $table.playChapters,
+    builder: (column) => column,
+  );
+
   GeneratedColumn<int> get id =>
       $composableBuilder(column: $table.id, builder: (column) => column);
 
@@ -3068,6 +3262,7 @@ class $$PlaylistsTableTableManager
               () => $$PlaylistsTableAnnotationComposer($db: db, $table: table),
           updateCompanionCallback:
               ({
+                Value<bool?> playChapters = const Value.absent(),
                 Value<int> id = const Value.absent(),
                 Value<String> url = const Value.absent(),
                 Value<String> name = const Value.absent(),
@@ -3085,6 +3280,7 @@ class $$PlaylistsTableTableManager
                 Value<DateTime> createdAt = const Value.absent(),
                 Value<String> outputPath = const Value.absent(),
               }) => PlaylistsCompanion(
+                playChapters: playChapters,
                 id: id,
                 url: url,
                 name: name,
@@ -3103,6 +3299,7 @@ class $$PlaylistsTableTableManager
               ),
           createCompanionCallback:
               ({
+                Value<bool?> playChapters = const Value.absent(),
                 Value<int> id = const Value.absent(),
                 required String url,
                 required String name,
@@ -3120,6 +3317,7 @@ class $$PlaylistsTableTableManager
                 required DateTime createdAt,
                 required String outputPath,
               }) => PlaylistsCompanion.insert(
+                playChapters: playChapters,
                 id: id,
                 url: url,
                 name: name,
@@ -3195,6 +3393,8 @@ typedef $$PlaylistsTableProcessedTableManager =
     >;
 typedef $$TracksTableCreateCompanionBuilder =
     TracksCompanion Function({
+      Value<String?> chaptersJson,
+      Value<bool?> chaptersEnabled,
       Value<int> id,
       required int playlistId,
       required int index,
@@ -3214,6 +3414,8 @@ typedef $$TracksTableCreateCompanionBuilder =
     });
 typedef $$TracksTableUpdateCompanionBuilder =
     TracksCompanion Function({
+      Value<String?> chaptersJson,
+      Value<bool?> chaptersEnabled,
       Value<int> id,
       Value<int> playlistId,
       Value<int> index,
@@ -3291,6 +3493,16 @@ class $$TracksTableFilterComposer
     super.$addJoinBuilderToRootComposer,
     super.$removeJoinBuilderFromRootComposer,
   });
+  ColumnFilters<String> get chaptersJson => $composableBuilder(
+    column: $table.chaptersJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get chaptersEnabled => $composableBuilder(
+    column: $table.chaptersEnabled,
+    builder: (column) => ColumnFilters(column),
+  );
+
   ColumnFilters<int> get id => $composableBuilder(
     column: $table.id,
     builder: (column) => ColumnFilters(column),
@@ -3424,6 +3636,16 @@ class $$TracksTableOrderingComposer
     super.$addJoinBuilderToRootComposer,
     super.$removeJoinBuilderFromRootComposer,
   });
+  ColumnOrderings<String> get chaptersJson => $composableBuilder(
+    column: $table.chaptersJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get chaptersEnabled => $composableBuilder(
+    column: $table.chaptersEnabled,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<int> get id => $composableBuilder(
     column: $table.id,
     builder: (column) => ColumnOrderings(column),
@@ -3532,6 +3754,16 @@ class $$TracksTableAnnotationComposer
     super.$addJoinBuilderToRootComposer,
     super.$removeJoinBuilderFromRootComposer,
   });
+  GeneratedColumn<String> get chaptersJson => $composableBuilder(
+    column: $table.chaptersJson,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<bool> get chaptersEnabled => $composableBuilder(
+    column: $table.chaptersEnabled,
+    builder: (column) => column,
+  );
+
   GeneratedColumn<int> get id =>
       $composableBuilder(column: $table.id, builder: (column) => column);
 
@@ -3674,6 +3906,8 @@ class $$TracksTableTableManager
               () => $$TracksTableAnnotationComposer($db: db, $table: table),
           updateCompanionCallback:
               ({
+                Value<String?> chaptersJson = const Value.absent(),
+                Value<bool?> chaptersEnabled = const Value.absent(),
                 Value<int> id = const Value.absent(),
                 Value<int> playlistId = const Value.absent(),
                 Value<int> index = const Value.absent(),
@@ -3691,6 +3925,8 @@ class $$TracksTableTableManager
                 Value<DateTime?> sponsorBlockCheckedAt = const Value.absent(),
                 Value<String?> lastError = const Value.absent(),
               }) => TracksCompanion(
+                chaptersJson: chaptersJson,
+                chaptersEnabled: chaptersEnabled,
                 id: id,
                 playlistId: playlistId,
                 index: index,
@@ -3710,6 +3946,8 @@ class $$TracksTableTableManager
               ),
           createCompanionCallback:
               ({
+                Value<String?> chaptersJson = const Value.absent(),
+                Value<bool?> chaptersEnabled = const Value.absent(),
                 Value<int> id = const Value.absent(),
                 required int playlistId,
                 required int index,
@@ -3727,6 +3965,8 @@ class $$TracksTableTableManager
                 Value<DateTime?> sponsorBlockCheckedAt = const Value.absent(),
                 Value<String?> lastError = const Value.absent(),
               }) => TracksCompanion.insert(
+                chaptersJson: chaptersJson,
+                chaptersEnabled: chaptersEnabled,
                 id: id,
                 playlistId: playlistId,
                 index: index,

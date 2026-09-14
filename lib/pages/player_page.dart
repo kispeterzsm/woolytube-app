@@ -11,6 +11,7 @@ import '../providers/playback_providers.dart';
 import '../widgets/player_controls.dart';
 import '../widgets/segment_mark_button.dart';
 import '../widgets/sleep_timer_button.dart';
+import '../widgets/chapters_button.dart';
 import '../services/media_thumbnail_service.dart';
 
 class PlayerPage extends ConsumerStatefulWidget {
@@ -533,8 +534,8 @@ class _VideoOverlay extends ConsumerWidget {
                   const SeekBar(),
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 8),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
+                    child: Wrap(
+                      alignment: WrapAlignment.center,
                       children: [
                         IconButton(
                           icon: Icon(
@@ -566,6 +567,7 @@ class _VideoOverlay extends ConsumerWidget {
                             onAnyAction();
                           },
                         ),
+                        const ChaptersButton(),
                         SegmentMarkButton(
                           inactiveColor: Colors.white,
                           onAction: onAnyAction,
@@ -954,6 +956,7 @@ class _AudioControlPanel extends StatelessWidget {
                     tooltip: 'Shuffle',
                     onPressed: onToggleShuffle,
                   ),
+                  const ChaptersButton(),
                   const SegmentMarkButton(
                     activeColor: Color(0xFF64B5F6),
                     inactiveColor: Colors.white70,

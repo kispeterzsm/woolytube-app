@@ -8,6 +8,7 @@ import '../providers/providers.dart';
 import '../services/playlist_service.dart';
 import '../services/sponsorblock_service.dart';
 import 'sponsorblock_settings_page.dart';
+import '../widgets/mobile_data_download_guard.dart';
 
 class PlaylistSettingsPage extends ConsumerStatefulWidget {
   final int playlistId;
@@ -31,6 +32,8 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
   Playlist? _playlist;
   late TextEditingController _nameController;
   bool _audioOnly = false;
+  bool _playChapters = false;
+  bool _fetchingChapters = false;
   bool _autoUpdate = true;
   int _updateFrequencyHours = 24;
   bool _includeThumbnails = true;
@@ -54,6 +57,7 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
       _playlist = playlist;
       _nameController.text = playlist.name;
       _audioOnly = playlist.audioOnly;
+      _playChapters = playlist.playChapters ?? false;
       _autoUpdate = playlist.autoUpdate;
       _updateFrequencyHours = _nearestUpdateFrequency(
         playlist.updateFrequencyHours,
@@ -74,6 +78,7 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
       id: widget.playlistId,
       name: _nameController.text.trim(),
       audioOnly: _audioOnly,
+      playChapters: _playChapters,
       autoUpdate: _autoUpdate,
       updateFrequencyHours: _updateFrequencyHours,
       includeThumbnails: _includeThumbnails,
@@ -351,6 +356,46 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
               (v) => setState(() => _includeThumbnails = v),
             ),
             const SizedBox(height: 24),
+            _settingsToggle(
+              'Play chapters as tracks',
+              'Shuffle each album completely before moving to another entry',
+              _playChapters,
+              (v) => setState(() => _playChapters = v),
+            ),
+            TextButton.icon(
+              icon: const Icon(Icons.download),
+              label: Text(
+                _fetchingChapters
+                    ? 'Fetching chapters…'
+                    : 'Fetch missing chapters for downloaded files',
+              ),
+              onPressed:
+                  _fetchingChapters
+                      ? null
+                      : () async {
+                        if (!await confirmManualDownload(
+                          context,
+                          ref.read(downloadNetworkPolicyProvider),
+                        )) {
+                          return;
+                        }
+                        setState(() => _fetchingChapters = true);
+                        try {
+                          final result = await ref
+                              .read(chapterServiceProvider)
+                              .fetchMissing(widget.playlistId);
+                          if (mounted) {
+                            _showMessage(
+                              'Checked ${result.$1} files; ${result.$2} failed.',
+                            );
+                          }
+                        } finally {
+                          if (mounted) {
+                            setState(() => _fetchingChapters = false);
+                          }
+                        }
+                      },
+            ),
             _settingsToggle(
               'SponsorBlock',
               'Skip configured segments during playback',
