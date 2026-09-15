@@ -5,8 +5,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/pages/player_page.dart';
+import 'package:woolytube/pages/playlist_detail_page.dart';
 import 'package:woolytube/providers/playback_providers.dart';
+import 'package:woolytube/providers/providers.dart';
+import 'package:woolytube/services/download_service.dart';
+import 'package:woolytube/services/metadata_service.dart';
 import 'package:woolytube/services/playback_service.dart';
+import 'package:woolytube/services/playlist_service.dart';
 import 'package:woolytube/widgets/mini_player.dart';
 
 import '../helpers/test_database.dart';
@@ -81,6 +86,18 @@ void main() {
         await tester.pumpWidget(
           ProviderScope(
             overrides: [
+              databaseProvider.overrideWithValue(database),
+              metadataServiceProvider.overrideWithValue(_Metadata()),
+              playlistServiceProvider.overrideWithValue(_Playlists()),
+              tracksProvider(
+                playlist.id,
+              ).overrideWith((ref) => Stream.value([displayTrack])),
+              upNextQueueProvider.overrideWith(
+                (ref) => Stream.value(<Track>[]),
+              ),
+              downloadProgressProvider.overrideWith(
+                (ref) => Stream.value(DownloadProgress.idle),
+              ),
               playbackServiceProvider.overrideWithValue(playback),
               currentTrackProvider.overrideWith(
                 (ref) => Stream<Track?>.value(displayTrack),
@@ -124,13 +141,37 @@ void main() {
                       ),
                     ],
                   ),
-              home: const Scaffold(body: SizedBox.expand()),
+              home: PlaylistDetailPage(playlistId: playlist.id),
             ),
           ),
         );
         await tester.pumpAndSettle();
 
         expect(find.byIcon(Icons.close), findsOneWidget);
+
+        // A visibility notification can arrive after this frame's layout.
+        // Only render frames requested by the app: forcing an extra frame
+        // here would hide the same missing refresh that scrolling hides.
+        videoFullscreenNotifier.value = true;
+        await tester.pumpAndSettle();
+        expect(find.byIcon(Icons.close), findsNothing);
+        tester.binding.addPostFrameCallback((_) {
+          videoFullscreenNotifier.value = false;
+        });
+        tester.binding.scheduleFrame();
+        await tester.pump();
+        for (
+          var frame = 0;
+          frame < 10 && tester.binding.hasScheduledFrame;
+          frame++
+        ) {
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+        expect(
+          find.byIcon(Icons.close),
+          findsOneWidget,
+          reason: 'The mini-player must return without a scroll or extra tap',
+        );
         expect(
           find.byIcon(Icons.fast_forward),
           withChapters ? findsOneWidget : findsNothing,
@@ -139,7 +180,12 @@ void main() {
           await tester.tap(find.byIcon(Icons.fast_forward));
           expect(playback.nextFileCalls, 1);
         }
-        await tester.tap(find.text('Audio track'));
+        await tester.tap(
+          find.descendant(
+            of: find.byType(MiniPlayerBar),
+            matching: find.text('Audio track'),
+          ),
+        );
         await tester.pumpAndSettle();
         expect(find.byIcon(Icons.close), findsNothing);
         expect(
@@ -151,13 +197,32 @@ void main() {
           expect(playback.nextFileCalls, 2);
         }
 
-        await tester.tap(find.text('Audio track'));
+        await tester.tap(
+          find.descendant(
+            of: find.byType(PlayerPage),
+            matching: find.text('Audio track'),
+          ),
+        );
         await tester.pumpAndSettle();
 
         expect(find.byIcon(Icons.close), findsOneWidget);
       },
     );
   }
+}
+
+class _Metadata implements MetadataService {
+  @override
+  Future<int> reconcilePlaylist(Playlist playlist) async => 0;
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _Playlists implements PlaylistService {
+  @override
+  Future<int> backfillLocalThumbnails(int playlistId) async => 0;
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _FakePlaybackService implements PlaybackService {

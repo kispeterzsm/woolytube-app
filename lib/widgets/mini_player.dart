@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -33,31 +34,22 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
   }
 
   void _onFullscreenChanged() {
-    debugPrint(
-      '[DEBUG-a4f2] notify fullscreen=${videoFullscreenNotifier.value} '
-      'phase=${WidgetsBinding.instance.schedulerPhase}',
-    );
-    // Route teardown flips the notifier during Flutter's persistent frame
-    // callbacks. Wait for that frame to finish before scheduling a rebuild;
-    // a wall-clock delay can still fire before a slow frame has completed.
-    WidgetsBinding.instance.endOfFrame.then((_) {
-      debugPrint(
-        '[DEBUG-a4f2] end-of-frame mounted=$mounted '
-        'fullscreen=${videoFullscreenNotifier.value} '
-        'phase=${WidgetsBinding.instance.schedulerPhase}',
-      );
-      if (mounted) setState(() {});
-    });
+    final binding = WidgetsBinding.instance;
+    // Route lifecycle callbacks can run during build/dispose. Defer only
+    // then; waiting for endOfFrame from a post-frame callback can wait for
+    // an unscheduled frame and leave the bar hidden until the next gesture.
+    if (binding.schedulerPhase == SchedulerPhase.persistentCallbacks) {
+      binding.addPostFrameCallback((_) {
+        if (mounted) setState(() {});
+      });
+    } else if (mounted) {
+      setState(() {});
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final currentTrack = ref.watch(currentTrackProvider).valueOrNull;
-    debugPrint(
-      '[DEBUG-a4f2] build track=${currentTrack?.id} '
-      'fullscreen=${videoFullscreenNotifier.value} '
-      'phase=${WidgetsBinding.instance.schedulerPhase}',
-    );
     if (currentTrack == null) return const SizedBox.shrink();
     if (videoFullscreenNotifier.value) return const SizedBox.shrink();
     return _buildBar(context, ref, currentTrack);

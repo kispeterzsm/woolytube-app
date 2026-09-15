@@ -682,11 +682,13 @@ class _AudioPlayerView extends ConsumerStatefulWidget {
 }
 
 class _AudioPlayerViewState extends ConsumerState<_AudioPlayerView> {
+  static _AudioPlayerViewState? _activeView;
   final _controlPanelKey = GlobalKey();
 
   @override
   void initState() {
     super.initState();
+    _activeView = this;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _updateOverlayHeight();
     });
@@ -694,7 +696,16 @@ class _AudioPlayerViewState extends ConsumerState<_AudioPlayerView> {
 
   @override
   void dispose() {
-    audioPlayerOverlayHeightNotifier.value = 0;
+    if (identical(_activeView, this)) {
+      _activeView = null;
+      // The playlist listens to this inset. Notifying during route teardown
+      // dirties its widgets while the tree is locked, which can also prevent
+      // the mini-player's rebuild from scheduling a new frame.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        // A replacement audio view may already have published its own inset.
+        if (_activeView == null) audioPlayerOverlayHeightNotifier.value = 0;
+      });
+    }
     super.dispose();
   }
 
@@ -708,7 +719,7 @@ class _AudioPlayerViewState extends ConsumerState<_AudioPlayerView> {
   }
 
   void _updateOverlayHeight() {
-    if (!mounted) return;
+    if (!mounted || !identical(_activeView, this)) return;
     // Include the system gesture/navigation area because this route is drawn
     // edge-to-edge over the page below it.
     final panelHeight = _controlPanelKey.currentContext?.size?.height;
