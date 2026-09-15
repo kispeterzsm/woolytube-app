@@ -455,6 +455,8 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                     track,
                     allTracks,
                     playlist: _playlist,
+                    chapterId:
+                        matchingChapterForSearch(track, _searchQuery)?.id,
                   );
                 }
                 : null,

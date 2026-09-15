@@ -298,7 +298,13 @@ class _HomePageState extends ConsumerState<HomePage> {
                 ? () {
                   ref
                       .read(playbackServiceProvider)
-                      .playTrack(track, playlistTracks, playlist: playlist);
+                      .playTrack(
+                        track,
+                        playlistTracks,
+                        playlist: playlist,
+                        chapterId:
+                            matchingChapterForSearch(track, _searchQuery)?.id,
+                      );
                 }
                 : null,
         child: Padding(

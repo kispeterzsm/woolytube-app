@@ -32,6 +32,10 @@ void main() {
       expect(matchesTrackSearch(track, query), isTrue, reason: query);
     }
     expect(matchesTrackSearch(track, 'absent'), isFalse);
+    expect(matchingChapterForSearch(track, ' HIDDEN melody ')?.id, 'one');
+    expect(matchingChapterForSearch(track, 'Full album'), isNull);
+    expect(matchingChapterForSearch(track, '42'), isNull);
+    expect(matchingChapterForSearch(track, '   '), isNull);
     final custom = ChapterData.decode(track.chaptersJson).withCustom([
       const MediaChapter(
         id: 'custom',
@@ -43,6 +47,43 @@ void main() {
     final edited = track.copyWith(chaptersJson: Value(custom.encode()));
     expect(matchesTrackSearch(edited, 'hidden'), isFalse);
     expect(matchesTrackSearch(edited, 'renamed'), isTrue);
+    expect(matchingChapterForSearch(edited, 'renamed')?.id, 'custom');
+    expect(matchingChapterForSearch(edited, 'hidden'), isNull);
+    final multiple = track.copyWith(
+      chaptersJson: Value(
+        const ChapterData(
+          downloaded: [
+            MediaChapter(
+              id: 'later',
+              title: 'Melody reprise',
+              startMs: 20000,
+              endMs: 30000,
+            ),
+            MediaChapter(
+              id: 'earlier',
+              title: 'Melody',
+              startMs: 10000,
+              endMs: 20000,
+            ),
+          ],
+        ).encode(),
+      ),
+    );
+    expect(matchingChapterForSearch(multiple, 'melody')?.id, 'earlier');
+    expect(
+      matchingChapterForSearch(
+        track.copyWith(chaptersJson: Value(custom.invalidate().encode())),
+        'renamed',
+      ),
+      isNull,
+    );
+    expect(
+      matchingChapterForSearch(
+        track.copyWith(chaptersJson: const Value('invalid json')),
+        'hidden',
+      ),
+      isNull,
+    );
     expect(
       matchesTrackSearch(
         track.copyWith(chaptersEnabled: const Value(false)),
