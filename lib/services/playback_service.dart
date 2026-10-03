@@ -222,6 +222,7 @@ class PlaybackService
   @override
   bool get shuffleEnabled => _shuffleEnabled.value;
   bool get autoplayEnabled => _autoplayEnabled.value;
+  @override
   bool get audioOnlyMode => _audioOnlyMode.value;
   Duration? get pendingSegmentMarkStart => _pendingSegmentMarkStart.value;
   List<PlaybackSponsorBlockSegment> get sponsorBlockSegments =>

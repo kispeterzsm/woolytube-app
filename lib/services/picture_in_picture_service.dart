@@ -12,6 +12,7 @@ abstract interface class PictureInPicturePlaybackController {
 
   bool get isPlaying;
   bool get isVideoContent;
+  bool get audioOnlyMode;
 
   Future<void> togglePlayPause();
   Future<void> next();
@@ -68,9 +69,12 @@ class PictureInPictureService {
       case 'enableAudioOnly':
         // The PiP headphone action is a background convenience, unlike the
         // persistent audio-only toggle in the player UI. Restore video when
-        // the user explicitly brings WoolyTube back to the foreground.
-        _restoreVideoOnNextForeground = true;
-        await _playback.setAudioOnlyMode(true);
+        // the user explicitly brings WoolyTube back to the foreground, but
+        // only if this action is what switched video off.
+        if (!_playback.audioOnlyMode) {
+          _restoreVideoOnNextForeground = true;
+          await _playback.setAudioOnlyMode(true);
+        }
         return null;
       case 'togglePlayPause':
         await _playback.togglePlayPause();

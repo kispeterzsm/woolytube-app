@@ -69,6 +69,11 @@ void main() {
     expect(playback.nextCalls, 1);
     expect(playback.previousCalls, 1);
     expect(playback.seekPositions, [const Duration(seconds: 42)]);
+    expect(
+      handler.playbackState.value.updatePosition,
+      const Duration(seconds: 42),
+      reason: 'seek must publish the new position without waiting',
+    );
   });
 
   test('routes next and previous media-button callbacks to playback', () async {

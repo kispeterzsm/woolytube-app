@@ -80,6 +80,16 @@ void main() {
     await service.handleAppResumed();
     expect(playback.audioOnlyCalls, isEmpty);
   });
+
+  test('keeps a manual audio-only setting across the PiP action', () async {
+    await playback.setAudioOnlyMode(true);
+    expect(playback.audioOnlyCalls, [true]);
+
+    await service.handlePlatformCall(const MethodCall('enableAudioOnly'));
+    await service.handleAppResumed();
+
+    expect(playback.audioOnlyCalls, [true]);
+  });
 }
 
 Future<void> _flushStreams() async {
@@ -109,6 +119,9 @@ class _FakePipPlayback implements PictureInPicturePlaybackController {
 
   @override
   bool get isVideoContent => _video.value;
+
+  @override
+  bool get audioOnlyMode => audioOnlyCalls.isNotEmpty && audioOnlyCalls.last;
 
   void setPlaying(bool value) => _playing.add(value);
   void setVideo(bool value) => _video.add(value);

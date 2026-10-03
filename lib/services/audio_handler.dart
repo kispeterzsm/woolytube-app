@@ -311,8 +311,11 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   @override
-  Future<void> seek(Duration position) async =>
-      await _playbackService.seekTo(position);
+  Future<void> seek(Duration position) async {
+    await _playbackService.seekTo(position);
+    // The throttled position stream may lag; show the new position at once.
+    _broadcastState();
+  }
 
   @override
   Future<dynamic> customAction(
