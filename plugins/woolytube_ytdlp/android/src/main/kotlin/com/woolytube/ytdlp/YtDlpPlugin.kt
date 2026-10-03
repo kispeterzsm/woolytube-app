@@ -92,6 +92,8 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "startDownloadService" -> handleStartDownloadService(call.arguments as Map<*, *>, result)
             "updateDownloadServiceProgress" -> handleUpdateDownloadServiceProgress(call.arguments as Map<*, *>, result)
             "stopDownloadService" -> handleStopDownloadService(result)
+            "decodeAudioWindow" -> handleDecodeAudioWindow(call.arguments as Map<*, *>, result)
+            "probeMediaDurationMs" -> handleProbeMediaDuration(call.arguments as Map<*, *>, result)
             else -> result.notImplemented()
         }
     }
@@ -386,6 +388,42 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         } catch (e: Exception) {
             Log.w(TAG, "Failed to update download service progress", e)
             result.success(null)
+        }
+    }
+
+    private fun handleDecodeAudioWindow(args: Map<*, *>, result: MethodChannel.Result) {
+        val path = args["path"] as? String
+        val startMs = (args["startMs"] as? Number)?.toLong() ?: 0L
+        val durationMs = (args["durationMs"] as? Number)?.toLong() ?: 0L
+        if (path == null || durationMs <= 0) {
+            result.error("INVALID_ARGS", "path and durationMs are required", null)
+            return
+        }
+        scope.launch {
+            try {
+                val pcm = AudioWindowDecoder.decodeWindow(path, startMs, durationMs)
+                withContext(Dispatchers.Main) { result.success(pcm) }
+            } catch (e: Exception) {
+                Log.w(TAG, "Audio window decode failed", e)
+                withContext(Dispatchers.Main) { result.error("DECODE_ERROR", e.message, null) }
+            }
+        }
+    }
+
+    private fun handleProbeMediaDuration(args: Map<*, *>, result: MethodChannel.Result) {
+        val path = args["path"] as? String
+        if (path == null) {
+            result.error("INVALID_ARGS", "path is required", null)
+            return
+        }
+        scope.launch {
+            try {
+                val duration = AudioWindowDecoder.probeDurationMs(path)
+                withContext(Dispatchers.Main) { result.success(duration) }
+            } catch (e: Exception) {
+                Log.w(TAG, "Duration probe failed", e)
+                withContext(Dispatchers.Main) { result.error("PROBE_ERROR", e.message, null) }
+            }
         }
     }
 

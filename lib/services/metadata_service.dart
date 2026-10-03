@@ -556,6 +556,41 @@ class MetadataService {
     return collapsed.isEmpty ? '_' : collapsed;
   }
 
+  /// Resolves a stored track path (which may lack its extension) to the
+  /// file on disk: the exact path, the same basename with any extension, or
+  /// the first media file sharing its index prefix.
+  static String? resolveStoredFilePath(String storedPath) {
+    if (File(storedPath).existsSync()) return storedPath;
+
+    final dir = Directory(p.dirname(storedPath));
+    final baseName = p.basename(storedPath);
+    if (!dir.existsSync()) return null;
+
+    for (final entity in dir.listSync()) {
+      if (entity is File &&
+          p.basenameWithoutExtension(entity.path) == baseName) {
+        return entity.path;
+      }
+    }
+
+    final indexPrefixMatch = RegExp(r'^\d+[_ -]').firstMatch(baseName);
+    if (indexPrefixMatch != null) {
+      final prefix = indexPrefixMatch.group(0)!;
+      for (final entity in dir.listSync()) {
+        if (entity is File) {
+          final fileName = p.basename(entity.path);
+          final ext = p.extension(entity.path).toLowerCase();
+          if (fileName.startsWith(prefix) &&
+              mediaExtensions.contains(ext) &&
+              !isTransientFile(fileName)) {
+            return entity.path;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
   /// Find a media file in [dirPath] matching an index prefix (e.g. "001_").
   /// Intermediate and staging files are never returned, even when their
   /// extension looks like media.
