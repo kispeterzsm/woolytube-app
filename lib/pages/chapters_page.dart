@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../database/database.dart';
@@ -6,7 +8,9 @@ import '../providers/playback_providers.dart';
 import '../services/chapters.dart';
 import '../services/playback_service.dart';
 import '../services/playlist_service.dart';
+import '../services/recognition/song_recognition_service.dart';
 import '../widgets/mobile_data_download_guard.dart';
+import 'recognition_review_page.dart';
 
 class ChaptersPage extends ConsumerStatefulWidget {
   final Track track;
@@ -25,12 +29,84 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
   /// position updates are ignored until the drag ends and one seek is sent.
   double? _dragPositionMs;
 
+  /// The last completed recognition scan for this file, if any.
+  RecognitionRun? _recognitionRun;
+
   @override
   void initState() {
     super.initState();
     _tracks = ref
         .read(databaseProvider)
         .watchTracksForPlaylist(widget.track.playlistId);
+    unawaited(_loadRecognitionRun());
+  }
+
+  Future<void> _loadRecognitionRun() async {
+    try {
+      final run = await ref
+          .read(songRecognitionServiceProvider)
+          .loadRun(widget.track);
+      if (mounted) setState(() => _recognitionRun = run);
+    } catch (_) {
+      // No cached run is the same as none.
+    }
+  }
+
+  Future<void> _recognizeSongs(Track track) async {
+    if (ref.read(downloadServiceProvider).isDownloading) {
+      throw StateError('Wait for the running download to finish first.');
+    }
+    if (!await confirmManualDownload(
+      context,
+      ref.read(downloadNetworkPolicyProvider),
+    )) {
+      return;
+    }
+    final service = ref.read(songRecognitionServiceProvider);
+    // The scan outlives this page; results are picked up through the
+    // progress stream and the cached run.
+    unawaited(
+      service
+          .scan(track)
+          .then((run) {
+            if (!mounted) return;
+            setState(() => _recognitionRun = run);
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  'Recognized ${run.proposals.length} section${run.proposals.length == 1 ? '' : 's'} in "${track.title}".',
+                ),
+                action: SnackBarAction(
+                  label: 'Review',
+                  onPressed: () => _openReview(track, run),
+                ),
+              ),
+            );
+          })
+          .catchError((Object error) {
+            if (!mounted || error is RecognitionCancelled) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Recognition failed: $error')),
+            );
+          }),
+    );
+  }
+
+  Future<void> _openReview(Track track, RecognitionRun run) async {
+    final applied = await Navigator.of(context).push<int>(
+      MaterialPageRoute(
+        builder: (_) => RecognitionReviewPage(track: track, run: run),
+      ),
+    );
+    if (applied != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Applied $applied chapter${applied == 1 ? '' : 's'}. Undo is below if needed.',
+          ),
+        ),
+      );
+    }
   }
 
   @override
@@ -120,6 +196,103 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
     await ref
         .read(chapterServiceProvider)
         .save(track, result, durationMs: durationMs);
+  }
+
+  Widget _buildRecognitionSection(
+    BuildContext context,
+    Track track,
+    ChapterData data,
+    bool playable,
+  ) {
+    final progress = ref.watch(recognitionProgressProvider).valueOrNull;
+    final service = ref.read(chapterServiceProvider);
+    final scanningThis =
+        progress != null && progress.running && progress.trackId == track.id;
+    final scanningOther = progress?.running == true && !scanningThis;
+    final run = _recognitionRun;
+    final hasAutomatic = data.active.any(
+      (c) => c.origin == ChapterOrigin.auto && !c.manuallyEdited,
+    );
+    final theme = Theme.of(context);
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 8),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Song recognition', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 4),
+            const Text(
+              'Identifies the songs in a long mix by fingerprinting short samples and proposes chapters for you to review. Only fingerprints are sent, never audio.',
+            ),
+            if (scanningThis) ...[
+              const SizedBox(height: 8),
+              LinearProgressIndicator(
+                value:
+                    progress.total > 0 &&
+                            progress.phase == RecognitionPhase.sampling
+                        ? progress.completed / progress.total
+                        : null,
+              ),
+              const SizedBox(height: 4),
+              Text(switch (progress.phase) {
+                RecognitionPhase.sampling =>
+                  'Recognizing samples ${progress.completed} of ${progress.total}…',
+                RecognitionPhase.silence => 'Finding quiet transitions…',
+                _ => 'Estimating chapters…',
+              }, style: theme.textTheme.bodySmall),
+            ],
+            Wrap(
+              spacing: 8,
+              children: [
+                if (scanningThis)
+                  TextButton.icon(
+                    key: const ValueKey('cancel-recognition'),
+                    onPressed:
+                        () => ref.read(songRecognitionServiceProvider).cancel(),
+                    icon: const Icon(Icons.stop),
+                    label: const Text('Cancel'),
+                  )
+                else
+                  TextButton.icon(
+                    key: const ValueKey('recognize-songs'),
+                    onPressed:
+                        _busy || !playable || scanningOther
+                            ? null
+                            : () => _run(() => _recognizeSongs(track)),
+                    icon: const Icon(Icons.graphic_eq),
+                    label: Text(
+                      run == null ? 'Recognize songs' : 'Recognize again',
+                    ),
+                  ),
+                if (run != null && !scanningThis)
+                  FilledButton.tonalIcon(
+                    key: const ValueKey('review-proposals'),
+                    onPressed: _busy ? null : () => _openReview(track, run),
+                    icon: const Icon(Icons.fact_check_outlined),
+                    label: Text('Review ${run.proposals.length} proposals'),
+                  ),
+                if (hasAutomatic)
+                  TextButton(
+                    key: const ValueKey('remove-automatic'),
+                    onPressed:
+                        _busy
+                            ? null
+                            : () => _run(() => service.removeAutomatic(track)),
+                    child: const Text('Remove automatic chapters'),
+                  ),
+              ],
+            ),
+            if (scanningOther)
+              Text(
+                'Another file is being scanned.',
+                style: theme.textTheme.bodySmall,
+              ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -257,8 +430,16 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                               : () => _run(() => service.restore(track)),
                       child: const Text('Restore downloaded chapters'),
                     ),
+                  if (data.undoChapters != null)
+                    TextButton.icon(
+                      onPressed:
+                          _busy ? null : () => _run(() => service.undo(track)),
+                      icon: const Icon(Icons.undo),
+                      label: const Text('Undo last chapter change'),
+                    ),
                 ],
               ),
+              _buildRecognitionSection(context, track, data, playable),
               if (marking)
                 Card(
                   child: Padding(
@@ -387,8 +568,11 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                   child: ListTile(
                     title: Text(chapter.title),
                     subtitle: Text(
-                      '${chapterTimestamp(chapter.startMs)} – ${chapterTimestamp(chapter.endMs)} · ${chapterTimestamp(chapter.duration.inMilliseconds)}',
+                      '${chapterTimestamp(chapter.startMs)} – ${chapterTimestamp(chapter.endMs)} · ${chapterTimestamp(chapter.duration.inMilliseconds)}'
+                      '${chapter.origin == ChapterOrigin.auto ? (chapter.manuallyEdited ? ' · Auto, edited' : ' · Auto') : ''}'
+                      '${chapter.reviewReasons.isEmpty ? '' : '\n${chapter.reviewReasons.first}'}',
                     ),
+                    isThreeLine: chapter.reviewReasons.isNotEmpty,
                     leading: IconButton(
                       tooltip: 'Play chapter',
                       icon: const Icon(Icons.play_arrow),
