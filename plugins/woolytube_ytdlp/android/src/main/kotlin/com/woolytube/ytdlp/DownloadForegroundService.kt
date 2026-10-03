@@ -21,6 +21,8 @@ class DownloadForegroundService : Service() {
         private const val CHANNEL_NAME = "WoolyTube Downloads"
         private const val NOTIFICATION_ID = 2000
         private const val WAKE_LOCK_TAG = "WoolyTube:DownloadWakeLock"
+        private const val WAKE_LOCK_TIMEOUT_MS = 60 * 60 * 1000L
+        private const val MIN_NOTIFY_INTERVAL_MS = 500L
 
         const val ACTION_START_OR_UPDATE = "com.woolytube.download.START_OR_UPDATE"
         const val ACTION_STOP = "com.woolytube.download.STOP"
@@ -33,6 +35,7 @@ class DownloadForegroundService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var startedForeground = false
+    private var lastNotifyAtMs = 0L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -42,7 +45,18 @@ class DownloadForegroundService : Service() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG).apply {
             setReferenceCounted(false)
-            acquire(60 * 60 * 1000L)
+            acquire(WAKE_LOCK_TIMEOUT_MS)
+        }
+    }
+
+    // Re-arms the timeout; the lock is not reference counted, so a repeated
+    // acquire only extends it. Without this a playlist taking longer than an
+    // hour continued without the lock.
+    private fun renewWakeLock() {
+        try {
+            wakeLock?.acquire(WAKE_LOCK_TIMEOUT_MS)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to renew wake lock", e)
         }
     }
 
@@ -54,13 +68,14 @@ class DownloadForegroundService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_START_OR_UPDATE, null -> {
+                renewWakeLock()
                 val playlistName = intent?.getStringExtra(EXTRA_PLAYLIST_NAME) ?: "playlist"
                 val current = intent?.getIntExtra(EXTRA_CURRENT_TRACK, 0) ?: 0
                 val total = intent?.getIntExtra(EXTRA_TOTAL_TRACKS, 0) ?: 0
                 val progress = intent?.getIntExtra(EXTRA_PROGRESS, 0) ?: 0
-                val notification = buildNotification(playlistName, current, total, progress)
 
                 if (!startedForeground) {
+                    val notification = buildNotification(playlistName, current, total, progress)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                         startForeground(
                             NOTIFICATION_ID,
@@ -71,9 +86,17 @@ class DownloadForegroundService : Service() {
                         startForeground(NOTIFICATION_ID, notification)
                     }
                     startedForeground = true
+                    lastNotifyAtMs = System.currentTimeMillis()
                 } else {
-                    val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                    nm.notify(NOTIFICATION_ID, notification)
+                    // yt-dlp reports progress many times per second; posting every
+                    // update makes the shade sluggish and is rate limited anyway.
+                    val now = System.currentTimeMillis()
+                    if (now - lastNotifyAtMs >= MIN_NOTIFY_INTERVAL_MS) {
+                        lastNotifyAtMs = now
+                        val notification = buildNotification(playlistName, current, total, progress)
+                        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                        nm.notify(NOTIFICATION_ID, notification)
+                    }
                 }
             }
         }

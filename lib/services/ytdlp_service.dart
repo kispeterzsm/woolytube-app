@@ -70,12 +70,6 @@ class YtDlpService {
     return jsonDecode(result!) as Map<String, dynamic>;
   }
 
-  Future<void> cancelDownload(String processId) async {
-    await _methodChannel.invokeMethod('cancelDownload', {
-      'processId': processId,
-    });
-  }
-
   Future<void> cancelDownloads() async {
     await _methodChannel.invokeMethod('cancelDownloads');
   }
