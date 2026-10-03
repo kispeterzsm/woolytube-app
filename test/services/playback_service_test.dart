@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -254,6 +255,78 @@ void main() {
       await settle();
       expect(player.state.playing, isTrue);
       expect(player.plays, 1);
+    });
+
+    test('skipping re-arms after a near-end segment pauses playback', () async {
+      final track = await addTrack('track');
+      for (final range in const [(5000, 8000), (56000, 60000)]) {
+        await db.insertSegment(
+          SponsorBlockSegmentsCompanion.insert(
+            trackId: track.id,
+            videoId: track.videoId,
+            source: 'local',
+            category: 'sponsor',
+            startMs: range.$1,
+            endMs: range.$2,
+            createdAt: DateTime.now(),
+          ),
+        );
+      }
+      playback.setAutoplayEnabled(false);
+      await playback.playTrack(track, [track]);
+
+      player.tick(const Duration(seconds: 57));
+      await settle();
+      expect(player.state.playing, isFalse);
+      expect(player.seeks, isEmpty);
+
+      await playback.seekTo(Duration.zero);
+      await playback.resume();
+      player.tick(const Duration(seconds: 6));
+      await settle();
+      expect(player.seeks.last, const Duration(milliseconds: 8250));
+    });
+
+    test('a sleep timer that fires mid-load still pauses', () async {
+      final track = await addTrack('track');
+      playback.startSleepTimer(const Duration(milliseconds: 20));
+      player.openGate = Completer<void>();
+      final loading = playback.playTrack(track, [track]);
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      expect(playback.sleepTimerRemaining, isNull);
+
+      player.openGate!.complete();
+      player.openGate = null;
+      await loading;
+      await settle();
+
+      expect(player.opened, hasLength(1));
+      expect(player.state.playing, isFalse);
+    });
+
+    test('completion followed by an immediate next advances once', () async {
+      final track = await addTrack('album', chapters: threeChapters);
+      await playback.playTrack(track, [track]);
+
+      player.finish();
+      await playback.next();
+      await settle();
+
+      expect(playback.currentTrack!.title, 'Second song');
+      expect(player.opened, hasLength(2));
+    });
+
+    test('previous at the first item restarts it', () async {
+      final track = await addTrack('album', chapters: threeChapters);
+      await playback.playTrack(track, [track], chapterId: 'two');
+      player.tick(const Duration(seconds: 21));
+      expect(playback.position, const Duration(seconds: 1));
+
+      await playback.previous();
+
+      expect(playback.currentTrack!.title, 'Second song');
+      expect(player.seeks.last, const Duration(seconds: 20));
+      expect(playback.position, Duration.zero);
     });
 
     test(

@@ -113,6 +113,7 @@ class PlaybackService
   Future<void> _playbackTransition = Future.value();
   bool _loading = false;
   bool _completionHandled = false;
+  bool _completionAdvancePending = false;
   bool _chapterEditing = false;
   int _generation = 0;
   int? _loadedTrackId;
@@ -239,15 +240,22 @@ class PlaybackService
   PlaybackService(this._db, {Random? random, Player? player}) {
     _player = player ?? Player();
     _albumQueue = AlbumPlaybackQueue(random: random);
-    _sleepTimer = SleepTimerController(onElapsed: pause);
+    // Route the sleep timer through the transition chain so a track change
+    // that is in flight when the timer fires cannot swallow the pause.
+    _sleepTimer = SleepTimerController(onElapsed: () => _transition(pause));
     _subscriptions.add(
       _player.stream.completed.listen((completed) {
         if (completed && !_loading && !_chapterEditing && !_completionHandled) {
           _completionHandled = true;
           final generation = _generation;
+          final completedId = currentMediaId;
+          _completionAdvancePending = true;
           unawaited(
             _transition(() async {
-              if (generation != _generation) return;
+              _completionAdvancePending = false;
+              if (generation != _generation || currentMediaId != completedId) {
+                return;
+              }
               if (autoplayEnabled) await _advance();
             }),
           );
@@ -817,10 +825,15 @@ class PlaybackService
       final targetMs = segment.endMs + 250;
       if (durationMs > 0 && targetMs >= durationMs - 500) {
         _isSeekingPastSegment = true;
-        await pause();
-        if (autoplayEnabled && !_completionHandled) {
-          _completionHandled = true;
-          await next();
+        try {
+          await pause();
+          if (autoplayEnabled && !_completionHandled) {
+            _completionHandled = true;
+            await next();
+          }
+        } finally {
+          // Re-arm skipping so a later seek back into the item still works.
+          _isSeekingPastSegment = false;
         }
         return;
       }
@@ -924,17 +937,28 @@ class PlaybackService
   }
 
   @override
-  Future<void> next() => _transition(() async {
-    await _advance();
-  });
+  Future<void> next() {
+    final completionPending = _completionAdvancePending;
+    final fromId = currentMediaId;
+    return _transition(() async {
+      // A natural completion queued just before this press already moved on.
+      if (completionPending && currentMediaId != fromId) return;
+      await _advance();
+    });
+  }
 
   @override
-  Future<void> nextFile() => _transition(() async {
-    if (!await _advance(skipFile: true)) {
-      _completionHandled = true;
-      await _player.pause();
-    }
-  });
+  Future<void> nextFile() {
+    final completionPending = _completionAdvancePending;
+    final fromTrackId = currentTrack?.id;
+    return _transition(() async {
+      if (completionPending && currentTrack?.id != fromTrackId) return;
+      if (!await _advance(skipFile: true)) {
+        _completionHandled = true;
+        await _player.pause();
+      }
+    });
+  }
 
   @override
   Future<void> previous() => _transition(() async {
@@ -942,7 +966,9 @@ class PlaybackService
       await seekTo(Duration.zero);
       return;
     }
-    await _advance(forward: false);
+    if (!await _advance(forward: false) && _loadedTrackId != null) {
+      await seekTo(Duration.zero);
+    }
   });
 
   void setShuffleEnabled(bool enabled) {
