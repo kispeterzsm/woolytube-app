@@ -19,8 +19,10 @@ class AppUpdate {
 }
 
 class UpdateService {
-  UpdateService({HttpClient? httpClient})
-    : _httpClient = httpClient ?? HttpClient();
+  UpdateService({HttpClient? httpClient}) : _httpClient = httpClient;
+
+  static const connectionTimeout = Duration(seconds: 10);
+  static const requestTimeout = Duration(seconds: 20);
 
   static const MethodChannel _appUpdateChannel = MethodChannel(
     'com.woolytube/app_update',
@@ -31,12 +33,23 @@ class UpdateService {
     '/repos/kispeterzsm/woolytube-app/releases/latest',
   );
 
-  final HttpClient _httpClient;
+  /// Injected for tests; otherwise each check opens and closes its own client
+  /// so no idle connection outlives the check.
+  final HttpClient? _httpClient;
 
   Future<AppUpdate?> checkForUpdate({String? currentVersion}) async {
     final installedVersion =
         currentVersion ?? (await PackageInfo.fromPlatform()).version;
-    final release = await _fetchLatestRelease(await _getSupportedAbis());
+    final supportedAbis = await _getSupportedAbis();
+    final ownsClient = _httpClient == null;
+    final client =
+        _httpClient ?? (HttpClient()..connectionTimeout = connectionTimeout);
+    final _GitHubRelease? release;
+    try {
+      release = await _fetchLatestRelease(client, supportedAbis);
+    } finally {
+      if (ownsClient) client.close(force: true);
+    }
     if (release == null || !isVersionNewer(release.version, installedVersion)) {
       return null;
     }
@@ -70,9 +83,12 @@ class UpdateService {
   }
 
   Future<_GitHubRelease?> _fetchLatestRelease(
+    HttpClient client,
     List<String> supportedAbis,
   ) async {
-    final request = await _httpClient.getUrl(_latestReleaseUri);
+    final request = await client
+        .getUrl(_latestReleaseUri)
+        .timeout(requestTimeout);
     request.headers.set(
       HttpHeaders.acceptHeader,
       'application/vnd.github+json',
@@ -82,8 +98,11 @@ class UpdateService {
       'WoolyTube update checker',
     );
 
-    final response = await request.close();
-    final body = await response.transform(utf8.decoder).join();
+    final response = await request.close().timeout(requestTimeout);
+    final body = await response
+        .transform(utf8.decoder)
+        .join()
+        .timeout(requestTimeout);
     if (response.statusCode == HttpStatus.notFound) {
       return null;
     }
