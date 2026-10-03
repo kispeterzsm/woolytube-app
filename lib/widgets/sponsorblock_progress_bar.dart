@@ -89,10 +89,10 @@ class _SegmentedProgressPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final radius = Radius.circular(size.height / 2);
     final base = RRect.fromRectAndRadius(Offset.zero & size, radius);
-    if (backgroundColor.alpha > 0) {
+    if (backgroundColor.a > 0) {
       canvas.drawRRect(base, Paint()..color = backgroundColor);
     }
-    if (progressColor.alpha > 0 && progress > 0) {
+    if (progressColor.a > 0 && progress > 0) {
       canvas.drawRRect(
         RRect.fromRectAndRadius(
           Rect.fromLTWH(0, 0, size.width * progress, size.height),

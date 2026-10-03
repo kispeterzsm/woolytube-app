@@ -68,112 +68,152 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
         duration.inMilliseconds > 0
             ? position.inMilliseconds / duration.inMilliseconds
             : 0.0;
+    // The bar sits outside the Navigator, so there is usually no Overlay for
+    // Tooltip to attach to; fall back to semantics labels there.
+    final hasOverlay = Overlay.maybeOf(context) != null;
 
-    return GestureDetector(
-      onTap: _openPlayer,
-      child: Container(
-        decoration: const BoxDecoration(
-          color: Color(0xFF2A2A2A),
-          border: Border(top: BorderSide(color: Color(0xFF333333), width: 0.5)),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            SegmentedProgressBar(
-              progress: progress,
-              durationMs: duration.inMilliseconds,
-              segments: sponsorBlockSegments,
-              height: 2,
-            ),
-            // Content
-            SizedBox(
-              height: 62,
-              child: Row(
-                children: [
-                  const SizedBox(width: 12),
-                  // Thumbnail or video preview
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(4),
-                    child: SizedBox(
-                      width: 48,
-                      height: 48,
-                      child:
-                          isVideo
-                              ? Video(
-                                controller: playbackService.videoController,
-                                controls: noVideoControls,
-                                pauseUponEnteringBackgroundMode: false,
-                              )
-                              : _buildThumbnail(currentTrack),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  // Title
-                  Expanded(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          currentTrack.title,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w500,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          _formatDuration(position, duration),
-                          style: const TextStyle(
-                            color: Color(0xFF888888),
-                            fontSize: 11,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  // Controls
-                  IconButton(
-                    icon: Icon(
-                      isPlaying ? Icons.pause : Icons.play_arrow,
-                      color: Colors.white,
-                      size: 28,
-                    ),
-                    onPressed: playbackService.togglePlayPause,
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(minWidth: 40),
-                  ),
-                  IconButton(
-                    icon: const Icon(
-                      Icons.skip_next,
-                      color: Colors.white,
-                      size: 24,
-                    ),
-                    onPressed: () => playbackService.next(),
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(minWidth: 40),
-                  ),
-                  const NextFileButton(iconSize: 28),
-                  // Close button
-                  IconButton(
-                    icon: const Icon(
-                      Icons.close,
-                      color: Color(0xFF888888),
-                      size: 20,
-                    ),
-                    onPressed: () => playbackService.stop(),
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(minWidth: 36),
-                  ),
-                  const SizedBox(width: 4),
-                ],
+    // The bar lives in MaterialApp.builder, outside any Scaffold, so it needs
+    // its own Material ancestor for text styling and ink effects.
+    return Material(
+      color: const Color(0xFF2A2A2A),
+      child: Semantics(
+        button: true,
+        label: 'Open player',
+        // Keep the title and control buttons as their own nodes so this
+        // label stays exactly 'Open player' for screen readers.
+        explicitChildNodes: true,
+        child: GestureDetector(
+          onTap: _openPlayer,
+          behavior: HitTestBehavior.opaque,
+          child: Container(
+            decoration: const BoxDecoration(
+              border: Border(
+                top: BorderSide(color: Color(0xFF333333), width: 0.5),
               ),
             ),
-          ],
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SegmentedProgressBar(
+                  progress: progress,
+                  durationMs: duration.inMilliseconds,
+                  segments: sponsorBlockSegments,
+                  height: 2,
+                ),
+                // Content
+                SizedBox(
+                  height: 62,
+                  child: Row(
+                    children: [
+                      const SizedBox(width: 12),
+                      // Thumbnail or video preview
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(4),
+                        child: SizedBox(
+                          width: 48,
+                          height: 48,
+                          child:
+                              isVideo
+                                  ? Video(
+                                    controller: playbackService.videoController,
+                                    controls: noVideoControls,
+                                    pauseUponEnteringBackgroundMode: false,
+                                  )
+                                  : _buildThumbnail(currentTrack),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      // Title
+                      Expanded(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              currentTrack.title,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              _formatDuration(position, duration),
+                              style: const TextStyle(
+                                color: Color(0xFF888888),
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      // Controls
+                      _barButton(
+                        label: isPlaying ? 'Pause' : 'Play',
+                        hasOverlay: hasOverlay,
+                        icon: Icon(
+                          isPlaying ? Icons.pause : Icons.play_arrow,
+                          color: Colors.white,
+                          size: 28,
+                        ),
+                        onPressed: playbackService.togglePlayPause,
+                        minWidth: 40,
+                      ),
+                      _barButton(
+                        label: 'Next',
+                        hasOverlay: hasOverlay,
+                        icon: const Icon(
+                          Icons.skip_next,
+                          color: Colors.white,
+                          size: 24,
+                        ),
+                        onPressed: () => playbackService.next(),
+                        minWidth: 40,
+                      ),
+                      const NextFileButton(iconSize: 28),
+                      // Close button
+                      _barButton(
+                        label: 'Close player',
+                        hasOverlay: hasOverlay,
+                        icon: const Icon(
+                          Icons.close,
+                          color: Color(0xFF888888),
+                          size: 20,
+                        ),
+                        onPressed: () => playbackService.stop(),
+                        minWidth: 36,
+                      ),
+                      const SizedBox(width: 4),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
+      ),
+    );
+  }
+
+  Widget _barButton({
+    required String label,
+    required bool hasOverlay,
+    required Widget icon,
+    required VoidCallback onPressed,
+    required double minWidth,
+  }) {
+    return Semantics(
+      label: hasOverlay ? null : label,
+      button: true,
+      child: IconButton(
+        icon: icon,
+        tooltip: hasOverlay ? label : null,
+        onPressed: onPressed,
+        padding: EdgeInsets.zero,
+        constraints: BoxConstraints(minWidth: minWidth),
       ),
     );
   }
