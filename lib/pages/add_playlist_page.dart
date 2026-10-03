@@ -122,8 +122,12 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
 
     setState(() => _adding = true);
 
+    // Read providers before awaiting: `ref` is unusable after disposal and
+    // the download must still start if the user leaves this page.
+    final service = ref.read(playlistServiceProvider);
+    final db = ref.read(databaseProvider);
+    final downloadService = ref.read(downloadServiceProvider);
     try {
-      final service = ref.read(playlistServiceProvider);
       final playlistId = await service.addPlaylist(
         url: url,
         name: title,
@@ -139,9 +143,8 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
 
       // Start downloading automatically. The playlist exists now, so the
       // download runs regardless of whether this page is still open.
-      final db = ref.read(databaseProvider);
       final playlist = await db.getPlaylist(playlistId);
-      unawaited(ref.read(downloadServiceProvider).downloadPlaylist(playlist));
+      unawaited(downloadService.downloadPlaylist(playlist));
 
       if (!mounted) return;
       Navigator.of(context).pop();

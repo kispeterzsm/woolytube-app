@@ -22,15 +22,16 @@ void backgroundMain() async {
   try {
     final ytdlp = YtDlpService();
     // The foreground app shares this process's yt-dlp runtime. Never start a
-    // second download next to one it is running, and never take over its
-    // lock while it holds it (a sync between two tracks has no process).
+    // second download next to one it is running, and never run while it
+    // holds the lock (a sync between two tracks has no process). The
+    // download service re-checks the lock before every playlist.
     if (await ytdlp.hasActiveDownloads() ||
-        !await lock.acquire(DownloadLock.backgroundOwner)) {
+        await lock.isHeldByOther(DownloadLock.backgroundOwner)) {
       controlChannel.invokeMethod('taskComplete', null);
       return;
     }
 
-    try {
+    {
       final db = AppDatabase();
       await ytdlp.initialize();
 
@@ -56,6 +57,7 @@ void backgroundMain() async {
         sponsorBlock,
         null,
         lock,
+        DownloadLock.backgroundOwner,
       );
 
       for (final playlist in duePlaylists) {
@@ -70,8 +72,6 @@ void backgroundMain() async {
       }
 
       controlChannel.invokeMethod('taskComplete', null);
-    } finally {
-      await lock.release();
     }
   } catch (e) {
     controlChannel.invokeMethod('taskFailed', {'error': e.toString()});

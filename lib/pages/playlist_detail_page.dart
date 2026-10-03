@@ -811,7 +811,10 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     final playlist = _playlist;
     if (playlist == null || _isUpdating) return;
 
+    // Read every provider before the first await: `ref` is unusable once the
+    // page is disposed, and the download must start even then.
     final downloadService = ref.read(downloadServiceProvider);
+    final db = ref.read(databaseProvider);
     if (downloadService.isDownloading) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('A download is already in progress')),
@@ -852,9 +855,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
         await _showReplacementConflicts(result.replacementConflicts);
       }
 
-      final freshPlaylist = await ref
-          .read(databaseProvider)
-          .getPlaylist(widget.playlistId);
+      final freshPlaylist = await db.getPlaylist(widget.playlistId);
       // The download is a service-level operation: start it even if this
       // page was closed while the sync ran.
       unawaited(downloadService.downloadPlaylist(freshPlaylist));
@@ -2195,6 +2196,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     if (_playlist == null) return;
 
     final downloadService = ref.read(downloadServiceProvider);
+    final playlistService = ref.read(playlistServiceProvider);
     if (downloadService.isDownloading) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -2211,12 +2213,11 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
       return;
     }
 
-    if (deleteExistingFile && track.filePath != null) {
-      final file = File(track.filePath!);
+    if (deleteExistingFile) {
+      // Let the service remove the file and reset the row together, so the
+      // track never stays "complete" while pointing at a deleted file.
       try {
-        if (await file.exists()) {
-          await file.delete();
-        }
+        await playlistService.resetTrackForRedownload(track, deleteFile: true);
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(
@@ -2244,21 +2245,9 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                 SnackBar(content: Text('Downloaded "${track.title}"')),
               );
             },
-            onError: (Object e, StackTrace _) async {
-              // The service stores the real yt-dlp message on the track row;
-              // the thrown error is usually just "Download failed".
-              String raw = '$e';
-              try {
-                final fresh = await ref
-                    .read(databaseProvider)
-                    .getTrack(track.id);
-                final lastError = fresh?.lastError;
-                if (lastError != null && lastError.trim().isNotEmpty) {
-                  raw = lastError;
-                }
-              } catch (_) {
-                // Fall back to the thrown error text.
-              }
+            onError: (Object e, StackTrace _) {
+              // The service throws the recorded yt-dlp reason itself.
+              final raw = '$e';
               if (!mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(

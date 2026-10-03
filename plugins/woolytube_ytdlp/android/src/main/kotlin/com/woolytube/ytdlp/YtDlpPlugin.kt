@@ -145,12 +145,18 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     formatOption,
                     processId
                 )
+                // Drop the ids before replying so a stopDownloadService call
+                // that follows the reply does not see this run as active.
+                ownedProcessIds.remove(processId)
+                activeProcessIds.remove(processId)
                 withContext(Dispatchers.Main) {
                     sendProgress(mapOf("status" to "complete", "progress" to 100.0))
                     result.success(null)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Download failed", e)
+                ownedProcessIds.remove(processId)
+                activeProcessIds.remove(processId)
                 withContext(Dispatchers.Main) {
                     sendProgress(mapOf(
                         "status" to "error",

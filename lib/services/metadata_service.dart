@@ -579,29 +579,16 @@ class MetadataService {
 
   /// Imports a discovered playlist into the database.
   Future<void> importPlaylist(DiscoveredPlaylist discovered) async {
-    final playlistId = await _db.insertPlaylist(
-      PlaylistsCompanion.insert(
-        url: discovered.url,
-        name: discovered.name,
-        thumbnailUrl: Value(discovered.thumbnailUrl),
-        audioOnly: Value(discovered.audioOnly),
-        playChapters: Value(discovered.playChapters),
-        autoUpdate: Value(discovered.autoUpdate),
-        updateFrequencyHours: Value(discovered.updateFrequencyHours),
-        includeThumbnails: Value(discovered.includeThumbnails),
-        sponsorBlockEnabled: Value(discovered.sponsorBlockEnabled),
-        sponsorBlockCategories: Value(discovered.sponsorBlockCategories),
-        sponsorBlockCategoryActions: Value(
-          discovered.sponsorBlockCategoryActions,
-        ),
-        lastUpdated: Value(discovered.lastUpdated),
-        createdAt: discovered.createdAt,
-        outputPath: discovered.folderPath,
-      ),
-    );
-
-    final tracks = <TracksCompanion>[];
-    final discoveredByVideoId = <String, DiscoveredTrack>{};
+    // Resolve files first so the database transaction below stays short.
+    final rows =
+        <
+          ({
+            DiscoveredTrack track,
+            String? filePath,
+            String? thumbnailPath,
+            String status,
+          })
+        >[];
     for (final dt in discovered.tracks) {
       String? filePath;
       String? thumbnailPath;
@@ -633,58 +620,114 @@ class MetadataService {
       if (status != 'complete' && status != 'unavailable') {
         status = 'pending';
       }
+      rows.add((
+        track: dt,
+        filePath: filePath,
+        thumbnailPath: thumbnailPath,
+        status: status,
+      ));
+    }
 
-      tracks.add(
-        TracksCompanion.insert(
-          playlistId: playlistId,
-          index: dt.index,
-          videoId: dt.videoId,
-          title: dt.title,
-          thumbnailUrl: Value(dt.thumbnailUrl),
-          thumbnailPath: Value(thumbnailPath),
-          durationSeconds: Value(dt.durationSeconds),
-          status: Value(status),
-          unavailableReason: Value(dt.unavailableReason),
-          isLocalReplacement: Value(dt.isLocalReplacement),
-          alwaysSkip: Value(dt.alwaysSkip),
-          chaptersJson: Value(dt.chaptersJson),
-          chaptersEnabled: Value(dt.chaptersEnabled),
-          filePath: Value(filePath),
-          downloadedAt: Value(status == 'complete' ? DateTime.now() : null),
-          sponsorBlockCheckedAt: Value(dt.sponsorBlockCheckedAt),
+    // Sidecars from older versions can repeat an index; the first entry keeps
+    // it and the others are appended, matching the database repair rule.
+    final usedIndices = <int>{};
+    var maxIndex = rows.fold<int>(
+      0,
+      (max, row) => row.track.index > max ? row.track.index : max,
+    );
+    final indices = <int>[];
+    for (final row in rows) {
+      var index = row.track.index;
+      if (index <= 0 || !usedIndices.add(index)) {
+        index = ++maxIndex;
+        usedIndices.add(index);
+      }
+      indices.add(index);
+    }
+
+    final discoveredByVideoId = <String, DiscoveredTrack>{
+      for (final dt in discovered.tracks) dt.videoId: dt,
+    };
+
+    final playlistId = await _db.transaction(() async {
+      final playlistId = await _db.insertPlaylist(
+        PlaylistsCompanion.insert(
+          url: discovered.url,
+          name: discovered.name,
+          thumbnailUrl: Value(discovered.thumbnailUrl),
+          audioOnly: Value(discovered.audioOnly),
+          playChapters: Value(discovered.playChapters),
+          autoUpdate: Value(discovered.autoUpdate),
+          updateFrequencyHours: Value(discovered.updateFrequencyHours),
+          includeThumbnails: Value(discovered.includeThumbnails),
+          sponsorBlockEnabled: Value(discovered.sponsorBlockEnabled),
+          sponsorBlockCategories: Value(discovered.sponsorBlockCategories),
+          sponsorBlockCategoryActions: Value(
+            discovered.sponsorBlockCategoryActions,
+          ),
+          lastUpdated: Value(discovered.lastUpdated),
+          createdAt: discovered.createdAt,
+          outputPath: discovered.folderPath,
         ),
       );
-      discoveredByVideoId[dt.videoId] = dt;
-    }
 
-    if (tracks.isNotEmpty) {
-      await _db.insertTracks(tracks);
-    }
-
-    final importedTracks = await _db.getTracksForPlaylist(playlistId);
-    for (final track in importedTracks) {
-      final discoveredTrack = discoveredByVideoId[track.videoId];
-      if (discoveredTrack == null) continue;
-      final segments =
-          discoveredTrack.sponsorBlockSegments
-              .where((s) => s.endMs > s.startMs)
-              .map(
-                (s) => SponsorBlockSegmentsCompanion.insert(
-                  trackId: track.id,
-                  videoId: track.videoId,
-                  source: s.source,
-                  uuid: Value(s.uuid),
-                  category: s.category,
-                  startMs: s.startMs,
-                  endMs: s.endMs,
-                  createdAt: DateTime.now(),
-                ),
-              )
-              .toList();
-      if (segments.isNotEmpty) {
-        await _db.replaceSponsorBlockSegments(track.id, segments);
+      final tracks = <TracksCompanion>[];
+      for (var i = 0; i < rows.length; i++) {
+        final row = rows[i];
+        final dt = row.track;
+        tracks.add(
+          TracksCompanion.insert(
+            playlistId: playlistId,
+            index: indices[i],
+            videoId: dt.videoId,
+            title: dt.title,
+            thumbnailUrl: Value(dt.thumbnailUrl),
+            thumbnailPath: Value(row.thumbnailPath),
+            durationSeconds: Value(dt.durationSeconds),
+            status: Value(row.status),
+            unavailableReason: Value(dt.unavailableReason),
+            isLocalReplacement: Value(dt.isLocalReplacement),
+            alwaysSkip: Value(dt.alwaysSkip),
+            chaptersJson: Value(dt.chaptersJson),
+            chaptersEnabled: Value(dt.chaptersEnabled),
+            filePath: Value(row.filePath),
+            downloadedAt: Value(
+              row.status == 'complete' ? DateTime.now() : null,
+            ),
+            sponsorBlockCheckedAt: Value(dt.sponsorBlockCheckedAt),
+          ),
+        );
       }
-    }
+      if (tracks.isNotEmpty) {
+        await _db.insertTracks(tracks);
+      }
+
+      final importedTracks = await _db.getTracksForPlaylist(playlistId);
+      for (final track in importedTracks) {
+        final discoveredTrack = discoveredByVideoId[track.videoId];
+        if (discoveredTrack == null) continue;
+        final segments =
+            discoveredTrack.sponsorBlockSegments
+                .where((s) => s.endMs > s.startMs)
+                .map(
+                  (s) => SponsorBlockSegmentsCompanion.insert(
+                    trackId: track.id,
+                    videoId: track.videoId,
+                    source: s.source,
+                    uuid: Value(s.uuid),
+                    category: s.category,
+                    startMs: s.startMs,
+                    endMs: s.endMs,
+                    createdAt: DateTime.now(),
+                  ),
+                )
+                .toList();
+        if (segments.isNotEmpty) {
+          await _db.replaceSponsorBlockSegments(track.id, segments);
+        }
+      }
+      return playlistId;
+    });
 
     // Reconcile with actual files on disk (catches mismatches from stale JSON)
     final playlist = await _db.getPlaylist(playlistId);

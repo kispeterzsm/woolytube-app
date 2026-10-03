@@ -86,16 +86,18 @@ class DownloadLock {
     final lockFile = file ?? await _file();
     if (!lockFile.existsSync()) return false;
     final String holder;
+    final DateTime modified;
     try {
       holder = lockFile.readAsStringSync().split(' ').first.trim();
+      modified = lockFile.lastModifiedSync();
     } on FileSystemException {
+      // The other engine released it between the checks.
       return false;
     }
     if (holder == owner) return false;
     final staleAfter =
         holder == backgroundOwner ? backgroundStaleAfter : foregroundStaleAfter;
-    final age = DateTime.now().difference(lockFile.lastModifiedSync());
-    return age < staleAfter;
+    return DateTime.now().difference(modified) < staleAfter;
   }
 
   /// Re-stamps the lock so a long foreground download is not mistaken for an
@@ -151,8 +153,19 @@ class DownloadService {
     this._sponsorBlock,
     AppSettingsService? settings,
     DownloadLock? lock,
+    String lockOwner = DownloadLock.foregroundOwner,
   ]) : _settings = settings ?? AppSettingsService(),
-       _lock = lock ?? DownloadLock();
+       _lock = lock ?? DownloadLock(),
+       _lockOwner = lockOwner;
+
+  /// Which kind of engine this service runs in; the shared lock refuses a
+  /// live holder of the other kind.
+  final String _lockOwner;
+
+  String get _lockHeldMessage =>
+      _lockOwner == DownloadLock.backgroundOwner
+          ? 'A download started from the app is running.'
+          : lockHeldMessage;
 
   /// yt-dlp reads `%` in `-o` as the start of a format field, so a literal
   /// path component such as `100% Hits` must be doubled.
@@ -175,9 +188,9 @@ class DownloadService {
     var failedCount = 0;
 
     try {
-      lockAcquired = await _lock.acquire(DownloadLock.foregroundOwner);
+      lockAcquired = await _lock.acquire(_lockOwner);
       if (!lockAcquired) {
-        _log.warn('Playlist download skipped: $lockHeldMessage');
+        _log.warn('Playlist download skipped: $_lockHeldMessage');
         _emit(
           DownloadProgress(
             playlistId: playlist.id,
@@ -185,7 +198,7 @@ class DownloadService {
             totalTracks: 0,
             trackProgress: 0,
             status: 'error',
-            error: lockHeldMessage,
+            error: _lockHeldMessage,
           ),
         );
         return;
@@ -244,7 +257,7 @@ class DownloadService {
         final track = pendingTracks[i];
         final trackNum = downloadedSoFar + i + 1;
         currentTrackNum = trackNum;
-        await _lock.refresh(DownloadLock.foregroundOwner);
+        await _lock.refresh(_lockOwner);
 
         final result = await _downloadTrackFile(
           playlist: playlist,
@@ -357,10 +370,10 @@ class DownloadService {
     const progressTotalTracks = 1;
 
     try {
-      lockAcquired = await _lock.acquire(DownloadLock.foregroundOwner);
+      lockAcquired = await _lock.acquire(_lockOwner);
       if (!lockAcquired) {
-        _log.warn('Track download skipped: $lockHeldMessage');
-        throw StateError(lockHeldMessage);
+        _log.warn('Track download skipped: $_lockHeldMessage');
+        throw StateError(_lockHeldMessage);
       }
 
       totalTracks = await _db.getTotalTrackCount(playlist.id);

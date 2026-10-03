@@ -524,4 +524,46 @@ void main() {
       expect((data['tracks'] as List).single['videoId'], track.videoId);
     },
   );
+
+  test('import de-duplicates indices from an older sidecar', () async {
+    final db = openTestDatabase();
+    addTearDown(db.close);
+    final tempDir = await Directory.systemTemp.createTemp(
+      'woolytube_import_dup_',
+    );
+    addTearDown(() => tempDir.delete(recursive: true));
+    final metadata = MetadataService(db);
+
+    DiscoveredTrack track(int index, String videoId) => DiscoveredTrack(
+      index: index,
+      videoId: videoId,
+      title: videoId,
+      status: 'pending',
+    );
+
+    await metadata.importPlaylist(
+      DiscoveredPlaylist(
+        folderPath: tempDir.path,
+        url: 'https://www.youtube.com/playlist?list=dups',
+        name: 'Dups',
+        audioOnly: true,
+        autoUpdate: false,
+        updateFrequencyHours: 24,
+        includeThumbnails: false,
+        sponsorBlockEnabled: false,
+        sponsorBlockCategories: '[]',
+        createdAt: DateTime.utc(2024),
+        tracks: [track(1, 'a'), track(2, 'b'), track(2, 'c'), track(0, 'd')],
+      ),
+    );
+
+    final playlist = await db.getPlaylistByUrl(
+      'https://www.youtube.com/playlist?list=dups',
+    );
+    final imported = await db.getTracksForPlaylist(playlist!.id);
+    expect(
+      {for (final t in imported) t.videoId: t.index},
+      {'a': 1, 'b': 2, 'c': 3, 'd': 4},
+    );
+  });
 }

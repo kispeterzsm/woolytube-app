@@ -849,10 +849,22 @@ class PlaybackService
   @override
   Future<void> resume() async {
     if (_loadedTrackId == null) {
-      // Nothing is open (stopped, still loading, or the last open failed), so
-      // there is nothing to take focus for. A play press while idle may still
-      // start tracks that were queued up next.
-      if (currentTrack == null) await startUpNextQueueIfIdle();
+      final item = currentItem;
+      if (item == null) {
+        // Nothing is queued: a play press while idle may still start tracks
+        // that were queued up next.
+        await startUpNextQueueIfIdle();
+        return;
+      }
+      if (_loading) return;
+      // The last open failed; try the published item again instead of
+      // silently ignoring the press.
+      final filePath = _resolveTrackFile(item.track);
+      if (filePath == null) {
+        reportMessage('File not found: ${item.track.title}');
+        return;
+      }
+      await _transition(() => _loadAndPlay(item, filePath: filePath));
       return;
     }
     if (!await _requestFocus()) return;

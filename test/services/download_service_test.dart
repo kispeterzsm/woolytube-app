@@ -623,6 +623,44 @@ void main() {
     expect(await lockFile().exists(), isFalse);
   });
 
+  test(
+    'a background-owned service downloads behind a fresh background lock',
+    () async {
+      // The worker checks the lock up front; its own service must then be able
+      // to take and release the lock as the background owner.
+      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+      await insertTestTrack(db, playlistId: playlist.id);
+      await lockFile().writeAsString(
+        '${DownloadLock.backgroundOwner} ${DateTime.now().toIso8601String()}',
+      );
+      final background = DownloadService(
+        db,
+        ytdlp,
+        log,
+        MetadataService(db),
+        notifications,
+        sponsorBlock,
+        null,
+        lock,
+        DownloadLock.backgroundOwner,
+      );
+
+      await background.downloadPlaylist(playlist);
+
+      expect(ytdlp.downloadedUrls, hasLength(1));
+      expect(await lockFile().exists(), isFalse);
+
+      // A live foreground lock still blocks it.
+      await lockFile().writeAsString(
+        '${DownloadLock.foregroundOwner} ${DateTime.now().toIso8601String()}',
+      );
+      await background.downloadPlaylist(playlist);
+      expect(ytdlp.downloadedUrls, hasLength(1));
+      expect(await lockFile().exists(), isTrue);
+      background.dispose();
+    },
+  );
+
   test('the foreground holds the shared lock while downloading', () async {
     final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
     await insertTestTrack(db, playlistId: playlist.id);
