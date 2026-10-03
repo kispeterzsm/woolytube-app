@@ -30,6 +30,7 @@ void main() {
 
       await service.showDownloadComplete('My Playlist', downloadedCount: 2);
 
+      expect(presenter.id, 1001);
       expect(presenter.title, 'New videos downloaded');
       expect(presenter.body, '2 new videos downloaded to My Playlist');
       final android = presenter.details!.android!;
@@ -49,5 +50,15 @@ void main() {
     await service.showDownloadComplete('My Playlist', downloadedCount: 0);
 
     expect(presenter.id, isNull);
+  });
+
+  test('each playlist gets its own completion notification', () async {
+    final presenter = RecordingNotificationPresenter();
+    final service = DownloadNotificationService(presenter: presenter.call);
+
+    await service.showDownloadComplete('Playlist 7', notificationId: 7);
+
+    expect(presenter.id, 7);
+    expect(presenter.body, '1 new video downloaded to Playlist 7');
   });
 }

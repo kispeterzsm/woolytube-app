@@ -72,7 +72,9 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         progressSink = null
         val hadActiveDownloads = ownedProcessIds.isNotEmpty()
         cancelOwnedDownloads()
-        if (hadActiveDownloads) {
+        // Another engine (foreground app or background worker) may still be
+        // downloading through the same service.
+        if (hadActiveDownloads && !hasActiveDownloads()) {
             context.stopService(Intent(context, DownloadForegroundService::class.java))
         }
         scope.cancel()
@@ -84,7 +86,6 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "download" -> handleDownload(call.arguments as Map<*, *>, result)
             "getVideoInfo" -> handleGetVideoInfo(call.arguments as Map<*, *>, result)
             "getPlaylistInfo" -> handleGetPlaylistInfo(call.arguments as Map<*, *>, result)
-            "cancelDownload" -> handleCancelDownload(call.arguments as Map<*, *>, result)
             "cancelDownloads" -> result.success(cancelOwnedDownloads())
             "hasActiveDownloads" -> result.success(hasActiveDownloads())
             "updateYtDlp" -> handleUpdateYtDlp(result)
@@ -244,22 +245,6 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         }
     }
 
-    private fun handleCancelDownload(args: Map<*, *>, result: MethodChannel.Result) {
-        val processId = args["processId"] as? String
-        if (processId == null) {
-            result.error("INVALID_ARGS", "processId required", null)
-            return
-        }
-        try {
-            YoutubeDL.getInstance().destroyProcessById(processId)
-            ownedProcessIds.remove(processId)
-            activeProcessIds.remove(processId)
-            result.success(true)
-        } catch (e: Exception) {
-            result.error("CANCEL_ERROR", e.message, null)
-        }
-    }
-
     private fun cancelOwnedDownloads(): Int {
         val ids = ownedProcessIds.toList()
         for (processId in ids) {
@@ -310,7 +295,8 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         if (outputTemplate != null) {
             request.addOption("-o", outputTemplate)
         } else {
-            request.addOption("-o", "$outputPath/%(title)s.%(ext)s")
+            // yt-dlp reads "%" in -o as a format field; escape literal path parts.
+            request.addOption("-o", "${outputPath.replace("%", "%%")}/%(title)s.%(ext)s")
         }
 
         if (formatOption != null) {
@@ -398,6 +384,13 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     }
 
     private fun handleStopDownloadService(result: MethodChannel.Result) {
+        // The foreground and background engines share one service. Keep it (and
+        // its wake lock) alive while any engine still has a yt-dlp process.
+        if (hasActiveDownloads()) {
+            Log.i(TAG, "Not stopping download service: downloads still active")
+            result.success(null)
+            return
+        }
         val intent = Intent(context, DownloadForegroundService::class.java).apply {
             action = DownloadForegroundService.ACTION_STOP
         }

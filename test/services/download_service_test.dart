@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:drift/drift.dart' show Value;
@@ -19,11 +18,15 @@ import '../helpers/test_database.dart';
 
 class FakeYtDlpService extends YtDlpService {
   final downloadedUrls = <String>[];
+  final outputTemplates = <String>[];
   final subtitleRequests = <(bool, String)>[];
   Completer<void>? downloadCompleter;
   Completer<void>? downloadStarted;
   Object? downloadError;
   bool cancelCalled = false;
+
+  /// Mirrors yt-dlp leaving a media file at the output template.
+  bool createOutputFile = true;
 
   @override
   Stream<Map<String, dynamic>> get progressStream =>
@@ -41,10 +44,19 @@ class FakeYtDlpService extends YtDlpService {
     String? outputTemplate,
   }) async {
     downloadedUrls.add(url);
+    outputTemplates.add(outputTemplate ?? '');
     subtitleRequests.add((downloadSubtitles, subtitleLanguages));
     downloadStarted?.complete();
     if (downloadError != null) throw downloadError!;
     if (downloadCompleter != null) await downloadCompleter!.future;
+    if (createOutputFile && outputTemplate != null) {
+      final path = outputTemplate
+          .replaceAll('%(title)s', 'Title')
+          .replaceAll('%(ext)s', audioOnly ? 'm4a' : 'mp4')
+          .replaceAll('%%', '%');
+      await File(path).parent.create(recursive: true);
+      await File(path).writeAsString('media');
+    }
   }
 
   @override
@@ -76,14 +88,17 @@ class FakeYtDlpService extends YtDlpService {
 class FakeDownloadNotificationService extends DownloadNotificationService {
   final playlistNames = <String>[];
   final downloadedCounts = <int>[];
+  final notificationIds = <int>[];
 
   @override
   Future<void> showDownloadComplete(
     String playlistName, {
     int downloadedCount = 1,
+    int notificationId = 1001,
   }) async {
     playlistNames.add(playlistName);
     downloadedCounts.add(downloadedCount);
+    notificationIds.add(notificationId);
   }
 }
 
@@ -92,6 +107,7 @@ class FakeSponsorBlockService extends SponsorBlockService {
   final refreshedTracks = <Track>[];
   final fetchedVideoIds = <String>[];
   final segmentsByVideoId = <String, List<SponsorBlockSegmentsCompanion>>{};
+  void Function()? onFetch;
 
   FakeSponsorBlockService(this.db, LogService log) : super(db, log);
 
@@ -111,6 +127,7 @@ class FakeSponsorBlockService extends SponsorBlockService {
     int trackId,
   ) async {
     fetchedVideoIds.add(videoId);
+    onFetch?.call();
     return segmentsByVideoId[videoId] ?? const [];
   }
 }
@@ -135,6 +152,7 @@ void main() {
   late FakeYtDlpService ytdlp;
   late FakeSponsorBlockService sponsorBlock;
   late FakeDownloadNotificationService notifications;
+  late DownloadLock lock;
   late DownloadService service;
 
   setUp(() async {
@@ -145,6 +163,7 @@ void main() {
     ytdlp = FakeYtDlpService();
     sponsorBlock = FakeSponsorBlockService(db, log);
     notifications = FakeDownloadNotificationService();
+    lock = DownloadLock(directoryProvider: () async => tempDir.path);
     service = DownloadService(
       db,
       ytdlp,
@@ -152,8 +171,12 @@ void main() {
       MetadataService(db),
       notifications,
       sponsorBlock,
+      null,
+      lock,
     );
   });
+
+  File lockFile() => File(p.join(tempDir.path, DownloadLock.fileName));
 
   tearDown(() async {
     service.dispose();
@@ -272,6 +295,7 @@ void main() {
     expect(ytdlp.downloadedUrls, hasLength(2));
     expect(notifications.playlistNames, [playlist.name]);
     expect(notifications.downloadedCounts, [2]);
+    expect(notifications.notificationIds, [playlist.id]);
   });
 
   test('a failed playlist download does not notify', () async {
@@ -284,44 +308,35 @@ void main() {
     expect(notifications.playlistNames, isEmpty);
   });
 
-  test(
-    'playlist update repairs legacy reused files missing remote segments',
-    () async {
-      final playlist = await insertTestPlaylist(
-        db,
-        outputPath: tempDir.path,
-        audioOnly: true,
-      );
-      final filePath = p.join(tempDir.path, '00001_Legacy_Audio.m4a');
-      await File(filePath).writeAsString('audio');
-      final track = await insertTestTrack(
-        db,
-        playlistId: playlist.id,
-        videoId: 'legacy-video',
-        title: 'Legacy Audio',
-        filePath: filePath,
-        status: 'complete',
-        isLocalReplacement: true,
-      );
-      sponsorBlock.segmentsByVideoId[track.videoId] = [remoteSegment(track)];
+  test('SponsorBlock backfill leaves local replacements alone', () async {
+    final playlist = await insertTestPlaylist(
+      db,
+      outputPath: tempDir.path,
+      audioOnly: true,
+    );
+    final filePath = p.join(tempDir.path, '00001_Local_Audio.m4a');
+    await File(filePath).writeAsString('audio');
+    final track = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      videoId: 'local-video',
+      title: 'Local Audio',
+      filePath: filePath,
+      status: 'complete',
+      isLocalReplacement: true,
+    );
+    sponsorBlock.segmentsByVideoId[track.videoId] = [remoteSegment(track)];
 
-      await service.downloadPlaylist(playlist);
+    await service.downloadPlaylist(playlist);
 
-      expect(ytdlp.downloadedUrls, isEmpty);
-      expect(sponsorBlock.fetchedVideoIds, [track.videoId]);
-
-      final updated = (await db.getTracksForPlaylist(playlist.id)).single;
-      expect(updated.isLocalReplacement, isFalse);
-
-      final segments = await db.getSegmentsForTrack(track.id);
-      expect(segments.map((segment) => segment.uuid), ['remote-1']);
-
-      final metaFile = File(p.join(tempDir.path, 'woolytube_meta.json'));
-      final meta = jsonDecode(await metaFile.readAsString()) as Map;
-      final tracks = meta['tracks'] as List;
-      expect(tracks.single['sponsorBlockSegments'], hasLength(1));
-    },
-  );
+    expect(ytdlp.downloadedUrls, isEmpty);
+    // The file is not the YouTube video; its segments would cut the wrong
+    // audio, and the flag must survive so the sync can ask the user.
+    expect(sponsorBlock.fetchedVideoIds, isEmpty);
+    final updated = (await db.getTracksForPlaylist(playlist.id)).single;
+    expect(updated.isLocalReplacement, isTrue);
+    expect(await db.getSegmentsForTrack(track.id), isEmpty);
+  });
 
   test(
     'playlist update backfills SponsorBlock for already complete tracks',
@@ -429,4 +444,216 @@ void main() {
       expect(await partial.exists(), isFalse);
     },
   );
+
+  test('lastUpdated is stamped without replacing the playlist row', () async {
+    final stale = await insertTestPlaylist(db, outputPath: tempDir.path);
+    await insertTestTrack(db, playlistId: stale.id);
+    await db.updatePlaylistFields(
+      stale.id,
+      const PlaylistsCompanion(name: Value('Renamed meanwhile')),
+    );
+
+    await service.downloadPlaylist(stale);
+
+    final updated = await db.getPlaylist(stale.id);
+    expect(updated.name, 'Renamed meanwhile');
+    expect(updated.lastUpdated, isNotNull);
+  });
+
+  test('a run in which every download failed is not stamped', () async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    await insertTestTrack(db, playlistId: playlist.id);
+    ytdlp.downloadError = StateError('permanent failure');
+
+    await service.downloadPlaylist(playlist);
+
+    expect((await db.getPlaylist(playlist.id)).lastUpdated, isNull);
+  });
+
+  test('a reused file counts as progress for the update stamp', () async {
+    final playlist = await insertTestPlaylist(
+      db,
+      outputPath: tempDir.path,
+      audioOnly: true,
+    );
+    await insertTestTrack(db, playlistId: playlist.id, index: 1);
+    await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 2,
+      videoId: 'video-2',
+    );
+    await File(p.join(tempDir.path, '00001_Present.m4a')).writeAsString('a');
+    ytdlp.downloadError = StateError('permanent failure');
+
+    await service.downloadPlaylist(playlist);
+
+    expect(ytdlp.downloadedUrls, hasLength(1));
+    expect((await db.getPlaylist(playlist.id)).lastUpdated, isNotNull);
+  });
+
+  test(
+    'a download that leaves no media file is recorded as an error',
+    () async {
+      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+      final track = await insertTestTrack(db, playlistId: playlist.id);
+      ytdlp.createOutputFile = false;
+
+      await service.downloadPlaylist(playlist);
+
+      final updated = (await db.getTrack(track.id))!;
+      expect(updated.status, 'error');
+      expect(updated.lastError, 'Downloaded file not found');
+      expect(updated.filePath, isNull);
+      expect(sponsorBlock.refreshedTracks, isEmpty);
+      expect(notifications.playlistNames, isEmpty);
+    },
+  );
+
+  test('a percent sign in the playlist folder is escaped for yt-dlp', () async {
+    final folder = Directory(p.join(tempDir.path, '100% Hits'));
+    await folder.create();
+    final playlist = await insertTestPlaylist(db, outputPath: folder.path);
+    final track = await insertTestTrack(db, playlistId: playlist.id);
+
+    await service.downloadPlaylist(playlist);
+
+    expect(
+      ytdlp.outputTemplates.single,
+      '${tempDir.path}/100%% Hits/00001_%(title)s.%(ext)s',
+    );
+    final updated = (await db.getTrack(track.id))!;
+    expect(updated.status, 'complete');
+    expect(updated.filePath, p.join(folder.path, '00001_Title.mp4'));
+  });
+
+  test('completion is reported only after the SponsorBlock backfill', () async {
+    final playlist = await insertTestPlaylist(
+      db,
+      outputPath: tempDir.path,
+      audioOnly: true,
+    );
+    final donePath = p.join(tempDir.path, '00001_Done.m4a');
+    await File(donePath).writeAsString('audio');
+    final done = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 1,
+      videoId: 'done',
+      filePath: donePath,
+      status: 'complete',
+    );
+    await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 2,
+      videoId: 'pending',
+    );
+    sponsorBlock.segmentsByVideoId[done.videoId] = [remoteSegment(done)];
+    final events = <String>[];
+    sponsorBlock.onFetch = () => events.add('fetch');
+    final subscription = service.progressStream.listen((progress) {
+      if (progress.status == 'complete') events.add('complete');
+    });
+
+    await service.downloadPlaylist(playlist);
+    await Future<void>.delayed(Duration.zero);
+    await subscription.cancel();
+
+    expect(events, ['fetch', 'complete']);
+  });
+
+  test('a live background lock blocks foreground downloads', () async {
+    await lockFile().writeAsString(
+      '${DownloadLock.backgroundOwner} ${DateTime.now().toIso8601String()}',
+    );
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    final track = await insertTestTrack(db, playlistId: playlist.id);
+    final events = <DownloadProgress>[];
+    final subscription = service.progressStream.listen(events.add);
+
+    await service.downloadPlaylist(playlist);
+    await expectLater(
+      service.downloadTrack(playlist, track),
+      throwsA(
+        isA<StateError>().having(
+          (error) => error.message,
+          'message',
+          DownloadService.lockHeldMessage,
+        ),
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+    await subscription.cancel();
+
+    expect(ytdlp.downloadedUrls, isEmpty);
+    expect(service.isDownloading, isFalse);
+    expect(events.map((event) => event.status), ['error', 'error']);
+    expect(events.first.error, DownloadService.lockHeldMessage);
+    expect(await lockFile().exists(), isTrue);
+    expect((await db.getTrack(track.id))!.status, 'pending');
+  });
+
+  test('abandoned locks are taken over and released afterwards', () async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    final track = await insertTestTrack(db, playlistId: playlist.id);
+    await lockFile().writeAsString(
+      '${DownloadLock.backgroundOwner} ${DateTime.now().toIso8601String()}',
+    );
+    await lockFile().setLastModified(
+      DateTime.now().subtract(
+        DownloadLock.backgroundStaleAfter + const Duration(minutes: 1),
+      ),
+    );
+
+    await service.downloadPlaylist(playlist);
+
+    expect(ytdlp.downloadedUrls, hasLength(1));
+    expect(await lockFile().exists(), isFalse);
+
+    // A lock left by a killed foreground process is ours to reuse.
+    await lockFile().writeAsString(
+      '${DownloadLock.foregroundOwner} ${DateTime.now().toIso8601String()}',
+    );
+    await service.downloadTrack(playlist, track);
+
+    expect(ytdlp.downloadedUrls, hasLength(2));
+    expect(await lockFile().exists(), isFalse);
+  });
+
+  test('the foreground holds the shared lock while downloading', () async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    await insertTestTrack(db, playlistId: playlist.id);
+    ytdlp.downloadCompleter = Completer<void>();
+    ytdlp.downloadStarted = Completer<void>();
+
+    final download = service.downloadPlaylist(playlist);
+    await ytdlp.downloadStarted!.future;
+
+    expect(
+      await lock.isHeldByOther(DownloadLock.backgroundOwner),
+      isTrue,
+      reason: 'the background worker must not start mid-download',
+    );
+    expect(await lock.acquire(DownloadLock.backgroundOwner), isFalse);
+
+    ytdlp.downloadCompleter!.complete();
+    await download;
+    expect(await lockFile().exists(), isFalse);
+  });
+
+  test('progress after dispose is dropped instead of throwing', () async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    final track = await insertTestTrack(db, playlistId: playlist.id);
+    ytdlp.downloadCompleter = Completer<void>();
+    ytdlp.downloadStarted = Completer<void>();
+
+    final download = service.downloadPlaylist(playlist);
+    await ytdlp.downloadStarted!.future;
+    service.dispose();
+    ytdlp.downloadCompleter!.complete();
+    await download;
+
+    expect((await db.getTrack(track.id))!.status, 'complete');
+  });
 }

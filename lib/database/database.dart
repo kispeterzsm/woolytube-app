@@ -96,7 +96,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 10;
+  int get schemaVersion => 11;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -108,9 +108,7 @@ class AppDatabase extends _$AppDatabase {
       await customStatement(
         'CREATE INDEX IF NOT EXISTS idx_tracks_pl_status ON tracks (playlist_id, status)',
       );
-      await customStatement(
-        'CREATE INDEX IF NOT EXISTS idx_tracks_pl_index ON tracks (playlist_id, "index")',
-      );
+      await customStatement(_createUniqueTrackIndexSql);
       await customStatement(
         'CREATE INDEX IF NOT EXISTS idx_sb_track_start ON sponsor_block_segments (track_id, start_ms)',
       );
@@ -181,8 +179,84 @@ class AppDatabase extends _$AppDatabase {
       if (from < 9) {
         await migrator.addColumn(tracks, tracks.alwaysSkip);
       }
+      if (from < 11) {
+        await _repairDuplicateTrackIndices();
+        await customStatement('DROP INDEX IF EXISTS idx_tracks_pl_index');
+        await customStatement(_createUniqueTrackIndexSql);
+      }
     },
   );
+
+  static const _createUniqueTrackIndexSql =
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_tracks_pl_index_unique '
+      'ON tracks (playlist_id, "index")';
+
+  /// Older versions could give two tracks of one playlist the same index, for
+  /// example when a sync renumbered pending tracks onto a downloaded one. Keep
+  /// the oldest row at the contested index and append the others after the
+  /// playlist's current maximum. A moved row that points at the same file as
+  /// another row loses that file so it is downloaded again under its own
+  /// index instead of playing another track's media.
+  Future<void> _repairDuplicateTrackIndices() async {
+    final groups =
+        await customSelect(
+          'SELECT playlist_id, "index" FROM tracks '
+          'GROUP BY playlist_id, "index" HAVING COUNT(*) > 1 '
+          'ORDER BY playlist_id, "index"',
+        ).get();
+    final maxIndexByPlaylist = <int, int>{};
+    for (final group in groups) {
+      final playlistId = group.read<int>('playlist_id');
+      final index = group.read<int>('index');
+      var maxIndex = maxIndexByPlaylist[playlistId];
+      if (maxIndex == null) {
+        final row =
+            await customSelect(
+              'SELECT MAX("index") AS max_index FROM tracks '
+              'WHERE playlist_id = ?',
+              variables: [Variable<int>(playlistId)],
+            ).getSingle();
+        maxIndex = row.readNullable<int>('max_index') ?? 0;
+      }
+      final rows =
+          await customSelect(
+            'SELECT id, file_path FROM tracks '
+            'WHERE playlist_id = ? AND "index" = ? ORDER BY id',
+            variables: [Variable<int>(playlistId), Variable<int>(index)],
+          ).get();
+      for (final row in rows.skip(1)) {
+        final id = row.read<int>('id');
+        maxIndex = maxIndex! + 1;
+        await customUpdate(
+          'UPDATE tracks SET "index" = ? WHERE id = ?',
+          variables: [Variable<int>(maxIndex), Variable<int>(id)],
+          updates: {tracks},
+        );
+        final filePath = row.readNullable<String>('file_path');
+        if (filePath == null) continue;
+        final shared =
+            await customSelect(
+              'SELECT COUNT(*) AS shared FROM tracks '
+              'WHERE playlist_id = ? AND file_path = ? AND id <> ?',
+              variables: [
+                Variable<int>(playlistId),
+                Variable<String>(filePath),
+                Variable<int>(id),
+              ],
+            ).getSingle();
+        if (shared.read<int>('shared') > 0) {
+          await customUpdate(
+            "UPDATE tracks SET status = 'pending', file_path = NULL, "
+            'downloaded_at = NULL, thumbnail_path = NULL, '
+            'is_local_replacement = 0 WHERE id = ?',
+            variables: [Variable<int>(id)],
+            updates: {tracks},
+          );
+        }
+      }
+      maxIndexByPlaylist[playlistId] = maxIndex!;
+    }
+  }
 
   // Playlist queries
   Future<List<Playlist>> getAllPlaylists() => select(playlists).get();
@@ -197,6 +271,13 @@ class AppDatabase extends _$AppDatabase {
 
   Future<bool> updatePlaylist(PlaylistsCompanion playlist) =>
       update(playlists).replace(playlist);
+
+  /// Writes only the columns present in [fields], leaving the rest untouched.
+  Future<void> updatePlaylistFields(int id, PlaylistsCompanion fields) =>
+      (update(playlists)..where((p) => p.id.equals(id))).write(fields);
+
+  Future<void> markPlaylistUpdated(int id, DateTime at) =>
+      updatePlaylistFields(id, PlaylistsCompanion(lastUpdated: Value(at)));
 
   /// Removes a playlist together with its tracks and their segments.
   Future<int> deletePlaylist(int id) => transaction(() async {
@@ -253,9 +334,6 @@ class AppDatabase extends _$AppDatabase {
       batch.insertAll(tracks, trackList);
     });
   }
-
-  Future<bool> updateTrack(TracksCompanion track) =>
-      update(tracks).replace(track);
 
   Future<void> updateTrackFields(
     int trackId, {
@@ -356,23 +434,11 @@ class AppDatabase extends _$AppDatabase {
     }).toList();
   }
 
-  Future<List<String>> getVideoIdsForPlaylist(int playlistId) async {
-    final trackList =
-        await (select(tracks)
-          ..where((t) => t.playlistId.equals(playlistId))).get();
-    return trackList.map((t) => t.videoId).toList();
-  }
-
-  Future<void> updateTrackUnavailable(
-    int trackId,
-    String reason, {
-    int? newIndex,
-  }) async {
+  Future<void> updateTrackUnavailable(int trackId, String reason) async {
     await (update(tracks)..where((t) => t.id.equals(trackId))).write(
       TracksCompanion(
         status: const Value('unavailable'),
         unavailableReason: Value(reason),
-        index: newIndex != null ? Value(newIndex) : const Value.absent(),
       ),
     );
   }
@@ -382,7 +448,6 @@ class AppDatabase extends _$AppDatabase {
     required String title,
     String? thumbnailUrl,
     int? durationSeconds,
-    int? newIndex,
   }) async {
     await (update(tracks)..where((t) => t.id.equals(trackId))).write(
       TracksCompanion(
@@ -391,15 +456,8 @@ class AppDatabase extends _$AppDatabase {
         title: Value(title),
         thumbnailUrl: Value(thumbnailUrl),
         durationSeconds: Value(durationSeconds),
-        index: newIndex != null ? Value(newIndex) : const Value.absent(),
       ),
     );
-  }
-
-  Future<void> updateTrackIndex(int trackId, int newIndex) async {
-    await (update(tracks)..where(
-      (t) => t.id.equals(trackId),
-    )).write(TracksCompanion(index: Value(newIndex)));
   }
 
   Future<void> updateTrackPlacement(
@@ -601,6 +659,14 @@ class AppDatabase extends _$AppDatabase {
   Future<void> deleteLocalSegmentsForTrack(int trackId) =>
       (delete(sponsorBlockSegments)..where(
         (s) => s.trackId.equals(trackId) & s.source.equals('local'),
+      )).go();
+
+  /// Drops segments fetched from SponsorBlock while keeping local, override
+  /// and hidden entries. Used when a track's media no longer matches the
+  /// YouTube video those segments were timed against.
+  Future<void> deleteRemoteSegmentsForTrack(int trackId) =>
+      (delete(sponsorBlockSegments)..where(
+        (s) => s.trackId.equals(trackId) & s.source.equals('sponsorblock'),
       )).go();
 }
 

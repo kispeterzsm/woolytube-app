@@ -102,6 +102,52 @@ final downloadServiceProvider = Provider<DownloadService>((ref) {
   return service;
 });
 
+/// Minimum spacing between yt-dlp self-update attempts.
+const ytDlpUpdateInterval = Duration(hours: 24);
+
+/// Decides whether the yt-dlp self-update may run at startup.
+///
+/// The update is a nightly-channel binary download. It is skipped when one
+/// ran within [ytDlpUpdateInterval], while a download is using the current
+/// binary (swapping it under a running process breaks that download), and on
+/// mobile data unless the user allows automatic downloads there.
+Future<bool> shouldRunYtDlpSelfUpdate({
+  required YtDlpService ytdlp,
+  required AppSettingsService settings,
+  required DownloadNetworkPolicy networkPolicy,
+  DateTime? now,
+}) async {
+  final current = now ?? DateTime.now();
+  final lastAttempt = await settings.getLastYtDlpUpdateAttempt();
+  if (lastAttempt != null &&
+      current.difference(lastAttempt) < ytDlpUpdateInterval) {
+    return false;
+  }
+  if (await ytdlp.hasActiveDownloads()) return false;
+  return networkPolicy.allowsAutomaticNetworkUse();
+}
+
+Future<void> _maybeUpdateYtDlp(Ref ref, LogService log) async {
+  final ytdlp = ref.read(ytdlpServiceProvider);
+  final settings = ref.read(appSettingsServiceProvider);
+  try {
+    final shouldRun = await shouldRunYtDlpSelfUpdate(
+      ytdlp: ytdlp,
+      settings: settings,
+      networkPolicy: ref.read(downloadNetworkPolicyProvider),
+    );
+    if (!shouldRun) {
+      log.info('yt-dlp update skipped (recent attempt, busy or mobile data)');
+      return;
+    }
+    await settings.setLastYtDlpUpdateAttempt(DateTime.now());
+    await ytdlp.updateYtDlp();
+    log.info('yt-dlp updated to latest');
+  } catch (e) {
+    log.warn('yt-dlp update failed: $e');
+  }
+}
+
 // Initialization state
 final initProvider = FutureProvider<bool>((ref) async {
   final ytdlp = ref.watch(ytdlpServiceProvider);
@@ -112,12 +158,7 @@ final initProvider = FutureProvider<bool>((ref) async {
   log.info('init: ytdlp.initialize ${sw.elapsedMilliseconds}ms');
 
   // yt-dlp self-update is a network call; must not block the splash screen.
-  unawaited(
-    ytdlp.updateYtDlp().then(
-      (_) => log.info('yt-dlp updated to latest'),
-      onError: (e) => log.warn('yt-dlp update failed: $e'),
-    ),
-  );
+  unawaited(_maybeUpdateYtDlp(ref, log));
 
   // Request storage permission for Android 11+
   if (!await Permission.manageExternalStorage.isGranted) {

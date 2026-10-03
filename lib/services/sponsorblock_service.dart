@@ -18,7 +18,11 @@ class SponsorBlockService {
   final HttpClient _httpClient;
 
   SponsorBlockService(this._db, this._log, {HttpClient? httpClient})
-    : _httpClient = httpClient ?? HttpClient();
+    : _httpClient =
+          httpClient ?? (HttpClient()..connectionTimeout = connectionTimeout);
+
+  static const connectionTimeout = Duration(seconds: 10);
+  static const requestTimeout = Duration(seconds: 20);
 
   Future<void> refreshTrackSegments(Track track) async {
     if (track.isLocalReplacement) {
@@ -47,10 +51,13 @@ class SponsorBlockService {
       'actionTypes': jsonEncode(['skip', 'poi']),
     });
 
-    final request = await _httpClient.getUrl(uri);
+    final request = await _httpClient.getUrl(uri).timeout(requestTimeout);
     request.headers.set(HttpHeaders.acceptHeader, 'application/json');
-    final response = await request.close();
-    final body = await response.transform(utf8.decoder).join();
+    final response = await request.close().timeout(requestTimeout);
+    final body = await response
+        .transform(utf8.decoder)
+        .join()
+        .timeout(requestTimeout);
 
     if (response.statusCode == HttpStatus.notFound) return const [];
     if (response.statusCode < 200 || response.statusCode >= 300) {

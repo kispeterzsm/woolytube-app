@@ -32,6 +32,18 @@ class DownloadNetworkPolicy {
     return DownloadConnection.other;
   }
 
+  /// Whether unattended network work (automatic downloads, the yt-dlp
+  /// self-update) may run right now: never offline, and on mobile data only
+  /// when the user opted in.
+  Future<bool> allowsAutomaticNetworkUse() async {
+    final connection = await currentConnection();
+    if (connection == DownloadConnection.offline) return false;
+    if (connection == DownloadConnection.mobile) {
+      return _settings.getAutoDownloadWithMobileData();
+    }
+    return true;
+  }
+
   Future<ManualDownloadDecision> manualDownloadDecision() async {
     final connection = await currentConnection();
     if (connection == DownloadConnection.offline) {

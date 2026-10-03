@@ -17,16 +17,21 @@ void backgroundMain() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   final controlChannel = MethodChannel('com.woolytube/background');
+  final lock = DownloadLock();
 
   try {
-    if (!await DownloadService.acquireLock()) {
+    final ytdlp = YtDlpService();
+    // The foreground app shares this process's yt-dlp runtime. Never start a
+    // second download next to one it is running, and never take over its
+    // lock while it holds it (a sync between two tracks has no process).
+    if (await ytdlp.hasActiveDownloads() ||
+        !await lock.acquire(DownloadLock.backgroundOwner)) {
       controlChannel.invokeMethod('taskComplete', null);
       return;
     }
 
     try {
       final db = AppDatabase();
-      final ytdlp = YtDlpService();
       await ytdlp.initialize();
 
       final log = LogService();
@@ -49,6 +54,8 @@ void backgroundMain() async {
         metadata,
         notifications,
         sponsorBlock,
+        null,
+        lock,
       );
 
       for (final playlist in duePlaylists) {
@@ -64,7 +71,7 @@ void backgroundMain() async {
 
       controlChannel.invokeMethod('taskComplete', null);
     } finally {
-      await DownloadService.releaseLock();
+      await lock.release();
     }
   } catch (e) {
     controlChannel.invokeMethod('taskFailed', {'error': e.toString()});

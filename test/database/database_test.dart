@@ -1,6 +1,8 @@
 import 'package:drift/drift.dart' show Value;
+import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:woolytube/database/database.dart';
+import 'package:woolytube/services/sponsorblock_categories.dart';
 
 import '../helpers/test_database.dart';
 
@@ -388,4 +390,224 @@ void main() {
     expect(byUuid['remote-4']!.source, 'sponsorblock');
     expect(byUuid['remote-4']!.category, 'music_offtopic');
   });
+
+  test('two tracks of one playlist cannot share an index', () async {
+    final playlist = await insertTestPlaylist(db);
+    final other = await insertTestPlaylist(
+      db,
+      url: 'https://www.youtube.com/playlist?list=other',
+      name: 'Other',
+    );
+    await insertTestTrack(db, playlistId: playlist.id, index: 1);
+
+    await expectLater(
+      insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 1,
+        videoId: 'video-2',
+      ),
+      throwsA(isA<Exception>()),
+    );
+    // The same index in another playlist is fine.
+    await insertTestTrack(db, playlistId: other.id, index: 1, videoId: 'v');
+    expect(await db.getTotalTrackCount(playlist.id), 1);
+  });
+
+  test('partial playlist updates leave other columns untouched', () async {
+    final playlist = await insertTestPlaylist(db, name: 'Original');
+    final stamp = DateTime(2025, 3, 4, 5, 6);
+
+    await db.updatePlaylistFields(
+      playlist.id,
+      const PlaylistsCompanion(autoUpdate: Value(false)),
+    );
+    await db.markPlaylistUpdated(playlist.id, stamp);
+
+    final updated = await db.getPlaylist(playlist.id);
+    expect(updated.name, 'Original');
+    expect(updated.autoUpdate, isFalse);
+    expect(updated.lastUpdated, stamp);
+    expect(updated.outputPath, playlist.outputPath);
+  });
+
+  test('removing remote segments keeps local and curated ones', () async {
+    final playlist = await insertTestPlaylist(db);
+    final track = await insertTestTrack(db, playlistId: playlist.id);
+    await db.replaceSponsorBlockSegments(track.id, [
+      for (final source in ['sponsorblock', 'local', 'override', 'hidden'])
+        SponsorBlockSegmentsCompanion.insert(
+          trackId: track.id,
+          videoId: track.videoId,
+          source: source,
+          category: 'sponsor',
+          startMs: 1000,
+          endMs: 2000,
+          createdAt: DateTime(2024),
+        ),
+    ]);
+
+    await db.deleteRemoteSegmentsForTrack(track.id);
+
+    expect(
+      (await db.getSegmentsForTrack(track.id)).map((s) => s.source).toSet(),
+      {'local', 'override', 'hidden'},
+    );
+  });
+
+  test('upgrading from schema 10 repairs duplicate indices before adding the '
+      'unique index', () async {
+    final migrated = AppDatabase.forTesting(
+      NativeDatabase.memory(
+        setup: (raw) {
+          for (final statement in _schemaV10) {
+            raw.execute(statement);
+          }
+          raw.execute(
+            "INSERT INTO playlists (id, url, name, created_at, output_path) "
+            "VALUES (1, 'https://example.com/list', 'List', 0, '/tmp/list')",
+          );
+          void track(
+            int id,
+            int index,
+            String videoId,
+            String status,
+            String? filePath, {
+            bool localReplacement = false,
+          }) {
+            raw.execute(
+              'INSERT INTO tracks (id, playlist_id, "index", video_id, '
+              'title, status, file_path, thumbnail_path, downloaded_at, '
+              'is_local_replacement) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?)',
+              [
+                id,
+                index,
+                videoId,
+                videoId,
+                status,
+                filePath,
+                filePath == null ? null : '/tmp/list/thumb_$id.jpg',
+                filePath == null ? null : 1700000000,
+                localReplacement ? 1 : 0,
+              ],
+            );
+          }
+
+          track(10, 5, 'kept', 'complete', '/tmp/list/00005_Kept.mp4');
+          track(
+            11,
+            5,
+            'shared-file',
+            'complete',
+            '/tmp/list/00005_Kept.mp4',
+            localReplacement: true,
+          );
+          track(12, 5, 'own-file', 'complete', '/tmp/list/00005_Own.mp4');
+          track(13, 9, 'max', 'pending', null);
+          track(14, 2, 'dup2a', 'pending', null);
+          track(15, 2, 'dup2b', 'pending', null);
+          raw.execute('PRAGMA user_version = 10');
+        },
+      ),
+    );
+    addTearDown(migrated.close);
+
+    final tracks = await migrated.getTracksForPlaylist(1);
+    final byVideoId = {for (final track in tracks) track.videoId: track};
+    expect(tracks.map((track) => track.index).toSet(), hasLength(6));
+    // Lowest id keeps the contested index; the rest are appended after the
+    // playlist's previous maximum in (index, id) order.
+    expect(byVideoId['dup2a']!.index, 2);
+    expect(byVideoId['dup2b']!.index, 10);
+    expect(byVideoId['kept']!.index, 5);
+    expect(byVideoId['kept']!.status, 'complete');
+    expect(byVideoId['kept']!.filePath, '/tmp/list/00005_Kept.mp4');
+    expect(byVideoId['shared-file']!.index, 11);
+    expect(byVideoId['shared-file']!.status, 'pending');
+    expect(byVideoId['shared-file']!.filePath, isNull);
+    expect(byVideoId['shared-file']!.thumbnailPath, isNull);
+    expect(byVideoId['shared-file']!.downloadedAt, isNull);
+    expect(byVideoId['shared-file']!.isLocalReplacement, isFalse);
+    expect(byVideoId['own-file']!.index, 12);
+    expect(byVideoId['own-file']!.status, 'complete');
+    expect(byVideoId['own-file']!.filePath, '/tmp/list/00005_Own.mp4');
+    expect(byVideoId['max']!.index, 9);
+
+    final indexes =
+        await migrated
+            .customSelect(
+              "SELECT name FROM sqlite_master WHERE type = 'index' "
+              "AND tbl_name = 'tracks'",
+            )
+            .get();
+    expect(
+      indexes.map((row) => row.read<String>('name')),
+      contains('idx_tracks_pl_index_unique'),
+    );
+    await expectLater(
+      insertTestTrack(migrated, playlistId: 1, index: 5, videoId: 'clash'),
+      throwsA(isA<Exception>()),
+    );
+  });
 }
+
+/// The on-device schema as created by app versions up to schema 10.
+final _schemaV10 = [
+  '''CREATE TABLE playlists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    url TEXT NOT NULL,
+    name TEXT NOT NULL,
+    thumbnail_url TEXT,
+    thumbnail_path TEXT,
+    audio_only INTEGER NOT NULL DEFAULT 0,
+    auto_update INTEGER NOT NULL DEFAULT 1,
+    update_frequency_hours INTEGER NOT NULL DEFAULT 24,
+    include_thumbnails INTEGER NOT NULL DEFAULT 1,
+    sponsor_block_enabled INTEGER NOT NULL DEFAULT 1,
+    sponsor_block_categories TEXT NOT NULL
+      DEFAULT '["sponsor","selfpromo","music_offtopic"]',
+    sponsor_block_category_actions TEXT NOT NULL
+      DEFAULT '$defaultSponsorBlockCategoryActionsJson',
+    last_updated INTEGER,
+    created_at INTEGER NOT NULL,
+    output_path TEXT NOT NULL,
+    play_chapters INTEGER
+  )''',
+  '''CREATE TABLE tracks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    playlist_id INTEGER NOT NULL REFERENCES playlists (id),
+    "index" INTEGER NOT NULL,
+    video_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    thumbnail_url TEXT,
+    thumbnail_path TEXT,
+    file_path TEXT,
+    duration_seconds INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending',
+    unavailable_reason TEXT,
+    is_local_replacement INTEGER NOT NULL DEFAULT 0,
+    always_skip INTEGER NOT NULL DEFAULT 0,
+    downloaded_at INTEGER,
+    sponsor_block_checked_at INTEGER,
+    last_error TEXT,
+    chapters_json TEXT,
+    chapters_enabled INTEGER
+  )''',
+  '''CREATE TABLE sponsor_block_segments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    track_id INTEGER NOT NULL REFERENCES tracks (id) ON DELETE CASCADE,
+    video_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    uuid TEXT,
+    category TEXT NOT NULL,
+    action_type TEXT NOT NULL DEFAULT 'skip',
+    start_ms INTEGER NOT NULL,
+    end_ms INTEGER NOT NULL,
+    votes INTEGER,
+    locked INTEGER,
+    description TEXT,
+    created_at INTEGER NOT NULL
+  )''',
+  'CREATE INDEX idx_tracks_pl_status ON tracks (playlist_id, status)',
+  'CREATE INDEX idx_tracks_pl_index ON tracks (playlist_id, "index")',
+];

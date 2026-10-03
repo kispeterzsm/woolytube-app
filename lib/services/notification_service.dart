@@ -34,9 +34,13 @@ class DownloadNotificationService {
     );
   }
 
+  /// Posts a completion notification. Pass the playlist id as
+  /// [notificationId] so several playlists finishing close together each keep
+  /// their own notification instead of overwriting one shared entry.
   Future<void> showDownloadComplete(
     String playlistName, {
     int downloadedCount = 1,
+    int notificationId = _completeNotificationId,
   }) async {
     if (downloadedCount < 1) return;
 
@@ -58,9 +62,9 @@ class DownloadNotificationService {
     final details = NotificationDetails(android: androidDetails);
     final presenter = _presenter;
     if (presenter != null) {
-      await presenter(_completeNotificationId, title, body, details);
+      await presenter(notificationId, title, body, details);
     } else {
-      await _plugin.show(_completeNotificationId, title, body, details);
+      await _plugin.show(notificationId, title, body, details);
     }
   }
 }

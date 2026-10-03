@@ -146,29 +146,12 @@ class PlaylistService {
     Map<String, dynamic> playlistInfo,
   ) async {
     final entries = playlistInfo['entries'] as List<dynamic>? ?? [];
-    final tracks = <TracksCompanion>[];
-
-    for (var i = 0; i < entries.length; i++) {
-      final entry = entries[i] as Map<String, dynamic>;
-      final videoId = entry['id'] as String? ?? '';
-      if (videoId.isEmpty) continue;
-
-      final playlistIndex = entry['playlist_index'] as int? ?? (i + 1);
-      final reason = _detectUnavailability(entry);
-
-      tracks.add(
-        TracksCompanion.insert(
-          playlistId: playlistId,
-          index: playlistIndex,
-          videoId: videoId,
-          title: entry['title'] as String? ?? 'Unknown',
-          thumbnailUrl: Value(entry['thumbnail'] as String?),
-          durationSeconds: Value(entry['duration'] as int?),
-          status: Value(reason != null ? 'unavailable' : 'pending'),
-          unavailableReason: Value(reason),
-        ),
-      );
-    }
+    final existingTracks = await _db.getTracksForPlaylist(playlistId);
+    final tracks = _newTrackCompanions(
+      playlistId: playlistId,
+      entries: entries,
+      existingTracks: existingTracks,
+    );
 
     if (tracks.isNotEmpty) {
       await _db.insertTracks(tracks);
@@ -177,6 +160,8 @@ class PlaylistService {
     await _writeMetadata(playlistId);
   }
 
+  /// Writes only the settings that were passed, so a stale [Playlist] snapshot
+  /// in the UI can never overwrite fields changed elsewhere in the meantime.
   Future<void> updatePlaylistSettings({
     required int id,
     String? name,
@@ -204,7 +189,7 @@ class PlaylistService {
             }
             : null);
 
-    String outputPath = playlist.outputPath;
+    String? outputPath;
     if (audioOnly != null && audioOnly != playlist.audioOnly) {
       final basePath =
           audioOnly
@@ -215,79 +200,76 @@ class PlaylistService {
       await Directory(outputPath).create(recursive: true);
     }
 
-    await _db.updatePlaylist(
+    await _db.updatePlaylistFields(
+      id,
       PlaylistsCompanion(
-        id: Value(id),
-        url: Value(playlist.url),
-        name: Value(name ?? playlist.name),
-        thumbnailUrl: Value(playlist.thumbnailUrl),
-        thumbnailPath: Value(playlist.thumbnailPath),
-        audioOnly: Value(audioOnly ?? playlist.audioOnly),
-        autoUpdate: Value(autoUpdate ?? playlist.autoUpdate),
-        playChapters: Value(playChapters ?? playlist.playChapters),
-        updateFrequencyHours: Value(
-          updateFrequencyHours ?? playlist.updateFrequencyHours,
-        ),
-        includeThumbnails: Value(
-          includeThumbnails ?? playlist.includeThumbnails,
-        ),
-        sponsorBlockEnabled: Value(
-          sponsorBlockEnabled ?? playlist.sponsorBlockEnabled,
-        ),
-        sponsorBlockCategories: Value(
-          resolvedSponsorBlockActions != null
-              ? jsonEncode(
-                autoSkipCategoriesFromActions(resolvedSponsorBlockActions),
-              )
-              : playlist.sponsorBlockCategories,
-        ),
-        sponsorBlockCategoryActions: Value(
-          resolvedSponsorBlockActions != null
-              ? encodeSponsorBlockCategoryActions(resolvedSponsorBlockActions)
-              : playlist.sponsorBlockCategoryActions,
-        ),
-        lastUpdated: Value(playlist.lastUpdated),
-        createdAt: Value(playlist.createdAt),
-        outputPath: Value(outputPath),
+        name: name != null ? Value(name) : const Value.absent(),
+        audioOnly: audioOnly != null ? Value(audioOnly) : const Value.absent(),
+        autoUpdate:
+            autoUpdate != null ? Value(autoUpdate) : const Value.absent(),
+        playChapters:
+            playChapters != null ? Value(playChapters) : const Value.absent(),
+        updateFrequencyHours:
+            updateFrequencyHours != null
+                ? Value(updateFrequencyHours)
+                : const Value.absent(),
+        includeThumbnails:
+            includeThumbnails != null
+                ? Value(includeThumbnails)
+                : const Value.absent(),
+        sponsorBlockEnabled:
+            sponsorBlockEnabled != null
+                ? Value(sponsorBlockEnabled)
+                : const Value.absent(),
+        sponsorBlockCategories:
+            resolvedSponsorBlockActions != null
+                ? Value(
+                  jsonEncode(
+                    autoSkipCategoriesFromActions(resolvedSponsorBlockActions),
+                  ),
+                )
+                : const Value.absent(),
+        sponsorBlockCategoryActions:
+            resolvedSponsorBlockActions != null
+                ? Value(
+                  encodeSponsorBlockCategoryActions(
+                    resolvedSponsorBlockActions,
+                  ),
+                )
+                : const Value.absent(),
+        outputPath:
+            outputPath != null ? Value(outputPath) : const Value.absent(),
       ),
     );
 
     await _writeMetadata(id);
   }
 
-  /// Full reconciliation: detect new, unavailable, removed, and re-available tracks.
+  /// Full reconciliation: detect new, unavailable, removed, and re-available
+  /// tracks.
+  ///
+  /// Local indices are append-only. An existing track keeps its index even
+  /// when YouTube reorders the playlist or removes earlier entries, because
+  /// on-disk file prefixes are derived from it. Genuinely new entries are
+  /// appended after the current maximum index in remote order.
+  ///
+  /// Throws a [StateError] when YouTube returns no entries for a playlist that
+  /// already has tracks; an empty response is far more likely a transient
+  /// fetch problem than a playlist that was really emptied.
   Future<SyncResult> syncPlaylist(Playlist playlist) async {
     final info = await _ytdlp.getPlaylistInfo(playlist.url);
     final freshEntries = info['entries'] as List<dynamic>? ?? [];
     final existingTracks = await _db.getTracksForPlaylist(playlist.id);
-    final forcedInsertIndices =
-        existingTracks
-            .where((track) => isForcedInsertVideoId(track.videoId))
-            .map((track) => track.index)
-            .toList()
-          ..sort();
 
-    final existingByVideoId = <String, Track>{};
-    for (final t in existingTracks) {
-      existingByVideoId[t.videoId] = t;
+    final freshByVideoId = _entriesByVideoId(freshEntries);
+    if (freshByVideoId.isEmpty && existingTracks.isNotEmpty) {
+      throw StateError(
+        'YouTube returned no entries for "${playlist.name}"; the local '
+        'playlist was left unchanged.',
+      );
     }
 
-    final freshByVideoId = <String, Map<String, dynamic>>{};
-    final freshIndexByVideoId = <String, int>{};
-    for (var i = 0; i < freshEntries.length; i++) {
-      final entry = freshEntries[i] as Map<String, dynamic>;
-      final vid = entry['id'] as String? ?? '';
-      if (vid.isNotEmpty) {
-        freshByVideoId[vid] = entry;
-        final remoteIndex = entry['playlist_index'] as int? ?? (i + 1);
-        freshIndexByVideoId[vid] = _remoteToLocalIndex(
-          remoteIndex,
-          forcedInsertIndices,
-        );
-      }
-    }
-
-    int added = 0, markedUnavailable = 0, markedAvailable = 0, removed = 0;
+    int markedUnavailable = 0, markedAvailable = 0, removed = 0;
     final replacementConflicts = <Track>[];
 
     // Helper: check if track has a valid file on disk
@@ -316,7 +298,6 @@ class PlaylistService {
       }
 
       final reason = _detectUnavailability(freshEntry);
-      final freshIndex = freshIndexByVideoId[track.videoId] ?? track.index;
 
       if (reason != null) {
         // Video is unavailable online
@@ -325,13 +306,8 @@ class PlaylistService {
           if (track.unavailableReason != reason) {
             await _db.updateTrackOnlineStatus(track.id, reason);
           }
-          // Don't change index for tracks with files
         } else if (track.status != 'unavailable') {
-          await _db.updateTrackUnavailable(
-            track.id,
-            reason,
-            newIndex: freshIndex,
-          );
+          await _db.updateTrackUnavailable(track.id, reason);
           markedUnavailable++;
         }
       } else if (track.unavailableReason != null) {
@@ -349,35 +325,84 @@ class PlaylistService {
             title: freshEntry['title'] as String? ?? 'Unknown',
             thumbnailUrl: freshEntry['thumbnail'] as String?,
             durationSeconds: freshEntry['duration'] as int?,
-            newIndex: freshIndex,
           );
         } else {
           // Status is pending/error, reason was set informationally
           await _db.updateTrackOnlineStatus(track.id, null);
         }
         markedAvailable++;
-      } else if (freshIndex != track.index && track.status != 'complete') {
-        // Index changed and track not yet downloaded — safe to update
-        await _db.updateTrackIndex(track.id, freshIndex);
       }
     }
 
-    // Add genuinely new tracks
-    final newTracks = <TracksCompanion>[];
-    for (var i = 0; i < freshEntries.length; i++) {
-      final entry = freshEntries[i] as Map<String, dynamic>;
+    final newTracks = _newTrackCompanions(
+      playlistId: playlist.id,
+      entries: freshEntries,
+      existingTracks: existingTracks,
+    );
+    if (newTracks.isNotEmpty) {
+      await _db.insertTracks(newTracks);
+    }
+
+    await _writeMetadata(playlist.id);
+    return SyncResult(
+      added: newTracks.length,
+      markedUnavailable: markedUnavailable,
+      markedAvailable: markedAvailable,
+      removed: removed,
+      replacementConflicts: replacementConflicts,
+    );
+  }
+
+  /// Maps remote entries by video ID. The first occurrence wins when YouTube
+  /// lists the same video twice; entries without an ID are ignored.
+  static Map<String, Map<String, dynamic>> _entriesByVideoId(
+    List<dynamic> entries,
+  ) {
+    final byVideoId = <String, Map<String, dynamic>>{};
+    for (final raw in entries) {
+      final entry = raw as Map<String, dynamic>;
       final vid = entry['id'] as String? ?? '';
-      if (vid.isEmpty || existingByVideoId.containsKey(vid)) continue;
+      if (vid.isEmpty) continue;
+      byVideoId.putIfAbsent(vid, () => entry);
+    }
+    return byVideoId;
+  }
+
+  /// Builds rows for remote entries that are not in [existingTracks] yet.
+  ///
+  /// A playlist without tracks keeps YouTube's own numbering so a fresh add
+  /// matches the remote order. Otherwise new tracks are appended after the
+  /// current maximum index; no two rows ever share an index.
+  List<TracksCompanion> _newTrackCompanions({
+    required int playlistId,
+    required List<dynamic> entries,
+    required List<Track> existingTracks,
+  }) {
+    final existingVideoIds = existingTracks.map((t) => t.videoId).toSet();
+    final usedIndices = existingTracks.map((t) => t.index).toSet();
+    var maxIndex = usedIndices.fold<int>(0, (max, i) => i > max ? i : max);
+    final appendOnly = existingTracks.isNotEmpty;
+    final seenVideoIds = <String>{};
+    final companions = <TracksCompanion>[];
+
+    for (var i = 0; i < entries.length; i++) {
+      final entry = entries[i] as Map<String, dynamic>;
+      final vid = entry['id'] as String? ?? '';
+      if (vid.isEmpty || !seenVideoIds.add(vid)) continue;
+      if (existingVideoIds.contains(vid)) continue;
+
+      var playlistIndex =
+          appendOnly
+              ? maxIndex + 1
+              : entry['playlist_index'] as int? ?? (i + 1);
+      if (usedIndices.contains(playlistIndex)) playlistIndex = maxIndex + 1;
+      usedIndices.add(playlistIndex);
+      if (playlistIndex > maxIndex) maxIndex = playlistIndex;
 
       final reason = _detectUnavailability(entry);
-      final remoteIndex = entry['playlist_index'] as int? ?? (i + 1);
-      final playlistIndex = _remoteToLocalIndex(
-        remoteIndex,
-        forcedInsertIndices,
-      );
-      newTracks.add(
+      companions.add(
         TracksCompanion.insert(
-          playlistId: playlist.id,
+          playlistId: playlistId,
           index: playlistIndex,
           videoId: vid,
           title: entry['title'] as String? ?? 'Unknown',
@@ -387,21 +412,8 @@ class PlaylistService {
           unavailableReason: Value(reason),
         ),
       );
-      added++;
     }
-
-    if (newTracks.isNotEmpty) {
-      await _db.insertTracks(newTracks);
-    }
-
-    await _writeMetadata(playlist.id);
-    return SyncResult(
-      added: added,
-      markedUnavailable: markedUnavailable,
-      markedAvailable: markedAvailable,
-      removed: removed,
-      replacementConflicts: replacementConflicts,
-    );
+    return companions;
   }
 
   /// Removes the playlist and its tracks from the database.
@@ -469,17 +481,6 @@ class PlaylistService {
 
   static bool isForcedInsertVideoId(String videoId) =>
       videoId.startsWith(forcedInsertVideoIdPrefix);
-
-  static int _remoteToLocalIndex(
-    int remoteIndex,
-    List<int> forcedInsertIndices,
-  ) {
-    var localIndex = remoteIndex;
-    for (final forcedIndex in forcedInsertIndices) {
-      if (forcedIndex <= localIndex) localIndex++;
-    }
-    return localIndex;
-  }
 
   /// Inserts a user-supplied local file at an exact archive position.
   ///
@@ -593,7 +594,9 @@ class PlaylistService {
 
       await _db.transaction(() async {
         final movesByTrackId = {for (final move in moves) move.trackId: move};
-        for (final track in tracks) {
+        // Shift from the highest index down so the unique (playlist, index)
+        // constraint is never violated part-way through.
+        for (final track in tracks.reversed) {
           final newIndex = track.index >= index ? track.index + 1 : track.index;
           final move = movesByTrackId[track.id];
           if (newIndex != track.index || move != null) {
@@ -615,6 +618,8 @@ class PlaylistService {
             status: const Value('complete'),
             isLocalReplacement: const Value(true),
             downloadedAt: Value(DateTime.now()),
+            // A local file has no SponsorBlock timeline to fetch.
+            sponsorBlockCheckedAt: Value(DateTime.now()),
           ),
         );
       });
@@ -712,6 +717,9 @@ class PlaylistService {
         filePath: destinationPath,
         isLocalReplacement: true,
       );
+      // Remote segments were timed against the YouTube video, not this file.
+      await _db.deleteRemoteSegmentsForTrack(track.id);
+      await _db.updateTrackSponsorBlockCheckedAt(track.id, DateTime.now());
       await _refreshEmbeddedThumbnail(
         playlist: playlist,
         trackId: track.id,
@@ -728,8 +736,9 @@ class PlaylistService {
     }
 
     final updated = await _db.getTrack(track.id);
-    if (updated == null)
+    if (updated == null) {
       throw StateError('The replacement could not be loaded.');
+    }
     return updated;
   }
 

@@ -12,6 +12,7 @@ class AppSettingsService {
   static const subtitleLanguagesKey = 'subtitle_languages';
   static const pauseOnAudioInterruptionKey = 'pause_on_audio_interruption';
   static const dismissedImportUrlsKey = 'dismissed_import_urls';
+  static const lastYtDlpUpdateAttemptKey = 'last_ytdlp_update_attempt';
   static const _backgroundChannel = MethodChannel('com.woolytube/background');
 
   final PreferencesLoader _preferencesLoader;
@@ -100,6 +101,21 @@ class AppSettingsService {
     await preferences.setStringList(
       dismissedImportUrlsKey,
       current.where((entry) => entry != url).toList(),
+    );
+  }
+
+  /// When the app last tried to self-update yt-dlp, successful or not.
+  Future<DateTime?> getLastYtDlpUpdateAttempt() async {
+    final preferences = await _preferencesLoader();
+    final millis = preferences.getInt(lastYtDlpUpdateAttemptKey);
+    return millis == null ? null : DateTime.fromMillisecondsSinceEpoch(millis);
+  }
+
+  Future<void> setLastYtDlpUpdateAttempt(DateTime at) async {
+    final preferences = await _preferencesLoader();
+    await preferences.setInt(
+      lastYtDlpUpdateAttemptKey,
+      at.millisecondsSinceEpoch,
     );
   }
 

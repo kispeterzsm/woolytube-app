@@ -62,4 +62,27 @@ void main() {
       expect(await policy.currentConnection(), DownloadConnection.wifi);
     },
   );
+
+  test('automatic network use follows the mobile-data preference', () async {
+    expect(
+      await policyFor([ConnectivityResult.wifi]).allowsAutomaticNetworkUse(),
+      isTrue,
+    );
+    expect(
+      await policyFor([ConnectivityResult.mobile]).allowsAutomaticNetworkUse(),
+      isFalse,
+    );
+    expect(
+      await policyFor([ConnectivityResult.none]).allowsAutomaticNetworkUse(),
+      isFalse,
+    );
+
+    SharedPreferences.setMockInitialValues({
+      AppSettingsService.autoDownloadWithMobileDataKey: true,
+    });
+    expect(
+      await policyFor([ConnectivityResult.mobile]).allowsAutomaticNetworkUse(),
+      isTrue,
+    );
+  });
 }

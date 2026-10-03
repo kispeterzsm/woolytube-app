@@ -88,4 +88,14 @@ void main() {
     expect(calls.single.method, 'scheduleAutoUpdate');
     expect(calls.single.arguments, {'allowMobileData': true});
   });
+
+  test('remembers when yt-dlp last tried to update itself', () async {
+    final settings = AppSettingsService();
+    expect(await settings.getLastYtDlpUpdateAttempt(), isNull);
+
+    final at = DateTime(2026, 10, 3, 12, 30);
+    await settings.setLastYtDlpUpdateAttempt(at);
+
+    expect(await AppSettingsService().getLastYtDlpUpdateAttempt(), at);
+  });
 }
