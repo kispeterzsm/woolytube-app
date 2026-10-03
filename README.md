@@ -19,6 +19,8 @@ Per-architecture APKs are also available on the [Releases page](https://github.c
 - **Persistent storage** -- files are saved to accessible folders that survive app uninstall
 - **Audio-only mode** -- download and play just the audio from any video
 - **Thumbnails** -- download and display video thumbnails
+- **Stable local order** -- a downloaded track keeps its number and file name forever; videos added to the YouTube playlist later are appended after the existing entries
+- **Audio focus** -- playback pauses for calls and resumes when they end, lowers volume for short prompts, and pauses when headphones disconnect
 
 ## Installation
 
@@ -27,6 +29,10 @@ Per-architecture APKs are also available on the [Releases page](https://github.c
 3. Open the APK and install
 
 **Requirements:** Android 7.0 (API 24) or higher.
+
+## Playlists and downloads
+
+Tap the update icon on a playlist to sync it with YouTube and download new entries; while a download runs the same control cancels it, keeping finished tracks. Download problems are shown in the app with a **Details** action. Deleting a playlist offers to remove its downloaded files too; if they are kept, the folder is no longer offered for import on the next launch. Switching a playlist between video and audio-only uses a new folder and downloads everything again, which the app confirms first.
 
 ## Album chapters
 
