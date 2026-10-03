@@ -303,4 +303,328 @@ void main() {
       }
     },
   );
+
+  group('chapter editing and recognition', () {
+    MediaChapter chapter(
+      String id,
+      int startMs,
+      int endMs, {
+      ChapterOrigin origin = ChapterOrigin.user,
+      bool manuallyEdited = false,
+      List<String> reviewReasons = const [],
+    }) => MediaChapter(
+      id: id,
+      title: id,
+      startMs: startMs,
+      endMs: endMs,
+      origin: origin,
+      manuallyEdited: manuallyEdited,
+      reviewReasons: reviewReasons,
+    );
+
+    Future<ChapterData> data() async =>
+        ChapterData.decode((await db.getTrack(track.id))!.chaptersJson);
+
+    Future<void> seed(List<MediaChapter> chapters, {int durationMs = 60000}) =>
+        db.writeTrackChapters(
+          track.id,
+          ChapterData(custom: chapters, durationMs: durationMs),
+        );
+
+    test('rename marks the chapter edited and clears name reviews', () async {
+      await seed([
+        chapter(
+          'a',
+          0,
+          30000,
+          origin: ChapterOrigin.auto,
+          reviewReasons: ['Name: low confidence', 'Timing: guessed'],
+        ),
+        chapter('b', 30000, 60000),
+      ]);
+      await service.rename(track, 'a', '  Real title ');
+      final renamed = (await data()).active.first;
+      expect(renamed.title, 'Real title');
+      expect(renamed.manuallyEdited, isTrue);
+      expect(renamed.protectedFromRecognition, isTrue);
+      expect(renamed.reviewReasons, ['Timing: guessed']);
+      await expectLater(
+        service.rename(track, 'missing', 'x'),
+        throwsStateError,
+      );
+    });
+
+    test(
+      'moveBoundary shifts both neighbours and rejects stale edges',
+      () async {
+        await seed([
+          chapter('a', 0, 30000, origin: ChapterOrigin.auto),
+          chapter(
+            'b',
+            30000,
+            60000,
+            origin: ChapterOrigin.auto,
+            reviewReasons: ['Timing: guessed'],
+          ),
+        ]);
+        await service.moveBoundary(track, 'a', 'b', 30000, 25000);
+        final moved = (await data()).active;
+        expect(moved.map((c) => (c.startMs, c.endMs)), [
+          (0, 25000),
+          (25000, 60000),
+        ]);
+        expect(moved.every((c) => c.manuallyEdited), isTrue);
+        expect(moved.last.reviewReasons, isEmpty);
+        await expectLater(
+          service.moveBoundary(track, 'a', 'b', 30000, 20000),
+          throwsStateError,
+        );
+        await expectLater(
+          service.moveBoundary(track, 'a', 'b', 25000, 70000),
+          throwsFormatException,
+        );
+      },
+    );
+
+    test('merge keeps the chosen survivor over the combined range', () async {
+      final left = chapter(
+        'a',
+        0,
+        30000,
+        origin: ChapterOrigin.auto,
+        reviewReasons: ['Timing: guessed', 'Name: low confidence'],
+      );
+      final right = chapter('b', 30000, 60000, origin: ChapterOrigin.original);
+      await seed([left, right]);
+      await service.merge(
+        track,
+        left,
+        right,
+        keepEarlier: false,
+        title: 'Both',
+      );
+      final merged = (await data()).active.single;
+      expect(merged.id, 'b');
+      expect(merged.origin, ChapterOrigin.original);
+      expect((merged.startMs, merged.endMs), (0, 60000));
+      expect(merged.title, 'Both');
+      expect(merged.manuallyEdited, isTrue);
+      expect(merged.reviewReasons, ['Timing: guessed']);
+      await expectLater(
+        service.merge(track, left, right, keepEarlier: true, title: 'x'),
+        throwsStateError,
+      );
+    });
+
+    test(
+      'delete and restore keep an undo snapshot that undo applies',
+      () async {
+        await service.refresh(track);
+        final before = (await data()).active;
+        await service.delete(track, before.first.id);
+        var current = await data();
+        expect(current.active.map((c) => c.id), [before.last.id]);
+        expect(current.undoChapters!.map((c) => c.id), before.map((c) => c.id));
+
+        await service.undo(track);
+        current = await data();
+        expect(current.active.map((c) => c.id), before.map((c) => c.id));
+        expect(current.undoChapters, isNull);
+        expect(current.recognitionEpoch, 1);
+
+        await service.save(
+          track,
+          MediaChapter(
+            id: before.first.id,
+            title: 'Mine',
+            startMs: 0,
+            endMs: 30000,
+          ),
+        );
+        await service.restore(track);
+        current = await data();
+        expect(current.custom, isNull);
+        expect(current.active.first.title, 'First');
+        expect(current.undoChapters!.first.title, 'Mine');
+        // Undo reverts the restore; a second undo has nothing left to apply.
+        await service.undo(track);
+        current = await data();
+        expect(current.active.first.title, 'Mine');
+        expect(current.undoChapters, isNull);
+        await service.undo(track);
+        expect((await data()).active.first.title, 'Mine');
+      },
+    );
+
+    test('removeAutomatic keeps edited and user-made chapters', () async {
+      await seed([
+        chapter('auto', 0, 20000, origin: ChapterOrigin.auto),
+        chapter(
+          'edited',
+          20000,
+          40000,
+          origin: ChapterOrigin.auto,
+          manuallyEdited: true,
+        ),
+        chapter('mine', 40000, 60000),
+      ]);
+      await service.removeAutomatic(track);
+      final current = await data();
+      expect(current.active.map((c) => c.id), ['edited', 'mine']);
+      expect(current.recognitionEpoch, 1);
+      expect(current.undoChapters, hasLength(3));
+    });
+
+    test('applyRecognition cuts around protected chapters and replaces old '
+        'results', () async {
+      await seed([
+        chapter('old-auto', 0, 30000, origin: ChapterOrigin.auto),
+        chapter('mine', 30000, 40000),
+        chapter(
+          'edited',
+          40000,
+          50000,
+          origin: ChapterOrigin.auto,
+          manuallyEdited: true,
+        ),
+      ]);
+      final applied = await service.applyRecognition(
+        track,
+        runId: 'run-1',
+        epoch: 0,
+        durationMs: 60000,
+        proposals: [
+          chapter('song-1', 0, 28000),
+          chapter('song-2', 28000, 55000),
+        ],
+      );
+      expect(applied, isTrue);
+      final current = await data();
+      expect(current.lastRecognitionRunId, 'run-1');
+      expect(
+        current.active
+            .map((c) => (c.id, c.startMs, c.endMs, c.origin))
+            .toList(),
+        [
+          ('song-1-0-28000', 0, 28000, ChapterOrigin.auto),
+          // The 2 s remainder of the old result is noise and is dropped.
+          ('mine', 30000, 40000, ChapterOrigin.user),
+          ('edited', 40000, 50000, ChapterOrigin.auto),
+          ('song-2-50000-55000', 50000, 55000, ChapterOrigin.auto),
+        ],
+      );
+      expect(
+        current.active
+            .where((c) => c.id.startsWith('song'))
+            .every((c) => !c.manuallyEdited),
+        isTrue,
+      );
+    });
+
+    test('applyRecognition clips overlapping and overlong proposals', () async {
+      await seed(const []);
+      await service.applyRecognition(
+        track,
+        runId: 'run-1',
+        epoch: 0,
+        durationMs: 60000,
+        proposals: [
+          chapter('b', 25000, 70000),
+          chapter('a', 0, 30000),
+          chapter('tiny', 29000, 31000),
+        ],
+      );
+      expect((await data()).active.map((c) => (c.startMs, c.endMs)).toList(), [
+        (0, 30000),
+        (30000, 60000),
+      ]);
+    });
+
+    test('applyRecognition ignores stale epochs and repeated runs', () async {
+      await seed([chapter('mine', 0, 10000)]);
+      final proposals = [chapter('song', 10000, 60000)];
+      expect(
+        await service.applyRecognition(
+          track,
+          runId: 'run-1',
+          epoch: 3,
+          durationMs: 60000,
+          proposals: proposals,
+        ),
+        isFalse,
+      );
+      expect(
+        await service.applyRecognition(
+          track,
+          runId: 'run-1',
+          epoch: 0,
+          durationMs: 60000,
+          proposals: proposals,
+        ),
+        isTrue,
+      );
+      expect(
+        await service.applyRecognition(
+          track,
+          runId: 'run-1',
+          epoch: 0,
+          durationMs: 60000,
+          proposals: proposals,
+        ),
+        isFalse,
+      );
+      // An edit bumps the epoch, so an in-flight scan from before it is dropped.
+      await service.rename(track, 'mine', 'Renamed');
+      await service.removeAutomatic(track);
+      expect(
+        await service.applyRecognition(
+          track,
+          runId: 'run-2',
+          epoch: 0,
+          durationMs: 60000,
+          proposals: proposals,
+        ),
+        isFalse,
+      );
+      expect((await data()).active.map((c) => c.id), ['mine']);
+    });
+
+    test('legacy custom chapters infer origin and edits from downloads', () {
+      final parsed = ChapterData.fromJson({
+        'downloaded': [
+          {'id': 'youtube-0-0', 'title': 'First', 'startMs': 0, 'endMs': 30000},
+          {
+            'id': 'youtube-1-30',
+            'title': 'Second',
+            'startMs': 30000,
+            'endMs': 60000,
+          },
+        ],
+        'custom': [
+          {'id': 'youtube-0-0', 'title': 'First', 'startMs': 0, 'endMs': 30000},
+          {
+            'id': 'youtube-1-30',
+            'title': 'Renamed',
+            'startMs': 30000,
+            'endMs': 60000,
+          },
+          {'id': 'local', 'title': 'Mine', 'startMs': 60000, 'endMs': 70000},
+        ],
+      });
+      expect(
+        parsed.downloaded.every((c) => c.origin == ChapterOrigin.original),
+        isTrue,
+      );
+      final custom = parsed.custom!;
+      expect(custom[0].origin, ChapterOrigin.original);
+      expect(custom[0].manuallyEdited, isFalse);
+      expect(custom[1].origin, ChapterOrigin.original);
+      expect(custom[1].manuallyEdited, isTrue);
+      expect(custom[2].origin, ChapterOrigin.user);
+      expect(custom[2].protectedFromRecognition, isTrue);
+      final roundTrip = ChapterData.fromJson(parsed.toJson());
+      expect(roundTrip.custom![1].manuallyEdited, isTrue);
+      expect(roundTrip.recognitionEpoch, 0);
+    });
+  });
 }

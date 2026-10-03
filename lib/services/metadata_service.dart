@@ -169,10 +169,10 @@ class MetadataService {
       final data = ChapterData.fromVideoInfo(info);
       await _db.writeTrackChapters(
         track.id,
-        ChapterData(
+        old.copyWith(
           downloaded: data.downloaded,
           custom: old.valid ? old.custom : null,
-          shuffleChapters: old.shuffleChapters,
+          valid: true,
           checkedAt: data.checkedAt,
           durationMs: data.durationMs,
         ),

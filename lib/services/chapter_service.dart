@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import '../database/database.dart';
 import 'chapters.dart';
 import 'metadata_service.dart';
@@ -51,10 +53,8 @@ class ChapterService {
           final remote = results[track.videoId]!;
           await db.writeTrackChapters(
             track.id,
-            ChapterData(
+            old.copyWith(
               downloaded: remote.downloaded,
-              custom: old.custom,
-              shuffleChapters: old.shuffleChapters,
               checkedAt: remote.checkedAt,
               durationMs: remote.durationMs,
             ),
@@ -92,10 +92,10 @@ class ChapterService {
     final remote = ChapterData.fromVideoInfo(info);
     await db.writeTrackChapters(
       track.id,
-      ChapterData(
+      old.copyWith(
         downloaded: remote.downloaded,
         custom: old.valid ? old.custom : null,
-        shuffleChapters: old.shuffleChapters,
+        valid: true,
         checkedAt: remote.checkedAt,
         durationMs: remote.durationMs,
       ),
@@ -103,61 +103,322 @@ class ChapterService {
     await persist(track.playlistId);
   }
 
+  Future<bool> _change(
+    Track track,
+    ChapterData Function(ChapterData, Track) action,
+  ) async {
+    var changed = false;
+    await db.transaction(() async {
+      final fresh = await db.getTrack(track.id);
+      if (fresh == null || fresh.filePath != track.filePath) {
+        throw StateError('The media changed. Reopen its chapters.');
+      }
+      final old = ChapterData.decode(fresh.chaptersJson);
+      final next = action(old, fresh);
+      if (identical(old, next)) return;
+      validateChapters(next.active, durationMs: next.durationMs);
+      await db.writeTrackChapters(track.id, next);
+      changed = true;
+    });
+    if (changed) await persist(track.playlistId);
+    return changed;
+  }
+
+  ChapterData _edited(
+    ChapterData old,
+    List<MediaChapter> entries, {
+    int? durationMs,
+  }) {
+    entries.sort((a, b) => a.startMs.compareTo(b.startMs));
+    return old.copyWith(
+      custom: entries,
+      undoChapters: old.active,
+      downloaded: old.valid ? old.downloaded : const [],
+      valid: true,
+      durationMs: durationMs,
+    );
+  }
+
   Future<void> save(
     Track track,
     MediaChapter chapter, {
     int? durationMs,
   }) async {
-    final fresh = await db.getTrack(track.id);
-    if (fresh == null || fresh.filePath != track.filePath) {
-      throw StateError('The media changed.');
-    }
-    final old = ChapterData.decode(fresh.chaptersJson);
-    final entries = [...old.active.where((c) => c.id != chapter.id), chapter]
-      ..sort((a, b) => a.startMs.compareTo(b.startMs));
-    final duration =
-        durationMs ??
-        (old.valid ? old.durationMs : null) ??
-        (fresh.isLocalReplacement
-            ? null
-            : fresh.durationSeconds == null
-            ? null
-            : fresh.durationSeconds! * 1000);
-    if (duration == null || duration <= 0) {
-      throw StateError('Play the file first to determine its duration.');
-    }
-    validateChapters(entries, durationMs: duration);
-    await db.writeTrackChapters(
-      track.id,
-      ChapterData(
-        downloaded: old.valid ? old.downloaded : const [],
-        custom: entries,
-        shuffleChapters: old.shuffleChapters,
-        checkedAt: old.valid ? old.checkedAt : null,
-        durationMs: duration,
-      ),
-    );
-    await persist(track.playlistId);
+    await _change(track, (old, fresh) {
+      final previous = old.active.where((c) => c.id == chapter.id).firstOrNull;
+      final duration =
+          durationMs ??
+          (old.valid ? old.durationMs : null) ??
+          (fresh.isLocalReplacement
+              ? null
+              : fresh.durationSeconds == null
+              ? null
+              : fresh.durationSeconds! * 1000);
+      if (duration == null || duration <= 0) {
+        throw StateError('Play the file first to determine its duration.');
+      }
+      final edited =
+          previous != null &&
+          (chapter.title != previous.title ||
+              chapter.startMs != previous.startMs ||
+              chapter.endMs != previous.endMs);
+      final saved = chapter.copyWith(
+        origin: previous?.origin ?? ChapterOrigin.user,
+        manuallyEdited: (previous?.manuallyEdited ?? false) || edited,
+        alternativeTitles: previous?.alternativeTitles ?? const [],
+        reviewReasons:
+            previous?.reviewReasons
+                .where(
+                  (reason) =>
+                      !(reason.startsWith('Name:') &&
+                          chapter.title != previous.title) &&
+                      !(reason.startsWith('Timing:') &&
+                          chapter.startMs != previous.startMs),
+                )
+                .toList() ??
+            const [],
+      );
+      return _edited(old, [
+        ...old.active.where((c) => c.id != chapter.id),
+        saved,
+      ], durationMs: duration);
+    });
+  }
+
+  Future<void> rename(Track track, String id, String title) async {
+    await _change(track, (old, _) {
+      if (!old.active.any((c) => c.id == id)) {
+        throw StateError('The chapter changed. Reopen it.');
+      }
+      return _edited(
+        old,
+        old.active
+            .map(
+              (c) =>
+                  c.id == id
+                      ? c.copyWith(
+                        title: title.trim(),
+                        manuallyEdited: true,
+                        reviewReasons:
+                            c.reviewReasons
+                                .where((r) => !r.startsWith('Name:'))
+                                .toList(),
+                      )
+                      : c,
+            )
+            .toList(),
+      );
+    });
+  }
+
+  Future<void> moveBoundary(
+    Track track,
+    String leftId,
+    String rightId,
+    int originalBoundaryMs,
+    int boundaryMs,
+  ) async {
+    await _change(track, (old, _) {
+      final entries = [...old.active];
+      final index = entries.indexWhere((c) => c.id == leftId);
+      if (index < 0 ||
+          index + 1 >= entries.length ||
+          entries[index + 1].id != rightId ||
+          entries[index].endMs != originalBoundaryMs ||
+          entries[index + 1].startMs != originalBoundaryMs) {
+        throw StateError('These chapters changed. Reopen the boundary editor.');
+      }
+      entries[index] = entries[index].copyWith(
+        endMs: boundaryMs,
+        manuallyEdited: true,
+      );
+      entries[index + 1] = entries[index + 1].copyWith(
+        startMs: boundaryMs,
+        manuallyEdited: true,
+        reviewReasons:
+            entries[index + 1].reviewReasons
+                .where((r) => !r.startsWith('Timing:'))
+                .toList(),
+      );
+      return _edited(old, entries);
+    });
+  }
+
+  Future<void> merge(
+    Track track,
+    MediaChapter left,
+    MediaChapter right, {
+    required bool keepEarlier,
+    required String title,
+  }) async {
+    await _change(track, (old, _) {
+      final entries = [...old.active];
+      final index = entries.indexWhere((c) => c.id == left.id);
+      if (index < 0 ||
+          index + 1 >= entries.length ||
+          entries[index + 1].id != right.id ||
+          entries[index].startMs != left.startMs ||
+          entries[index].endMs != left.endMs ||
+          entries[index + 1].startMs != right.startMs ||
+          entries[index + 1].endMs != right.endMs) {
+        throw StateError('These chapters changed. Reopen the merge dialog.');
+      }
+      final survivor = entries[index + (keepEarlier ? 0 : 1)];
+      final merged = survivor.copyWith(
+        title: title.trim(),
+        startMs: left.startMs,
+        endMs: right.endMs,
+        manuallyEdited: true,
+        reviewReasons:
+            entries[index].reviewReasons
+                .where((r) => r.startsWith('Timing:'))
+                .toList(),
+      );
+      entries.replaceRange(index, index + 2, [merged]);
+      return _edited(old, entries);
+    });
   }
 
   Future<void> delete(Track track, String chapterId) async {
-    final fresh = await db.getTrack(track.id);
-    if (fresh == null) return;
-    final old = ChapterData.decode(fresh.chaptersJson);
-    await db.writeTrackChapters(
-      track.id,
-      old.withCustom(old.active.where((c) => c.id != chapterId).toList()),
+    await _change(
+      track,
+      (old, _) =>
+          _edited(old, old.active.where((c) => c.id != chapterId).toList()),
     );
-    await persist(track.playlistId);
+  }
+
+  /// Drops recognised chapters the user never touched. Edited ones count as
+  /// the user's own work and stay, like everything else recognition protects.
+  Future<void> removeAutomatic(Track track) async {
+    await _change(
+      track,
+      (old, _) => _edited(
+        old,
+        old.active.where((c) => c.protectedFromRecognition).toList(),
+      ).copyWith(recognitionEpoch: old.recognitionEpoch + 1),
+    );
+  }
+
+  Future<void> undo(Track track) async {
+    await _change(
+      track,
+      (old, _) =>
+          old.undoChapters == null
+              ? old
+              : old.copyWith(
+                custom: old.undoChapters,
+                undoChapters: null,
+                recognitionEpoch: old.recognitionEpoch + 1,
+              ),
+    );
   }
 
   Future<void> restore(Track track) async {
-    final fresh = await db.getTrack(track.id);
-    if (fresh == null) return;
-    await db.writeTrackChapters(
-      track.id,
-      ChapterData.decode(fresh.chaptersJson).withCustom(null),
-    );
-    await persist(track.playlistId);
+    await _change(track, (old, _) {
+      if (!old.valid) {
+        throw StateError('The media changed. Fetch new chapters first.');
+      }
+      return old.copyWith(
+        custom: null,
+        undoChapters: old.active,
+        recognitionEpoch: old.recognitionEpoch + 1,
+      );
+    });
   }
+
+  /// Leftover pieces shorter than this come from clipping, not from a song,
+  /// and are dropped instead of becoming chapters of their own.
+  static const minimumChapterMs = 5000;
+
+  /// Rebases a completed scan onto the current edits.
+  ///
+  /// Chapters the user created or edited are never moved; proposals are cut
+  /// around them. Earlier untouched recognition results are replaced wherever
+  /// a new proposal covers them. Proposals that overlap each other or run past
+  /// the file are clipped rather than rejected, so one odd match cannot throw
+  /// away a whole run. A run is applied once per [epoch], which edits bump.
+  Future<bool> applyRecognition(
+    Track track, {
+    required String runId,
+    required int epoch,
+    required int durationMs,
+    required List<MediaChapter> proposals,
+  }) => _change(track, (old, _) {
+    if (old.recognitionEpoch != epoch ||
+        old.lastRecognitionRunId == runId ||
+        proposals.isEmpty) {
+      return old;
+    }
+    final protected =
+        old.active.where((c) => c.protectedFromRecognition).toList();
+    final protectedRanges = protected.map((c) => (c.startMs, c.endMs)).toList();
+
+    final added = <MediaChapter>[];
+    var cursor = 0;
+    final ordered = [...proposals]
+      ..sort((a, b) => a.startMs.compareTo(b.startMs));
+    for (final proposal in ordered) {
+      final start = math.max(proposal.startMs, cursor);
+      final end = math.min(proposal.endMs, durationMs);
+      if (end <= start) continue;
+      cursor = end;
+      for (final range in _subtractAll((start, end), protectedRanges)) {
+        if (range.$2 - range.$1 < minimumChapterMs) continue;
+        added.add(
+          proposal.copyWith(
+            id: '${proposal.id}-${range.$1}-${range.$2}',
+            startMs: range.$1,
+            endMs: range.$2,
+            origin: ChapterOrigin.auto,
+            manuallyEdited: false,
+          ),
+        );
+      }
+    }
+
+    final addedRanges = added.map((c) => (c.startMs, c.endMs)).toList();
+    final retained = <MediaChapter>[...protected];
+    for (final previous in old.active.where(
+      (c) => !c.protectedFromRecognition,
+    )) {
+      final whole = (previous.startMs, previous.endMs);
+      for (final range in _subtractAll(whole, addedRanges)) {
+        if (range.$2 - range.$1 < minimumChapterMs) continue;
+        retained.add(
+          previous.copyWith(
+            id:
+                range == whole
+                    ? previous.id
+                    : '${previous.id}-${range.$1}-${range.$2}',
+            startMs: range.$1,
+            endMs: range.$2,
+          ),
+        );
+      }
+    }
+    return _edited(old, [
+      ...retained,
+      ...added,
+    ], durationMs: durationMs).copyWith(lastRecognitionRunId: runId);
+  });
+
+  static List<(int, int)> _subtractAll(
+    (int, int) range,
+    List<(int, int)> removed,
+  ) {
+    var pieces = [range];
+    for (final r in removed) {
+      pieces =
+          pieces.expand((piece) => subtractChapterRange(piece, r)).toList();
+    }
+    return pieces;
+  }
+}
+
+List<(int, int)> subtractChapterRange((int, int) range, (int, int) removed) {
+  if (removed.$2 <= range.$1 || removed.$1 >= range.$2) return [range];
+  return [
+    if (removed.$1 > range.$1) (range.$1, removed.$1),
+    if (removed.$2 < range.$2) (removed.$2, range.$2),
+  ];
 }
