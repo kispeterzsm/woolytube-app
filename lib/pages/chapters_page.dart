@@ -21,6 +21,10 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
   int? _markStart;
   bool _busy = false;
 
+  /// Timeline position while the marking slider is being dragged; incoming
+  /// position updates are ignored until the drag ends and one seek is sent.
+  double? _dragPositionMs;
+
   @override
   void initState() {
     super.initState();
@@ -126,7 +130,16 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
     final playing = ref.watch(isPlayingProvider).valueOrNull ?? false;
     final marking = _editingPlayer != null && current?.id == widget.track.id;
     return Scaffold(
-      appBar: AppBar(title: const Text('Chapters')),
+      appBar: AppBar(
+        title: const Text('Chapters'),
+        bottom:
+            _busy
+                ? const PreferredSize(
+                  preferredSize: Size.fromHeight(2),
+                  child: LinearProgressIndicator(minHeight: 2),
+                )
+                : null,
+      ),
       body: StreamBuilder<List<Track>>(
         stream: _tracks,
         builder: (context, snapshot) {
@@ -253,22 +266,39 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                     child: Column(
                       children: [
                         const Text('Mark on the full-file timeline'),
-                        Slider(
-                          value: position.inMilliseconds.toDouble().clamp(
-                            0,
-                            duration.inMilliseconds.toDouble(),
-                          ),
-                          max:
-                              duration.inMilliseconds > 0
-                                  ? duration.inMilliseconds.toDouble()
-                                  : 1,
-                          onChanged:
-                              (v) => _editingPlayer!.seekTo(
-                                Duration(milliseconds: v.round()),
-                              ),
-                        ),
-                        Text(
-                          '${chapterTimestamp(position.inMilliseconds)} / ${chapterTimestamp(duration.inMilliseconds)}',
+                        Builder(
+                          builder: (context) {
+                            final maxMs =
+                                duration.inMilliseconds > 0
+                                    ? duration.inMilliseconds.toDouble()
+                                    : 1.0;
+                            final shownMs = (_dragPositionMs ??
+                                    position.inMilliseconds.toDouble())
+                                .clamp(0.0, maxMs);
+                            return Column(
+                              children: [
+                                Slider(
+                                  value: shownMs,
+                                  max: maxMs,
+                                  onChangeStart:
+                                      (v) =>
+                                          setState(() => _dragPositionMs = v),
+                                  onChanged:
+                                      (v) =>
+                                          setState(() => _dragPositionMs = v),
+                                  onChangeEnd: (v) {
+                                    setState(() => _dragPositionMs = null);
+                                    _editingPlayer?.seekTo(
+                                      Duration(milliseconds: v.round()),
+                                    );
+                                  },
+                                ),
+                                Text(
+                                  '${chapterTimestamp(shownMs.round())} / ${chapterTimestamp(duration.inMilliseconds)}',
+                                ),
+                              ],
+                            );
+                          },
                         ),
                         Wrap(
                           alignment: WrapAlignment.center,
@@ -419,7 +449,6 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                     ),
                   ),
                 ),
-              if (_busy) const LinearProgressIndicator(),
             ],
           );
         },

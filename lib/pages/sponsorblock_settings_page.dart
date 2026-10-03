@@ -2,6 +2,36 @@ import 'package:flutter/material.dart';
 
 import '../services/sponsorblock_categories.dart';
 
+/// Asks whether unsaved edits on a settings page should be thrown away.
+Future<bool> showDiscardChangesDialog(BuildContext context) async {
+  final discard = await showDialog<bool>(
+    context: context,
+    builder:
+        (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF2A2A2A),
+          title: const Text(
+            'Discard changes?',
+            style: TextStyle(color: Colors.white),
+          ),
+          content: const Text(
+            'You have unsaved changes.',
+            style: TextStyle(color: Color(0xFFCCCCCC)),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Keep editing'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Discard', style: TextStyle(color: Colors.red)),
+            ),
+          ],
+        ),
+  );
+  return discard == true;
+}
+
 class SponsorBlockSettingsPage extends StatefulWidget {
   final Map<String, SponsorBlockCategoryAction> categoryActions;
 
@@ -25,32 +55,53 @@ class _SponsorBlockSettingsPageState extends State<SponsorBlockSettingsPage> {
     Navigator.of(context).pop(_categoryActions);
   }
 
+  bool get _isDirty {
+    for (final definition in sponsorBlockCategoryDefinitions) {
+      final original =
+          widget.categoryActions[definition.id] ?? definition.defaultAction;
+      final current =
+          _categoryActions[definition.id] ?? definition.defaultAction;
+      if (original != current) return true;
+    }
+    return false;
+  }
+
+  Future<void> _onPopInvoked(bool didPop, Object? result) async {
+    if (didPop) return;
+    final discard = await showDiscardChangesDialog(context);
+    if (discard && mounted) Navigator.of(context).pop();
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('SponsorBlock Settings'),
-        actions: [
-          TextButton(
-            onPressed: _save,
-            child: const Text(
-              'Save',
-              style: TextStyle(color: Color(0xFF2196F3), fontSize: 16),
+    return PopScope(
+      canPop: !_isDirty,
+      onPopInvokedWithResult: _onPopInvoked,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('SponsorBlock Settings'),
+          actions: [
+            TextButton(
+              onPressed: _save,
+              child: const Text(
+                'Save',
+                style: TextStyle(color: Color(0xFF2196F3), fontSize: 16),
+              ),
             ),
-          ),
-        ],
-      ),
-      body: ListView(
-        padding: const EdgeInsets.all(24),
-        children: [
-          const Text(
-            'Choose how each type of segment is handled during playback.',
-            style: TextStyle(color: Color(0xFF888888), fontSize: 13),
-          ),
-          const SizedBox(height: 16),
-          for (final definition in sponsorBlockCategoryDefinitions)
-            _categoryActionRow(definition),
-        ],
+          ],
+        ),
+        body: ListView(
+          padding: const EdgeInsets.all(24),
+          children: [
+            const Text(
+              'Choose how each type of segment is handled during playback.',
+              style: TextStyle(color: Color(0xFF888888), fontSize: 13),
+            ),
+            const SizedBox(height: 16),
+            for (final definition in sponsorBlockCategoryDefinitions)
+              _categoryActionRow(definition),
+          ],
+        ),
       ),
     );
   }

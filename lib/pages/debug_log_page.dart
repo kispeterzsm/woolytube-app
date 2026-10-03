@@ -63,13 +63,20 @@ class _DebugLogPageState extends ConsumerState<DebugLogPage> {
             );
           }
 
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (_scrollController.hasClients) {
+          // Follow new entries only while the user is already reading the
+          // tail; never yank the list away from an older entry.
+          final shouldFollow =
+              !_scrollController.hasClients ||
+              _scrollController.position.pixels >=
+                  _scrollController.position.maxScrollExtent - 48;
+          if (shouldFollow) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!mounted || !_scrollController.hasClients) return;
               _scrollController.jumpTo(
                 _scrollController.position.maxScrollExtent,
               );
-            }
-          });
+            });
+          }
 
           return ListView.builder(
             controller: _scrollController,

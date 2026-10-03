@@ -294,12 +294,17 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     );
     if (!mounted || shouldUpdate != true) return;
 
-    var progressDialogVisible = true;
+    // The dialog closes itself through its own context; whenComplete tracks
+    // every way it can go away so we never pop an unrelated route.
+    var progressDialogOpen = true;
+    BuildContext? progressDialogContext;
     void closeProgressDialog({bool showBackgroundMessage = false}) {
-      if (!mounted || !progressDialogVisible) return;
-      progressDialogVisible = false;
-      Navigator.of(context, rootNavigator: true).pop();
-      if (showBackgroundMessage) {
+      if (!progressDialogOpen) return;
+      final dialogContext = progressDialogContext;
+      if (dialogContext != null && dialogContext.mounted) {
+        Navigator.of(dialogContext).pop();
+      }
+      if (showBackgroundMessage && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text(
@@ -316,8 +321,11 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       showDialog<void>(
         context: context,
         barrierDismissible: false,
-        builder:
-            (dialogContext) => AlertDialog(
+        builder: (dialogContext) {
+          progressDialogContext = dialogContext;
+          return PopScope(
+            canPop: false,
+            child: AlertDialog(
               title: const Text('Downloading update'),
               content: const Row(
                 children: [
@@ -343,7 +351,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 ),
               ],
             ),
-      ),
+          );
+        },
+      ).whenComplete(() {
+        progressDialogOpen = false;
+        progressDialogContext = null;
+      }),
     );
 
     try {
@@ -359,6 +372,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(message)));
+    } catch (error) {
+      closeProgressDialog();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not install the update: $error')),
+      );
     } finally {
       if (mounted) setState(() => _isDownloadingUpdate = false);
     }

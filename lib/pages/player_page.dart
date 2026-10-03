@@ -42,6 +42,18 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
 
   @override
   Widget build(BuildContext context) {
+    // Playback stopped (or the queue ended) while the player was open: leave
+    // instead of sitting on an empty screen.
+    ref.listen<AsyncValue<Track?>>(currentTrackProvider, (prev, next) {
+      if (!next.hasValue || next.valueOrNull != null) return;
+      if (prev?.valueOrNull == null) return;
+      final navigator = Navigator.maybeOf(context);
+      if (navigator == null || !navigator.canPop()) return;
+      final route = ModalRoute.of(context);
+      if (route != null && !route.isCurrent) return;
+      navigator.pop();
+    });
+
     final currentTrack = ref.watch(currentTrackProvider).valueOrNull;
     final isVideo = ref.watch(isVideoContentProvider).valueOrNull ?? false;
 

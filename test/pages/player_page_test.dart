@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:drift/drift.dart' show Value;
 import 'package:woolytube/services/chapters.dart';
@@ -209,6 +211,70 @@ void main() {
       },
     );
   }
+
+  testWidgets('player route pops itself when playback stops', (tester) async {
+    final database = openTestDatabase();
+    addTearDown(database.close);
+    final playlist = await insertTestPlaylist(database, audioOnly: true);
+    final track = await insertTestTrack(
+      database,
+      playlistId: playlist.id,
+      title: 'Audio track',
+      status: 'complete',
+      filePath: '/tmp/audio-track.m4a',
+    );
+    final trackController = StreamController<Track?>.broadcast();
+    addTearDown(trackController.close);
+    final navigatorKey = GlobalKey<NavigatorState>();
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          playbackServiceProvider.overrideWithValue(_FakePlaybackService()),
+          currentTrackProvider.overrideWith((ref) => trackController.stream),
+          currentPlaylistProvider.overrideWith(
+            (ref) => Stream<Playlist?>.value(playlist),
+          ),
+          isPlayingProvider.overrideWith((ref) => Stream.value(false)),
+          positionProvider.overrideWith((ref) => Stream.value(Duration.zero)),
+          durationProvider.overrideWith(
+            (ref) => Stream.value(const Duration(minutes: 3)),
+          ),
+          isVideoContentProvider.overrideWith((ref) => Stream.value(false)),
+          playbackSponsorBlockSegmentsProvider.overrideWith(
+            (ref) => Stream.value(const <PlaybackSponsorBlockSegment>[]),
+          ),
+          queueProvider.overrideWith((ref) => Stream.value([track])),
+          upNextQueueProvider.overrideWith((ref) => Stream.value(<Track>[])),
+          queueIndexProvider.overrideWith((ref) => Stream.value(0)),
+          shuffleEnabledProvider.overrideWith((ref) => Stream.value(false)),
+          autoplayEnabledProvider.overrideWith((ref) => Stream.value(true)),
+          audioOnlyModeProvider.overrideWith((ref) => Stream.value(false)),
+          sleepTimerRemainingProvider.overrideWith(
+            (ref) => Stream<Duration?>.value(null),
+          ),
+          pendingSegmentMarkStartProvider.overrideWith(
+            (ref) => Stream<Duration?>.value(null),
+          ),
+        ],
+        child: MaterialApp(
+          navigatorKey: navigatorKey,
+          home: const Scaffold(body: Text('underneath')),
+        ),
+      ),
+    );
+    navigatorKey.currentState!.push(playerPageRoute());
+    await tester.pumpAndSettle();
+    trackController.add(track);
+    await tester.pumpAndSettle();
+    expect(find.byType(PlayerPage), findsOneWidget);
+    expect(find.text('Nothing playing'), findsNothing);
+
+    trackController.add(null);
+    await tester.pumpAndSettle();
+    expect(find.byType(PlayerPage), findsNothing);
+    expect(find.text('underneath'), findsOneWidget);
+  });
 }
 
 class _Metadata implements MetadataService {
