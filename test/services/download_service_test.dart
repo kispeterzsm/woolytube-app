@@ -588,7 +588,9 @@ void main() {
 
     expect(ytdlp.downloadedUrls, isEmpty);
     expect(service.isDownloading, isFalse);
-    expect(events.map((event) => event.status), ['error', 'error']);
+    // The playlist run raises the global error event; the single-track run
+    // throws to its caller instead and only clears the progress state.
+    expect(events.map((event) => event.status), ['error', 'idle']);
     expect(events.first.error, DownloadService.lockHeldMessage);
     expect(await lockFile().exists(), isTrue);
     expect((await db.getTrack(track.id))!.status, 'pending');

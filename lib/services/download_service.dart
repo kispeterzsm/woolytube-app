@@ -398,7 +398,9 @@ class DownloadService {
           _emit(DownloadProgress.idle);
           return;
         }
-        throw StateError('Download failed');
+        // The caller shows this failure, so carry the recorded reason.
+        final failed = await _db.getTrack(track.id);
+        throw StateError(failed?.lastError ?? 'Download failed');
       }
 
       await _markPlaylistUpdated(playlist);
@@ -434,16 +436,9 @@ class DownloadService {
         _emit(DownloadProgress.idle);
         return;
       }
-      _emit(
-        DownloadProgress(
-          playlistId: playlist.id,
-          currentTrackIndex: 0,
-          totalTracks: progressTotalTracks,
-          trackProgress: 0,
-          status: 'error',
-          error: e.toString(),
-        ),
-      );
+      // A single-track download is always user-initiated and its caller
+      // reports the failure, so do not also raise the global error event.
+      _emit(DownloadProgress.idle);
       rethrow;
     } finally {
       await _finishRun(lockAcquired: lockAcquired);
