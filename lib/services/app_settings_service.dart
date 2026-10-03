@@ -11,6 +11,7 @@ class AppSettingsService {
   static const downloadSubtitlesKey = 'download_subtitles';
   static const subtitleLanguagesKey = 'subtitle_languages';
   static const pauseOnAudioInterruptionKey = 'pause_on_audio_interruption';
+  static const dismissedImportUrlsKey = 'dismissed_import_urls';
   static const _backgroundChannel = MethodChannel('com.woolytube/background');
 
   final PreferencesLoader _preferencesLoader;
@@ -72,6 +73,34 @@ class AppSettingsService {
       );
     }
     return languages.join(',');
+  }
+
+  /// Playlist URLs whose on-disk folders should not be offered for import
+  /// again, because the user deleted the playlist in-app or dismissed the
+  /// import banner.
+  Future<Set<String>> getDismissedImportUrls() async {
+    final preferences = await _preferencesLoader();
+    return (preferences.getStringList(dismissedImportUrlsKey) ?? const [])
+        .toSet();
+  }
+
+  Future<void> addDismissedImportUrls(Iterable<String> urls) async {
+    final preferences = await _preferencesLoader();
+    final merged = {
+      ...?preferences.getStringList(dismissedImportUrlsKey),
+      ...urls,
+    };
+    await preferences.setStringList(dismissedImportUrlsKey, merged.toList());
+  }
+
+  Future<void> removeDismissedImportUrl(String url) async {
+    final preferences = await _preferencesLoader();
+    final current = preferences.getStringList(dismissedImportUrlsKey);
+    if (current == null || !current.contains(url)) return;
+    await preferences.setStringList(
+      dismissedImportUrlsKey,
+      current.where((entry) => entry != url).toList(),
+    );
   }
 
   Future<void> scheduleAutoUpdate() async {

@@ -55,6 +55,7 @@ final playlistServiceProvider = Provider<PlaylistService>((ref) {
     ref.watch(ytdlpServiceProvider),
     ref.watch(metadataServiceProvider),
     ref.watch(mediaThumbnailServiceProvider),
+    ref.watch(appSettingsServiceProvider),
   );
 });
 
@@ -153,7 +154,11 @@ final initProvider = FutureProvider<bool>((ref) async {
   // Scan for importable playlists from previous installation
   try {
     final metadata = ref.watch(metadataServiceProvider);
-    final unimported = await metadata.findUnimportedPlaylists();
+    final dismissed =
+        await ref.watch(appSettingsServiceProvider).getDismissedImportUrls();
+    final unimported = await metadata.findUnimportedPlaylists(
+      excludeUrls: dismissed,
+    );
     if (unimported.isNotEmpty) {
       ref.read(pendingImportsProvider.notifier).state = unimported;
     }

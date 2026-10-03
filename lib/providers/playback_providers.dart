@@ -112,3 +112,8 @@ final subtitleTracksProvider = StreamProvider<List<SubtitleTrack>>((ref) {
 final selectedSubtitleTrackProvider = StreamProvider<SubtitleTrack>((ref) {
   return ref.watch(playbackServiceProvider).selectedSubtitleTrackStream;
 });
+
+/// User-facing playback notices (missing file, denied audio focus, ...).
+final playbackMessagesProvider = StreamProvider<String>((ref) {
+  return ref.watch(playbackServiceProvider).messages;
+});

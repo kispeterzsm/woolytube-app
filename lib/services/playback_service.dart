@@ -108,6 +108,7 @@ class PlaybackService
   final _currentItem = BehaviorSubject<PlaybackItem?>.seeded(null);
   final _position = BehaviorSubject<Duration>.seeded(Duration.zero);
   final _duration = BehaviorSubject<Duration>.seeded(Duration.zero);
+  final _messages = StreamController<String>.broadcast();
   final List<StreamSubscription<dynamic>> _subscriptions = [];
   Future<void> _playbackTransition = Future.value();
   bool _loading = false;
@@ -117,6 +118,15 @@ class PlaybackService
   int? _loadedTrackId;
 
   PlaybackItem? get currentItem => _currentItem.value;
+
+  /// Short, user-facing notices about playback problems, such as a missing
+  /// file or denied audio focus. The UI shows them as transient messages.
+  Stream<String> get messages => _messages.stream;
+
+  void reportMessage(String message) {
+    if (!_messages.isClosed) _messages.add(message);
+  }
+
   @override
   String? get currentMediaId => currentItem?.id;
   Stream<PlaybackItem?> get currentItemStream => _currentItem.stream;
@@ -904,5 +914,6 @@ class PlaybackService
     _audioOnlyMode.close();
     _pendingSegmentMarkStart.close();
     _sponsorBlockSegments.close();
+    _messages.close();
   }
 }

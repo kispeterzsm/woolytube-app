@@ -100,6 +100,9 @@ class AppDatabase extends _$AppDatabase {
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
+    beforeOpen: (details) async {
+      await customStatement('PRAGMA foreign_keys = ON');
+    },
     onCreate: (migrator) async {
       await migrator.createAll();
       await customStatement(
@@ -195,8 +198,22 @@ class AppDatabase extends _$AppDatabase {
   Future<bool> updatePlaylist(PlaylistsCompanion playlist) =>
       update(playlists).replace(playlist);
 
-  Future<int> deletePlaylist(int id) =>
-      (delete(playlists)..where((p) => p.id.equals(id))).go();
+  /// Removes a playlist together with its tracks and their segments.
+  Future<int> deletePlaylist(int id) => transaction(() async {
+    final trackIds =
+        (await (selectOnly(tracks)
+                  ..addColumns([tracks.id])
+                  ..where(tracks.playlistId.equals(id)))
+                .get())
+            .map((row) => row.read(tracks.id)!)
+            .toList();
+    if (trackIds.isNotEmpty) {
+      await (delete(sponsorBlockSegments)
+        ..where((s) => s.trackId.isIn(trackIds))).go();
+    }
+    await (delete(tracks)..where((t) => t.playlistId.equals(id))).go();
+    return (delete(playlists)..where((p) => p.id.equals(id))).go();
+  });
 
   Future<Playlist?> getPlaylistByUrl(String url) =>
       (select(playlists)..where((p) => p.url.equals(url))).getSingleOrNull();

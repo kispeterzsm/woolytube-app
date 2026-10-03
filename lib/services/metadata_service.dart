@@ -278,11 +278,14 @@ class MetadataService {
   }
 
   /// Returns only playlists not already in the database (matched by URL).
-  Future<List<DiscoveredPlaylist>> findUnimportedPlaylists() async {
+  Future<List<DiscoveredPlaylist>> findUnimportedPlaylists({
+    Set<String> excludeUrls = const {},
+  }) async {
     final discovered = await scanForPlaylists();
     final result = <DiscoveredPlaylist>[];
 
     for (final dp in discovered) {
+      if (excludeUrls.contains(dp.url)) continue;
       final existing = await _db.getPlaylistByUrl(dp.url);
       if (existing == null) result.add(dp);
     }

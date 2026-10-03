@@ -205,6 +205,39 @@ void main() {
     ]);
   });
 
+  test('deleting a playlist removes its tracks and segments', () async {
+    final playlist = await insertTestPlaylist(db);
+    final other = await insertTestPlaylist(
+      db,
+      url: 'https://www.youtube.com/playlist?list=other',
+      name: 'Other',
+    );
+    final track = await insertTestTrack(db, playlistId: playlist.id);
+    final kept = await insertTestTrack(
+      db,
+      playlistId: other.id,
+      videoId: 'video-2',
+    );
+    await db.insertSegment(
+      SponsorBlockSegmentsCompanion.insert(
+        trackId: track.id,
+        videoId: track.videoId,
+        source: 'local',
+        category: 'intro',
+        startMs: 0,
+        endMs: 1000,
+        createdAt: DateTime(2024),
+      ),
+    );
+
+    await db.deletePlaylist(playlist.id);
+
+    expect(await db.getTrack(track.id), isNull);
+    expect(await db.getSegmentsForTrack(track.id), isEmpty);
+    expect(await db.getAllTracks(), [kept]);
+    expect((await db.getAllPlaylists()).map((p) => p.id), [other.id]);
+  });
+
   test('replaces SponsorBlock segments for a track', () async {
     final playlist = await insertTestPlaylist(db);
     final track = await insertTestTrack(db, playlistId: playlist.id);

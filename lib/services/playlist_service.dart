@@ -7,6 +7,7 @@ import 'ytdlp_service.dart';
 import 'metadata_service.dart';
 import 'sponsorblock_service.dart';
 import 'media_thumbnail_service.dart' as media_thumbnail_service;
+import 'app_settings_service.dart';
 
 class ForceInsertException implements Exception {
   final String message;
@@ -70,14 +71,17 @@ class PlaylistService {
   final YtDlpService _ytdlp;
   final MetadataService _metadata;
   final media_thumbnail_service.MediaThumbnailService _thumbnails;
+  final AppSettingsService? _settings;
 
   PlaylistService(
     this._db,
     this._ytdlp,
     this._metadata, [
     media_thumbnail_service.MediaThumbnailService? thumbnails,
+    AppSettingsService? settings,
   ]) : _thumbnails =
-           thumbnails ?? const media_thumbnail_service.MediaThumbnailService();
+           thumbnails ?? const media_thumbnail_service.MediaThumbnailService(),
+       _settings = settings;
 
   Stream<List<Playlist>> watchAllPlaylists() => _db.watchAllPlaylists();
 
@@ -110,6 +114,7 @@ class PlaylistService {
     final outputPath = '$basePath/$sanitizedName';
 
     await Directory(outputPath).create(recursive: true);
+    await _settings?.removeDismissedImportUrl(url);
 
     final playlistId = await _db.insertPlaylist(
       PlaylistsCompanion.insert(
@@ -399,8 +404,48 @@ class PlaylistService {
     );
   }
 
-  Future<void> deletePlaylist(int id) async {
+  /// Removes the playlist and its tracks from the database.
+  ///
+  /// With [deleteFiles] the playlist folder is removed from storage as well.
+  /// Otherwise the folder's metadata is remembered as dismissed so it is not
+  /// offered for import again on the next launch.
+  Future<void> deletePlaylist(int id, {bool deleteFiles = false}) async {
+    final playlist = await _db.getPlaylist(id);
     await _db.deletePlaylist(id);
+    if (deleteFiles) {
+      final dir = Directory(playlist.outputPath);
+      if (await dir.exists()) {
+        await dir.delete(recursive: true);
+      }
+    } else {
+      await _settings?.addDismissedImportUrls([playlist.url]);
+    }
+  }
+
+  /// Returns a track to the download queue.
+  ///
+  /// [deleteFile] removes the current media file so a fresh download is not
+  /// mistaken for it by its index prefix. [clearSegments] drops stored
+  /// SponsorBlock segments, which is required when the current file was a
+  /// local replacement whose timeline differs from the original video.
+  Future<void> resetTrackForRedownload(
+    Track track, {
+    bool deleteFile = true,
+    bool clearSegments = false,
+  }) async {
+    if (deleteFile && track.filePath != null) {
+      final file = File(track.filePath!);
+      if (await file.exists()) await file.delete();
+    }
+    if (deleteFile && track.thumbnailPath != null) {
+      final thumbnail = File(track.thumbnailPath!);
+      if (await thumbnail.exists()) await thumbnail.delete();
+    }
+    if (clearSegments) {
+      await _db.replaceSponsorBlockSegments(track.id, const []);
+    }
+    await _db.resetTrackForRedownload(track.id);
+    await _writeMetadata(track.playlistId);
   }
 
   Future<List<Track>> getPendingTracks(int playlistId) =>
