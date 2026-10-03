@@ -96,6 +96,9 @@ class DiscoveredPlaylist {
 
 const _metaFileName = 'woolytube_meta.json';
 
+/// Index prefix yt-dlp output files and sidecars share, e.g. `00012_`.
+final _indexPrefixPattern = RegExp(r'^(\d+)_');
+
 class _CandidateFile {
   String digits;
   String rest;
@@ -142,36 +145,67 @@ class MetadataService {
     final dir = Directory(folder);
     if (!await dir.exists() || track.isLocalReplacement) return;
     await for (final entity in dir.list()) {
-      if (entity is! File || !entity.path.endsWith('.info.json')) continue;
-      final prefix = RegExp(r'^(\d+)_').firstMatch(p.basename(entity.path));
-      if (prefix == null || int.tryParse(prefix[1]!) != track.index) continue;
-      try {
-        final info =
-            jsonDecode(await entity.readAsString()) as Map<String, dynamic>;
-        if (info['id'] != track.videoId) continue;
-        final fresh = await _db.getTrack(track.id);
-        if (fresh == null) return;
-        final old = ChapterData.decode(fresh.chaptersJson);
-        final data = ChapterData.fromVideoInfo(info);
-        await _db.writeTrackChapters(
-          track.id,
-          ChapterData(
-            downloaded: data.downloaded,
-            custom: old.valid ? old.custom : null,
-            shuffleChapters: old.shuffleChapters,
-            checkedAt: data.checkedAt,
-            durationMs: data.durationMs,
-          ),
-        );
-        await entity.delete();
-      } catch (_) {
-        // A broken metadata sidecar must not fail a successful media download.
+      if (entity is! File || !_isInfoJsonForIndex(entity.path, track.index)) {
+        continue;
       }
+      await _captureChapterMetadataFile(track, entity);
     }
   }
 
+  static bool _isInfoJsonForIndex(String path, int index) {
+    if (!path.endsWith('.info.json')) return false;
+    final prefix = _indexPrefixPattern.firstMatch(p.basename(path));
+    return prefix != null && int.tryParse(prefix[1]!) == index;
+  }
+
+  Future<void> _captureChapterMetadataFile(Track track, File infoFile) async {
+    try {
+      final info =
+          jsonDecode(await infoFile.readAsString()) as Map<String, dynamic>;
+      if (info['id'] != track.videoId) return;
+      final fresh = await _db.getTrack(track.id);
+      if (fresh == null) return;
+      final old = ChapterData.decode(fresh.chaptersJson);
+      final data = ChapterData.fromVideoInfo(info);
+      await _db.writeTrackChapters(
+        track.id,
+        ChapterData(
+          downloaded: data.downloaded,
+          custom: old.valid ? old.custom : null,
+          shuffleChapters: old.shuffleChapters,
+          checkedAt: data.checkedAt,
+          durationMs: data.durationMs,
+        ),
+      );
+      await infoFile.delete();
+    } catch (_) {
+      // A broken metadata sidecar must not fail a successful media download.
+    }
+  }
+
+  final _metadataWrites = <int, Future<void>>{};
+  var _metadataWriteCounter = 0;
+
   /// Writes playlist metadata as JSON sidecar file in the playlist folder.
-  Future<void> writeMetadata(Playlist playlist, List<Track> tracks) async {
+  ///
+  /// Writes for one playlist run strictly one after another. Download
+  /// progress, sync and UI edits can all request a write at the same time and
+  /// would otherwise race on the temp file or rename a half-written sidecar
+  /// into place.
+  Future<void> writeMetadata(Playlist playlist, List<Track> tracks) {
+    final previous = _metadataWrites[playlist.id] ?? Future<void>.value();
+    final current = previous
+        .catchError((_) {})
+        .then((_) => _writeMetadataNow(playlist, tracks));
+    _metadataWrites[playlist.id] = current;
+    return current.whenComplete(() {
+      if (identical(_metadataWrites[playlist.id], current)) {
+        _metadataWrites.remove(playlist.id);
+      }
+    });
+  }
+
+  Future<void> _writeMetadataNow(Playlist playlist, List<Track> tracks) async {
     final dir = Directory(playlist.outputPath);
     if (!await dir.exists()) return;
 
@@ -231,10 +265,22 @@ class MetadataService {
 
     final jsonStr = const JsonEncoder.withIndent('  ').convert(data);
     final targetFile = File(p.join(playlist.outputPath, _metaFileName));
-    final tmpFile = File('${targetFile.path}.tmp');
+    final tmpFile = File(
+      '${targetFile.path}.tmp.'
+      '${DateTime.now().microsecondsSinceEpoch}.${_metadataWriteCounter++}',
+    );
 
-    await tmpFile.writeAsString(jsonStr);
-    await tmpFile.rename(targetFile.path);
+    try {
+      await tmpFile.writeAsString(jsonStr);
+      await tmpFile.rename(targetFile.path);
+    } catch (_) {
+      try {
+        if (await tmpFile.exists()) await tmpFile.delete();
+      } catch (_) {
+        // The folder cleanup removes leftover temp files later.
+      }
+      rethrow;
+    }
   }
 
   String? _thumbnailFileName(String playlistPath, Track track) {
@@ -294,13 +340,11 @@ class MetadataService {
   }
 
   /// Reconciles database track statuses with actual files on disk.
-  /// Single async directory pass: categorizes junk for deletion, widens any
-  /// short-prefix filenames, then matches tracks to files via O(1) map lookup.
+  /// Single async directory pass: consumes yt-dlp info sidecars, categorizes
+  /// junk for deletion, widens any short-prefix filenames, then matches tracks
+  /// to files via O(1) map lookup.
   Future<int> reconcilePlaylist(Playlist playlist) async {
     final tracks = await _db.getTracksForPlaylist(playlist.id);
-    for (final track in tracks) {
-      await captureChapterMetadata(track, playlist.outputPath);
-    }
     final dir = Directory(playlist.outputPath);
     if (!await dir.exists()) {
       var fixed = 0;
@@ -311,35 +355,29 @@ class MetadataService {
       return fixed;
     }
 
-    const mediaExtensions = {
-      '.m4a',
-      '.mp3',
-      '.opus',
-      '.ogg',
-      '.flac',
-      '.wav',
-      '.mp4',
-      '.mkv',
-      '.webm',
-      '.avi',
-      '.mov',
-    };
     const imageExtensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif'};
-    final partPattern = RegExp(r'\.part(-Frag\d+)?$');
     final prefixRe = RegExp(r'^(\d+)_(.*)$');
     final width = paddingWidth(tracks.length);
 
     final toDelete = <File>[];
     final mediaFiles = <_CandidateFile>[];
+    final infoFilesByIndex = <int, List<File>>{};
 
     await for (final entity in dir.list()) {
       if (entity is! File) continue;
       final fileName = p.basename(entity.path);
       final ext = p.extension(entity.path).toLowerCase();
 
-      if (partPattern.hasMatch(fileName) ||
-          ext == '.ytdl' ||
-          fileName.endsWith('.tmp') ||
+      if (fileName.endsWith('.info.json')) {
+        final prefix = _indexPrefixPattern.firstMatch(fileName);
+        final index = prefix == null ? null : int.tryParse(prefix[1]!);
+        if (index != null) {
+          infoFilesByIndex.putIfAbsent(index, () => []).add(entity);
+        }
+        continue;
+      }
+
+      if (isTransientFile(fileName) ||
           (imageExtensions.contains(ext) && fileName != _metaFileName)) {
         toDelete.add(entity);
         continue;
@@ -355,6 +393,13 @@ class MetadataService {
           path: entity.path,
         ),
       );
+    }
+
+    for (final track in tracks) {
+      if (track.isLocalReplacement) continue;
+      for (final infoFile in infoFilesByIndex[track.index] ?? const <File>[]) {
+        await _captureChapterMetadataFile(track, infoFile);
+      }
     }
 
     int fixed = 0;
@@ -423,47 +468,63 @@ class MetadataService {
     return fixed;
   }
 
-  /// Deletes .part files, .ytdl files, and orphaned image files from the playlist folder.
-  /// Returns the number of files deleted.
+  /// Media files WoolyTube downloads, imports or plays.
+  static const mediaExtensions = {
+    '.m4a',
+    '.mp3',
+    '.opus',
+    '.ogg',
+    '.flac',
+    '.wav',
+    '.mp4',
+    '.mkv',
+    '.webm',
+    '.avi',
+    '.mov',
+  };
+
+  static final _partPattern = RegExp(r'\.part(-Frag\d+)?$');
+  // yt-dlp per-format intermediates (`.f137.mp4`, `.f140.m4a`) and post-
+  // processing temporaries (`.temp.mp4`) before the final merge/remux.
+  static final _formatIntermediatePattern = RegExp(r'\.f\d+\.\w+$');
+  static final _postProcessTempPattern = RegExp(r'\.temp\.\w+$');
+  static const _stagingPrefixes = [
+    '.woolytube-force-insert-',
+    '.woolytube-force-move-',
+    '.woolytube-local-replacement-',
+  ];
+
+  /// True for files that yt-dlp or WoolyTube create while working and that
+  /// never represent a finished track: partial downloads, download state,
+  /// per-format intermediates, staging copies and metadata temp files.
+  static bool isTransientFile(String fileName) {
+    if (_partPattern.hasMatch(fileName)) return true;
+    if (p.extension(fileName).toLowerCase() == '.ytdl') return true;
+    if (_formatIntermediatePattern.hasMatch(fileName)) return true;
+    if (_postProcessTempPattern.hasMatch(fileName)) return true;
+    if (fileName.startsWith('$_metaFileName.tmp')) return true;
+    if (fileName.endsWith('.tmp')) return true;
+    return _stagingPrefixes.any(fileName.startsWith);
+  }
+
+  /// Deletes transient files (see [isTransientFile]) and orphaned image
+  /// files from the playlist folder. Returns the number of files deleted.
   static Future<int> cleanupPlaylistFolder(String dirPath) async {
     final dir = Directory(dirPath);
     if (!await dir.exists()) return 0;
 
     int deleted = 0;
     const imageExtensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif'};
-    final partPattern = RegExp(r'\.part(-Frag\d+)?$');
 
     for (final entity in dir.listSync()) {
       if (entity is! File) continue;
       final fileName = p.basename(entity.path);
       final ext = p.extension(entity.path).toLowerCase();
 
-      // Delete .part files (incomplete yt-dlp downloads)
-      if (partPattern.hasMatch(fileName)) {
+      if (isTransientFile(fileName) ||
+          (imageExtensions.contains(ext) && fileName != _metaFileName)) {
         await entity.delete();
         deleted++;
-        continue;
-      }
-
-      // Delete .ytdl files (yt-dlp download state files)
-      if (ext == '.ytdl') {
-        await entity.delete();
-        deleted++;
-        continue;
-      }
-
-      // Delete .tmp files (metadata writing leftovers)
-      if (fileName.endsWith('.tmp')) {
-        await entity.delete();
-        deleted++;
-        continue;
-      }
-
-      // Delete orphaned image/thumbnail files (not the metadata JSON)
-      if (imageExtensions.contains(ext) && fileName != _metaFileName) {
-        await entity.delete();
-        deleted++;
-        continue;
       }
     }
 
@@ -496,29 +557,19 @@ class MetadataService {
   }
 
   /// Find a media file in [dirPath] matching an index prefix (e.g. "001_").
+  /// Intermediate and staging files are never returned, even when their
+  /// extension looks like media.
   static String? resolveMediaFile(String dirPath, String indexPrefix) {
     final dir = Directory(dirPath);
     if (!dir.existsSync()) return null;
-
-    const mediaExtensions = {
-      '.m4a',
-      '.mp3',
-      '.opus',
-      '.ogg',
-      '.flac',
-      '.wav',
-      '.mp4',
-      '.mkv',
-      '.webm',
-      '.avi',
-      '.mov',
-    };
 
     for (final entity in dir.listSync()) {
       if (entity is File) {
         final fileName = p.basename(entity.path);
         final ext = p.extension(entity.path).toLowerCase();
-        if (fileName.startsWith(indexPrefix) && mediaExtensions.contains(ext)) {
+        if (fileName.startsWith(indexPrefix) &&
+            mediaExtensions.contains(ext) &&
+            !isTransientFile(fileName)) {
           return entity.path;
         }
       }

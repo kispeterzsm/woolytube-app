@@ -5,6 +5,7 @@ import 'package:drift/drift.dart' show Value;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:woolytube/database/database.dart';
+import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/metadata_service.dart';
 
 import '../helpers/test_database.dart';
@@ -64,10 +65,25 @@ void main() {
       await File(
         p.join(tempDir.path, 'woolytube_meta.json.tmp'),
       ).writeAsString('{}');
+      final leftovers = [
+        '00002_Title.f137.mp4',
+        '00002_Title.f140.m4a',
+        '00002_Title.temp.mp4',
+        '.woolytube-force-insert-1.mp4',
+        '.woolytube-force-move-1-0.mp4',
+        '.woolytube-local-replacement-1.m4a',
+        'woolytube_meta.json.tmp.1700000000.3',
+      ];
+      for (final name in leftovers) {
+        await File(p.join(tempDir.path, name)).writeAsString('junk');
+      }
 
       final deleted = await MetadataService.cleanupPlaylistFolder(tempDir.path);
 
-      expect(deleted, 5);
+      expect(deleted, 5 + leftovers.length);
+      for (final name in leftovers) {
+        expect(await File(p.join(tempDir.path, name)).exists(), isFalse);
+      }
       expect(await keepMedia.exists(), isTrue);
       expect(await keepMetadata.exists(), isTrue);
       expect(await File(p.join(tempDir.path, 'cover.jpg')).exists(), isFalse);
@@ -366,6 +382,146 @@ void main() {
       expect(segments.single.category, 'intro');
       expect(segments.single.startMs, 1000);
       expect(segments.single.endMs, 2000);
+    },
+  );
+
+  test('classifies transient files', () {
+    for (final name in [
+      '00001_Title.mp4.part',
+      '00001_Title.mp4.part-Frag3',
+      '00001_Title.mp4.ytdl',
+      '00001_Title.f137.mp4',
+      '00001_Title.f140.m4a',
+      '00001_Title.temp.mp4',
+      'woolytube_meta.json.tmp',
+      'woolytube_meta.json.tmp.1.2',
+      '.woolytube-force-insert-9.mp4',
+      '.woolytube-force-move-9-1.mp4',
+      '.woolytube-local-replacement-9.m4a',
+    ]) {
+      expect(MetadataService.isTransientFile(name), isTrue, reason: name);
+    }
+    for (final name in [
+      '00001_Title.mp4',
+      '00001_Title.m4a',
+      '00001_Title.info.json',
+      'woolytube_meta.json',
+      '00001_Part_Two.mp4',
+      '00001_Temperature.mp4',
+    ]) {
+      expect(MetadataService.isTransientFile(name), isFalse, reason: name);
+    }
+  });
+
+  test('intermediate files are never resolved as the track media', () async {
+    for (final name in [
+      '00001_Title.f137.mp4',
+      '00001_Title.f140.m4a',
+      '00001_Title.temp.mp4',
+      '00001_Title.mp4.part',
+      '00001_Title.mp4.ytdl',
+    ]) {
+      await File(p.join(tempDir.path, name)).writeAsString('partial');
+    }
+    expect(MetadataService.resolveMediaFile(tempDir.path, '00001_'), isNull);
+
+    final media = File(p.join(tempDir.path, '00001_Title.mp4'));
+    await media.writeAsString('video');
+    expect(
+      MetadataService.resolveMediaFile(tempDir.path, '00001_'),
+      media.path,
+    );
+  });
+
+  test(
+    'reconcile removes intermediates without completing the track',
+    () async {
+      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+      final track = await insertTestTrack(db, playlistId: playlist.id);
+      final intermediate = File(p.join(tempDir.path, '00001_Title.f137.mp4'));
+      final temp = File(p.join(tempDir.path, '00001_Title.temp.mp4'));
+      await intermediate.writeAsString('video');
+      await temp.writeAsString('video');
+
+      final fixed = await metadata.reconcilePlaylist(playlist);
+
+      expect(fixed, 2);
+      expect((await db.getTrack(track.id))!.status, 'pending');
+      expect(await intermediate.exists(), isFalse);
+      expect(await temp.exists(), isFalse);
+    },
+  );
+
+  test('reconcile consumes info sidecars with one directory listing', () async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    final first = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 1,
+      videoId: 'first',
+      filePath: p.join(tempDir.path, '00001_First.mp4'),
+      status: 'complete',
+    );
+    final second = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 2,
+      videoId: 'second',
+      filePath: p.join(tempDir.path, '00002_Second.mp4'),
+      status: 'complete',
+    );
+    await File(first.filePath!).writeAsString('video');
+    await File(second.filePath!).writeAsString('video');
+    Future<File> sidecar(String name, String id, String chapter) async {
+      final file = File(p.join(tempDir.path, name));
+      await file.writeAsString(
+        jsonEncode({
+          'id': id,
+          'duration': 60,
+          'chapters': [
+            {'title': chapter, 'start_time': 0, 'end_time': 60},
+          ],
+        }),
+      );
+      return file;
+    }
+
+    final firstInfo = await sidecar('00001_First.info.json', 'first', 'One');
+    final secondInfo = await sidecar('00002_Second.info.json', 'second', 'Two');
+    final foreign = await sidecar('00002_Other.info.json', 'other', 'Nope');
+
+    await metadata.reconcilePlaylist(playlist);
+
+    String? chapterTitle(Track? track) =>
+        ChapterData.decode(track?.chaptersJson).active.singleOrNull?.title;
+    expect(chapterTitle(await db.getTrack(first.id)), 'One');
+    expect(chapterTitle(await db.getTrack(second.id)), 'Two');
+    expect(await firstInfo.exists(), isFalse);
+    expect(await secondInfo.exists(), isFalse);
+    expect(await foreign.exists(), isTrue);
+  });
+
+  test(
+    'concurrent metadata writes serialise and leave no temp files',
+    () async {
+      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+      final track = await insertTestTrack(db, playlistId: playlist.id);
+
+      await Future.wait([
+        for (var i = 0; i < 25; i++) metadata.writeMetadata(playlist, [track]),
+      ]);
+
+      final names =
+          tempDir.listSync().map((entity) => p.basename(entity.path)).toList();
+      expect(names, ['woolytube_meta.json']);
+      final data =
+          jsonDecode(
+                await File(
+                  p.join(tempDir.path, 'woolytube_meta.json'),
+                ).readAsString(),
+              )
+              as Map<String, dynamic>;
+      expect((data['tracks'] as List).single['videoId'], track.videoId);
     },
   );
 }
