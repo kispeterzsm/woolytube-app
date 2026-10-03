@@ -117,6 +117,10 @@ class PlaybackService
   int _generation = 0;
   int? _loadedTrackId;
 
+  /// The on-disk file of the current item, resolved once per load so video
+  /// detection does not rescan the directory on every emission.
+  String? _currentFilePath;
+
   PlaybackItem? get currentItem => _currentItem.value;
 
   /// Short, user-facing notices about playback problems, such as a missing
@@ -365,26 +369,24 @@ class PlaybackService
     return ['.mp4', '.mkv', '.webm', '.avi', '.mov'].contains(ext);
   }
 
+  String? _resolveTrackFile(Track track) =>
+      track.filePath == null ? null : resolveFilePath(track.filePath!);
+
+  bool _isVideoTrack(Track? track, bool audioOnly) {
+    if (track == null || audioOnly) return false;
+    return _isVideoFile(_currentFilePath ?? _resolveTrackFile(track));
+  }
+
   /// Whether the current track is a video file (not audio-only)
   @override
-  bool get isVideoContent {
-    final track = _currentTrack.value;
-    if (track == null || _audioOnlyMode.value) return false;
-    final resolved =
-        track.filePath != null ? resolveFilePath(track.filePath!) : null;
-    return _isVideoFile(resolved);
-  }
+  bool get isVideoContent =>
+      _isVideoTrack(_currentTrack.value, _audioOnlyMode.value);
 
   @override
   Stream<bool> get isVideoContentStream => Rx.combineLatest2(
     _currentTrack.stream,
     _audioOnlyMode.stream,
-    (Track? track, bool audioOnly) {
-      if (track == null || audioOnly) return false;
-      final resolved =
-          track.filePath != null ? resolveFilePath(track.filePath!) : null;
-      return _isVideoFile(resolved);
-    },
+    _isVideoTrack,
   );
 
   @override
@@ -418,11 +420,79 @@ class PlaybackService
     String? chapterId,
     bool whole = false,
   }) async {
+    final groups = await _buildAlbums(
+      tracks,
+      trackId: trackId,
+      chapterId: chapterId,
+      whole: whole,
+    );
+    if (groups.isEmpty) {
+      reportMessage('Nothing to play');
+      return;
+    }
+    // Validate the explicitly selected file and take audio focus before the
+    // live queue is replaced, so a failure leaves current playback untouched.
+    PlaybackAlbum? selectedAlbum;
+    String? selectedPath;
+    if (trackId != null) {
+      selectedAlbum = groups.where((g) => g.trackId == trackId).firstOrNull;
+    }
+    if (selectedAlbum != null) {
+      final selectedTrack = selectedAlbum.items.first.track;
+      selectedPath = _resolveTrackFile(selectedTrack);
+      if (selectedPath == null) {
+        reportMessage('File not found: ${selectedTrack.title}');
+        return;
+      }
+    }
+    if (!await _requestFocus()) return;
+    final selected = _albumQueue.start(
+      groups,
+      trackId: trackId,
+      chapterId: chapterId,
+      shuffled: shuffleEnabled,
+    );
+    _publishQueue();
+    if (selected == null) return;
+    final filePath =
+        selected.track.id == selectedAlbum?.trackId
+            ? selectedPath
+            : _resolveTrackFile(selected.track);
+    if (filePath == null) {
+      _reportSkippedFiles([selected.track.title]);
+      await _advance();
+      return;
+    }
+    await _loadAndPlay(selected, filePath: filePath);
+  }
+
+  /// Builds the playback groups for [tracks] from fresh database rows, reading
+  /// each distinct playlist once instead of one query per track.
+  Future<List<PlaybackAlbum>> _buildAlbums(
+    List<Track> tracks, {
+    int? trackId,
+    String? chapterId,
+    bool whole = false,
+  }) async {
+    final playlists = <int, Playlist>{};
+    final freshTracks = <int, Track>{};
+    for (final playlistId in tracks.map((t) => t.playlistId).toSet()) {
+      try {
+        playlists[playlistId] = await _db.getPlaylist(playlistId);
+      } catch (_) {
+        continue;
+      }
+      for (final fresh in await _db.getTracksForPlaylist(playlistId)) {
+        freshTracks[fresh.id] = fresh;
+      }
+    }
     final groups = <PlaybackAlbum>[];
     for (final track in tracks) {
-      final fresh = await _db.getTrack(track.id);
-      if (fresh == null || !isTrackPlayable(fresh)) continue;
-      final playlist = await _db.getPlaylist(fresh.playlistId);
+      final fresh = freshTracks[track.id];
+      final playlist = playlists[track.playlistId];
+      if (fresh == null || playlist == null || !isTrackPlayable(fresh)) {
+        continue;
+      }
       var items = chapterPlaybackItems(
         fresh,
         playlist,
@@ -433,18 +503,27 @@ class PlaybackService
             ChapterData.decode(
               fresh.chaptersJson,
             ).active.map((c) => PlaybackItem(fresh, c)).toList();
-        if (!items.any((i) => i.chapter?.id == chapterId)) return;
+        if (!items.any((i) => i.chapter?.id == chapterId)) return const [];
       }
       groups.add(PlaybackAlbum(items));
     }
-    final selected = _albumQueue.start(
-      groups,
-      trackId: trackId,
-      chapterId: chapterId,
-      shuffled: shuffleEnabled,
+    return groups;
+  }
+
+  Future<bool> _requestFocus() async {
+    final controller = _audioFocusController;
+    if (controller == null || await controller.requestFocus()) return true;
+    reportMessage('Another app is using audio');
+    return false;
+  }
+
+  void _reportSkippedFiles(List<String> titles) {
+    if (titles.isEmpty) return;
+    reportMessage(
+      titles.length == 1
+          ? 'Skipped "${titles.single}": file not found'
+          : 'Skipped ${titles.length} tracks: files not found',
     );
-    _publishQueue();
-    if (selected != null) await _loadAndPlay(selected);
   }
 
   Future<bool> addToUpNextQueue(Track track, {String? chapterId}) async {
@@ -498,28 +577,57 @@ class PlaybackService
             : forward
             ? _albumQueue.next()
             : _albumQueue.previous();
+    final missingFiles = <String>[];
     while (item != null) {
-      final fresh = await _db.getTrack(item.track.id);
-      if (fresh != null &&
-          isTrackAutomaticallyPlayable(fresh) &&
-          fresh.filePath == item.track.filePath &&
-          fresh.downloadedAt == item.track.downloadedAt &&
-          (item.chapter == null ||
-              ChapterData.decode(fresh.chaptersJson).valid) &&
-          resolveFilePath(fresh.filePath!) != null) {
-        _publishQueue();
-        await _loadAndPlay(PlaybackItem(fresh, item.chapter));
-        return true;
+      final candidate = await _freshPlaybackItem(item);
+      if (candidate != null) {
+        final filePath = _resolveTrackFile(candidate.track);
+        if (filePath != null) {
+          _publishQueue();
+          _reportSkippedFiles(missingFiles);
+          return await _loadAndPlay(candidate, filePath: filePath);
+        }
+        missingFiles.add(candidate.track.title);
       }
       item = forward ? _albumQueue.next() : _albumQueue.previous();
     }
     _publishQueue();
+    _reportSkippedFiles(missingFiles);
     return false;
   }
 
-  Future<void> _loadAndPlay(PlaybackItem item) async {
+  /// Re-reads a queued item from the database. Returns null when the track is
+  /// no longer automatically playable, its file was replaced, or its chapter
+  /// no longer exists; otherwise the item carries the chapter's current bounds
+  /// rather than the ones captured when the queue was built.
+  Future<PlaybackItem?> _freshPlaybackItem(PlaybackItem item) async {
+    final fresh = await _db.getTrack(item.track.id);
+    if (fresh == null ||
+        !isTrackAutomaticallyPlayable(fresh) ||
+        fresh.filePath != item.track.filePath ||
+        fresh.downloadedAt != item.track.downloadedAt) {
+      return null;
+    }
+    final queuedChapter = item.chapter;
+    if (queuedChapter == null) return PlaybackItem(fresh);
+    final chapter =
+        ChapterData.decode(
+          fresh.chaptersJson,
+        ).active.where((c) => c.id == queuedChapter.id).firstOrNull;
+    return chapter == null ? null : PlaybackItem(fresh, chapter);
+  }
+
+  /// Opens [item] from the already resolved [filePath]. Audio focus is taken
+  /// before anything is published, so a denied request leaves the previous
+  /// item and its media untouched. Returns whether the file was opened.
+  Future<bool> _loadAndPlay(
+    PlaybackItem item, {
+    required String filePath,
+  }) async {
+    if (!await _requestFocus()) return false;
     _loading = true;
     _loadedTrackId = null;
+    _currentFilePath = filePath;
     _generation++;
     _chapterEditing = false;
     _completionHandled = false;
@@ -531,15 +639,6 @@ class PlaybackService
     try {
       await _player.pause();
       await _loadActiveSegments(item.track);
-      final filePath =
-          item.track.filePath == null
-              ? null
-              : resolveFilePath(item.track.filePath!);
-      if (filePath == null) return;
-      final hasFocus =
-          _audioFocusController == null ||
-          await _audioFocusController!.requestFocus();
-      if (!hasFocus) return;
       await _player.open(
         Media(
           Uri.file(filePath).toString(),
@@ -555,8 +654,13 @@ class PlaybackService
       );
       _loadedTrackId = item.track.id;
     } catch (_) {
+      // The previous media must not stay resumable under this item's name.
+      _currentFilePath = null;
+      try {
+        await _player.stop();
+      } catch (_) {}
       await _audioFocusController?.abandonFocus();
-      rethrow;
+      reportMessage('Could not open "${item.track.title}"');
     } finally {
       _loading = false;
       _duration.add(
@@ -566,6 +670,7 @@ class PlaybackService
       );
       _position.add(item.relativePosition(sourcePosition));
     }
+    return _loadedTrackId != null;
   }
 
   Future<void> beginChapterEditing(Track track) async {
@@ -739,10 +844,14 @@ class PlaybackService
 
   @override
   Future<void> resume() async {
-    final hasFocus =
-        _audioFocusController == null ||
-        await _audioFocusController!.requestFocus();
-    if (!hasFocus) return;
+    if (_loadedTrackId == null) {
+      // Nothing is open (stopped, still loading, or the last open failed), so
+      // there is nothing to take focus for. A play press while idle may still
+      // start tracks that were queued up next.
+      if (currentTrack == null) await startUpNextQueueIfIdle();
+      return;
+    }
+    if (!await _requestFocus()) return;
     try {
       // Native playback restarts a completed range on Play. Allow that new
       // traversal to advance when it reaches the end again.
@@ -878,6 +987,7 @@ class PlaybackService
   Future<void> stop() => _transition(() async {
     _generation++;
     _loadedTrackId = null;
+    _currentFilePath = null;
     _chapterEditing = false;
     _completionHandled = true;
     _sleepTimer.cancel();
