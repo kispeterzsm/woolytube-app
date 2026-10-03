@@ -296,7 +296,10 @@ class PlaybackService
   }) async {
     final controller = AudioFocusController(
       session: audioSession ?? await PlatformPlaybackAudioSession.create(),
-      pausePlayback: pause,
+      // The controller decides whether focus is kept (transient loss) or
+      // abandoned, so it pauses the player directly instead of via pause().
+      pausePlayback: () => _player.pause(),
+      resumePlayback: resume,
       isPlaying: () => isPlaying,
     );
     await controller.initialize(enabled: pauseOnAudioInterruption);
@@ -894,26 +897,31 @@ class PlaybackService
     _pendingSegmentMarkStart.add(null);
   });
 
-  void dispose() {
+  Future<void> dispose() async {
+    // Stop every producer before closing the subjects they feed, otherwise a
+    // late player event could add to a closed stream.
     for (final sub in _subscriptions) {
-      unawaited(sub.cancel());
+      await sub.cancel();
     }
-    _currentItem.close();
-    _position.close();
-    _duration.close();
+    _subscriptions.clear();
     _sleepTimer.dispose();
-    unawaited(_audioFocusController?.dispose());
-    _player.dispose();
-    _currentTrack.close();
-    _currentPlaylist.close();
-    _queue.close();
-    _upNextQueue.close();
-    _queueIndex.close();
-    _shuffleEnabled.close();
-    _autoplayEnabled.close();
-    _audioOnlyMode.close();
-    _pendingSegmentMarkStart.close();
-    _sponsorBlockSegments.close();
-    _messages.close();
+    await _audioFocusController?.dispose();
+    await _player.dispose();
+    await Future.wait([
+      _currentItem.close(),
+      _position.close(),
+      _duration.close(),
+      _currentTrack.close(),
+      _currentPlaylist.close(),
+      _queue.close(),
+      _upNextQueue.close(),
+      _queueIndex.close(),
+      _shuffleEnabled.close(),
+      _autoplayEnabled.close(),
+      _audioOnlyMode.close(),
+      _pendingSegmentMarkStart.close(),
+      _sponsorBlockSegments.close(),
+      _messages.close(),
+    ]);
   }
 }

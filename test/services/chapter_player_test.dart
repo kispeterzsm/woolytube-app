@@ -1,100 +1,17 @@
-import 'dart:async';
 import 'dart:io';
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter_test/flutter_test.dart';
-import 'package:media_kit/media_kit.dart' as kit;
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/audio_handler.dart';
 import 'package:woolytube/services/playback_service.dart';
 import '../helpers/test_database.dart';
-
-class _Streams implements kit.PlayerStream {
-  final positions = StreamController<Duration>.broadcast(sync: true);
-  final durations = StreamController<Duration>.broadcast(sync: true);
-  final completions = StreamController<bool>.broadcast(sync: true);
-  final playingChanges = StreamController<bool>.broadcast(sync: true);
-  @override
-  Stream<Duration> get position => positions.stream;
-  @override
-  Stream<Duration> get duration => durations.stream;
-  @override
-  Stream<bool> get completed => completions.stream;
-  @override
-  Stream<bool> get playing => playingChanges.stream;
-  @override
-  dynamic noSuchMethod(Invocation i) => super.noSuchMethod(i);
-}
-
-class _Player implements kit.Player {
-  @override
-  final _Streams stream = _Streams();
-  @override
-  kit.PlayerState state = const kit.PlayerState(
-    duration: Duration(seconds: 60),
-  );
-  final opened = <kit.Media>[];
-  final seeks = <Duration>[];
-  @override
-  Future<void> open(kit.Playable playable, {bool play = true}) async {
-    final media = playable as kit.Media;
-    opened.add(media);
-    state = state.copyWith(
-      position: media.start ?? Duration.zero,
-      completed: false,
-      playing: play,
-    );
-  }
-
-  @override
-  Future<void> pause() async {
-    state = state.copyWith(playing: false);
-    stream.playingChanges.add(false);
-  }
-
-  @override
-  Future<void> play() async {
-    state = state.copyWith(playing: true);
-    stream.playingChanges.add(true);
-  }
-
-  @override
-  Future<void> seek(Duration position) async {
-    seeks.add(position);
-    tick(position);
-  }
-
-  void tick(Duration position) {
-    state = state.copyWith(position: position);
-    stream.positions.add(position);
-  }
-
-  void finish() {
-    state = state.copyWith(completed: true, playing: false);
-    stream.completions.add(true);
-  }
-
-  @override
-  Future<void> stop() async {
-    await pause();
-  }
-
-  @override
-  Future<void> dispose() async {
-    await stream.positions.close();
-    await stream.durations.close();
-    await stream.completions.close();
-    await stream.playingChanges.close();
-  }
-
-  @override
-  dynamic noSuchMethod(Invocation i) => super.noSuchMethod(i);
-}
+import 'playback_fakes.dart';
 
 void main() {
   late AppDatabase db;
   late Directory dir;
-  late _Player player;
+  late FakePlayer player;
   late PlaybackService playback;
   late Track track;
   late Playlist playlist;
@@ -139,11 +56,11 @@ void main() {
       ),
     );
     track = (await db.getTrack(track.id))!;
-    player = _Player();
+    player = FakePlayer();
     playback = PlaybackService(db, player: player);
   });
   tearDown(() async {
-    playback.dispose();
+    await playback.dispose();
     await db.close();
     await dir.delete(recursive: true);
   });
