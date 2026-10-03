@@ -1,9 +1,12 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:drift/drift.dart' show Value;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:woolytube/database/database.dart';
+import 'package:woolytube/services/download_service.dart';
+import 'package:woolytube/services/log_service.dart';
 import 'package:woolytube/services/metadata_service.dart';
 import 'package:woolytube/services/media_thumbnail_service.dart';
 import 'package:woolytube/services/playlist_service.dart';
@@ -20,6 +23,37 @@ class FakeYtDlpService extends YtDlpService {
     requestedPlaylistUrls.add(url);
     return playlistInfo;
   }
+
+  @override
+  Stream<Map<String, dynamic>> get progressStream =>
+      const Stream<Map<String, dynamic>>.empty();
+
+  /// Succeeds without producing a file, like a download whose merge failed.
+  @override
+  Future<void> download({
+    required String url,
+    required String outputPath,
+    String? formatOption,
+    bool audioOnly = false,
+    bool embedThumbnail = true,
+    bool downloadSubtitles = false,
+    String subtitleLanguages = 'en',
+    String? outputTemplate,
+  }) async {}
+
+  @override
+  Future<void> startDownloadService(String playlistName) async {}
+
+  @override
+  Future<void> updateDownloadServiceProgress({
+    required String playlistName,
+    required int currentTrack,
+    required int totalTracks,
+    required int progress,
+  }) async {}
+
+  @override
+  Future<void> stopDownloadService() async {}
 }
 
 class FakeMediaThumbnailService extends MediaThumbnailService {
@@ -104,7 +138,7 @@ void main() {
   });
 
   test(
-    'syncs playlist additions, removals, availability, and ordering',
+    'syncs playlist additions, removals and availability without renumbering',
     () async {
       final playlist = await insertTestPlaylist(
         db,
@@ -266,17 +300,20 @@ void main() {
       expect(byVideoId['back']!.title, 'Back Online');
       expect(byVideoId['back']!.thumbnailUrl, 'https://example.com/back.jpg');
       expect(byVideoId['back']!.durationSeconds, 300);
-      expect(byVideoId['back']!.index, 21);
+      expect(byVideoId['back']!.index, 5);
       expect(byVideoId['replacement']!.status, 'complete');
       expect(byVideoId['replacement']!.unavailableReason, isNull);
       expect(byVideoId['complete-index']!.index, 7);
-      expect(byVideoId['pending-index']!.index, 101);
+      expect(byVideoId['pending-index']!.index, 8);
       expect(byVideoId['will-private']!.status, 'unavailable');
       expect(byVideoId['will-private']!.unavailableReason, 'private');
-      expect(byVideoId['will-private']!.index, 102);
+      expect(byVideoId['will-private']!.index, 9);
       expect(byVideoId['new']!.status, 'pending');
+      expect(byVideoId['new']!.index, 10);
       expect(byVideoId['new-private']!.status, 'unavailable');
       expect(byVideoId['new-private']!.unavailableReason, 'private');
+      expect(byVideoId['new-private']!.index, 11);
+      expect(tracks.map((track) => track.index).toSet(), hasLength(11));
       expect(
         await File(p.join(tempDir.path, 'woolytube_meta.json')).exists(),
         isTrue,
@@ -556,4 +593,284 @@ void main() {
       expect(tracks.map((track) => track.index), [1, 2, 3, 4]);
     },
   );
+
+  test(
+    'an entry removed on YouTube never renumbers downloaded or pending tracks',
+    () async {
+      final outputDir = Directory(p.join(tempDir.path, 'append-only'));
+      await outputDir.create();
+      final playlist = await insertTestPlaylist(
+        db,
+        url: 'https://www.youtube.com/playlist?list=append-only',
+        audioOnly: true,
+        outputPath: outputDir.path,
+      );
+      final keptPath = p.join(outputDir.path, '00050_Kept.m4a');
+      await File(keptPath).writeAsString('audio');
+      final early = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 49,
+        videoId: 'early',
+        title: 'Early',
+      );
+      final kept = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 50,
+        videoId: 'kept',
+        title: 'Kept',
+        status: 'complete',
+        filePath: keptPath,
+      );
+      final later = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 51,
+        videoId: 'later',
+        title: 'Later',
+      );
+      ytdlp.playlistInfo = {
+        'entries': [
+          {'id': 'kept', 'playlist_index': 1, 'title': 'Kept'},
+          {'id': 'later', 'playlist_index': 2, 'title': 'Later'},
+          {'id': 'fresh', 'playlist_index': 3, 'title': 'Fresh'},
+        ],
+      };
+
+      final result = await service.syncPlaylist(playlist);
+
+      expect(result.added, 1);
+      expect(result.removed, 1);
+      final tracks = await db.getTracksForPlaylist(playlist.id);
+      final byVideoId = {for (final track in tracks) track.videoId: track};
+      expect(byVideoId['early']!.index, 49);
+      expect(byVideoId['early']!.status, 'unavailable');
+      expect(byVideoId['early']!.unavailableReason, 'removed');
+      expect(byVideoId['kept']!.index, 50);
+      expect(byVideoId['later']!.index, 51);
+      expect(byVideoId['fresh']!.index, 52);
+      expect(tracks.map((track) => track.index).toSet(), hasLength(4));
+      expect(byVideoId['early']!.id, early.id);
+      expect(byVideoId['later']!.id, later.id);
+
+      // The pending ex-#51 must not inherit #50's file on the next update.
+      final log = LogService();
+      final downloads = DownloadService(
+        db,
+        ytdlp,
+        log,
+        MetadataService(db),
+        null,
+        null,
+        null,
+        DownloadLock(directoryProvider: () async => tempDir.path),
+      );
+      addTearDown(() {
+        downloads.dispose();
+        log.dispose();
+      });
+      await downloads.downloadPlaylist(await db.getPlaylist(playlist.id));
+
+      final laterAfter = (await db.getTrack(later.id))!;
+      expect(laterAfter.status, 'error');
+      expect(laterAfter.filePath, isNull);
+      expect((await db.getTrack(kept.id))!.filePath, keptPath);
+    },
+  );
+
+  test(
+    'new remote entries are appended after the highest local index',
+    () async {
+      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 3,
+        videoId: 'a',
+      );
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 7,
+        videoId: 'b',
+      );
+      ytdlp.playlistInfo = {
+        'entries': [
+          {'id': 'a', 'playlist_index': 1, 'title': 'A'},
+          {'id': 'new-1', 'playlist_index': 2, 'title': 'New 1'},
+          {'id': 'b', 'playlist_index': 3, 'title': 'B'},
+          {'id': 'new-2', 'playlist_index': 4, 'title': 'New 2'},
+        ],
+      };
+
+      final result = await service.syncPlaylist(playlist);
+
+      expect(result.added, 2);
+      final byVideoId = {
+        for (final track in await db.getTracksForPlaylist(playlist.id))
+          track.videoId: track,
+      };
+      expect(byVideoId['a']!.index, 3);
+      expect(byVideoId['b']!.index, 7);
+      expect(byVideoId['new-1']!.index, 8);
+      expect(byVideoId['new-2']!.index, 9);
+    },
+  );
+
+  test('duplicate remote video IDs are stored once', () async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    await insertTestTrack(db, playlistId: playlist.id, index: 1, videoId: 'x');
+    ytdlp.playlistInfo = {
+      'entries': [
+        {'id': 'x', 'playlist_index': 1, 'title': 'X'},
+        {'id': 'dup', 'playlist_index': 2, 'title': 'First'},
+        {'id': 'dup', 'playlist_index': 3, 'title': 'Second'},
+        {'id': 'other', 'playlist_index': 4, 'title': 'Other'},
+      ],
+    };
+
+    final result = await service.syncPlaylist(playlist);
+
+    expect(result.added, 2);
+    final tracks = await db.getTracksForPlaylist(playlist.id);
+    expect(tracks.map((track) => track.videoId), ['x', 'dup', 'other']);
+    expect(tracks.map((track) => track.index), [1, 2, 3]);
+    expect(tracks[1].title, 'First');
+  });
+
+  test(
+    'a fresh playlist keeps remote numbering but never repeats it',
+    () async {
+      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+
+      await service.populateTracksFromInfo(playlist.id, {
+        'entries': [
+          {'id': 'dup', 'playlist_index': 4, 'title': 'First'},
+          {'id': 'dup', 'playlist_index': 4, 'title': 'Second'},
+          {'id': 'clash', 'playlist_index': 4, 'title': 'Clash'},
+          {'id': 'later', 'playlist_index': 9, 'title': 'Later'},
+        ],
+      });
+
+      final tracks = await db.getTracksForPlaylist(playlist.id);
+      expect(tracks.map((track) => track.videoId), ['dup', 'clash', 'later']);
+      expect(tracks.map((track) => track.index), [4, 5, 9]);
+    },
+  );
+
+  test(
+    'an empty remote response fails instead of removing everything',
+    () async {
+      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+      final track = await insertTestTrack(db, playlistId: playlist.id);
+      ytdlp.playlistInfo = {'entries': <dynamic>[]};
+
+      await expectLater(service.syncPlaylist(playlist), throwsStateError);
+
+      final unchanged = (await db.getTrack(track.id))!;
+      expect(unchanged.status, 'pending');
+      expect(unchanged.unavailableReason, isNull);
+
+      // Without local tracks there is nothing to protect.
+      final empty = await insertTestPlaylist(
+        db,
+        url: 'https://www.youtube.com/playlist?list=empty',
+        outputPath: tempDir.path,
+      );
+      expect((await service.syncPlaylist(empty)).hasChanges, isFalse);
+    },
+  );
+
+  test('concurrent settings updates do not overwrite each other', () async {
+    final playlist = await insertTestPlaylist(
+      db,
+      outputPath: tempDir.path,
+      lastUpdated: DateTime.utc(2024, 5, 6),
+    );
+
+    await Future.wait([
+      service.updatePlaylistSettings(id: playlist.id, name: 'Renamed'),
+      service.updatePlaylistSettings(id: playlist.id, autoUpdate: false),
+      service.updatePlaylistSettings(id: playlist.id, updateFrequencyHours: 6),
+    ]);
+
+    final updated = await db.getPlaylist(playlist.id);
+    expect(updated.name, 'Renamed');
+    expect(updated.autoUpdate, isFalse);
+    expect(updated.updateFrequencyHours, 6);
+    expect(updated.lastUpdated, playlist.lastUpdated);
+    expect(updated.outputPath, playlist.outputPath);
+    expect(updated.sponsorBlockCategories, playlist.sponsorBlockCategories);
+  });
+
+  test('a local replacement drops remote SponsorBlock segments', () async {
+    final outputDir = Directory(p.join(tempDir.path, 'segments'));
+    await outputDir.create();
+    final playlist = await insertTestPlaylist(db, outputPath: outputDir.path);
+    final track = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      videoId: 'segmented',
+      status: 'complete',
+      filePath: p.join(outputDir.path, '00001_Old.mp4'),
+    );
+    await File(track.filePath!).writeAsString('old');
+    await db.replaceSponsorBlockSegments(track.id, [
+      for (final source in ['sponsorblock', 'local', 'override'])
+        SponsorBlockSegmentsCompanion.insert(
+          trackId: track.id,
+          videoId: track.videoId,
+          source: source,
+          uuid: Value('$source-uuid'),
+          category: 'sponsor',
+          startMs: 1000,
+          endMs: 2000,
+          createdAt: DateTime(2024),
+        ),
+    ]);
+    final source = File(p.join(tempDir.path, 'Replacement.mp4'));
+    await source.writeAsString('new');
+
+    final updated = await service.replaceWithLocalFile(
+      trackId: track.id,
+      sourcePath: source.path,
+      sourceFileName: 'Replacement.mp4',
+    );
+
+    expect(updated.isLocalReplacement, isTrue);
+    expect(updated.sponsorBlockCheckedAt, isNotNull);
+    final remaining = await db.getSegmentsForTrack(track.id);
+    expect(remaining.map((segment) => segment.source), ['local', 'override']);
+  });
+
+  test('force insert at the front shifts every later track', () async {
+    final outputDir = Directory(p.join(tempDir.path, 'front-insert'));
+    await outputDir.create();
+    final playlist = await insertTestPlaylist(db, outputPath: outputDir.path);
+    final ids = <int>[];
+    for (var i = 1; i <= 3; i++) {
+      ids.add(
+        (await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: i,
+          videoId: 'video-$i',
+        )).id,
+      );
+    }
+    final source = File(p.join(tempDir.path, 'Intro.mp4'));
+    await source.writeAsString('intro');
+
+    final inserted = await service.forceInsert(
+      playlistId: playlist.id,
+      index: 1,
+      sourcePath: source.path,
+    );
+
+    final tracks = await db.getTracksForPlaylist(playlist.id);
+    expect(tracks.map((track) => track.index), [1, 2, 3, 4]);
+    expect(tracks.map((track) => track.id), [inserted.id, ...ids]);
+    expect(inserted.sponsorBlockCheckedAt, isNotNull);
+  });
 }
