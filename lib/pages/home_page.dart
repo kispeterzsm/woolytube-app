@@ -7,7 +7,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/providers.dart';
 import '../providers/playback_providers.dart';
+import '../providers/playlist_counts_provider.dart';
 import '../database/database.dart';
+import '../services/download_errors.dart';
 import '../services/download_service.dart';
 import '../services/media_thumbnail_service.dart';
 import '../services/metadata_service.dart';
@@ -29,10 +31,10 @@ class HomePage extends ConsumerStatefulWidget {
 }
 
 class _HomePageState extends ConsumerState<HomePage> {
-  final Map<int, int> _downloadedCounts = {};
-  final Map<int, int> _totalCounts = {};
+  final Set<int> _syncingPlaylistIds = <int>{};
   String _searchQuery = '';
   bool _showSearch = false;
+  bool _importing = false;
   AppUpdate? _availableUpdate;
   Future<void>? _updateCheck;
   bool _isCheckingForUpdate = false;
@@ -79,13 +81,32 @@ class _HomePageState extends ConsumerState<HomePage> {
             },
           ),
           IconButton(
-            icon: Icon(
-              Icons.settings,
-              color:
-                  _availableUpdate == null
-                      ? const Color(0xFF888888)
-                      : const Color(0xFF2196F3),
-              size: 20,
+            icon: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Icon(
+                  Icons.settings,
+                  color:
+                      _availableUpdate == null
+                          ? const Color(0xFF888888)
+                          : const Color(0xFF2196F3),
+                  size: 20,
+                ),
+                if (_availableUpdate != null)
+                  Positioned(
+                    top: -2,
+                    right: -2,
+                    child: Container(
+                      key: const ValueKey('settings-update-badge'),
+                      width: 8,
+                      height: 8,
+                      decoration: const BoxDecoration(
+                        color: Color(0xFFFF7043),
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                  ),
+              ],
             ),
             tooltip:
                 _availableUpdate != null
@@ -552,7 +573,7 @@ class _HomePageState extends ConsumerState<HomePage> {
     List<Playlist> playlists,
     DownloadProgress downloadProgress,
   ) {
-    _refreshCounts(playlists);
+    final counts = ref.watch(playlistTrackCountsProvider);
 
     return ListView.separated(
       padding: const EdgeInsets.all(12),
@@ -563,38 +584,58 @@ class _HomePageState extends ConsumerState<HomePage> {
         final isDownloading =
             downloadProgress.status == 'downloading' &&
             downloadProgress.playlistId == playlist.id;
+        final playlistCounts = counts[playlist.id];
 
         return PlaylistCard(
           playlist: playlist,
-          downloadedCount: _downloadedCounts[playlist.id] ?? 0,
-          totalCount: _totalCounts[playlist.id] ?? 0,
+          downloadedCount: playlistCounts?.downloaded ?? 0,
+          totalCount: playlistCounts?.total ?? 0,
           isDownloading: isDownloading,
+          isSyncing: _syncingPlaylistIds.contains(playlist.id),
           downloadProgress: isDownloading ? downloadProgress.trackProgress : 0,
           onTap: () => _navigateToDetail(context, playlist),
           onUpdate: () => _startUpdate(playlist),
+          onCancel: _confirmCancelDownload,
           onSettings: () => _navigateToSettings(context, playlist),
         );
       },
     );
   }
 
-  void _refreshCounts(List<Playlist> playlists) {
-    final service = ref.read(playlistServiceProvider);
-    for (final playlist in playlists) {
-      service.getDownloadedCount(playlist.id).then((count) {
-        if (mounted && _downloadedCounts[playlist.id] != count) {
-          setState(() => _downloadedCounts[playlist.id] = count);
-        }
-      });
-      service.getTotalCount(playlist.id).then((count) {
-        if (mounted && _totalCounts[playlist.id] != count) {
-          setState(() => _totalCounts[playlist.id] = count);
-        }
-      });
-    }
+  Future<void> _confirmCancelDownload() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder:
+          (ctx) => AlertDialog(
+            backgroundColor: const Color(0xFF2A2A2A),
+            title: const Text(
+              'Stop downloading?',
+              style: TextStyle(color: Colors.white),
+            ),
+            content: const Text(
+              'Finished tracks are kept; the rest stay queued for the next '
+              'update.',
+              style: TextStyle(color: Color(0xFFCCCCCC)),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Keep downloading'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Stop', style: TextStyle(color: Colors.red)),
+              ),
+            ],
+          ),
+    );
+    if (confirmed != true) return;
+    await ref.read(downloadServiceProvider).cancelActiveDownloads();
   }
 
-  void _startUpdate(Playlist playlist) async {
+  Future<void> _startUpdate(Playlist playlist) async {
+    if (_syncingPlaylistIds.contains(playlist.id)) return;
+
     final downloadService = ref.read(downloadServiceProvider);
     if (downloadService.isDownloading) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -609,38 +650,55 @@ class _HomePageState extends ConsumerState<HomePage> {
     )) {
       return;
     }
+    if (!mounted) return;
 
-    // Sync first to detect new, unavailable, and removed tracks
-    final playlistService = ref.read(playlistServiceProvider);
-    final result = await playlistService.syncPlaylist(playlist);
+    setState(() => _syncingPlaylistIds.add(playlist.id));
+    try {
+      // Sync first to detect new, unavailable, and removed tracks
+      final playlistService = ref.read(playlistServiceProvider);
+      final result = await playlistService.syncPlaylist(playlist);
 
-    if (result.hasChanges && mounted) {
-      final parts = <String>[];
-      if (result.added > 0) parts.add('${result.added} new');
-      if (result.markedUnavailable > 0) {
-        parts.add('${result.markedUnavailable} unavailable');
+      if (result.hasChanges && mounted) {
+        final parts = <String>[];
+        if (result.added > 0) parts.add('${result.added} new');
+        if (result.markedUnavailable > 0) {
+          parts.add('${result.markedUnavailable} unavailable');
+        }
+        if (result.removed > 0) parts.add('${result.removed} removed');
+        if (result.markedAvailable > 0) {
+          parts.add('${result.markedAvailable} restored');
+        }
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Synced: ${parts.join(', ')}')));
       }
-      if (result.removed > 0) parts.add('${result.removed} removed');
-      if (result.markedAvailable > 0) {
-        parts.add('${result.markedAvailable} restored');
+
+      if (result.hasConflicts && mounted) {
+        await _showReplacementConflicts(result.replacementConflicts);
       }
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Synced: ${parts.join(', ')}')));
-    }
 
-    if (result.hasConflicts && mounted) {
-      await _showReplacementConflicts(result.replacementConflicts);
+      final freshPlaylist = await ref
+          .read(databaseProvider)
+          .getPlaylist(playlist.id);
+      // The download is a service-level operation and runs regardless of
+      // whether this page is still mounted.
+      unawaited(downloadService.downloadPlaylist(freshPlaylist));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Update failed: ${friendlyDownloadError('$e')}'),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _syncingPlaylistIds.remove(playlist.id));
+      }
     }
-
-    final freshPlaylist = await ref
-        .read(databaseProvider)
-        .getPlaylist(playlist.id);
-    downloadService.downloadPlaylist(freshPlaylist);
   }
 
   Future<void> _showReplacementConflicts(List<Track> conflicts) async {
-    final db = ref.read(databaseProvider);
+    final playlistService = ref.read(playlistServiceProvider);
     for (final track in conflicts) {
       if (!mounted) return;
       final decision = await showDialog<String>(
@@ -672,7 +730,13 @@ class _HomePageState extends ConsumerState<HomePage> {
             ),
       );
       if (decision == 'download') {
-        await db.resetTrackForRedownload(track.id);
+        // Delete the replacement so the fresh download is not re-adopted by
+        // its index prefix, and drop segments that belonged to its timeline.
+        await playlistService.resetTrackForRedownload(
+          track,
+          deleteFile: true,
+          clearSegments: true,
+        );
       }
     }
   }
@@ -716,8 +780,7 @@ class _HomePageState extends ConsumerState<HomePage> {
             ),
           ),
           TextButton(
-            onPressed:
-                () => ref.read(pendingImportsProvider.notifier).state = [],
+            onPressed: _importing ? null : () => _dismissImports(imports),
             child: const Text(
               'Dismiss',
               style: TextStyle(color: Color(0xFF888888), fontSize: 13),
@@ -725,37 +788,86 @@ class _HomePageState extends ConsumerState<HomePage> {
           ),
           const SizedBox(width: 4),
           ElevatedButton(
-            onPressed: () => _importAll(imports),
+            onPressed: _importing ? null : () => _importAll(imports),
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFF2196F3),
               foregroundColor: Colors.white,
+              disabledBackgroundColor: const Color(0xFF2A4A6A),
+              disabledForegroundColor: const Color(0xFFAABBCC),
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(8),
               ),
             ),
-            child: const Text('Import All', style: TextStyle(fontSize: 13)),
+            child:
+                _importing
+                    ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                    : const Text('Import All', style: TextStyle(fontSize: 13)),
           ),
         ],
       ),
     );
   }
 
-  Future<void> _importAll(List<DiscoveredPlaylist> imports) async {
-    final metadata = ref.read(metadataServiceProvider);
-    for (final discovered in imports) {
-      await metadata.importPlaylist(discovered);
+  Future<void> _dismissImports(List<DiscoveredPlaylist> imports) async {
+    try {
+      await ref
+          .read(appSettingsServiceProvider)
+          .addDismissedImportUrls(imports.map((i) => i.url));
+    } catch (e) {
+      ref.read(logServiceProvider).warn('could not persist dismissal: $e');
     }
+    if (!mounted) return;
     ref.read(pendingImportsProvider.notifier).state = [];
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Imported ${imports.length} playlist${imports.length == 1 ? '' : 's'}',
-          ),
-        ),
-      );
+  }
+
+  Future<void> _importAll(List<DiscoveredPlaylist> imports) async {
+    if (_importing) return;
+    setState(() => _importing = true);
+    final metadata = ref.read(metadataServiceProvider);
+    final failures = <String>[];
+    var imported = 0;
+    try {
+      for (final discovered in imports) {
+        try {
+          await metadata.importPlaylist(discovered);
+          imported++;
+          final remaining = ref.read(pendingImportsProvider);
+          ref.read(pendingImportsProvider.notifier).state =
+              remaining.where((p) => p.url != discovered.url).toList();
+        } catch (e) {
+          failures.add(discovered.name);
+          ref
+              .read(logServiceProvider)
+              .warn('import of ${discovered.name} failed: $e');
+        }
+      }
+    } finally {
+      if (mounted) setState(() => _importing = false);
     }
+    if (!mounted) return;
+    final String message;
+    if (failures.isEmpty) {
+      message = 'Imported $imported playlist${imported == 1 ? '' : 's'}';
+    } else if (imported == 0) {
+      message =
+          'Could not import ${failures.length} '
+          'playlist${failures.length == 1 ? '' : 's'}: ${failures.join(', ')}';
+    } else {
+      message =
+          'Imported $imported, failed ${failures.length}: '
+          '${failures.join(', ')}';
+    }
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   void _navigateToAddPlaylist(BuildContext context) {
@@ -767,7 +879,11 @@ class _HomePageState extends ConsumerState<HomePage> {
   void _navigateToDetail(BuildContext context, Playlist playlist) {
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => PlaylistDetailPage(playlistId: playlist.id),
+        builder:
+            (_) => PlaylistDetailPage(
+              playlistId: playlist.id,
+              initialName: playlist.name,
+            ),
       ),
     );
   }

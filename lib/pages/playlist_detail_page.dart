@@ -14,6 +14,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../database/database.dart';
 import '../providers/providers.dart';
 import '../providers/playback_providers.dart';
+import '../services/download_errors.dart';
 import '../services/download_service.dart';
 import '../services/metadata_service.dart';
 import '../services/media_thumbnail_service.dart';
@@ -27,7 +28,14 @@ enum _TrackActionGroup { youtube, storage, playback }
 class PlaylistDetailPage extends ConsumerStatefulWidget {
   final int playlistId;
 
-  const PlaylistDetailPage({super.key, required this.playlistId});
+  /// Name shown in the app bar until the playlist row has loaded.
+  final String? initialName;
+
+  const PlaylistDetailPage({
+    super.key,
+    required this.playlistId,
+    this.initialName,
+  });
 
   @override
   ConsumerState<PlaylistDetailPage> createState() => _PlaylistDetailPageState();
@@ -171,7 +179,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(_playlist?.name ?? 'Playlist'),
+        title: Text(_playlist?.name ?? widget.initialName ?? ''),
         actions: [
           IconButton(
             icon: Stack(
@@ -215,6 +223,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
               _showSearch ? Icons.search_off : Icons.search,
               color: _showSearch ? const Color(0xFF2196F3) : Colors.white,
             ),
+            tooltip: _showSearch ? 'Close search' : 'Search tracks',
             onPressed: () {
               setState(() {
                 _showSearch = !_showSearch;
@@ -228,15 +237,8 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => Center(child: Text('Error: $e')),
         data: (tracks) {
-          if (tracks.isEmpty) {
-            return const Center(
-              child: Text(
-                'No tracks yet. Tap sync on the home page to fetch them.',
-                style: TextStyle(color: Color(0xFF888888)),
-                textAlign: TextAlign.center,
-              ),
-            );
-          }
+          final trackIds = {for (final track in tracks) track.id};
+          _trackTileKeys.removeWhere((id, _) => !trackIds.contains(id));
 
           final normalizedSearchQuery = _searchQuery.trim().toLowerCase();
           final filteredTracks =
@@ -297,38 +299,37 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                   children: [
                     // Play all
                     if (playableTracks.isNotEmpty)
-                      TextButton.icon(
-                        onPressed: () {
-                          playbackService.playAll(tracks, playlist: _playlist);
-                        },
-                        icon: const Icon(Icons.play_arrow, size: 20),
-                        label: const Text('Play all'),
-                        style: TextButton.styleFrom(
-                          foregroundColor: const Color(0xFF2196F3),
-                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                      Flexible(
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          alignment: Alignment.centerLeft,
+                          child: TextButton.icon(
+                            onPressed: () {
+                              playbackService.playAll(
+                                tracks,
+                                playlist: _playlist,
+                              );
+                            },
+                            icon: const Icon(Icons.play_arrow, size: 20),
+                            label: const Text('Play all'),
+                            style: TextButton.styleFrom(
+                              foregroundColor: const Color(0xFF2196F3),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                              ),
+                            ),
+                          ),
                         ),
                       ),
-                    // Sync & download
-                    TextButton.icon(
-                      onPressed:
-                          (_isUpdating || isDownloadingThis)
-                              ? null
-                              : _startUpdate,
-                      icon: Icon(
-                        _isUpdating ? Icons.hourglass_top : Icons.sync,
-                        size: 20,
-                      ),
-                      label: Text(
-                        isDownloadingThis
-                            ? '${downloadProgress.currentTrackIndex}/${downloadProgress.totalTracks}'
-                            : 'Update',
-                      ),
-                      style: TextButton.styleFrom(
-                        foregroundColor:
-                            (_isUpdating || isDownloadingThis)
-                                ? const Color(0xFF888888)
-                                : const Color(0xFF2196F3),
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                    // Sync & download, or cancel while downloading
+                    Flexible(
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerLeft,
+                        child: _buildUpdateControl(
+                          isDownloadingThis: isDownloadingThis,
+                          downloadProgress: downloadProgress,
+                        ),
                       ),
                     ),
                     const Spacer(),
@@ -386,35 +387,131 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
               ),
               const Divider(height: 1, color: Color(0xFF333333)),
               // Track list
-              Expanded(
-                child: ValueListenableBuilder<double>(
-                  valueListenable: audioPlayerOverlayHeightNotifier,
-                  builder:
-                      (context, overlayHeight, _) => ListView.builder(
-                        controller: _trackListController,
-                        padding: EdgeInsets.only(bottom: overlayHeight),
-                        itemCount: filteredTracks.length,
-                        itemBuilder: (context, index) {
-                          final track = filteredTracks[index];
-                          final isCurrentTrack = currentTrack?.id == track.id;
-                          return KeyedSubtree(
-                            key: _trackTileKey(track.id),
-                            child: _buildTrackTile(
-                              track,
-                              isCurrentTrack: isCurrentTrack,
-                              isCurrentlyPlaying: isCurrentTrack && isPlaying,
-                              allTracks: tracks,
-                            ),
-                          );
-                        },
+              if (tracks.isEmpty)
+                const Expanded(
+                  child: Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(24),
+                      child: Text(
+                        'No tracks yet. Tap Update to fetch them.',
+                        style: TextStyle(color: Color(0xFF888888)),
+                        textAlign: TextAlign.center,
                       ),
+                    ),
+                  ),
+                )
+              else if (filteredTracks.isEmpty)
+                const Expanded(
+                  child: Center(
+                    child: Text(
+                      'No matching tracks',
+                      style: TextStyle(color: Color(0xFF888888)),
+                    ),
+                  ),
+                )
+              else
+                Expanded(
+                  child: ValueListenableBuilder<double>(
+                    valueListenable: audioPlayerOverlayHeightNotifier,
+                    builder:
+                        (context, overlayHeight, _) => ListView.builder(
+                          controller: _trackListController,
+                          padding: EdgeInsets.only(bottom: overlayHeight),
+                          itemCount: filteredTracks.length,
+                          itemBuilder: (context, index) {
+                            final track = filteredTracks[index];
+                            final isCurrentTrack = currentTrack?.id == track.id;
+                            return KeyedSubtree(
+                              key: _trackTileKey(track.id),
+                              child: _buildTrackTile(
+                                track,
+                                isCurrentTrack: isCurrentTrack,
+                                isCurrentlyPlaying: isCurrentTrack && isPlaying,
+                                allTracks: tracks,
+                              ),
+                            );
+                          },
+                        ),
+                  ),
                 ),
-              ),
             ],
           );
         },
       ),
     );
+  }
+
+  Widget _buildUpdateControl({
+    required bool isDownloadingThis,
+    required DownloadProgress downloadProgress,
+  }) {
+    if (isDownloadingThis) {
+      return TextButton.icon(
+        key: const ValueKey('playlist-detail-cancel'),
+        onPressed: _confirmCancelDownload,
+        icon: const Icon(Icons.stop_circle_outlined, size: 20),
+        label: Text(
+          'Cancel (${downloadProgress.currentTrackIndex}/${downloadProgress.totalTracks})',
+        ),
+        style: TextButton.styleFrom(
+          foregroundColor: const Color(0xFFE57373),
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+        ),
+      );
+    }
+    return TextButton.icon(
+      key: const ValueKey('playlist-detail-update'),
+      onPressed: _isUpdating ? null : _startUpdate,
+      icon:
+          _isUpdating
+              ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Color(0xFF888888),
+                ),
+              )
+              : const Icon(Icons.sync, size: 20),
+      label: Text(_isUpdating ? 'Syncing...' : 'Update'),
+      style: TextButton.styleFrom(
+        foregroundColor:
+            _isUpdating ? const Color(0xFF888888) : const Color(0xFF2196F3),
+        disabledForegroundColor: const Color(0xFF888888),
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+      ),
+    );
+  }
+
+  Future<void> _confirmCancelDownload() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder:
+          (ctx) => AlertDialog(
+            backgroundColor: const Color(0xFF2A2A2A),
+            title: const Text(
+              'Stop downloading?',
+              style: TextStyle(color: Colors.white),
+            ),
+            content: const Text(
+              'Finished tracks are kept; the rest stay queued for the next '
+              'update.',
+              style: TextStyle(color: Color(0xFFCCCCCC)),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Keep downloading'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Stop', style: TextStyle(color: Colors.red)),
+              ),
+            ],
+          ),
+    );
+    if (confirmed != true) return;
+    await ref.read(downloadServiceProvider).cancelActiveDownloads();
   }
 
   Widget _buildTrackTile(
@@ -459,7 +556,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                         matchingChapterForSearch(track, _searchQuery)?.id,
                   );
                 }
-                : null,
+                : () => _showTrackActions(track),
         onLongPress: () => _showTrackActions(track),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -574,6 +671,19 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                           ),
                 ),
               ),
+              IconButton(
+                key: ValueKey('track-more-${track.id}'),
+                icon: const Icon(
+                  Icons.more_vert,
+                  color: Color(0xFF888888),
+                  size: 20,
+                ),
+                tooltip: 'Track actions',
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                visualDensity: VisualDensity.compact,
+                onPressed: () => _showTrackActions(track),
+              ),
             ],
           ),
         ),
@@ -659,7 +769,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     required bool hasLocalFile,
   }) {
     if (hasError) {
-      return 'Download failed · ${_friendlyError(track.lastError!)}';
+      return 'Download failed · ${friendlyDownloadError(track.lastError!)}';
     }
     if (isUnavailable) {
       return '${_unavailableLabel(track.unavailableReason)} · ${track.videoId}';
@@ -680,49 +790,6 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     return '$m:${s.toString().padLeft(2, '0')}';
   }
 
-  String _friendlyError(String raw) {
-    final lower = raw.toLowerCase();
-    if (lower.contains('confirm your age') ||
-        lower.contains('sign in to confirm') ||
-        lower.contains('age-restricted')) {
-      return 'Age-restricted — needs sign-in';
-    }
-    if (lower.contains('private video')) return 'Private video';
-    if (lower.contains('members-only') || lower.contains('members only')) {
-      return 'Members-only video';
-    }
-    if (lower.contains('premium')) return 'YouTube Premium only';
-    if (lower.contains('http error 403') ||
-        lower.contains('rate-limit') ||
-        lower.contains(' 429')) {
-      return 'Blocked by YouTube (rate-limited)';
-    }
-    if (lower.contains('geo') && lower.contains('restrict')) {
-      return 'Geo-restricted';
-    }
-    if (lower.contains('live event')) return 'Live event, not downloadable';
-    if (lower.contains('video unavailable') ||
-        lower.contains('this video is not available')) {
-      return 'Video unavailable';
-    }
-    if (lower.contains('network') || lower.contains('connection')) {
-      return 'Network error';
-    }
-    // Fallback: first line, truncated.
-    final firstLine = raw.split('\n').first.trim();
-    if (firstLine.length > 120) {
-      return '${firstLine.substring(0, 120)}...';
-    }
-    return firstLine;
-  }
-
-  bool _isAgeGateError(String raw) {
-    final lower = raw.toLowerCase();
-    return lower.contains('confirm your age') ||
-        lower.contains('sign in to confirm') ||
-        lower.contains('age-restricted');
-  }
-
   String _unavailableLabel(String? reason) {
     switch (reason) {
       case 'private':
@@ -741,7 +808,8 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   }
 
   Future<void> _startUpdate() async {
-    if (_playlist == null) return;
+    final playlist = _playlist;
+    if (playlist == null || _isUpdating) return;
 
     final downloadService = ref.read(downloadServiceProvider);
     if (downloadService.isDownloading) {
@@ -757,12 +825,13 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     )) {
       return;
     }
+    if (!mounted) return;
 
     setState(() => _isUpdating = true);
 
     try {
       final playlistService = ref.read(playlistServiceProvider);
-      final result = await playlistService.syncPlaylist(_playlist!);
+      final result = await playlistService.syncPlaylist(playlist);
 
       if (result.hasChanges && mounted) {
         final parts = <String>[];
@@ -786,15 +855,25 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
       final freshPlaylist = await ref
           .read(databaseProvider)
           .getPlaylist(widget.playlistId);
+      // The download is a service-level operation: start it even if this
+      // page was closed while the sync ran.
+      unawaited(downloadService.downloadPlaylist(freshPlaylist));
+      if (!mounted) return;
       setState(() => _playlist = freshPlaylist);
-      downloadService.downloadPlaylist(freshPlaylist);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Update failed: ${friendlyDownloadError('$e')}'),
+        ),
+      );
     } finally {
       if (mounted) setState(() => _isUpdating = false);
     }
   }
 
   Future<void> _showReplacementConflicts(List<Track> conflicts) async {
-    final db = ref.read(databaseProvider);
+    final playlistService = ref.read(playlistServiceProvider);
     for (final track in conflicts) {
       if (!mounted) return;
       final decision = await showDialog<String>(
@@ -826,7 +905,13 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
             ),
       );
       if (decision == 'download') {
-        await db.resetTrackForRedownload(track.id);
+        // Delete the replacement so the fresh download is not re-adopted by
+        // its index prefix, and drop segments that belonged to its timeline.
+        await playlistService.resetTrackForRedownload(
+          track,
+          deleteFile: true,
+          clearSegments: true,
+        );
       }
     }
   }
@@ -952,6 +1037,11 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
         track.status == 'complete' &&
         track.filePath != null &&
         !track.alwaysSkip;
+    // Local replacements and kept local files for unavailable videos are
+    // only swapped for the original through the replacement-conflict flow.
+    final canRedownload =
+        !track.isLocalReplacement &&
+        !(track.status == 'complete' && track.unavailableReason != null);
     _TrackActionGroup? selectedGroup;
 
     showModalBottomSheet(
@@ -1338,8 +1428,10 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                               await _showOverrideDialog(track);
                             },
                           ),
-                        if (selectedGroup == _TrackActionGroup.storage)
+                        if (selectedGroup == _TrackActionGroup.storage &&
+                            canRedownload)
                           ListTile(
+                            key: const ValueKey('track-actions-redownload'),
                             leading: const Icon(
                               Icons.refresh,
                               color: Colors.white70,
@@ -1370,7 +1462,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                               style: TextStyle(color: Colors.white),
                             ),
                             subtitle: Text(
-                              _friendlyError(track.lastError!),
+                              friendlyDownloadError(track.lastError!),
                               style: const TextStyle(color: Color(0xFFAA6666)),
                             ),
                             onTap: () {
@@ -1465,11 +1557,43 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   Future<void> _showSkipSegments(Track track) async {
     final db = ref.read(databaseProvider);
     var segments = await db.getSegmentsForTrack(track.id);
+    var busy = false;
 
-    Future<void> reload(StateSetter setSheetState) async {
+    Future<void> reload(
+      BuildContext sheetContext,
+      StateSetter setSheetState,
+    ) async {
       final updated = await db.getSegmentsForTrack(track.id);
-      setSheetState(() => segments = updated);
+      if (sheetContext.mounted) {
+        setSheetState(() => segments = updated);
+      }
       await ref.read(playbackServiceProvider).refreshCurrentSegments();
+    }
+
+    Future<void> runBusy(
+      BuildContext sheetContext,
+      StateSetter setSheetState,
+      Future<void> Function() action,
+    ) async {
+      if (busy) return;
+      setSheetState(() => busy = true);
+      try {
+        await action();
+        if (!sheetContext.mounted) return;
+        await reload(sheetContext, setSheetState);
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('Could not save: $e')));
+        }
+      } finally {
+        if (sheetContext.mounted) {
+          setSheetState(() => busy = false);
+        } else {
+          busy = false;
+        }
+      }
     }
 
     if (!mounted) return;
@@ -1480,7 +1604,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
       builder:
           (sheetContext) => StatefulBuilder(
             builder:
-                (context, setSheetState) => SafeArea(
+                (sheetContext, setSheetState) => SafeArea(
                   child: Padding(
                     padding: const EdgeInsets.only(bottom: 8),
                     child: Column(
@@ -1543,16 +1667,23 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                                             color: Colors.white70,
                                           ),
                                           tooltip: 'Edit segment',
-                                          onPressed: () async {
-                                            final changed =
-                                                await _showSegmentEditDialog(
-                                                  track,
-                                                  segment,
-                                                );
-                                            if (changed && mounted) {
-                                              await reload(setSheetState);
-                                            }
-                                          },
+                                          onPressed:
+                                              busy
+                                                  ? null
+                                                  : () async {
+                                                    final changed =
+                                                        await _showSegmentEditDialog(
+                                                          track,
+                                                          segment,
+                                                        );
+                                                    if (changed &&
+                                                        sheetContext.mounted) {
+                                                      await reload(
+                                                        sheetContext,
+                                                        setSheetState,
+                                                      );
+                                                    }
+                                                  },
                                         ),
                                         if (segment.source == 'hidden')
                                           IconButton(
@@ -1561,13 +1692,17 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                                               color: Color(0xFF2196F3),
                                             ),
                                             tooltip: 'Restore segment',
-                                            onPressed: () async {
-                                              await db.updateSegment(
-                                                segment.id,
-                                                source: 'sponsorblock',
-                                              );
-                                              await reload(setSheetState);
-                                            },
+                                            onPressed:
+                                                busy
+                                                    ? null
+                                                    : () => runBusy(
+                                                      sheetContext,
+                                                      setSheetState,
+                                                      () => db.updateSegment(
+                                                        segment.id,
+                                                        source: 'sponsorblock',
+                                                      ),
+                                                    ),
                                           )
                                         else
                                           IconButton(
@@ -1579,20 +1714,31 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                                                 segment.source == 'local'
                                                     ? 'Delete segment'
                                                     : 'Hide segment',
-                                            onPressed: () async {
-                                              if (segment.source == 'local' ||
-                                                  segment.uuid == null) {
-                                                await db.deleteSegment(
-                                                  segment.id,
-                                                );
-                                              } else {
-                                                await db.updateSegment(
-                                                  segment.id,
-                                                  source: 'hidden',
-                                                );
-                                              }
-                                              await reload(setSheetState);
-                                            },
+                                            onPressed:
+                                                busy
+                                                    ? null
+                                                    : () => runBusy(
+                                                      sheetContext,
+                                                      setSheetState,
+                                                      () async {
+                                                        if (segment.source ==
+                                                                'local' ||
+                                                            segment.uuid ==
+                                                                null) {
+                                                          await db
+                                                              .deleteSegment(
+                                                                segment.id,
+                                                              );
+                                                        } else {
+                                                          await db
+                                                              .updateSegment(
+                                                                segment.id,
+                                                                source:
+                                                                    'hidden',
+                                                              );
+                                                        }
+                                                      },
+                                                    ),
                                           ),
                                       ],
                                     ),
@@ -1644,6 +1790,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     );
     final endController = TextEditingController(text: _formatMs(segment.endMs));
     String? error;
+    var saving = false;
 
     final saved = await showDialog<bool>(
       context: context,
@@ -1712,54 +1859,74 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                       child: const Text('Cancel'),
                     ),
                     TextButton(
-                      onPressed: () async {
-                        final startMs = _parseTimestampMs(startController.text);
-                        final endMs = _parseTimestampMs(endController.text);
-                        if (startMs == null || endMs == null) {
-                          setDialogState(() => error = 'Use mm:ss or seconds');
-                          return;
-                        }
-                        if (endMs <= startMs) {
-                          setDialogState(
-                            () => error = 'End must be after start',
-                          );
-                          return;
-                        }
-                        if (segment.source == 'sponsorblock' ||
-                            segment.source == 'hidden') {
-                          await db.deleteSegment(segment.id);
-                          await db.insertSegment(
-                            SponsorBlockSegmentsCompanion.insert(
-                              trackId: track.id,
-                              videoId: track.videoId,
-                              source: 'override',
-                              uuid: Value(segment.uuid),
-                              category: category,
-                              actionType: Value(segment.actionType),
-                              startMs: startMs,
-                              endMs: endMs,
-                              votes: Value(segment.votes),
-                              locked: Value(segment.locked),
-                              description: Value(segment.description),
-                              createdAt: DateTime.now(),
-                            ),
-                          );
-                        } else {
-                          await db.updateSegment(
-                            segment.id,
-                            category: category,
-                            startMs: startMs,
-                            endMs: endMs,
-                            source:
-                                segment.source == 'local'
-                                    ? 'local'
-                                    : 'override',
-                          );
-                        }
-                        if (dialogContext.mounted) {
-                          Navigator.pop(dialogContext, true);
-                        }
-                      },
+                      onPressed:
+                          saving
+                              ? null
+                              : () async {
+                                final startMs = _parseTimestampMs(
+                                  startController.text,
+                                );
+                                final endMs = _parseTimestampMs(
+                                  endController.text,
+                                );
+                                if (startMs == null || endMs == null) {
+                                  setDialogState(
+                                    () => error = 'Use mm:ss or seconds',
+                                  );
+                                  return;
+                                }
+                                if (endMs <= startMs) {
+                                  setDialogState(
+                                    () => error = 'End must be after start',
+                                  );
+                                  return;
+                                }
+                                setDialogState(() => saving = true);
+                                try {
+                                  if (segment.source == 'sponsorblock' ||
+                                      segment.source == 'hidden') {
+                                    await db.deleteSegment(segment.id);
+                                    await db.insertSegment(
+                                      SponsorBlockSegmentsCompanion.insert(
+                                        trackId: track.id,
+                                        videoId: track.videoId,
+                                        source: 'override',
+                                        uuid: Value(segment.uuid),
+                                        category: category,
+                                        actionType: Value(segment.actionType),
+                                        startMs: startMs,
+                                        endMs: endMs,
+                                        votes: Value(segment.votes),
+                                        locked: Value(segment.locked),
+                                        description: Value(segment.description),
+                                        createdAt: DateTime.now(),
+                                      ),
+                                    );
+                                  } else {
+                                    await db.updateSegment(
+                                      segment.id,
+                                      category: category,
+                                      startMs: startMs,
+                                      endMs: endMs,
+                                      source:
+                                          segment.source == 'local'
+                                              ? 'local'
+                                              : 'override',
+                                    );
+                                  }
+                                } catch (e) {
+                                  if (dialogContext.mounted) {
+                                    setDialogState(() {
+                                      saving = false;
+                                      error = 'Could not save: $e';
+                                    });
+                                  }
+                                  return;
+                                }
+                                if (dialogContext.mounted) {
+                                  Navigator.pop(dialogContext, true);
+                                }
+                              },
                       child: const Text('Save'),
                     ),
                   ],
@@ -1949,7 +2116,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
 
   Future<void> _showErrorDetails(Track track) async {
     final raw = track.lastError ?? '';
-    final isAgeGate = _isAgeGateError(raw);
+    final isAgeGate = isAgeGateDownloadError(raw);
 
     await showDialog<void>(
       context: context,
@@ -1962,7 +2129,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    _friendlyError(raw),
+                    friendlyDownloadError(raw),
                     style: const TextStyle(color: Colors.white, fontSize: 16),
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
@@ -2077,11 +2244,27 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                 SnackBar(content: Text('Downloaded "${track.title}"')),
               );
             },
-            onError: (Object e, StackTrace _) {
+            onError: (Object e, StackTrace _) async {
+              // The service stores the real yt-dlp message on the track row;
+              // the thrown error is usually just "Download failed".
+              String raw = '$e';
+              try {
+                final fresh = await ref
+                    .read(databaseProvider)
+                    .getTrack(track.id);
+                final lastError = fresh?.lastError;
+                if (lastError != null && lastError.trim().isNotEmpty) {
+                  raw = lastError;
+                }
+              } catch (_) {
+                // Fall back to the thrown error text.
+              }
               if (!mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(
-                  content: Text('Download failed: ${_friendlyError('$e')}'),
+                  content: Text(
+                    'Download failed: ${friendlyDownloadError(raw)}',
+                  ),
                 ),
               );
             },
@@ -2090,6 +2273,33 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   }
 
   Future<void> _redownloadTrack(Track track) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder:
+          (ctx) => AlertDialog(
+            backgroundColor: const Color(0xFF2A2A2A),
+            title: const Text(
+              'Redownload track?',
+              style: TextStyle(color: Colors.white),
+            ),
+            content: Text(
+              '"${track.title}" will be downloaded again from YouTube. '
+              'The current file will be deleted first.',
+              style: const TextStyle(color: Color(0xFFCCCCCC)),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Redownload'),
+              ),
+            ],
+          ),
+    );
+    if (confirmed != true || !mounted) return;
     await _startTrackDownload(track, deleteExistingFile: true);
   }
 }

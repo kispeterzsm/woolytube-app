@@ -1,8 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../providers/providers.dart';
+import '../services/download_errors.dart';
 import '../widgets/mobile_data_download_guard.dart';
+import '../widgets/update_frequency_dropdown.dart';
 
 class AddPlaylistPage extends ConsumerStatefulWidget {
   const AddPlaylistPage({super.key});
@@ -29,13 +33,46 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
   int _trackCount = 0;
   Map<String, dynamic>? _playlistInfo;
 
+  /// The URL [_playlistInfo] was fetched for. Add is only enabled while the
+  /// text field still contains this URL, so stale tracks are never combined
+  /// with a different link.
+  String? _fetchedUrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _urlController.addListener(_onUrlChanged);
+  }
+
   @override
   void dispose() {
+    _urlController.removeListener(_onUrlChanged);
     _urlController.dispose();
     super.dispose();
   }
 
+  void _onUrlChanged() {
+    if (_playlistInfo == null && _error == null) return;
+    if (_urlController.text.trim() == _fetchedUrl) return;
+    setState(() {
+      _playlistInfo = null;
+      _playlistTitle = null;
+      _playlistThumbnail = null;
+      _trackCount = 0;
+      _fetchedUrl = null;
+      _error = null;
+    });
+  }
+
+  bool get _canAdd =>
+      !_adding &&
+      !_fetching &&
+      _playlistInfo != null &&
+      _fetchedUrl != null &&
+      _urlController.text.trim() == _fetchedUrl;
+
   Future<void> _fetchInfo() async {
+    if (_fetching) return;
     final url = _urlController.text.trim();
     if (url.isEmpty) return;
 
@@ -43,28 +80,37 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
       _fetching = true;
       _error = null;
       _playlistInfo = null;
+      _fetchedUrl = null;
     });
 
     try {
       final ytdlp = ref.read(ytdlpServiceProvider);
       final info = await ytdlp.getPlaylistInfo(url);
+      if (!mounted) return;
       setState(() {
         _playlistInfo = info;
+        _fetchedUrl = url;
         _playlistTitle = info['title'] as String? ?? 'Unknown Playlist';
         _playlistThumbnail = info['thumbnail'] as String?;
         _trackCount = info['count'] as int? ?? 0;
         _fetching = false;
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
-        _error = 'Failed to fetch playlist info: $e';
+        _error =
+            'Failed to fetch playlist info: ${friendlyDownloadError('$e')}';
         _fetching = false;
       });
     }
   }
 
   Future<void> _addPlaylist() async {
-    if (_playlistInfo == null || _playlistTitle == null) return;
+    if (!_canAdd) return;
+    final info = _playlistInfo;
+    final url = _fetchedUrl;
+    final title = _playlistTitle;
+    if (info == null || url == null || title == null) return;
 
     if (!await confirmManualDownload(
       context,
@@ -72,14 +118,15 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
     )) {
       return;
     }
+    if (!mounted) return;
 
     setState(() => _adding = true);
 
     try {
       final service = ref.read(playlistServiceProvider);
       final playlistId = await service.addPlaylist(
-        url: _urlController.text.trim(),
-        name: _playlistTitle!,
+        url: url,
+        name: title,
         thumbnailUrl: _playlistThumbnail,
         audioOnly: _audioOnly,
         playChapters: _playChapters,
@@ -88,20 +135,20 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
         includeThumbnails: _includeThumbnails,
       );
 
-      await service.populateTracksFromInfo(playlistId, _playlistInfo!);
+      await service.populateTracksFromInfo(playlistId, info);
 
-      if (mounted) {
-        // Start downloading automatically
-        final db = ref.read(databaseProvider);
-        final playlist = await db.getPlaylist(playlistId);
-        if (!mounted) return;
-        ref.read(downloadServiceProvider).downloadPlaylist(playlist);
+      // Start downloading automatically. The playlist exists now, so the
+      // download runs regardless of whether this page is still open.
+      final db = ref.read(databaseProvider);
+      final playlist = await db.getPlaylist(playlistId);
+      unawaited(ref.read(downloadServiceProvider).downloadPlaylist(playlist));
 
-        Navigator.of(context).pop();
-      }
+      if (!mounted) return;
+      Navigator.of(context).pop();
     } catch (e) {
+      if (!mounted) return;
       setState(() {
-        _error = 'Failed to add playlist: $e';
+        _error = 'Failed to add playlist: ${friendlyDownloadError('$e')}';
         _adding = false;
       });
     }
@@ -137,10 +184,13 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
                             Icons.search,
                             color: Color(0xFF2196F3),
                           ),
+                          tooltip: 'Fetch playlist info',
                           onPressed: _fetchInfo,
                         ),
               ),
-              onSubmitted: (_) => _fetchInfo(),
+              onSubmitted: (_) {
+                if (!_fetching) _fetchInfo();
+              },
             ),
             if (_error != null) ...[
               const SizedBox(height: 12),
@@ -158,7 +208,8 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
               SizedBox(
                 height: 48,
                 child: ElevatedButton(
-                  onPressed: _adding ? null : _addPlaylist,
+                  key: const ValueKey('add-playlist-button'),
+                  onPressed: _canAdd ? _addPlaylist : null,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF2196F3),
                     disabledBackgroundColor: const Color(0xFF333333),
@@ -264,41 +315,12 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
           _includeThumbnails,
           (v) => setState(() => _includeThumbnails = v),
         ),
-        if (_autoUpdate) ...[
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              const Text(
-                'Update every',
-                style: TextStyle(color: Colors.white, fontSize: 14),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Slider(
-                  value: _updateFrequencyHours.toDouble(),
-                  min: 1,
-                  max: 168,
-                  divisions: 167,
-                  activeColor: const Color(0xFF2196F3),
-                  inactiveColor: const Color(0xFF333333),
-                  onChanged:
-                      (v) => setState(() => _updateFrequencyHours = v.round()),
-                ),
-              ),
-              SizedBox(
-                width: 60,
-                child: Text(
-                  _formatFrequency(_updateFrequencyHours),
-                  style: const TextStyle(
-                    color: Color(0xFF888888),
-                    fontSize: 13,
-                  ),
-                  textAlign: TextAlign.right,
-                ),
-              ),
-            ],
-          ),
-        ],
+        const SizedBox(height: 16),
+        UpdateFrequencyDropdown(
+          value: _updateFrequencyHours,
+          enabled: _autoUpdate,
+          onChanged: (hours) => setState(() => _updateFrequencyHours = hours),
+        ),
       ],
     );
   }
@@ -340,12 +362,5 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
         ],
       ),
     );
-  }
-
-  String _formatFrequency(int hours) {
-    if (hours < 24) return '${hours}h';
-    final days = hours ~/ 24;
-    if (days == 7) return '1 week';
-    return '${days}d';
   }
 }

@@ -7,9 +7,15 @@ class PlaylistCard extends StatelessWidget {
   final int downloadedCount;
   final int totalCount;
   final bool isDownloading;
+
+  /// True while the metadata sync that precedes a download is running.
+  final bool isSyncing;
   final double downloadProgress;
   final VoidCallback onTap;
   final VoidCallback onUpdate;
+
+  /// Invoked from the stop icon shown while this playlist is downloading.
+  final VoidCallback? onCancel;
   final VoidCallback onSettings;
 
   const PlaylistCard({
@@ -18,9 +24,11 @@ class PlaylistCard extends StatelessWidget {
     required this.downloadedCount,
     required this.totalCount,
     required this.isDownloading,
+    this.isSyncing = false,
     required this.downloadProgress,
     required this.onTap,
     required this.onUpdate,
+    this.onCancel,
     required this.onSettings,
   });
 
@@ -73,17 +81,7 @@ class PlaylistCard extends StatelessWidget {
                                   ),
                                 ),
                               ),
-                              _iconButton(
-                                icon:
-                                    isDownloading
-                                        ? Icons.hourglass_top
-                                        : Icons.sync,
-                                tooltip:
-                                    isDownloading
-                                        ? 'Downloading playlist'
-                                        : 'Update playlist',
-                                onTap: isDownloading ? null : onUpdate,
-                              ),
+                              _buildUpdateButton(),
                               _iconButton(
                                 icon: Icons.settings,
                                 tooltip: 'Playlist settings',
@@ -118,6 +116,42 @@ class PlaylistCard extends StatelessWidget {
     );
   }
 
+  Widget _buildUpdateButton() {
+    if (isDownloading) {
+      return _iconButton(
+        key: const ValueKey('playlist-card-cancel'),
+        icon: Icons.stop_circle_outlined,
+        tooltip: 'Cancel download',
+        onTap: onCancel,
+      );
+    }
+    if (isSyncing) {
+      return const SizedBox(
+        width: 48,
+        height: 48,
+        child: Tooltip(
+          message: 'Syncing playlist',
+          child: Center(
+            child: SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Color(0xFF888888),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+    return _iconButton(
+      key: const ValueKey('playlist-card-update'),
+      icon: Icons.sync,
+      tooltip: 'Update playlist',
+      onTap: onUpdate,
+    );
+  }
+
   Widget _buildThumbnail() {
     if (playlist.thumbnailUrl != null && playlist.thumbnailUrl!.isNotEmpty) {
       return CachedNetworkImage(
@@ -143,6 +177,7 @@ class PlaylistCard extends StatelessWidget {
     if (isDownloading) {
       return 'Downloading $downloadedCount / $totalCount';
     }
+    if (isSyncing) return 'Syncing...';
     if (totalCount > 0) {
       final parts = <String>[];
       parts.add('$downloadedCount/$totalCount');
@@ -167,6 +202,7 @@ class PlaylistCard extends StatelessWidget {
   }
 
   Widget _iconButton({
+    Key? key,
     required IconData icon,
     required String tooltip,
     VoidCallback? onTap,
@@ -175,6 +211,7 @@ class PlaylistCard extends StatelessWidget {
       width: 48,
       height: 48,
       child: IconButton(
+        key: key,
         icon: Icon(icon, size: 26),
         color: const Color(0xFF888888),
         padding: EdgeInsets.zero,
