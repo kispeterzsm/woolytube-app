@@ -14,6 +14,8 @@ import 'services/audio_handler.dart';
 import 'services/picture_in_picture_service.dart';
 import 'services/background_worker.dart' as background_worker;
 import 'services/app_settings_service.dart';
+import 'services/download_errors.dart';
+import 'services/download_service.dart';
 import 'pages/home_page.dart';
 import 'pages/player_page.dart';
 import 'widgets/mini_player.dart';
@@ -95,6 +97,8 @@ class WoolyTubeApp extends ConsumerStatefulWidget {
 class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
     with WidgetsBindingObserver {
   final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
+  final GlobalKey<ScaffoldMessengerState> _messengerKey =
+      GlobalKey<ScaffoldMessengerState>();
 
   @override
   void initState() {
@@ -144,9 +148,35 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
       _navigatorKey.currentState?.push(playerPageRoute());
     });
 
+    // Surface download failures from anywhere in the app, including
+    // background-started downloads whose page is no longer open.
+    ref.listen<AsyncValue<DownloadProgress>>(downloadProgressProvider, (
+      prev,
+      next,
+    ) {
+      final progress = next.valueOrNull;
+      if (progress == null || progress.status != 'error') return;
+      if (identical(prev?.valueOrNull, progress)) return;
+      _showDownloadError(progress.error ?? '');
+    });
+
+    ref.listen<AsyncValue<String>>(playbackMessagesProvider, (prev, next) {
+      final message = next.valueOrNull;
+      if (message == null || message.isEmpty) return;
+      _messengerKey.currentState
+        ?..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(message),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+    });
+
     return MaterialApp(
       title: 'WoolyTube',
       navigatorKey: _navigatorKey,
+      scaffoldMessengerKey: _messengerKey,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -159,6 +189,22 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
         appBarTheme: const AppBarTheme(
           backgroundColor: Color(0xFF1E1E1E),
           elevation: 0,
+          scrolledUnderElevation: 0,
+          surfaceTintColor: Colors.transparent,
+        ),
+        dialogTheme: const DialogThemeData(
+          backgroundColor: Color(0xFF2A2A2A),
+          surfaceTintColor: Colors.transparent,
+          titleTextStyle: TextStyle(color: Colors.white, fontSize: 20),
+          contentTextStyle: TextStyle(color: Color(0xFFCCCCCC), fontSize: 14),
+        ),
+        cardTheme: const CardThemeData(
+          color: Color(0xFF2A2A2A),
+          surfaceTintColor: Colors.transparent,
+        ),
+        bottomSheetTheme: const BottomSheetThemeData(
+          backgroundColor: Color(0xFF2A2A2A),
+          surfaceTintColor: Colors.transparent,
         ),
         inputDecorationTheme: InputDecorationTheme(
           filled: true,
@@ -212,6 +258,74 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
       home: const InitWrapper(),
     );
   }
+
+  void _showDownloadError(String raw) {
+    final messenger = _messengerKey.currentState;
+    if (messenger == null) return;
+    final friendly = friendlyDownloadError(raw);
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text('Download failed: $friendly'),
+          duration: const Duration(seconds: 6),
+          action:
+              raw.trim().isEmpty
+                  ? null
+                  : SnackBarAction(
+                    label: 'Details',
+                    onPressed: () => _showDownloadErrorDetails(friendly, raw),
+                  ),
+        ),
+      );
+  }
+
+  void _showDownloadErrorDetails(String friendly, String raw) {
+    final navigator = _navigatorKey.currentState;
+    if (navigator == null) return;
+    // The overlay's context is below the Navigator, which showDialog needs.
+    final dialogContext = navigator.overlay?.context;
+    if (dialogContext == null) return;
+    showDialog<void>(
+      context: dialogContext,
+      builder:
+          (ctx) => AlertDialog(
+            title: Row(
+              children: [
+                const Icon(Icons.error_outline, color: Color(0xFFAA6666)),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    friendly,
+                    style: const TextStyle(color: Colors.white, fontSize: 16),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            content: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 360),
+              child: SingleChildScrollView(
+                child: SelectableText(
+                  raw,
+                  style: const TextStyle(
+                    color: Color(0xFFCCCCCC),
+                    fontSize: 12,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Close'),
+              ),
+            ],
+          ),
+    );
+  }
 }
 
 Widget _noPictureInPictureControls(VideoState state) => const SizedBox.shrink();
@@ -249,11 +363,22 @@ class _InitWrapperState extends ConsumerState<InitWrapper> {
           (e, _) => Scaffold(
             body: Center(
               child: Padding(
-                padding: EdgeInsets.all(24),
-                child: Text(
-                  'Failed to initialize: $e',
-                  style: TextStyle(color: Colors.red),
-                  textAlign: TextAlign.center,
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Failed to initialize: $e',
+                      style: const TextStyle(color: Colors.red),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 16),
+                    FilledButton.icon(
+                      onPressed: () => ref.invalidate(initProvider),
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Retry'),
+                    ),
+                  ],
                 ),
               ),
             ),

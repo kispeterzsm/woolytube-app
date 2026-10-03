@@ -116,20 +116,31 @@ class PlayerControls extends ConsumerWidget {
   }
 }
 
-class SeekBar extends ConsumerWidget {
+class SeekBar extends ConsumerStatefulWidget {
   const SeekBar({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<SeekBar> createState() => _SeekBarState();
+}
+
+class _SeekBarState extends ConsumerState<SeekBar> {
+  /// Position shown while the thumb is being dragged. Incoming position
+  /// updates are ignored until the drag ends and a single seek is issued.
+  double? _dragValueMs;
+
+  @override
+  Widget build(BuildContext context) {
     final position = ref.watch(positionProvider).valueOrNull ?? Duration.zero;
     final duration = ref.watch(durationProvider).valueOrNull ?? Duration.zero;
     final sponsorBlockSegments =
         ref.watch(playbackSponsorBlockSegmentsProvider).valueOrNull ?? const [];
     final playbackService = ref.watch(playbackServiceProvider);
 
-    final positionMs = position.inMilliseconds.toDouble();
     final durationMs =
         duration.inMilliseconds > 0 ? duration.inMilliseconds.toDouble() : 1.0;
+    final liveMs = position.inMilliseconds.toDouble().clamp(0.0, durationMs);
+    final shownMs = (_dragValueMs ?? liveMs).clamp(0.0, durationMs);
+    final shownPosition = Duration(milliseconds: shownMs.round());
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -153,9 +164,16 @@ class SeekBar extends ConsumerWidget {
                   overlayColor: const Color(0xFF2196F3).withValues(alpha: 0.2),
                 ),
                 child: Slider(
-                  value: positionMs.clamp(0, durationMs),
+                  value: shownMs,
                   max: durationMs,
+                  onChangeStart: (value) {
+                    setState(() => _dragValueMs = value);
+                  },
                   onChanged: (value) {
+                    setState(() => _dragValueMs = value);
+                  },
+                  onChangeEnd: (value) {
+                    setState(() => _dragValueMs = null);
                     playbackService.seekTo(
                       Duration(milliseconds: value.toInt()),
                     );
@@ -182,7 +200,7 @@ class SeekBar extends ConsumerWidget {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
-                _formatDuration(position),
+                _formatDuration(shownPosition),
                 style: const TextStyle(color: Color(0xFF888888), fontSize: 12),
               ),
               Text(
