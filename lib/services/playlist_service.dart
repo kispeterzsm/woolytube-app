@@ -189,12 +189,14 @@ class PlaylistService {
   /// Picks the folder for a playlist named [name]: `<base>/<name>`, or
   /// `<name> (2)`, `<name> (3)`, ... when that folder belongs to another
   /// playlist or holds media of unknown origin. A folder holding a backup of
-  /// this same playlist is returned with that backup.
+  /// this same playlist is returned with that backup when [allowRestore];
+  /// otherwise any folder with a sidecar counts as taken.
   Future<_FolderChoice> _chooseFolder({
     required bool audioOnly,
     required String name,
     required String url,
     required List<Playlist> existing,
+    bool allowRestore = true,
   }) async {
     final base = LibraryLayout.basePathFor(audioOnly: audioOnly);
     final baseName = folderNameFor(name);
@@ -212,7 +214,8 @@ class PlaylistService {
       if (!await dir.exists()) return (path: path, restore: null);
       final backup = await _metadata.readFolder(path);
       if (backup != null) {
-        if (MetadataService.samePlaylistUrl(backup.url, url) &&
+        if (allowRestore &&
+            MetadataService.samePlaylistUrl(backup.url, url) &&
             backup.audioOnly == audioOnly) {
           return (path: path, restore: backup);
         }
@@ -244,10 +247,11 @@ class PlaylistService {
   /// and spaces are removed, and an empty result becomes "Playlist". The
   /// name can never point outside the library folder ("", ".", "..").
   static String folderNameFor(String name) {
-    var cleaned = name
-        .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1f]'), '_')
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
+    var cleaned =
+        name
+            .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1f]'), '_')
+            .replaceAll(RegExp(r'\s+'), ' ')
+            .trim();
     cleaned = cleaned.replaceAll(RegExp(r'^[.\s]+|[.\s]+$'), '');
     if (cleaned.length > _maxFolderNameLength) {
       cleaned = cleaned.substring(0, _maxFolderNameLength).trim();
@@ -359,7 +363,10 @@ class PlaylistService {
       // Keep the folder name the playlist already has, so a later rename
       // in the app does not scatter its folders.
       name: p.basename(playlist.outputPath),
-      url: '${playlist.url}#switch-${playlist.id}',
+      url: playlist.url,
+      // A kept backup in the target folder is a different set of files; a
+      // switch must never write over it or adopt its files.
+      allowRestore: false,
       existing: [
         for (final other in await _db.getAllPlaylists())
           if (other.id != playlist.id) other,
@@ -371,7 +378,10 @@ class PlaylistService {
 
     await _db.updatePlaylistFields(
       playlist.id,
-      fields.copyWith(audioOnly: Value(audioOnly), outputPath: Value(newFolder)),
+      fields.copyWith(
+        audioOnly: Value(audioOnly),
+        outputPath: Value(newFolder),
+      ),
     );
     final switched = await _db.getPlaylist(playlist.id);
 
@@ -643,8 +653,7 @@ class PlaylistService {
       positionOfVideo.clear();
       for (var i = 0; i < slots.length; i++) {
         final slot = slots[i];
-        positionOfVideo[slot is int ? videoOfTrack[slot]! : slot as String] =
-            i;
+        positionOfVideo[slot is int ? videoOfTrack[slot]! : slot as String] = i;
       }
     }
 
@@ -976,7 +985,10 @@ class PlaylistService {
     // Copy first, into a working folder the cleanup never mistakes for a
     // finished track, and only then look at the playlist.
     final staging = Directory(
-      p.join(LibraryLayout.stagingRoot(playlist.outputPath), 'insert-$operationId'),
+      p.join(
+        LibraryLayout.stagingRoot(playlist.outputPath),
+        'insert-$operationId',
+      ),
     );
     await staging.create(recursive: true);
     final stagedSource = File(p.join(staging.path, 'source$extension'));
@@ -1164,7 +1176,10 @@ class PlaylistService {
     );
     final operationId = DateTime.now().microsecondsSinceEpoch;
     final staging = Directory(
-      p.join(LibraryLayout.stagingRoot(playlist.outputPath), 'replace-$operationId'),
+      p.join(
+        LibraryLayout.stagingRoot(playlist.outputPath),
+        'replace-$operationId',
+      ),
     );
     final stagedFile = File(p.join(staging.path, 'source$extension'));
 
@@ -1178,7 +1193,10 @@ class PlaylistService {
       final current = track.filePath;
       if (current != null && await File(current).exists()) {
         previousPath = current;
-        previousKeptAt = await _metadata.moveAside(playlist.outputPath, current);
+        previousKeptAt = await _metadata.moveAside(
+          playlist.outputPath,
+          current,
+        );
       }
       if (await File(destinationPath).exists()) {
         // Some other file already has this name; keep it as well.

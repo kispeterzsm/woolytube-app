@@ -13,11 +13,16 @@ import '../helpers/test_database.dart';
 void main() {
   late AppDatabase db;
   late Directory tempDir;
+  late String folder;
   late MetadataService metadata;
 
   setUp(() async {
     db = openTestDatabase();
     tempDir = await Directory.systemTemp.createTemp('woolytube_metadata_test_');
+    // A playlist folder one level below a library root, as on the device:
+    // writing metadata also puts a README into the root.
+    folder = p.join(tempDir.path, 'Music', 'Playlist');
+    await Directory(folder).create(recursive: true);
     metadata = MetadataService(db);
   });
 
@@ -28,6 +33,17 @@ void main() {
     }
   });
 
+  String at(String name) => p.join(folder, name);
+
+  Future<String> touch(String name, [String content = 'data']) async {
+    final path = at(name);
+    await File(path).parent.create(recursive: true);
+    await File(path).writeAsString(content);
+    return path;
+  }
+
+  bool exists(String name) => File(at(name)).existsSync();
+
   test('formats safe filenames and resolves media by index prefix', () async {
     expect(MetadataService.paddingWidth(10), 5);
     expect(MetadataService.paddingWidth(100000), 6);
@@ -36,76 +52,57 @@ void main() {
     expect(MetadataService.sanitizeFilename('  A:/B * C  '), 'A__B _ C');
     expect(MetadataService.sanitizeFilename('   '), '_');
 
-    final media = File(p.join(tempDir.path, '00001_Title.m4a'));
-    await media.writeAsString('audio');
-    await File(p.join(tempDir.path, '00001_Title.txt')).writeAsString('text');
+    final media = await touch('00001_Title.m4a', 'audio');
+    await touch('00001_Title.txt', 'text');
 
-    expect(
-      MetadataService.resolveMediaFile(tempDir.path, '00001_'),
-      media.path,
-    );
-    expect(MetadataService.resolveMediaFile(tempDir.path, '00002_'), isNull);
+    expect(MetadataService.resolveMediaFile(folder, '00001_'), media);
+    expect(MetadataService.resolveMediaFile(folder, '00002_'), isNull);
   });
 
-  test(
-    'cleans temporary and thumbnail files while keeping media and metadata',
-    () async {
-      final keepMedia = File(p.join(tempDir.path, '00001_Title.mp3'));
-      final keepMetadata = File(p.join(tempDir.path, 'woolytube_meta.json'));
-      await keepMedia.writeAsString('audio');
-      await keepMetadata.writeAsString('{}');
-      await File(p.join(tempDir.path, 'cover.jpg')).writeAsString('image');
-      await File(
-        p.join(tempDir.path, 'download.part'),
-      ).writeAsString('partial');
-      await File(
-        p.join(tempDir.path, 'download.part-Frag12'),
-      ).writeAsString('partial');
-      await File(p.join(tempDir.path, 'download.ytdl')).writeAsString('state');
-      await File(
-        p.join(tempDir.path, 'woolytube_meta.json.tmp'),
-      ).writeAsString('{}');
-      final leftovers = [
-        '00002_Title.f137.mp4',
-        '00002_Title.f140.m4a',
-        '00002_Title.temp.mp4',
-        '.woolytube-force-insert-1.mp4',
-        '.woolytube-force-move-1-0.mp4',
-        '.woolytube-local-replacement-1.m4a',
-        'woolytube_meta.json.tmp.1700000000.3',
-      ];
-      for (final name in leftovers) {
-        await File(p.join(tempDir.path, name)).writeAsString('junk');
-      }
+  // Updated: images, parked force-insert originals and format streams
+  // whose merged file is missing are no longer deleted.
+  test('cleanup deletes only download leftovers', () async {
+    await touch('00001_Title.mp3', 'audio');
+    await touch('woolytube_meta.json', '{}');
+    final removed = [
+      'download.part',
+      'download.part-Frag12',
+      'download.ytdl',
+      'woolytube_meta.json.tmp',
+      '.woolytube-force-insert-1.mp4',
+      '.woolytube-local-replacement-1.m4a',
+      'woolytube_meta.json.tmp.1700000000.3',
+    ];
+    final kept = [
+      '00001_Title.mp3',
+      'woolytube_meta.json',
+      'cover.jpg',
+      'folder.jpg',
+      '00002_Title.webp',
+      // No merged 00002_Title.mp4: these may be the only copy.
+      '00002_Title.f137.mp4',
+      '00002_Title.f140.m4a',
+      '00002_Title.temp.mp4',
+      // A file an older force insert parked under a temporary name.
+      '.woolytube-force-move-1-0.mp4',
+    ];
+    for (final name in [...removed, ...kept]) {
+      if (!exists(name)) await touch(name, 'junk');
+    }
 
-      final deleted = await MetadataService.cleanupPlaylistFolder(tempDir.path);
+    final deleted = await MetadataService.cleanupPlaylistFolder(folder);
 
-      expect(deleted, 5 + leftovers.length);
-      for (final name in leftovers) {
-        expect(await File(p.join(tempDir.path, name)).exists(), isFalse);
-      }
-      expect(await keepMedia.exists(), isTrue);
-      expect(await keepMetadata.exists(), isTrue);
-      expect(await File(p.join(tempDir.path, 'cover.jpg')).exists(), isFalse);
-      expect(
-        await File(p.join(tempDir.path, 'download.part')).exists(),
-        isFalse,
-      );
-      expect(
-        await File(p.join(tempDir.path, 'download.part-Frag12')).exists(),
-        isFalse,
-      );
-      expect(
-        await File(p.join(tempDir.path, 'download.ytdl')).exists(),
-        isFalse,
-      );
-      expect(
-        await File(p.join(tempDir.path, 'woolytube_meta.json.tmp')).exists(),
-        isFalse,
-      );
-    },
-  );
+    expect(deleted, removed.length);
+    for (final name in removed) {
+      expect(exists(name), isFalse, reason: name);
+    }
+    for (final name in kept) {
+      expect(exists(name), isTrue, reason: name);
+    }
+  });
 
+  // Updated: the sidecar is version 2 and carries every segment field,
+  // the download time and a pending replacement request.
   test(
     'writes playlist metadata including files and SponsorBlock segments',
     () async {
@@ -113,11 +110,11 @@ void main() {
         db,
         name: 'Metadata Playlist',
         thumbnailUrl: 'https://example.com/playlist.jpg',
-        outputPath: tempDir.path,
+        outputPath: folder,
         lastUpdated: DateTime.utc(2024, 1, 2, 3, 4, 5),
         createdAt: DateTime.utc(2024, 1, 1),
       );
-      final mediaPath = p.join(tempDir.path, '00001_Song.m4a');
+      final mediaPath = at('00001_Song.m4a');
       final track = await insertTestTrack(
         db,
         playlistId: playlist.id,
@@ -129,6 +126,8 @@ void main() {
         durationSeconds: 123,
         status: 'complete',
         alwaysSkip: true,
+        downloadedAt: DateTime.utc(2024, 3, 4, 5, 6, 7),
+        replaceRequested: true,
       );
       await db.replaceSponsorBlockSegments(track.id, [
         SponsorBlockSegmentsCompanion.insert(
@@ -143,12 +142,12 @@ void main() {
         ),
       ]);
 
-      await metadata.writeMetadata(playlist, [track]);
+      await metadata.writeMetadata(playlist, [(await db.getTrack(track.id))!]);
 
-      final metaFile = File(p.join(tempDir.path, 'woolytube_meta.json'));
       final data =
-          jsonDecode(await metaFile.readAsString()) as Map<String, dynamic>;
-      expect(data['version'], 1);
+          jsonDecode(await File(at('woolytube_meta.json')).readAsString())
+              as Map<String, dynamic>;
+      expect(data['version'], 2);
       expect(data['playlist']['name'], 'Metadata Playlist');
       expect(data['playlist']['lastUpdated'], '2024-01-02T03:04:05.000Z');
 
@@ -157,148 +156,615 @@ void main() {
       expect(tracks.single['videoId'], 'video-1');
       expect(tracks.single['fileName'], '00001_Song.m4a');
       expect(tracks.single['alwaysSkip'], isTrue);
+      expect(tracks.single['downloadedAt'], '2024-03-04T05:06:07.000Z');
+      expect(tracks.single['replaceRequested'], isTrue);
       expect(tracks.single['sponsorBlockSegments'], [
         {
           'source': 'sponsorblock',
           'uuid': 'segment-1',
           'category': 'sponsor',
+          'actionType': 'skip',
           'startMs': 1000,
           'endMs': 2500,
+          'votes': null,
+          'locked': null,
+          'description': null,
+          'createdAt': '2024-01-01T00:00:00.000Z',
         },
       ]);
     },
   );
 
-  test('reconciles database state with files on disk', () async {
-    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
-    final first = await insertTestTrack(
-      db,
-      playlistId: playlist.id,
-      index: 1,
-      videoId: 'first',
-      title: 'First',
-      status: 'pending',
-    );
-    final missing = await insertTestTrack(
-      db,
-      playlistId: playlist.id,
-      index: 2,
-      videoId: 'missing',
-      title: 'Missing',
-      filePath: p.join(tempDir.path, 'missing.m4a'),
-      status: 'complete',
-      isLocalReplacement: true,
-      downloadedAt: DateTime.utc(2024),
-    );
-    final moved = await insertTestTrack(
-      db,
-      playlistId: playlist.id,
-      index: 3,
-      videoId: 'moved',
-      title: 'Moved',
-      filePath: p.join(tempDir.path, 'old-name.mp4'),
-      status: 'complete',
-      downloadedAt: DateTime.utc(2024),
-    );
-    await File(p.join(tempDir.path, '1_First.mp3')).writeAsString('audio');
-    await File(p.join(tempDir.path, '3_Moved.mp4')).writeAsString('video');
-    await File(p.join(tempDir.path, 'cover.jpg')).writeAsString('image');
-    await File(p.join(tempDir.path, 'download.part')).writeAsString('partial');
-    await File(p.join(tempDir.path, 'download.ytdl')).writeAsString('state');
-    await File(p.join(tempDir.path, 'old.tmp')).writeAsString('tmp');
-    await File(p.join(tempDir.path, 'woolytube_meta.json')).writeAsString('{}');
-
-    final fixed = await metadata.reconcilePlaylist(playlist);
-
-    expect(fixed, greaterThanOrEqualTo(3));
-    final tracksByVideoId = {
-      for (final track in await db.getTracksForPlaylist(playlist.id))
-        track.videoId: track,
-    };
-    final firstPath = p.join(tempDir.path, '00001_First.mp3');
-    final movedPath = p.join(tempDir.path, '00003_Moved.mp4');
-    expect(tracksByVideoId[first.videoId]!.status, 'complete');
-    expect(tracksByVideoId[first.videoId]!.filePath, firstPath);
-    expect(tracksByVideoId[missing.videoId]!.status, 'pending');
-    expect(tracksByVideoId[missing.videoId]!.filePath, isNull);
-    expect(tracksByVideoId[missing.videoId]!.downloadedAt, isNull);
-    expect(tracksByVideoId[missing.videoId]!.isLocalReplacement, isFalse);
-    expect(tracksByVideoId[moved.videoId]!.status, 'complete');
-    expect(tracksByVideoId[moved.videoId]!.filePath, movedPath);
-
-    expect(await File(firstPath).exists(), isTrue);
-    expect(await File(movedPath).exists(), isTrue);
-    expect(await File(p.join(tempDir.path, '1_First.mp3')).exists(), isFalse);
-    expect(await File(p.join(tempDir.path, '3_Moved.mp4')).exists(), isFalse);
-    expect(await File(p.join(tempDir.path, 'cover.jpg')).exists(), isFalse);
-    expect(await File(p.join(tempDir.path, 'download.part')).exists(), isFalse);
-    expect(await File(p.join(tempDir.path, 'download.ytdl')).exists(), isFalse);
-    expect(await File(p.join(tempDir.path, 'old.tmp')).exists(), isFalse);
-    expect(
-      await File(p.join(tempDir.path, 'woolytube_meta.json')).exists(),
-      isTrue,
-    );
-  });
-
-  test(
-    'startup recovery resolves interrupted downloads without starting them',
-    () async {
-      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
-      final missing = await insertTestTrack(
+  group('reconcile (link only)', () {
+    // Updated: reconcile no longer deletes or renames anything and keeps
+    // isLocalReplacement on a track whose file is missing. The renaming and
+    // cleanup now belong to repairPlaylist, tested below.
+    test('links files without deleting or renaming anything', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final first = await insertTestTrack(
         db,
         playlistId: playlist.id,
         index: 1,
-        videoId: 'interrupted-missing',
-        status: 'downloading',
+        videoId: 'first',
+        title: 'First',
+        status: 'pending',
       );
-      final finished = await insertTestTrack(
+      final missing = await insertTestTrack(
         db,
         playlistId: playlist.id,
         index: 2,
-        videoId: 'interrupted-finished',
-        status: 'downloading',
+        videoId: 'missing',
+        title: 'Missing',
+        filePath: at('missing.m4a'),
+        status: 'complete',
+        isLocalReplacement: true,
+        downloadedAt: DateTime.utc(2024),
       );
-      final finishedPath = p.join(tempDir.path, '00002_Finished.m4a');
-      await File(finishedPath).writeAsString('audio');
-      final partialPath = p.join(tempDir.path, '00001_Missing.m4a.part');
-      await File(partialPath).writeAsString('partial');
+      final moved = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 3,
+        videoId: 'moved',
+        title: 'Moved',
+        filePath: at('old-name.mp4'),
+        status: 'complete',
+        downloadedAt: DateTime.utc(2024),
+      );
+      final names = [
+        '1_First.mp3',
+        '3_Moved.mp4',
+        'cover.jpg',
+        'download.part',
+        'download.ytdl',
+        'old.tmp',
+        '00009_Unknown.f137.mp4',
+        'woolytube_meta.json',
+      ];
+      for (final name in names) {
+        await touch(name);
+      }
 
-      final fixed = await metadata.recoverInterruptedDownloads();
+      final fixed = await metadata.reconcilePlaylist(playlist);
 
       expect(fixed, 3);
-      expect((await db.getTrack(missing.id))!.status, 'pending');
-      expect((await db.getTrack(finished.id))!.status, 'complete');
-      expect((await db.getTrack(finished.id))!.filePath, finishedPath);
-      expect(await File(partialPath).exists(), isFalse);
+      final firstAfter = (await db.getTrack(first.id))!;
+      expect(firstAfter.status, 'complete');
+      expect(firstAfter.filePath, at('1_First.mp3'));
+      final missingAfter = (await db.getTrack(missing.id))!;
+      expect(missingAfter.status, 'pending');
+      expect(missingAfter.filePath, isNull);
+      expect(missingAfter.downloadedAt, isNull);
+      expect(missingAfter.isLocalReplacement, isTrue);
+      final movedAfter = (await db.getTrack(moved.id))!;
+      expect(movedAfter.status, 'complete');
+      expect(movedAfter.filePath, at('3_Moved.mp4'));
 
-      final sidecar =
+      final after =
+          Directory(folder).listSync().map((e) => p.basename(e.path)).toSet();
+      expect(after, names.toSet());
+    });
+
+    test('never demotes tracks when the folder lists no media although tracks '
+        'point into it', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final tracks = [
+        await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: 1,
+          videoId: 'a',
+          filePath: at('00001_A.m4a'),
+          status: 'complete',
+          downloadedAt: DateTime.utc(2024),
+        ),
+        await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: 2,
+          videoId: 'b',
+          filePath: at('00002_B.m4a'),
+          status: 'complete',
+          isLocalReplacement: true,
+          downloadedAt: DateTime.utc(2024),
+        ),
+      ];
+      // Storage not readable yet (no permission, not mounted): only the
+      // sidecar is visible.
+      await touch('woolytube_meta.json', '{}');
+
+      expect(await metadata.reconcilePlaylist(playlist), 0);
+      expect(await metadata.repairPlaylist(playlist), 0);
+
+      expect(await db.getTracksForPlaylist(playlist.id), tracks);
+    });
+
+    test('never gives one file to two tracks', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final shared = await touch('00001_Song.m4a');
+      final pending = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 1,
+        videoId: 'pending',
+        title: 'Song',
+      );
+      // Another track already uses the file numbered 1 (for example after
+      // an interrupted renumbering).
+      final owner = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 2,
+        videoId: 'owner',
+        title: 'Song',
+        filePath: shared,
+        status: 'complete',
+      );
+
+      await metadata.reconcilePlaylist(playlist);
+
+      expect((await db.getTrack(pending.id))!.status, 'pending');
+      expect((await db.getTrack(pending.id))!.filePath, isNull);
+      expect((await db.getTrack(owner.id))!.filePath, shared);
+    });
+
+    test(
+      'keeps an existing file path even when another file has its number',
+      () async {
+        final playlist = await insertTestPlaylist(db, outputPath: folder);
+        final own = await touch('00004_Mine.m4a');
+        await touch('00001_Other.m4a');
+        final track = await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: 1,
+          videoId: 'mine',
+          title: 'Mine',
+          filePath: own,
+          status: 'complete',
+        );
+
+        await metadata.reconcilePlaylist(playlist);
+
+        expect((await db.getTrack(track.id))!.filePath, own);
+        expect(exists('00001_Other.m4a'), isTrue);
+      },
+    );
+
+    test('keeps isLocalReplacement when the file is missing', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final local = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 1,
+        videoId: 'local',
+        filePath: at('00001_My Version.m4a'),
+        status: 'complete',
+        isLocalReplacement: true,
+      );
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 2,
+        videoId: 'other',
+        filePath: await touch('00002_Other.m4a'),
+        status: 'complete',
+      );
+
+      await metadata.reconcilePlaylist(playlist);
+
+      final after = (await db.getTrack(local.id))!;
+      expect(after.status, 'pending');
+      expect(after.isLocalReplacement, isTrue);
+    });
+
+    test('leaves a downloading track alone; repair resets it', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        status: 'downloading',
+      );
+      await touch('00002_Unrelated.m4a');
+
+      await metadata.reconcilePlaylist(playlist);
+      expect((await db.getTrack(track.id))!.status, 'downloading');
+
+      await metadata.repairPlaylist(playlist);
+      expect((await db.getTrack(track.id))!.status, 'pending');
+    });
+
+    // Updated: intermediates used to be deleted by reconcile. Now reconcile
+    // never deletes, and even repair keeps them while their merged file is
+    // missing.
+    test('intermediates never complete a track and are kept without a merged '
+        'file', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final track = await insertTestTrack(db, playlistId: playlist.id);
+      await touch('00001_Title.f137.mp4', 'video');
+      await touch('00001_Title.temp.mp4', 'video');
+
+      expect(await metadata.reconcilePlaylist(playlist), 0);
+      await metadata.repairPlaylist(playlist);
+
+      expect((await db.getTrack(track.id))!.status, 'pending');
+      expect(exists('00001_Title.f137.mp4'), isTrue);
+      expect(exists('00001_Title.temp.mp4'), isTrue);
+    });
+
+    test('consumes info sidecars with one directory listing', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final first = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 1,
+        videoId: 'first',
+        filePath: at('00001_First.mp4'),
+        status: 'complete',
+      );
+      final second = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 2,
+        videoId: 'second',
+        filePath: at('00002_Second.mp4'),
+        status: 'complete',
+      );
+      await File(first.filePath!).writeAsString('video');
+      await File(second.filePath!).writeAsString('video');
+      Future<File> sidecar(String name, String id, String chapter) async {
+        final file = File(at(name));
+        await file.writeAsString(
+          jsonEncode({
+            'id': id,
+            'duration': 60,
+            'formats': [
+              {'url': 'x'},
+            ],
+            'chapters': [
+              {'title': chapter, 'start_time': 0, 'end_time': 60},
+            ],
+          }),
+        );
+        return file;
+      }
+
+      final firstInfo = await sidecar('00001_First.info.json', 'first', 'One');
+      final secondInfo = await sidecar(
+        '00002_Second.info.json',
+        'second',
+        'Two',
+      );
+      final foreign = await sidecar('00002_Other.info.json', 'other', 'Nope');
+
+      await metadata.reconcilePlaylist(playlist);
+
+      String? chapterTitle(Track? track) =>
+          ChapterData.decode(track?.chaptersJson).active.singleOrNull?.title;
+      expect(chapterTitle(await db.getTrack(first.id)), 'One');
+      expect(chapterTitle(await db.getTrack(second.id)), 'Two');
+      expect(await firstInfo.exists(), isFalse);
+      expect(await secondInfo.exists(), isFalse);
+      expect(await foreign.exists(), isTrue);
+      // The information is kept, trimmed, in the info folder.
+      final kept =
           jsonDecode(
                 await File(
-                  p.join(tempDir.path, 'woolytube_meta.json'),
+                  at(p.join('.woolytube_info', 'first.info.json')),
                 ).readAsString(),
               )
               as Map<String, dynamic>;
-      final tracks = sidecar['tracks'] as List<dynamic>;
-      expect(tracks.first['status'], 'pending');
-      expect(tracks.last['status'], 'complete');
-    },
-  );
+      expect(kept['id'], 'first');
+      expect(kept.containsKey('formats'), isFalse);
+    });
+  });
+
+  group('repair', () {
+    test(
+      'renames files to their track numbers and removes download leftovers',
+      () async {
+        final playlist = await insertTestPlaylist(db, outputPath: folder);
+        final first = await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: 1,
+          videoId: 'first',
+          title: 'First',
+          status: 'pending',
+        );
+        final moved = await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: 3,
+          videoId: 'moved',
+          title: 'Moved',
+          filePath: at('old-name.mp4'),
+          status: 'complete',
+        );
+        for (final name in [
+          '1_First.mp3',
+          '3_Moved.mp4',
+          'cover.jpg',
+          'download.part',
+          'download.ytdl',
+          'old.tmp',
+          'woolytube_meta.json',
+        ]) {
+          await touch(name);
+        }
+
+        await metadata.repairPlaylist(playlist);
+
+        expect((await db.getTrack(first.id))!.filePath, at('00001_First.mp3'));
+        expect((await db.getTrack(moved.id))!.filePath, at('00003_Moved.mp4'));
+        expect(exists('00001_First.mp3'), isTrue);
+        expect(exists('00003_Moved.mp4'), isTrue);
+        expect(exists('1_First.mp3'), isFalse);
+        expect(exists('3_Moved.mp4'), isFalse);
+        expect(exists('download.part'), isFalse);
+        expect(exists('download.ytdl'), isFalse);
+        expect(exists('old.tmp'), isFalse);
+        expect(exists('cover.jpg'), isTrue);
+        expect(exists('woolytube_meta.json'), isTrue);
+      },
+    );
+
+    test(
+      "renames a file whose number does not match its track's index",
+      () async {
+        final playlist = await insertTestPlaylist(db, outputPath: folder);
+        final track = await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: 3,
+          videoId: 'moved',
+          title: 'Moved',
+          filePath: await touch('00002_Moved.mp4', 'video'),
+          status: 'complete',
+        );
+
+        expect(await metadata.repairPlaylist(playlist), 1);
+
+        final after = (await db.getTrack(track.id))!;
+        expect(after.filePath, at('00003_Moved.mp4'));
+        expect(await File(after.filePath!).readAsString(), 'video');
+        expect(exists('00002_Moved.mp4'), isFalse);
+      },
+    );
+
+    test(
+      'startup recovery resolves interrupted downloads without starting them',
+      () async {
+        final playlist = await insertTestPlaylist(db, outputPath: folder);
+        final missing = await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: 1,
+          videoId: 'interrupted-missing',
+          status: 'downloading',
+        );
+        final finished = await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: 2,
+          videoId: 'interrupted-finished',
+          status: 'downloading',
+        );
+        final finishedPath = await touch('00002_Finished.m4a', 'audio');
+        await touch('00001_Missing.m4a.part', 'partial');
+        await touch(
+          p.join('.woolytube-staging', 'track-${missing.id}', '00001_x.m4a'),
+        );
+
+        final fixed = await metadata.recoverInterruptedDownloads();
+
+        expect(fixed, 3);
+        expect((await db.getTrack(missing.id))!.status, 'pending');
+        expect((await db.getTrack(finished.id))!.status, 'complete');
+        expect((await db.getTrack(finished.id))!.filePath, finishedPath);
+        expect(exists('00001_Missing.m4a.part'), isFalse);
+        expect(await Directory(at('.woolytube-staging')).exists(), isFalse);
+
+        final sidecar =
+            jsonDecode(await File(at('woolytube_meta.json')).readAsString())
+                as Map<String, dynamic>;
+        final tracks = sidecar['tracks'] as List<dynamic>;
+        expect(tracks.first['status'], 'pending');
+        expect(tracks.last['status'], 'complete');
+      },
+    );
+  });
+
+  group('cleanup', () {
+    test('keeps folder covers and adopts a numbered root image as the '
+        "track's cover", () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 3,
+        videoId: 'vid-3',
+        filePath: await touch('00003_x.m4a'),
+        status: 'complete',
+      );
+      await touch('folder.jpg', 'folder');
+      await touch('cover.jpg', 'cover');
+      await touch('00003_x.webp', 'webp');
+      // No track 9: an image numbered like it is not touched.
+      await touch('00009_y.jpg', 'other');
+
+      await metadata.cleanupPlaylist(playlist);
+
+      expect(await File(at('folder.jpg')).readAsString(), 'folder');
+      expect(await File(at('cover.jpg')).readAsString(), 'cover');
+      expect(exists('00009_y.jpg'), isTrue);
+      final cover = at(p.join('.woolytube_thumbnails', 'vid-3.webp'));
+      expect((await db.getTrack(track.id))!.thumbnailPath, cover);
+      expect(await File(cover).readAsString(), 'webp');
+      expect(exists('00003_x.webp'), isFalse);
+    });
+
+    test('keeps format streams until their merged file exists', () async {
+      await touch('00002_Title.f137.mp4');
+      await touch('00002_Title.f140.m4a');
+
+      expect(await MetadataService.cleanupPlaylistFolder(folder), 0);
+      expect(exists('00002_Title.f137.mp4'), isTrue);
+      expect(exists('00002_Title.f140.m4a'), isTrue);
+
+      await touch('00002_Title.mp4');
+      expect(await MetadataService.cleanupPlaylistFolder(folder), 2);
+      expect(exists('00002_Title.f137.mp4'), isFalse);
+      expect(exists('00002_Title.f140.m4a'), isFalse);
+      expect(exists('00002_Title.mp4'), isTrue);
+    });
+
+    test('never deletes a file a track uses', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      // A real song whose title happens to end like a yt-dlp temp file.
+      final song = await touch('00005_Mix.temp.mp4', 'song');
+      await touch('00005_Mix.mp4', 'other');
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 5,
+        filePath: song,
+        status: 'complete',
+      );
+
+      await metadata.cleanupPlaylist(playlist);
+      await metadata.repairPlaylist(playlist);
+
+      expect(await File(song).readAsString(), 'song');
+    });
+
+    test('never deletes files an older force insert parked', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      await touch('.woolytube-force-move-1700000000-0.mp4', 'only copy');
+      await touch('00001_A.mp4');
+
+      await metadata.repairPlaylist(playlist);
+      await MetadataService.cleanupPlaylistFolder(folder);
+
+      expect(
+        await File(at('.woolytube-force-move-1700000000-0.mp4')).readAsString(),
+        'only copy',
+      );
+    });
+  });
+
+  group('force insert interrupted part-way', () {
+    // A force insert at 2 renames from the highest number down, recording
+    // each new path just before the file moves, and changes indices only at
+    // the end. These build the state a crash leaves behind.
+    late Playlist playlist;
+    late Track a;
+    late Track b;
+    late Track c;
+
+    setUp(() async {
+      playlist = await insertTestPlaylist(db, outputPath: folder);
+      a = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 1,
+        videoId: 'a',
+        title: 'A',
+        filePath: await touch('00001_A.mp4', 'a'),
+        status: 'complete',
+      );
+      b = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 2,
+        videoId: 'b',
+        title: 'B',
+        filePath: await touch('00002_B.mp4', 'b'),
+        status: 'complete',
+      );
+      c = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 3,
+        videoId: 'c',
+        title: 'C',
+        filePath: await touch('00003_C.mp4', 'c'),
+        status: 'complete',
+      );
+      await touch(p.join('.woolytube-staging', 'insert-1', 'source.mp4'), 'x');
+    });
+
+    Future<void> renamed(Track track, String to) async {
+      await db.updateTrackFields(track.id, filePath: at(to));
+      await File(track.filePath!).rename(at(to));
+    }
+
+    Future<Map<String, String>> contentByTrack() async => {
+      for (final t in await db.getTracksForPlaylist(playlist.id))
+        t.videoId: await File(t.filePath!).readAsString(),
+    };
+
+    test('after some renames, every track keeps its own file and repair '
+        'puts the names back', () async {
+      await renamed(c, '00004_C.mp4');
+      await renamed(b, '00003_B.mp4');
+
+      await metadata.reconcilePlaylist(playlist);
+
+      expect((await db.getTrack(a.id))!.filePath, at('00001_A.mp4'));
+      expect((await db.getTrack(b.id))!.filePath, at('00003_B.mp4'));
+      expect((await db.getTrack(c.id))!.filePath, at('00004_C.mp4'));
+      expect(await contentByTrack(), {'a': 'a', 'b': 'b', 'c': 'c'});
+
+      await metadata.repairPlaylist(playlist);
+
+      final tracks = await db.getTracksForPlaylist(playlist.id);
+      expect(tracks.map((t) => t.index), [1, 2, 3]);
+      expect(tracks.map((t) => p.basename(t.filePath!)), [
+        '00001_A.mp4',
+        '00002_B.mp4',
+        '00003_C.mp4',
+      ]);
+      expect(await contentByTrack(), {'a': 'a', 'b': 'b', 'c': 'c'});
+      expect(await Directory(at('.woolytube-staging')).exists(), isFalse);
+    });
+
+    test('with one rename in flight, that track finds its file by its '
+        'unchanged number', () async {
+      await renamed(c, '00004_C.mp4');
+      // The path was recorded, but the app died before the file moved.
+      await db.updateTrackFields(b.id, filePath: at('00003_B.mp4'));
+
+      await metadata.reconcilePlaylist(playlist);
+
+      expect((await db.getTrack(b.id))!.filePath, at('00002_B.mp4'));
+      expect((await db.getTrack(c.id))!.filePath, at('00004_C.mp4'));
+      expect(await contentByTrack(), {'a': 'a', 'b': 'b', 'c': 'c'});
+
+      await metadata.repairPlaylist(playlist);
+
+      expect(
+        (await db.getTracksForPlaylist(
+          playlist.id,
+        )).map((t) => p.basename(t.filePath!)),
+        ['00001_A.mp4', '00002_B.mp4', '00003_C.mp4'],
+      );
+      expect(await contentByTrack(), {'a': 'a', 'b': 'b', 'c': 'c'});
+    });
+  });
 
   test(
     'imports discovered playlists and keeps only valid local segments',
     () async {
       final thumbnail = File(
-        p.join(tempDir.path, '.woolytube_thumbnails', 'track_7.jpg'),
+        at(p.join('.woolytube_thumbnails', 'track_7.jpg')),
       );
       await thumbnail.parent.create();
       await thumbnail.writeAsString('image');
-      await File(
-        p.join(tempDir.path, '00001_Existing.m4a'),
-      ).writeAsString('audio');
+      await touch('00001_Existing.m4a', 'audio');
 
       await metadata.importPlaylist(
         DiscoveredPlaylist(
-          folderPath: tempDir.path,
+          folderPath: folder,
           url: 'https://www.youtube.com/playlist?list=imported',
           name: 'Imported',
           thumbnailUrl: 'https://example.com/imported.jpg',
@@ -368,7 +834,7 @@ void main() {
         'private',
       ]);
       expect(tracks[0].status, 'complete');
-      expect(tracks[0].filePath, p.join(tempDir.path, '00001_Existing.m4a'));
+      expect(tracks[0].filePath, at('00001_Existing.m4a'));
       expect(tracks[0].thumbnailPath, thumbnail.path);
       expect(tracks[0].alwaysSkip, isTrue);
       expect(tracks[1].status, 'pending');
@@ -421,90 +887,19 @@ void main() {
       '00001_Title.mp4.part',
       '00001_Title.mp4.ytdl',
     ]) {
-      await File(p.join(tempDir.path, name)).writeAsString('partial');
+      await touch(name, 'partial');
     }
-    expect(MetadataService.resolveMediaFile(tempDir.path, '00001_'), isNull);
+    expect(MetadataService.resolveMediaFile(folder, '00001_'), isNull);
 
-    final media = File(p.join(tempDir.path, '00001_Title.mp4'));
-    await media.writeAsString('video');
-    expect(
-      MetadataService.resolveMediaFile(tempDir.path, '00001_'),
-      media.path,
-    );
+    final media = await touch('00001_Title.mp4', 'video');
+    expect(MetadataService.resolveMediaFile(folder, '00001_'), media);
   });
 
-  test(
-    'reconcile removes intermediates without completing the track',
-    () async {
-      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
-      final track = await insertTestTrack(db, playlistId: playlist.id);
-      final intermediate = File(p.join(tempDir.path, '00001_Title.f137.mp4'));
-      final temp = File(p.join(tempDir.path, '00001_Title.temp.mp4'));
-      await intermediate.writeAsString('video');
-      await temp.writeAsString('video');
-
-      final fixed = await metadata.reconcilePlaylist(playlist);
-
-      expect(fixed, 2);
-      expect((await db.getTrack(track.id))!.status, 'pending');
-      expect(await intermediate.exists(), isFalse);
-      expect(await temp.exists(), isFalse);
-    },
-  );
-
-  test('reconcile consumes info sidecars with one directory listing', () async {
-    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
-    final first = await insertTestTrack(
-      db,
-      playlistId: playlist.id,
-      index: 1,
-      videoId: 'first',
-      filePath: p.join(tempDir.path, '00001_First.mp4'),
-      status: 'complete',
-    );
-    final second = await insertTestTrack(
-      db,
-      playlistId: playlist.id,
-      index: 2,
-      videoId: 'second',
-      filePath: p.join(tempDir.path, '00002_Second.mp4'),
-      status: 'complete',
-    );
-    await File(first.filePath!).writeAsString('video');
-    await File(second.filePath!).writeAsString('video');
-    Future<File> sidecar(String name, String id, String chapter) async {
-      final file = File(p.join(tempDir.path, name));
-      await file.writeAsString(
-        jsonEncode({
-          'id': id,
-          'duration': 60,
-          'chapters': [
-            {'title': chapter, 'start_time': 0, 'end_time': 60},
-          ],
-        }),
-      );
-      return file;
-    }
-
-    final firstInfo = await sidecar('00001_First.info.json', 'first', 'One');
-    final secondInfo = await sidecar('00002_Second.info.json', 'second', 'Two');
-    final foreign = await sidecar('00002_Other.info.json', 'other', 'Nope');
-
-    await metadata.reconcilePlaylist(playlist);
-
-    String? chapterTitle(Track? track) =>
-        ChapterData.decode(track?.chaptersJson).active.singleOrNull?.title;
-    expect(chapterTitle(await db.getTrack(first.id)), 'One');
-    expect(chapterTitle(await db.getTrack(second.id)), 'Two');
-    expect(await firstInfo.exists(), isFalse);
-    expect(await secondInfo.exists(), isFalse);
-    expect(await foreign.exists(), isTrue);
-  });
-
+  // Updated: writing metadata now also writes the `.m3u8` playlist.
   test(
     'concurrent metadata writes serialise and leave no temp files',
     () async {
-      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
       final track = await insertTestTrack(db, playlistId: playlist.id);
 
       await Future.wait([
@@ -512,28 +907,18 @@ void main() {
       ]);
 
       final names =
-          tempDir.listSync().map((entity) => p.basename(entity.path)).toList();
-      expect(names, ['woolytube_meta.json']);
+          Directory(
+            folder,
+          ).listSync().map((entity) => p.basename(entity.path)).toSet();
+      expect(names, {'woolytube_meta.json', 'Playlist.m3u8'});
       final data =
-          jsonDecode(
-                await File(
-                  p.join(tempDir.path, 'woolytube_meta.json'),
-                ).readAsString(),
-              )
+          jsonDecode(await File(at('woolytube_meta.json')).readAsString())
               as Map<String, dynamic>;
       expect((data['tracks'] as List).single['videoId'], track.videoId);
     },
   );
 
   test('import de-duplicates indices from an older sidecar', () async {
-    final db = openTestDatabase();
-    addTearDown(db.close);
-    final tempDir = await Directory.systemTemp.createTemp(
-      'woolytube_import_dup_',
-    );
-    addTearDown(() => tempDir.delete(recursive: true));
-    final metadata = MetadataService(db);
-
     DiscoveredTrack track(int index, String videoId) => DiscoveredTrack(
       index: index,
       videoId: videoId,
@@ -543,7 +928,7 @@ void main() {
 
     await metadata.importPlaylist(
       DiscoveredPlaylist(
-        folderPath: tempDir.path,
+        folderPath: folder,
         url: 'https://www.youtube.com/playlist?list=dups',
         name: 'Dups',
         audioOnly: true,

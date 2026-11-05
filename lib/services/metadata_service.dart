@@ -250,14 +250,17 @@ class MetadataService {
     try {
       final trimmed = {
         for (final entry in info.entries)
-          if (!_downloadOnlyInfoKeys.contains(entry.key)) entry.key: entry.value,
+          if (!_downloadOnlyInfoKeys.contains(entry.key))
+            entry.key: entry.value,
       };
       final dir = Directory(LibraryLayout.infoDir(folder));
       await dir.create(recursive: true);
       await _ensureNoMedia(dir.path);
       final target = File(LibraryLayout.infoJsonPath(folder, videoId));
       final tmp = File('${target.path}.tmp');
-      await tmp.writeAsString(const JsonEncoder.withIndent(' ').convert(trimmed));
+      await tmp.writeAsString(
+        const JsonEncoder.withIndent(' ').convert(trimmed),
+      );
       await tmp.rename(target.path);
     } catch (_) {
       // Extra information only; never fail a download over it.
@@ -447,7 +450,9 @@ class MetadataService {
       final relative = _fileNameRelativeTo(playlist.outputPath, path);
       if (relative == null) continue;
       buffer
-        ..writeln('#EXTINF:${track.durationSeconds ?? -1},${_singleLine(track.title)}')
+        ..writeln(
+          '#EXTINF:${track.durationSeconds ?? -1},${_singleLine(track.title)}',
+        )
         ..writeln(relative.replaceAll(r'\', '/'));
     }
     return buffer.toString();
@@ -763,7 +768,8 @@ for video) to keep a complete backup.
       }
       final match = _indexPrefixPattern.firstMatch(name);
       final index = match == null ? null : int.tryParse(match[1]!);
-      if (index != null) files.add(_CandidateFile(index: index, path: entity.path));
+      if (index != null)
+        files.add(_CandidateFile(index: index, path: entity.path));
     }
     return _pickCandidate(files, track, claimed);
   }
@@ -772,7 +778,10 @@ for video) to keep a complete backup.
   /// (after an interrupted force insert, a migration that moved a track, or
   /// an older, narrower prefix), so that sorting by name keeps giving the
   /// playlist order. A rename never replaces an existing file.
-  Future<int> _renameToTrackNumbers(Playlist playlist, List<Track> tracks) async {
+  Future<int> _renameToTrackNumbers(
+    Playlist playlist,
+    List<Track> tracks,
+  ) async {
     var renamed = 0;
     final total = tracks.length;
     for (final track in tracks) {
@@ -932,8 +941,8 @@ for video) to keep a complete backup.
 
   /// Cover images yt-dlp left beside the media (named like the media file,
   /// `<index>_<title>.webp`) become the track's offline thumbnail when it has
-  /// none yet, and are otherwise removed. Images without an index prefix,
-  /// such as a folder.jpg, are never touched.
+  /// none yet, and are otherwise moved to `.woolytube_replaced/`. Images
+  /// without an index prefix, such as a folder.jpg, are never touched.
   Future<int> _adoptLooseThumbnails(
     Playlist playlist,
     List<Track> tracks,
@@ -963,7 +972,8 @@ for video) to keep a complete backup.
           await moveFile(entity.path, target);
           await _db.updateTrackThumbnailPath(track.id, target);
         } else if (track != null) {
-          await entity.delete();
+          // The track already has a cover; keep this one out of the way.
+          await moveAside(folder, entity.path);
         } else {
           continue;
         }
@@ -1004,6 +1014,23 @@ for video) to keep a complete backup.
       (m) => '_${m[1]}',
     );
     return collapsed.isEmpty ? '_' : collapsed;
+  }
+
+  /// A file name whose title ends like a yt-dlp intermediate
+  /// (`Formula.f1.m4a`, `Live.temp.mp4`) gets that last dot replaced, so the
+  /// finished file can never be mistaken for a leftover.
+  static String neutralizeTransientLookingName(String fileName) {
+    if (!_formatIntermediatePattern.hasMatch(fileName) &&
+        !_postProcessTempPattern.hasMatch(fileName)) {
+      return fileName;
+    }
+    final ext = p.extension(fileName);
+    final stem = p.basenameWithoutExtension(fileName);
+    final fixed = stem.replaceFirstMapped(
+      RegExp(r'\.(f\d+|temp)$'),
+      (m) => '_${m[1]}',
+    );
+    return '$fixed$ext';
   }
 
   /// Find a media file in [dirPath] whose number prefix equals the number in
@@ -1072,14 +1099,26 @@ for video) to keep a complete backup.
   /// media file, or the largest of the preferred kinds if yt-dlp left more.
   static File? findStagedMedia(Directory dir) {
     if (!dir.existsSync()) return null;
+    // A staging folder only ever holds one download, so a name that merely
+    // looks like an intermediate (a title ending in ".f1" or ".temp") is
+    // still the finished file. Unfinished parts never count.
     final media = <File>[
       for (final entity in dir.listSync())
         if (entity is File &&
             mediaExtensions.contains(p.extension(entity.path).toLowerCase()) &&
-            !isTransientFile(p.basename(entity.path)))
+            !_partPattern.hasMatch(p.basename(entity.path)))
           entity,
     ];
     if (media.isEmpty) return null;
+    if (media.length == 1) return media.single;
+    final finished = [
+      for (final f in media)
+        if (!isTransientFile(p.basename(f.path))) f,
+    ];
+    if (finished.isNotEmpty)
+      media
+        ..clear()
+        ..addAll(finished);
     if (media.length == 1) return media.single;
     const preferred = ['.m4a', '.mp4', '.mkv'];
     media.sort((a, b) {
@@ -1123,20 +1162,32 @@ for video) to keep a complete backup.
     final folder = playlist.outputPath;
     await Directory(folder).create(recursive: true);
     final total = await _db.getTotalTrackCount(playlist.id);
-    final rest = p
-        .basename(stagedMedia.path)
-        .replaceFirst(_indexPrefixPattern, '');
-    final targetPath = p.join(folder, '${paddedIndex(fresh.index, total)}_$rest');
+    final rest = neutralizeTransientLookingName(
+      p.basename(stagedMedia.path).replaceFirst(_indexPrefixPattern, ''),
+    );
+    var targetPath = p.join(folder, '${paddedIndex(fresh.index, total)}_$rest');
 
     final oldPath = fresh.filePath;
     final oldExists = oldPath != null && await File(oldPath).exists();
-    final replacesOldInPlace =
+    var replacesOldInPlace =
         oldExists && p.equals(p.normalize(oldPath), p.normalize(targetPath));
     var oldMovedAside = false;
     if (await File(targetPath).exists() &&
         !(replacesOldInPlace && !fresh.isLocalReplacement)) {
-      await moveAside(folder, targetPath);
-      oldMovedAside = replacesOldInPlace;
+      final usedByOther = (await _db.getTracksForPlaylist(playlist.id)).any(
+        (t) =>
+            t.id != trackId &&
+            t.filePath != null &&
+            p.equals(p.normalize(t.filePath!), p.normalize(targetPath)),
+      );
+      if (usedByOther) {
+        // Another track's file has this name: never touch it, use another.
+        targetPath = await uniquePath(targetPath);
+        replacesOldInPlace = false;
+      } else {
+        await moveAside(folder, targetPath);
+        oldMovedAside = replacesOldInPlace;
+      }
     }
     await moveFile(stagedMedia.path, targetPath);
 
@@ -1342,7 +1393,9 @@ for video) to keep a complete backup.
       String status = dt.status;
 
       if (dt.fileName != null) {
-        final fullPath = p.normalize(p.join(discovered.folderPath, dt.fileName!));
+        final fullPath = p.normalize(
+          p.join(discovered.folderPath, dt.fileName!),
+        );
         if (await File(fullPath).exists()) {
           filePath = fullPath;
           status = 'complete';
@@ -1368,9 +1421,12 @@ for video) to keep a complete backup.
       ));
     }
 
-    // Sidecars from older versions can repeat an index. The entry whose file
-    // carries that number keeps it (otherwise the first one); the others are
-    // appended, matching the database repair rule.
+    // Sidecars from older versions can repeat an index, sometimes with two
+    // entries pointing at one file (a track that adopted another's file).
+    // The likely owner keeps the number, as in the database repair: the
+    // entry whose file carries the number, then the one that got its file
+    // first, then the one whose title matches the file name, then the
+    // first listed. The others are appended.
     bool ownsNumber(int i) {
       final path = rows[i].filePath;
       if (path == null) return false;
@@ -1378,14 +1434,51 @@ for video) to keep a complete backup.
       return match != null && int.tryParse(match[1]!) == rows[i].track.index;
     }
 
+    int compareOwnership(int a, int b) {
+      final aOwns = ownsNumber(a), bOwns = ownsNumber(b);
+      if (aOwns != bOwns) return aOwns ? -1 : 1;
+      final aAt = rows[a].track.downloadedAt;
+      final bAt = rows[b].track.downloadedAt;
+      if (aAt != bAt) {
+        if (aAt == null) return 1;
+        if (bAt == null) return -1;
+        final byTime = aAt.compareTo(bAt);
+        if (byTime != 0) return byTime;
+      }
+      final aPath = rows[a].filePath, bPath = rows[b].filePath;
+      final aTitle =
+          aPath != null && titleMatchesFileName(rows[a].track.title, aPath);
+      final bTitle =
+          bPath != null && titleMatchesFileName(rows[b].track.title, bPath);
+      if (aTitle != bTitle) return aTitle ? -1 : 1;
+      return a.compareTo(b);
+    }
+
     final holderOf = <int, int>{};
     for (var i = 0; i < rows.length; i++) {
       final index = rows[i].track.index;
       if (index <= 0) continue;
       final holder = holderOf[index];
-      if (holder == null || (!ownsNumber(holder) && ownsNumber(i))) {
+      if (holder == null || compareOwnership(i, holder) < 0) {
         holderOf[index] = i;
       }
+    }
+
+    // One file never belongs to two tracks: the entry that keeps its number
+    // keeps a shared file; any other entry downloads its own copy again.
+    final filePaths = [for (final row in rows) row.filePath];
+    final statuses = [for (final row in rows) row.status];
+    bool isHolder(int i) => holderOf[rows[i].track.index] == i;
+    final byOwnership = List<int>.generate(rows.length, (i) => i)..sort((a, b) {
+      if (isHolder(a) != isHolder(b)) return isHolder(a) ? -1 : 1;
+      return compareOwnership(a, b);
+    });
+    final claimedFiles = <String>{};
+    for (final i in byOwnership) {
+      final path = filePaths[i];
+      if (path == null || claimedFiles.add(p.normalize(path))) continue;
+      filePaths[i] = null;
+      if (statuses[i] == 'complete') statuses[i] = 'pending';
     }
     var maxIndex = rows.fold<int>(
       0,
@@ -1394,9 +1487,7 @@ for video) to keep a complete backup.
     final indices = <int>[];
     for (var i = 0; i < rows.length; i++) {
       final index = rows[i].track.index;
-      indices.add(
-        index > 0 && holderOf[index] == i ? index : ++maxIndex,
-      );
+      indices.add(index > 0 && holderOf[index] == i ? index : ++maxIndex);
     }
 
     final playlistThumbnail = await _resolveImportedImage(
@@ -1431,7 +1522,7 @@ for video) to keep a complete backup.
       for (var i = 0; i < rows.length; i++) {
         final row = rows[i];
         final dt = row.track;
-        final complete = row.status == 'complete';
+        final complete = statuses[i] == 'complete';
         tracks.add(
           TracksCompanion.insert(
             playlistId: playlistId,
@@ -1441,13 +1532,13 @@ for video) to keep a complete backup.
             thumbnailUrl: Value(dt.thumbnailUrl),
             thumbnailPath: Value(row.thumbnailPath),
             durationSeconds: Value(dt.durationSeconds),
-            status: Value(row.status),
+            status: Value(statuses[i]),
             unavailableReason: Value(dt.unavailableReason),
             isLocalReplacement: Value(dt.isLocalReplacement),
             alwaysSkip: Value(dt.alwaysSkip),
             chaptersJson: Value(dt.chaptersJson),
             chaptersEnabled: Value(dt.chaptersEnabled),
-            filePath: Value(row.filePath),
+            filePath: Value(filePaths[i]),
             downloadedAt: Value(
               complete ? (dt.downloadedAt ?? DateTime.now()) : null,
             ),

@@ -6,79 +6,18 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/services/download_service.dart';
+import 'package:woolytube/services/library_layout.dart';
 import 'package:woolytube/services/log_service.dart';
 import 'package:woolytube/services/metadata_service.dart';
-import 'package:woolytube/services/media_thumbnail_service.dart';
 import 'package:woolytube/services/playlist_service.dart';
-import 'package:woolytube/services/ytdlp_service.dart';
 
+import '../helpers/fakes.dart';
 import '../helpers/test_database.dart';
-
-class FakeYtDlpService extends YtDlpService {
-  Map<String, dynamic> playlistInfo = {'entries': <dynamic>[]};
-  final requestedPlaylistUrls = <String>[];
-
-  @override
-  Future<Map<String, dynamic>> getPlaylistInfo(String url) async {
-    requestedPlaylistUrls.add(url);
-    return playlistInfo;
-  }
-
-  @override
-  Stream<Map<String, dynamic>> get progressStream =>
-      const Stream<Map<String, dynamic>>.empty();
-
-  /// Succeeds without producing a file, like a download whose merge failed.
-  @override
-  Future<void> download({
-    required String url,
-    required String outputPath,
-    String? formatOption,
-    bool audioOnly = false,
-    bool embedThumbnail = true,
-    bool downloadSubtitles = false,
-    String subtitleLanguages = 'en',
-    String? outputTemplate,
-  }) async {}
-
-  @override
-  Future<void> startDownloadService(String playlistName) async {}
-
-  @override
-  Future<void> updateDownloadServiceProgress({
-    required String playlistName,
-    required int currentTrack,
-    required int totalTracks,
-    required int progress,
-  }) async {}
-
-  @override
-  Future<void> stopDownloadService() async {}
-}
-
-class FakeMediaThumbnailService extends MediaThumbnailService {
-  bool hasEmbeddedThumbnail = false;
-  final requestedMediaPaths = <String>[];
-
-  @override
-  Future<String?> extractEmbeddedThumbnail({
-    required String mediaPath,
-    required String playlistPath,
-    required int trackId,
-  }) async {
-    requestedMediaPaths.add(mediaPath);
-    if (!hasEmbeddedThumbnail) return null;
-    final directory = Directory(p.join(playlistPath, '.woolytube_thumbnails'));
-    await directory.create(recursive: true);
-    final thumbnail = File(p.join(directory.path, 'track_$trackId.jpg'));
-    await thumbnail.writeAsBytes(const [0xff, 0xd8, 0xff, 0xd9]);
-    return thumbnail.path;
-  }
-}
 
 void main() {
   late AppDatabase db;
   late Directory tempDir;
+  late String folder;
   late FakeYtDlpService ytdlp;
   late FakeMediaThumbnailService thumbnails;
   late PlaylistService service;
@@ -86,6 +25,9 @@ void main() {
   setUp(() async {
     db = openTestDatabase();
     tempDir = await Directory.systemTemp.createTemp('woolytube_playlist_test_');
+    // Writing metadata also puts a README into the folder above.
+    folder = p.join(tempDir.path, 'Playlist');
+    await Directory(folder).create();
     ytdlp = FakeYtDlpService();
     thumbnails = FakeMediaThumbnailService();
     service = PlaylistService(db, ytdlp, MetadataService(db), thumbnails);
@@ -99,7 +41,7 @@ void main() {
   });
 
   test('populates tracks and marks unavailable entries', () async {
-    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    final playlist = await insertTestPlaylist(db, outputPath: folder);
 
     await service.populateTracksFromInfo(playlist.id, {
       'entries': [
@@ -131,10 +73,7 @@ void main() {
     expect(tracks[1].durationSeconds, 42);
     expect(tracks[2].status, 'unavailable');
     expect(tracks[2].unavailableReason, 'deleted');
-    expect(
-      await File(p.join(tempDir.path, 'woolytube_meta.json')).exists(),
-      isTrue,
-    );
+    expect(await File(p.join(folder, 'woolytube_meta.json')).exists(), isTrue);
   });
 
   test(
@@ -143,12 +82,12 @@ void main() {
       final playlist = await insertTestPlaylist(
         db,
         url: 'https://www.youtube.com/playlist?list=sync',
-        outputPath: tempDir.path,
+        outputPath: folder,
       );
 
-      final downloadedGonePath = p.join(tempDir.path, '00004_Downloaded.mp4');
-      final replacementPath = p.join(tempDir.path, '00006_Replacement.m4a');
-      final completeIndexPath = p.join(tempDir.path, '00007_Complete.mp4');
+      final downloadedGonePath = p.join(folder, '00004_Downloaded.mp4');
+      final replacementPath = p.join(folder, '00006_Replacement.m4a');
+      final completeIndexPath = p.join(folder, '00007_Complete.mp4');
       await File(downloadedGonePath).writeAsString('video');
       await File(replacementPath).writeAsString('audio');
       await File(completeIndexPath).writeAsString('video');
@@ -315,7 +254,7 @@ void main() {
       expect(byVideoId['new-private']!.index, 11);
       expect(tracks.map((track) => track.index).toSet(), hasLength(11));
       expect(
-        await File(p.join(tempDir.path, 'woolytube_meta.json')).exists(),
+        await File(p.join(folder, 'woolytube_meta.json')).exists(),
         isTrue,
       );
     },
@@ -395,9 +334,14 @@ void main() {
       expect(metadataTracks.map((track) => track['index']), [1, 2, 3]);
       expect(metadataTracks[1]['videoId'], inserted.videoId);
       expect(metadataTracks[1]['fileName'], '00002_Lost Video.mp4');
+      // Covers are named by video id (a local file gets `.local`), so the
+      // name survives a reinstall and import.
       expect(
         metadataTracks[1]['thumbnailFileName'],
-        p.join('.woolytube_thumbnails', 'track_${inserted.id}.jpg'),
+        p.join(
+          '.woolytube_thumbnails',
+          '${LibraryLayout.safeId(inserted.videoId)}.local.jpg',
+        ),
       );
     },
   );
@@ -434,12 +378,49 @@ void main() {
     expect(await File(updated.thumbnailPath!).exists(), isTrue);
   });
 
+  test('a local replacement keeps the previous file aside', () async {
+    final playlist = await insertTestPlaylist(db, outputPath: folder);
+    final oldPath = p.join(folder, '00001_Downloaded.mp4');
+    await File(oldPath).writeAsString('downloaded');
+    final track = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      filePath: oldPath,
+      status: 'complete',
+    );
+    final source = File(p.join(tempDir.path, 'Better copy.mp4'));
+    await source.writeAsString('better');
+
+    final updated = await service.replaceWithLocalFile(
+      trackId: track.id,
+      sourcePath: source.path,
+      sourceFileName: 'Better copy.mp4',
+    );
+
+    expect(updated.filePath, p.join(folder, '00001_Better copy.mp4'));
+    expect(await File(updated.filePath!).readAsString(), 'better');
+    expect(await File(oldPath).exists(), isFalse);
+    expect(
+      await File(
+        p.join(folder, '.woolytube_replaced', '00001_Downloaded.mp4'),
+      ).readAsString(),
+      'downloaded',
+    );
+    // The picked file is copied, never moved.
+    expect(await source.readAsString(), 'better');
+    // No working copy is left behind.
+    expect(
+      await Directory(p.join(folder, '.woolytube-staging')).list().isEmpty,
+      isTrue,
+    );
+  });
+
   test(
     'backfills embedded artwork for an existing local replacement',
     () async {
       thumbnails.hasEmbeddedThumbnail = true;
-      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
-      final media = File(p.join(tempDir.path, '00001_Existing.mp3'));
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final media = File(p.join(folder, '00001_Existing.mp3'));
       await media.writeAsString('audio');
       final track = await insertTestTrack(
         db,
@@ -655,6 +636,8 @@ void main() {
       expect(byVideoId['later']!.id, later.id);
 
       // The pending ex-#51 must not inherit #50's file on the next update.
+      // yt-dlp "succeeds" without a file, like a download whose merge failed.
+      ytdlp.createOutputFile = false;
       final log = LogService();
       final downloads = DownloadService(
         db,
@@ -665,6 +648,9 @@ void main() {
         null,
         null,
         DownloadLock(directoryProvider: () async => tempDir.path),
+        DownloadLock.foregroundOwner,
+        null,
+        thumbnails,
       );
       addTearDown(() {
         downloads.dispose();
@@ -679,47 +665,37 @@ void main() {
     },
   );
 
-  test(
-    'new remote entries are appended after the highest local index',
-    () async {
-      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
-      await insertTestTrack(
-        db,
-        playlistId: playlist.id,
-        index: 3,
-        videoId: 'a',
-      );
-      await insertTestTrack(
-        db,
-        playlistId: playlist.id,
-        index: 7,
-        videoId: 'b',
-      );
-      ytdlp.playlistInfo = {
-        'entries': [
-          {'id': 'a', 'playlist_index': 1, 'title': 'A'},
-          {'id': 'new-1', 'playlist_index': 2, 'title': 'New 1'},
-          {'id': 'b', 'playlist_index': 3, 'title': 'B'},
-          {'id': 'new-2', 'playlist_index': 4, 'title': 'New 2'},
-        ],
-      };
+  // Updated (owner decision 2026-11-05): new entries go where they are on
+  // YouTube, after their nearest predecessor the app already has, instead of
+  // being appended. Here the gap before b absorbs new-1, so b keeps 7.
+  test('new remote entries go after their YouTube predecessor', () async {
+    final playlist = await insertTestPlaylist(db, outputPath: folder);
+    await insertTestTrack(db, playlistId: playlist.id, index: 3, videoId: 'a');
+    await insertTestTrack(db, playlistId: playlist.id, index: 7, videoId: 'b');
+    ytdlp.playlistInfo = {
+      'entries': [
+        {'id': 'a', 'playlist_index': 1, 'title': 'A'},
+        {'id': 'new-1', 'playlist_index': 2, 'title': 'New 1'},
+        {'id': 'b', 'playlist_index': 3, 'title': 'B'},
+        {'id': 'new-2', 'playlist_index': 4, 'title': 'New 2'},
+      ],
+    };
 
-      final result = await service.syncPlaylist(playlist);
+    final result = await service.syncPlaylist(playlist);
 
-      expect(result.added, 2);
-      final byVideoId = {
-        for (final track in await db.getTracksForPlaylist(playlist.id))
-          track.videoId: track,
-      };
-      expect(byVideoId['a']!.index, 3);
-      expect(byVideoId['b']!.index, 7);
-      expect(byVideoId['new-1']!.index, 8);
-      expect(byVideoId['new-2']!.index, 9);
-    },
-  );
+    expect(result.added, 2);
+    final byVideoId = {
+      for (final track in await db.getTracksForPlaylist(playlist.id))
+        track.videoId: track,
+    };
+    expect(byVideoId['a']!.index, 3);
+    expect(byVideoId['new-1']!.index, 4);
+    expect(byVideoId['b']!.index, 7);
+    expect(byVideoId['new-2']!.index, 8);
+  });
 
   test('duplicate remote video IDs are stored once', () async {
-    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    final playlist = await insertTestPlaylist(db, outputPath: folder);
     await insertTestTrack(db, playlistId: playlist.id, index: 1, videoId: 'x');
     ytdlp.playlistInfo = {
       'entries': [
@@ -742,7 +718,7 @@ void main() {
   test(
     'a fresh playlist keeps remote numbering but never repeats it',
     () async {
-      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
 
       await service.populateTracksFromInfo(playlist.id, {
         'entries': [
@@ -762,7 +738,7 @@ void main() {
   test(
     'an empty remote response fails instead of removing everything',
     () async {
-      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
       final track = await insertTestTrack(db, playlistId: playlist.id);
       ytdlp.playlistInfo = {'entries': <dynamic>[]};
 
@@ -776,7 +752,7 @@ void main() {
       final empty = await insertTestPlaylist(
         db,
         url: 'https://www.youtube.com/playlist?list=empty',
-        outputPath: tempDir.path,
+        outputPath: folder,
       );
       expect((await service.syncPlaylist(empty)).hasChanges, isFalse);
     },
@@ -785,7 +761,7 @@ void main() {
   test('concurrent settings updates do not overwrite each other', () async {
     final playlist = await insertTestPlaylist(
       db,
-      outputPath: tempDir.path,
+      outputPath: folder,
       lastUpdated: DateTime.utc(2024, 5, 6),
     );
 

@@ -455,83 +455,49 @@ void main() {
     );
   });
 
+  // Updated: the repair now keeps the row that owns the file instead of the
+  // lowest id, so the appended rows follow that order too.
   test('upgrading from schema 10 repairs duplicate indices before adding the '
       'unique index', () async {
-    final migrated = AppDatabase.forTesting(
-      NativeDatabase.memory(
-        setup: (raw) {
-          for (final statement in _schemaV10) {
-            raw.execute(statement);
-          }
-          raw.execute(
-            "INSERT INTO playlists (id, url, name, created_at, output_path) "
-            "VALUES (1, 'https://example.com/list', 'List', 0, '/tmp/list')",
-          );
-          void track(
-            int id,
-            int index,
-            String videoId,
-            String status,
-            String? filePath, {
-            bool localReplacement = false,
-          }) {
-            raw.execute(
-              'INSERT INTO tracks (id, playlist_id, "index", video_id, '
-              'title, status, file_path, thumbnail_path, downloaded_at, '
-              'is_local_replacement) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?)',
-              [
-                id,
-                index,
-                videoId,
-                videoId,
-                status,
-                filePath,
-                filePath == null ? null : '/tmp/list/thumb_$id.jpg',
-                filePath == null ? null : 1700000000,
-                localReplacement ? 1 : 0,
-              ],
-            );
-          }
-
-          track(10, 5, 'kept', 'complete', '/tmp/list/00005_Kept.mp4');
-          track(
-            11,
-            5,
-            'shared-file',
-            'complete',
-            '/tmp/list/00005_Kept.mp4',
-            localReplacement: true,
-          );
-          track(12, 5, 'own-file', 'complete', '/tmp/list/00005_Own.mp4');
-          track(13, 9, 'max', 'pending', null);
-          track(14, 2, 'dup2a', 'pending', null);
-          track(15, 2, 'dup2b', 'pending', null);
-          raw.execute('PRAGMA user_version = 10');
-        },
+    final migrated = _openSchema10([
+      _v10Track(10, 5, 'kept', 'complete', '/tmp/list/00005_Kept.mp4'),
+      _v10Track(
+        11,
+        5,
+        'shared-file',
+        'complete',
+        '/tmp/list/00005_Kept.mp4',
+        localReplacement: true,
       ),
-    );
+      _v10Track(12, 5, 'own-file', 'complete', '/tmp/list/00005_Own.mp4'),
+      _v10Track(13, 9, 'max', 'pending', null),
+      _v10Track(14, 2, 'dup2a', 'pending', null),
+      _v10Track(15, 2, 'dup2b', 'pending', null),
+    ]);
     addTearDown(migrated.close);
 
     final tracks = await migrated.getTracksForPlaylist(1);
     final byVideoId = {for (final track in tracks) track.videoId: track};
     expect(tracks.map((track) => track.index).toSet(), hasLength(6));
-    // Lowest id keeps the contested index; the rest are appended after the
-    // playlist's previous maximum in (index, id) order.
+    // Without any sign of ownership the lowest id keeps the index.
     expect(byVideoId['dup2a']!.index, 2);
     expect(byVideoId['dup2b']!.index, 10);
+    // 'kept' and 'own-file' are named like their files, 'shared-file' is
+    // not: it is appended last and gives up the file it shares.
     expect(byVideoId['kept']!.index, 5);
     expect(byVideoId['kept']!.status, 'complete');
     expect(byVideoId['kept']!.filePath, '/tmp/list/00005_Kept.mp4');
-    expect(byVideoId['shared-file']!.index, 11);
+    expect(byVideoId['own-file']!.index, 11);
+    expect(byVideoId['own-file']!.status, 'complete');
+    expect(byVideoId['own-file']!.filePath, '/tmp/list/00005_Own.mp4');
+    expect(byVideoId['shared-file']!.index, 12);
     expect(byVideoId['shared-file']!.status, 'pending');
     expect(byVideoId['shared-file']!.filePath, isNull);
     expect(byVideoId['shared-file']!.thumbnailPath, isNull);
     expect(byVideoId['shared-file']!.downloadedAt, isNull);
     expect(byVideoId['shared-file']!.isLocalReplacement, isFalse);
-    expect(byVideoId['own-file']!.index, 12);
-    expect(byVideoId['own-file']!.status, 'complete');
-    expect(byVideoId['own-file']!.filePath, '/tmp/list/00005_Own.mp4');
     expect(byVideoId['max']!.index, 9);
+    expect(tracks.every((track) => !track.replaceRequested), isTrue);
 
     final indexes =
         await migrated
@@ -549,7 +515,138 @@ void main() {
       throwsA(isA<Exception>()),
     );
   });
+
+  test('the duplicate-index repair keeps the row that got the shared file '
+      'first', () async {
+    // v1.3.0 moved a failing track onto a downloaded track's number and
+    // the next run let it adopt that file. The adopter has the lower id but
+    // was stamped later.
+    final migrated = _openSchema10([
+      _v10Track(
+        20,
+        41,
+        'adopter',
+        'complete',
+        '/tmp/list/00041_Song.m4a',
+        title: 'Adopter',
+        downloadedAt: 1700005000,
+      ),
+      _v10Track(
+        21,
+        41,
+        'owner',
+        'complete',
+        '/tmp/list/00041_Song.m4a',
+        title: 'Owner',
+        downloadedAt: 1700000000,
+      ),
+      _v10Track(22, 50, 'max', 'pending', null),
+    ]);
+    addTearDown(migrated.close);
+
+    final byVideoId = {
+      for (final track in await migrated.getTracksForPlaylist(1))
+        track.videoId: track,
+    };
+    expect(byVideoId['owner']!.index, 41);
+    expect(byVideoId['owner']!.status, 'complete');
+    expect(byVideoId['owner']!.filePath, '/tmp/list/00041_Song.m4a');
+    expect(byVideoId['adopter']!.index, 51);
+    expect(byVideoId['adopter']!.status, 'pending');
+    expect(byVideoId['adopter']!.filePath, isNull);
+    expect(byVideoId['adopter']!.downloadedAt, isNull);
+    expect(byVideoId['adopter']!.thumbnailPath, isNull);
+  });
+
+  test('the duplicate-index repair lets the title decide a tie', () async {
+    final migrated = _openSchema10([
+      _v10Track(
+        30,
+        3,
+        'other',
+        'complete',
+        '/tmp/list/00003_Real Song.m4a',
+        title: 'Other Song',
+      ),
+      _v10Track(
+        31,
+        3,
+        'real',
+        'complete',
+        '/tmp/list/00003_Real Song.m4a',
+        title: 'Real Song',
+      ),
+    ]);
+    addTearDown(migrated.close);
+
+    final byVideoId = {
+      for (final track in await migrated.getTracksForPlaylist(1))
+        track.videoId: track,
+    };
+    expect(byVideoId['real']!.index, 3);
+    expect(byVideoId['real']!.filePath, '/tmp/list/00003_Real Song.m4a');
+    expect(byVideoId['other']!.index, 4);
+    expect(byVideoId['other']!.status, 'pending');
+    expect(byVideoId['other']!.filePath, isNull);
+  });
+
+  test('matches titles with the file names they produced', () {
+    expect(titleMatchesFileName('Café Olé', '/x/00001_Cafe Ole.m4a'), isTrue);
+    expect(titleMatchesFileName('Real Song', '/x/00003_Real Song.m4a'), isTrue);
+    expect(
+      titleMatchesFileName('Other Song', '/x/00003_Real Song.m4a'),
+      isFalse,
+    );
+  });
 }
+
+/// A track row in the schema-10 table.
+typedef _V10Row = List<Object?>;
+
+_V10Row _v10Track(
+  int id,
+  int index,
+  String videoId,
+  String status,
+  String? filePath, {
+  String? title,
+  bool localReplacement = false,
+  int downloadedAt = 1700000000,
+}) => [
+  id,
+  index,
+  videoId,
+  title ?? videoId,
+  status,
+  filePath,
+  filePath == null ? null : '/tmp/list/thumb_$id.jpg',
+  filePath == null ? null : downloadedAt,
+  localReplacement ? 1 : 0,
+];
+
+/// A database as an app with schema 10 left it, opened by the current app.
+AppDatabase _openSchema10(List<_V10Row> tracks) => AppDatabase.forTesting(
+  NativeDatabase.memory(
+    setup: (raw) {
+      for (final statement in _schemaV10) {
+        raw.execute(statement);
+      }
+      raw.execute(
+        "INSERT INTO playlists (id, url, name, created_at, output_path) "
+        "VALUES (1, 'https://example.com/list', 'List', 0, '/tmp/list')",
+      );
+      for (final row in tracks) {
+        raw.execute(
+          'INSERT INTO tracks (id, playlist_id, "index", video_id, '
+          'title, status, file_path, thumbnail_path, downloaded_at, '
+          'is_local_replacement) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?)',
+          row,
+        );
+      }
+      raw.execute('PRAGMA user_version = 10');
+    },
+  ),
+);
 
 /// The on-device schema as created by app versions up to schema 10.
 final _schemaV10 = [
