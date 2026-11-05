@@ -424,7 +424,12 @@ class PlaylistService {
   /// fetch problem than a playlist that was really emptied.
   Future<SyncResult> syncPlaylist(Playlist playlist) async {
     final info = await _ytdlp.getPlaylistInfo(playlist.url);
-    return _gate.run('playlist update', () => _applySync(playlist, info));
+    // Re-read inside the gate: the caller's copy may predate a format
+    // switch, and the sync renames files in the current folder.
+    return _gate.run(
+      'playlist update',
+      () async => _applySync(await _db.getPlaylist(playlist.id), info),
+    );
   }
 
   Future<SyncResult> _applySync(

@@ -16,8 +16,9 @@ import '../providers/providers.dart';
 import '../providers/playback_providers.dart';
 import '../services/download_errors.dart';
 import '../services/download_service.dart';
-import '../services/metadata_service.dart';
+import '../services/library_gate.dart';
 import '../services/media_thumbnail_service.dart';
+import '../services/playlist_service.dart';
 import '../services/sponsorblock_service.dart';
 import '../widgets/tap_to_place_cursor_text_field.dart';
 import '../widgets/mobile_data_download_guard.dart';
@@ -64,16 +65,18 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     final playlist = await db.getPlaylist(widget.playlistId);
     await ref.read(metadataServiceProvider).reconcilePlaylist(playlist);
     if (mounted) setState(() => _playlist = playlist);
-    unawaited(_backfillLocalThumbnails(playlist.id));
+    unawaited(_backfillThumbnails(playlist));
   }
 
-  Future<void> _backfillLocalThumbnails(int playlistId) async {
+  /// Saves a cover file for every downloaded track that has none yet (from
+  /// the art inside the file, or the image cache), so covers show offline.
+  Future<void> _backfillThumbnails(Playlist playlist) async {
     try {
-      await ref
-          .read(playlistServiceProvider)
-          .backfillLocalThumbnails(playlistId);
+      final backfill = ref.read(thumbnailBackfillServiceProvider);
+      await backfill.ensureTrackThumbnails(playlist);
+      await backfill.ensurePlaylistCover(playlist);
     } catch (_) {
-      // Embedded artwork is optional and should never block the playlist UI.
+      // Artwork is optional and should never block the playlist UI.
     }
   }
 
@@ -814,6 +817,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     // Read every provider before the first await: `ref` is unusable once the
     // page is disposed, and the download must start even then.
     final downloadService = ref.read(downloadServiceProvider);
+    final playlistService = ref.read(playlistServiceProvider);
     final db = ref.read(databaseProvider);
     if (downloadService.isDownloading) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -821,6 +825,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
       );
       return;
     }
+    if (explainDownloadsUnavailable(context, ref)) return;
 
     if (!await confirmManualDownload(
       context,
@@ -833,87 +838,27 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     setState(() => _isUpdating = true);
 
     try {
-      final playlistService = ref.read(playlistServiceProvider);
-      final result = await playlistService.syncPlaylist(playlist);
-
-      if (result.hasChanges && mounted) {
-        final parts = <String>[];
-        if (result.added > 0) parts.add('${result.added} new');
-        if (result.markedUnavailable > 0) {
-          parts.add('${result.markedUnavailable} unavailable');
-        }
-        if (result.removed > 0) parts.add('${result.removed} removed');
-        if (result.markedAvailable > 0) {
-          parts.add('${result.markedAvailable} restored');
-        }
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Synced: ${parts.join(', ')}')));
+      final freshPlaylist = await syncAndDownloadPlaylist(
+        context: context,
+        playlist: playlist,
+        playlists: playlistService,
+        downloads: downloadService,
+        db: db,
+      );
+      if (freshPlaylist != null && mounted) {
+        setState(() => _playlist = freshPlaylist);
       }
-
-      if (result.hasConflicts && mounted) {
-        await _showReplacementConflicts(result.replacementConflicts);
-      }
-
-      final freshPlaylist = await db.getPlaylist(widget.playlistId);
-      // The download is a service-level operation: start it even if this
-      // page was closed while the sync ran.
-      unawaited(downloadService.downloadPlaylist(freshPlaylist));
-      if (!mounted) return;
-      setState(() => _playlist = freshPlaylist);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Update failed: ${friendlyDownloadError('$e')}'),
+          content: Text(
+            'Update failed: ${friendlyDownloadError(_errorText(e))}',
+          ),
         ),
       );
     } finally {
       if (mounted) setState(() => _isUpdating = false);
-    }
-  }
-
-  Future<void> _showReplacementConflicts(List<Track> conflicts) async {
-    final playlistService = ref.read(playlistServiceProvider);
-    for (final track in conflicts) {
-      if (!mounted) return;
-      final decision = await showDialog<String>(
-        context: context,
-        barrierDismissible: false,
-        builder:
-            (ctx) => AlertDialog(
-              backgroundColor: const Color(0xFF2A2A2A),
-              title: const Text(
-                'Video Available Again',
-                style: TextStyle(color: Colors.white),
-              ),
-              content: Text(
-                '"${track.title}" is available on YouTube again.\n\n'
-                'You have a local replacement file. '
-                'Would you like to keep it or download the original?',
-                style: const TextStyle(color: Color(0xFFCCCCCC)),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx, 'keep'),
-                  child: const Text('Keep Replacement'),
-                ),
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx, 'download'),
-                  child: const Text('Download Original'),
-                ),
-              ],
-            ),
-      );
-      if (decision == 'download') {
-        // Delete the replacement so the fresh download is not re-adopted by
-        // its index prefix, and drop segments that belonged to its timeline.
-        await playlistService.resetTrackForRedownload(
-          track,
-          deleteFile: true,
-          clearSegments: true,
-        );
-      }
     }
   }
 
@@ -1442,7 +1387,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                               style: TextStyle(color: Colors.white),
                             ),
                             subtitle: const Text(
-                              'Clear local state and download from YouTube',
+                              'Download a fresh copy from YouTube',
                               style: TextStyle(color: Color(0xFF888888)),
                             ),
                             onTap: () async {
@@ -1531,6 +1476,42 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
       return;
     }
 
+    final currentPath = track.filePath;
+    var explanation = '"${picked.name}" becomes the file of "${track.title}".';
+    if (currentPath != null && File(currentPath).existsSync()) {
+      explanation +=
+          "\n\nThe current file is not deleted: it is kept in this playlist's "
+          'replaced-files folder (.woolytube_replaced).';
+    }
+    if (!mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder:
+          (ctx) => AlertDialog(
+            backgroundColor: const Color(0xFF2A2A2A),
+            title: const Text(
+              'Use this file?',
+              style: TextStyle(color: Colors.white),
+            ),
+            content: Text(
+              explanation,
+              style: const TextStyle(color: Color(0xFFCCCCCC)),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                key: const ValueKey('local-replacement-confirm'),
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Replace'),
+              ),
+            ],
+          ),
+    );
+    if (confirmed != true || !mounted) return;
+
     try {
       final updated = await ref
           .read(playlistServiceProvider)
@@ -1546,11 +1527,17 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
           ),
         );
       }
-    } catch (e) {
+    } on LibraryBusyException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(SnackBar(content: Text('Copy failed: $e')));
+        ).showSnackBar(SnackBar(content: Text(e.message)));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Replacement failed: ${_errorText(e)}')),
+        );
       }
     }
   }
@@ -2048,70 +2035,38 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
           ),
     );
 
-    if (saved != true) return;
+    if (saved != true || !mounted) return;
 
-    final db = ref.read(databaseProvider);
-    final newTitle = titleController.text.trim();
     final newFilename = filenameController.text.trim();
-
-    var titleChanged = false;
-    var fileChanged = false;
-    String? newPath;
-
-    if (newTitle.isNotEmpty && newTitle != track.title) {
-      titleChanged = true;
-    }
-
-    if (hasFile && newFilename.isNotEmpty && newFilename != nameWithoutPrefix) {
-      final ext = p.extension(currentFile.path);
-      final prefixMatch = RegExp(
-        r'^(\d+_)',
-      ).firstMatch(p.basename(currentFile.path));
-      final prefix = prefixMatch?.group(1) ?? '';
-      final sanitized = MetadataService.sanitizeFilename(newFilename);
-      final newName = '$prefix$sanitized$ext';
-      newPath = p.join(p.dirname(currentFile.path), newName);
-      if (newPath != currentFile.path) {
-        if (File(newPath).existsSync()) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('A file with that name already exists'),
-              ),
-            );
-          }
-          return;
-        }
-        try {
-          await currentFile.rename(newPath);
-          fileChanged = true;
-        } catch (e) {
-          if (mounted) {
-            ScaffoldMessenger.of(
-              context,
-            ).showSnackBar(SnackBar(content: Text('Rename failed: $e')));
-          }
-          return;
-        }
-      }
-    }
-
-    if (titleChanged || fileChanged) {
-      await db.updateTrackFields(
-        track.id,
-        title: titleChanged ? newTitle : null,
-        filePath: fileChanged ? newPath : null,
-      );
+    String message;
+    try {
+      // The service renames inside the library gate, so a running download
+      // or update cannot attach the file to the wrong track meanwhile.
+      final changed = await ref
+          .read(playlistServiceProvider)
+          .overrideTrack(
+            trackId: track.id,
+            title: titleController.text,
+            // An untouched field must not rename a file whose name the
+            // sanitizer would spell differently.
+            fileName:
+                hasFile && newFilename != nameWithoutPrefix
+                    ? newFilename
+                    : null,
+          );
+      message = changed ? 'Override saved' : 'No changes';
+    } on LibraryBusyException catch (e) {
+      message = e.message;
+    } on StateError catch (e) {
+      message = e.message;
+    } catch (e) {
+      message = 'Rename failed: $e';
     }
 
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            titleChanged || fileChanged ? 'Override saved' : 'No changes',
-          ),
-        ),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
     }
   }
 
@@ -2189,22 +2144,26 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     );
   }
 
-  Future<void> _startTrackDownload(
-    Track track, {
-    bool deleteExistingFile = false,
-  }) async {
-    if (_playlist == null) return;
+  /// Downloads one track now. For a downloaded track this fetches a fresh
+  /// copy; the service replaces the current file only once the new one is
+  /// complete, so a failed download changes nothing.
+  Future<void> _startTrackDownload(Track track) async {
+    final playlist = _playlist;
+    if (playlist == null) return;
 
     final downloadService = ref.read(downloadServiceProvider);
-    final playlistService = ref.read(playlistServiceProvider);
+    void showBusy() {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('A download is already in progress')),
+      );
+    }
+
     if (downloadService.isDownloading) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('A download is already in progress')),
-        );
-      }
+      showBusy();
       return;
     }
+    if (explainDownloadsUnavailable(context, ref)) return;
 
     if (!await confirmManualDownload(
       context,
@@ -2212,23 +2171,14 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     )) {
       return;
     }
-
-    if (deleteExistingFile) {
-      // Let the service remove the file and reset the row together, so the
-      // track never stays "complete" while pointing at a deleted file.
-      try {
-        await playlistService.resetTrackForRedownload(track, deleteFile: true);
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text('Delete failed: $e')));
-        }
-        return;
-      }
+    // downloadTrack ignores a call while another download runs, which
+    // could have started during the dialog above.
+    if (downloadService.isDownloading) {
+      showBusy();
+      return;
     }
 
-    final playlist = _playlist!;
+    final hadFile = track.status == 'complete' && track.filePath != null;
     if (mounted) {
       ScaffoldMessenger.of(
         context,
@@ -2247,12 +2197,15 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
             },
             onError: (Object e, StackTrace _) {
               // The service throws the recorded yt-dlp reason itself.
-              final raw = '$e';
+              final reason = friendlyDownloadError(_errorText(e));
               if (!mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(
                   content: Text(
-                    'Download failed: ${friendlyDownloadError(raw)}',
+                    hadFile
+                        ? 'Could not download a new copy of "${track.title}"; '
+                            'the current file was kept. $reason'
+                        : 'Download failed: $reason',
                   ),
                 ),
               );
@@ -2262,6 +2215,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   }
 
   Future<void> _redownloadTrack(Track track) async {
+    final hasFile = track.status == 'complete' && track.filePath != null;
     final confirmed = await showDialog<bool>(
       context: context,
       builder:
@@ -2272,8 +2226,12 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
               style: TextStyle(color: Colors.white),
             ),
             content: Text(
-              '"${track.title}" will be downloaded again from YouTube. '
-              'The current file will be deleted first.',
+              hasFile
+                  ? 'A fresh copy of "${track.title}" is downloaded from '
+                      'YouTube. The current file is replaced only once the '
+                      'new one has finished downloading. If the download '
+                      'fails, nothing changes.'
+                  : '"${track.title}" will be downloaded from YouTube.',
               style: const TextStyle(color: Color(0xFFCCCCCC)),
             ),
             actions: [
@@ -2289,6 +2247,147 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
           ),
     );
     if (confirmed != true || !mounted) return;
-    await _startTrackDownload(track, deleteExistingFile: true);
+    await _startTrackDownload(track);
+  }
+}
+
+/// The message of an error meant for the owner, without Dart's "Bad state:"
+/// prefix.
+String _errorText(Object error) =>
+    error is StateError ? error.message : '$error';
+
+/// Shows why nothing can be downloaded when yt-dlp failed to start, and
+/// returns whether that is the case.
+bool explainDownloadsUnavailable(BuildContext context, WidgetRef ref) {
+  final reason = ref.read(ytDlpInitErrorProvider);
+  if (reason == null) return false;
+  ScaffoldMessenger.of(
+    context,
+  ).showSnackBar(SnackBar(content: Text('Downloads are unavailable: $reason')));
+  return true;
+}
+
+/// Refreshes [playlist] from YouTube, then starts downloading its new and
+/// failed tracks and the replacements asked for.
+///
+/// When the refresh fails (no network, or the playlist was made private,
+/// deleted or emptied on YouTube) the tracks already known are downloaded
+/// anyway. Nothing starts while another library change is running. Returns
+/// the playlist as the download got it, or null when nothing was started.
+/// Shared by the home and playlist pages.
+Future<Playlist?> syncAndDownloadPlaylist({
+  required BuildContext context,
+  required Playlist playlist,
+  required PlaylistService playlists,
+  required DownloadService downloads,
+  required AppDatabase db,
+}) async {
+  void show(String message) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  // The caller's row may predate a rename or a format switch, and the sync
+  // renames files inside the playlist's current folder.
+  final current = await db.getPlaylist(playlist.id);
+  SyncResult? result;
+  try {
+    result = await playlists.syncPlaylist(current);
+  } on LibraryBusyException catch (e) {
+    show(e.message);
+    return null;
+  } catch (e) {
+    show(
+      "Couldn't refresh the playlist from YouTube; downloading the tracks "
+      'already known.\n${friendlyDownloadError(_errorText(e))}',
+    );
+  }
+
+  if (result != null && result.hasChanges) {
+    final parts = <String>[];
+    if (result.added > 0) parts.add('${result.added} new');
+    if (result.markedUnavailable > 0) {
+      parts.add('${result.markedUnavailable} unavailable');
+    }
+    if (result.removed > 0) parts.add('${result.removed} removed');
+    if (result.markedAvailable > 0) {
+      parts.add('${result.markedAvailable} restored');
+    }
+    show('Synced: ${parts.join(', ')}');
+  }
+  if (result != null && result.hasConflicts && context.mounted) {
+    // Asked before the download starts, so the originals requested here
+    // are downloaded by this same run.
+    await _resolveReplacementConflicts(
+      context,
+      playlists,
+      result.replacementConflicts,
+    );
+  }
+
+  final fresh = await db.getPlaylist(playlist.id);
+  // A service-level operation: it runs on even if the page was closed.
+  unawaited(downloads.downloadPlaylist(fresh, sourceChecked: result != null));
+  return fresh;
+}
+
+/// Asks, for each local file whose YouTube video is back, whether to keep it
+/// or get the original. A requested original is downloaded by the next
+/// download run of the playlist.
+Future<void> _resolveReplacementConflicts(
+  BuildContext context,
+  PlaylistService playlists,
+  List<Track> conflicts,
+) async {
+  for (final track in conflicts) {
+    if (!context.mounted) return;
+    final decision = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder:
+          (ctx) => AlertDialog(
+            backgroundColor: const Color(0xFF2A2A2A),
+            title: const Text(
+              'Video Available Again',
+              style: TextStyle(color: Colors.white),
+            ),
+            content: Text(
+              '"${track.title}" is available on YouTube again. You are using '
+              'a local file for it.\n\n'
+              'Download Original: the YouTube version downloads with this '
+              'update and replaces your file only once it has finished. Your '
+              "file is kept in the playlist's replaced-files folder "
+              "(.woolytube_replaced). If YouTube can't provide the original, "
+              'your file stays.',
+              style: const TextStyle(color: Color(0xFFCCCCCC)),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, 'keep'),
+                child: const Text('Keep Replacement'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, 'download'),
+                child: const Text('Download Original'),
+              ),
+            ],
+          ),
+    );
+    if (decision != 'download') continue;
+    try {
+      await playlists.requestOriginalDownload(track);
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Could not ask for the original of "${track.title}": '
+            '${_errorText(e)}',
+          ),
+        ),
+      );
+    }
   }
 }

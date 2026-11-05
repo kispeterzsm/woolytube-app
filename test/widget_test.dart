@@ -148,6 +148,59 @@ void main() {
     expect(find.text('Audio focus was denied'), findsOneWidget);
   });
 
+  testWidgets('home explains when yt-dlp could not start', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    var inits = 0;
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          initProvider.overrideWith((ref) async {
+            inits++;
+            return true;
+          }),
+          ytDlpInitErrorProvider.overrideWith((ref) => 'No space left'),
+          updateServiceProvider.overrideWithValue(_Updates()),
+          playlistsProvider.overrideWith(
+            (ref) => Stream.value(const <Playlist>[]),
+          ),
+          allTracksProvider.overrideWith(
+            (ref) => Stream.value(const <Track>[]),
+          ),
+          downloadProgressProvider.overrideWith(
+            (ref) => const Stream<DownloadProgress>.empty(),
+          ),
+          playbackMessagesProvider.overrideWith(
+            (ref) => const Stream<String>.empty(),
+          ),
+          currentTrackProvider.overrideWith(
+            (ref) => Stream<Track?>.value(null),
+          ),
+          isInPictureInPictureProvider.overrideWith(
+            (ref) => Stream.value(false),
+          ),
+        ],
+        child: const WoolyTubeApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The library still opens; only downloads are affected.
+    expect(find.text('No playlists yet'), findsOneWidget);
+    expect(
+      find.text('Downloads are unavailable: No space left'),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Retry'));
+    await tester.pumpAndSettle();
+    expect(inits, 2);
+
+    await tester.tap(find.byTooltip('Dismiss'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Downloads are unavailable'), findsNothing);
+  });
+
   group('isVersionNewer', () {
     test('detects newer patch, minor, and major versions', () {
       expect(isVersionNewer('1.0.1', '1.0.0'), isTrue);

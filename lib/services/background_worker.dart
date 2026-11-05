@@ -77,9 +77,11 @@ void backgroundMain() async {
       );
 
       for (final playlist in duePlaylists) {
+        var synced = true;
         try {
           await playlistService.syncPlaylist(playlist);
         } catch (e) {
+          synced = false;
           // The playlist may have become private or been deleted on YouTube.
           // Tracks already known can often still be downloaded one by one,
           // so carry on with them.
@@ -88,7 +90,10 @@ void backgroundMain() async {
         try {
           // Re-fetch after sync since tracks may have changed
           final freshPlaylist = await db.getPlaylist(playlist.id);
-          await downloadService.downloadPlaylist(freshPlaylist);
+          await downloadService.downloadPlaylist(
+            freshPlaylist,
+            sourceChecked: synced,
+          );
         } catch (_) {
           // Continue with next playlist
         }

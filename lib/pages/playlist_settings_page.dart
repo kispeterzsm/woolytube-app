@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../database/database.dart';
 import '../providers/providers.dart';
 import '../services/download_errors.dart';
+import '../services/library_gate.dart';
 import '../services/playlist_service.dart';
 import '../services/sponsorblock_categories.dart';
 import '../services/sponsorblock_service.dart';
@@ -139,31 +140,40 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
       );
       if (!mounted) return;
       Navigator.of(context).pop();
+    } on LibraryBusyException catch (e) {
+      // A format switch moves files, so it waits for downloads and updates.
+      if (!mounted) return;
+      setState(() => _saving = false);
+      _showMessage(e.message);
     } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
-      _showMessage('Could not save settings: $e');
+      _showMessage('Could not save settings: ${_errorText(e)}');
     }
   }
 
   Future<void> _setAudioOnly(bool value) async {
     final playlist = _playlist;
-    if (value && playlist != null && !playlist.audioOnly) {
+    // Ask only when moving away from the saved format; switching back to it
+    // just undoes the change.
+    if (playlist != null && value != playlist.audioOnly) {
+      final format = value ? 'audio' : 'video';
       final confirmed = await showDialog<bool>(
         context: context,
         builder:
             (ctx) => AlertDialog(
               backgroundColor: const Color(0xFF2A2A2A),
-              title: const Text(
-                'Switch to audio only?',
-                style: TextStyle(color: Colors.white),
+              title: Text(
+                value ? 'Switch to audio only?' : 'Switch to video?',
+                style: const TextStyle(color: Colors.white),
               ),
-              content: const Text(
-                'Audio-only downloads are stored in a separate folder, so '
-                'every track in this playlist will be downloaded again on '
-                'the next update. The existing video files stay where they '
-                'are.',
-                style: TextStyle(color: Color(0xFFCCCCCC)),
+              content: Text(
+                'When you save, this playlist moves to a new $format folder. '
+                'Tracks YouTube can no longer provide, and local files, move '
+                'along with their current file. Every other track keeps '
+                'playing its current file until its $format version has '
+                'downloaded on the next update. No file is deleted.',
+                style: const TextStyle(color: Color(0xFFCCCCCC)),
               ),
               actions: [
                 TextButton(
@@ -203,7 +213,9 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
                       Text(
                         deleteFiles
                             ? 'This removes the playlist from the app and '
-                                'deletes its downloaded files from storage.'
+                                'deletes its downloaded files, including '
+                                'older copies kept after replacing a file. '
+                                'Anything else in its folder is kept.'
                             : 'This removes the playlist from the app. '
                                 'Downloaded files are kept on the device.',
                         style: const TextStyle(color: Color(0xFF888888)),
@@ -252,10 +264,15 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
       // The detail page underneath refers to a playlist that no longer
       // exists, so return all the way to the home page.
       Navigator.of(context).popUntil((route) => route.isFirst);
+    } on LibraryBusyException catch (e) {
+      // Deleting files waits for downloads and updates to finish.
+      if (!mounted) return;
+      setState(() => _deleting = false);
+      _showMessage(e.message);
     } catch (e) {
       if (!mounted) return;
       setState(() => _deleting = false);
-      _showMessage('Could not delete playlist: $e');
+      _showMessage('Could not delete playlist: ${_errorText(e)}');
     }
   }
 
@@ -376,6 +393,8 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
         _showMessage('Inserted "${inserted.title}" at #$index.');
       }
     } on ForceInsertException catch (error) {
+      if (mounted) _showMessage(error.message);
+    } on LibraryBusyException catch (error) {
       if (mounted) _showMessage(error.message);
     } catch (error) {
       if (mounted) _showMessage('Could not insert the selected file: $error');
@@ -641,6 +660,11 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
     );
   }
 }
+
+/// The message of an error meant for the owner, without Dart's "Bad state:"
+/// prefix.
+String _errorText(Object error) =>
+    error is StateError ? error.message : '$error';
 
 String playlistForceInsertDescription(bool audioOnly) {
   final kind = audioOnly ? 'audio' : 'video';

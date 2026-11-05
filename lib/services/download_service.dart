@@ -222,7 +222,14 @@ class DownloadService {
   /// files of tracks whose replacement was requested (a mode switch, or the
   /// original of a local replacement). An existing file is only replaced
   /// after its successor is completely on disk.
-  Future<void> downloadPlaylist(Playlist playlist) async {
+  ///
+  /// Pass [sourceChecked] false when the playlist could not be read from
+  /// YouTube first: the run then does not count as an update, so the next
+  /// scheduled check still happens on time.
+  Future<void> downloadPlaylist(
+    Playlist playlist, {
+    bool sourceChecked = true,
+  }) async {
     if (_isDownloading) return;
     _isDownloading = true;
     _cancelRequested = false;
@@ -289,7 +296,7 @@ class DownloadService {
         // A successful check with no pending work still starts the next
         // auto-update interval. Without this, an unchanged playlist remains
         // overdue and gets checked on every background-worker run.
-        await _markPlaylistUpdated(playlist);
+        if (sourceChecked) await _markPlaylistUpdated(playlist);
         await _backfillMissingSponsorBlockSegments(playlist);
         await _writeMetadataForPlaylist(playlist.id);
         _emit(
@@ -358,7 +365,7 @@ class DownloadService {
           'All $failedCount downloads failed; '
           'not stamping "${playlist.name}" as updated',
         );
-      } else {
+      } else if (sourceChecked) {
         await _markPlaylistUpdated(playlist);
       }
 
@@ -413,7 +420,10 @@ class DownloadService {
   /// a downloaded one. A downloaded file is replaced only once the new copy
   /// is complete; if the download fails the old file stays as it was.
   Future<void> downloadTrack(Playlist playlist, Track track) async {
-    if (_isDownloading) return;
+    // A caller must never report success for a download that never ran.
+    if (_isDownloading) {
+      throw StateError('A download is already in progress.');
+    }
     _isDownloading = true;
     _cancelRequested = false;
     _activePlaylist = playlist;
@@ -654,10 +664,24 @@ class DownloadService {
       await _db.updateTrackStatus(track.id, 'downloading');
     }
 
-    final staging = await _metadata.prepareStagingDir(
-      playlist.outputPath,
-      track.id,
-    );
+    final Directory staging;
+    try {
+      staging = await _metadata.prepareStagingDir(
+        playlist.outputPath,
+        track.id,
+      );
+    } catch (e) {
+      _activeTrackId = null;
+      _activeTrackIsReplacement = false;
+      return _recordFailure(
+        track: track,
+        playlist: playlist,
+        replaceExisting: replaceExisting,
+        trackLabel: trackLabel,
+        errorMsg:
+            'Could not prepare the download folder: ${_cleanErrorMessage(e)}',
+      );
+    }
     final outputTemplate =
         '${escapeOutputTemplateLiteral(staging.path)}/'
         '${indexStr}_%(title).${titleByteLimit}B.%(ext)s';

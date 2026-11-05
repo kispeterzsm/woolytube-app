@@ -15,6 +15,9 @@ import '../services/media_thumbnail_service.dart';
 import '../services/app_settings_service.dart';
 import '../services/download_network_policy.dart';
 import '../services/library_gate.dart';
+import '../services/sidecar_mirror.dart';
+import '../services/library_export_service.dart';
+import '../services/thumbnail_backfill_service.dart';
 
 final chapterServiceProvider = Provider<ChapterService>(
   (ref) => ChapterService(
@@ -54,10 +57,7 @@ final pendingImportsProvider = StateProvider<List<DiscoveredPlaylist>>(
 /// force insert, replacement, renames, format switch, deletion), also
 /// against the background worker.
 final libraryGateProvider = Provider<LibraryGate>((ref) {
-  return LibraryGate(
-    lock: DownloadLock(),
-    owner: DownloadLock.foregroundOwner,
-  );
+  return LibraryGate(lock: DownloadLock(), owner: DownloadLock.foregroundOwner);
 });
 
 /// Why yt-dlp could not start, or null when it is ready. The library and
@@ -122,6 +122,42 @@ final downloadServiceProvider = Provider<DownloadService>((ref) {
   return service;
 });
 
+/// Saves offline covers for tracks and playlists that only had a YouTube
+/// image URL.
+final thumbnailBackfillServiceProvider = Provider<ThumbnailBackfillService>((
+  ref,
+) {
+  return ThumbnailBackfillService(
+    ref.watch(databaseProvider),
+    ref.watch(metadataServiceProvider),
+    ref.watch(mediaThumbnailServiceProvider),
+    ref.watch(logServiceProvider),
+  );
+});
+
+/// Rewrites each playlist folder's metadata file and playlist file shortly
+/// after any change in the database, so no edit is lost on a reinstall.
+final sidecarMirrorProvider = Provider<SidecarMirror>((ref) {
+  final mirror = SidecarMirror(
+    ref.watch(databaseProvider),
+    ref.watch(metadataServiceProvider),
+    ref.watch(libraryGateProvider),
+    log: ref.watch(logServiceProvider),
+  );
+  ref.onDispose(mirror.dispose);
+  return mirror;
+});
+
+final libraryExportServiceProvider = Provider<LibraryExportService>((ref) {
+  return LibraryExportService(
+    ref.watch(databaseProvider),
+    ref.watch(metadataServiceProvider),
+    ref.watch(thumbnailBackfillServiceProvider),
+    ref.watch(appSettingsServiceProvider),
+    ref.watch(logServiceProvider),
+  );
+});
+
 /// Minimum spacing between yt-dlp self-update attempts.
 const ytDlpUpdateInterval = Duration(hours: 24);
 
@@ -165,6 +201,27 @@ Future<void> _maybeUpdateYtDlp(Ref ref, LogService log) async {
     log.info('yt-dlp updated to latest');
   } catch (e) {
     log.warn('yt-dlp update failed: $e');
+  }
+}
+
+/// Gives the existing library offline covers. Runs in the background after
+/// startup; covers are downloaded only when automatic network use is allowed.
+Future<void> _backfillThumbnails(Ref ref, LogService log) async {
+  try {
+    final networkPolicy = ref.read(downloadNetworkPolicyProvider);
+    final backfill = ref.read(thumbnailBackfillServiceProvider);
+    // Let the library open first; this is not urgent.
+    await Future<void>.delayed(const Duration(seconds: 5));
+    var allowNetwork = false;
+    try {
+      allowNetwork = await networkPolicy.allowsAutomaticNetworkUse();
+    } catch (e) {
+      log.warn('thumbnail backfill: network check failed: $e');
+    }
+    final added = await backfill.backfillAll(allowNetwork: allowNetwork);
+    if (added > 0) log.info('thumbnail backfill: saved $added covers');
+  } catch (e) {
+    log.warn('thumbnail backfill failed: $e');
   }
 }
 
@@ -216,7 +273,8 @@ final initProvider = FutureProvider<bool>((ref) async {
           .read(libraryGateProvider)
           .run(
             'startup check',
-            () => ref.read(metadataServiceProvider).recoverInterruptedDownloads(),
+            () =>
+                ref.read(metadataServiceProvider).recoverInterruptedDownloads(),
           );
       if (repaired > 0) {
         log.info('init: recovered $repaired interrupted download files/states');
@@ -232,20 +290,30 @@ final initProvider = FutureProvider<bool>((ref) async {
   log.info('init: recovery ${sw.elapsedMilliseconds}ms');
 
   // Scan for importable playlists from previous installation
-  if (storageGranted) try {
-    final metadata = ref.watch(metadataServiceProvider);
-    final dismissed =
-        await ref.watch(appSettingsServiceProvider).getDismissedImportUrls();
-    final unimported = await metadata.findUnimportedPlaylists(
-      excludeUrls: dismissed,
-    );
-    if (unimported.isNotEmpty) {
-      ref.read(pendingImportsProvider.notifier).state = unimported;
+  if (storageGranted) {
+    try {
+      final metadata = ref.watch(metadataServiceProvider);
+      final dismissed =
+          await ref.watch(appSettingsServiceProvider).getDismissedImportUrls();
+      final unimported = await metadata.findUnimportedPlaylists(
+        excludeUrls: dismissed,
+      );
+      if (unimported.isNotEmpty) {
+        ref.read(pendingImportsProvider.notifier).state = unimported;
+      }
+    } catch (_) {
+      // Non-critical — don't block app startup
     }
-  } catch (_) {
-    // Non-critical — don't block app startup
   }
   log.info('init: scan ${sw.elapsedMilliseconds}ms');
+
+  // Offline covers for older downloads. Never blocks startup; without
+  // storage access the files cannot be read or written.
+  if (storageGranted) {
+    unawaited(_backfillThumbnails(ref, log));
+    // From now on every edit reaches the playlist folders' metadata files.
+    ref.read(sidecarMirrorProvider).start();
+  }
 
   log.info('init: total ${sw.elapsedMilliseconds}ms');
   return true;

@@ -119,6 +119,15 @@ class AppSettingsService {
     );
   }
 
+  /// Every stored setting by key, for the library backup. Values are JSON
+  /// types (bool, int, double, String, list of String).
+  Future<Map<String, Object?>> exportSettings() async {
+    final preferences = await _preferencesLoader();
+    await preferences.reload();
+    final keys = preferences.getKeys().toList()..sort();
+    return {for (final key in keys) key: preferences.get(key)};
+  }
+
   Future<void> scheduleAutoUpdate() async {
     final allowMobileData = await getAutoDownloadWithMobileData();
     try {

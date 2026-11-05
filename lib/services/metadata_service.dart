@@ -1157,7 +1157,19 @@ for video) to keep a complete backup.
 
     if (oldExists && !replacesOldInPlace && !oldMovedAside) {
       try {
-        if (fresh.isLocalReplacement) {
+        // Older versions could point two tracks at one file; never remove
+        // a file another track still uses.
+        final sharedWithOther = (await _db.getTracksForPlaylist(
+          playlist.id,
+        )).any(
+          (t) =>
+              t.id != trackId &&
+              t.filePath != null &&
+              p.equals(p.normalize(t.filePath!), p.normalize(oldPath)),
+        );
+        if (sharedWithOther) {
+          // Leave it to the track that also uses it.
+        } else if (fresh.isLocalReplacement) {
           await moveAside(folder, oldPath);
         } else if (p.equals(p.dirname(oldPath), folder)) {
           await File(oldPath).delete();
