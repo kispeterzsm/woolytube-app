@@ -768,8 +768,9 @@ for video) to keep a complete backup.
       }
       final match = _indexPrefixPattern.firstMatch(name);
       final index = match == null ? null : int.tryParse(match[1]!);
-      if (index != null)
+      if (index != null) {
         files.add(_CandidateFile(index: index, path: entity.path));
+      }
     }
     return _pickCandidate(files, track, claimed);
   }
@@ -1115,10 +1116,11 @@ for video) to keep a complete backup.
       for (final f in media)
         if (!isTransientFile(p.basename(f.path))) f,
     ];
-    if (finished.isNotEmpty)
+    if (finished.isNotEmpty) {
       media
         ..clear()
         ..addAll(finished);
+    }
     if (media.length == 1) return media.single;
     const preferred = ['.m4a', '.mp4', '.mkv'];
     media.sort((a, b) {
