@@ -261,17 +261,11 @@ class PlaylistService {
     Map<String, dynamic> playlistInfo,
   ) => _gate.run('playlist update', () async {
     final entries = playlistInfo['entries'] as List<dynamic>? ?? [];
-    final existingTracks = await _db.getTracksForPlaylist(playlistId);
-    final tracks = _newTrackCompanions(
-      playlistId: playlistId,
+    await _insertNewEntries(
+      playlist: await _db.getPlaylist(playlistId),
       entries: entries,
-      existingTracks: existingTracks,
+      existingTracks: await _db.getTracksForPlaylist(playlistId),
     );
-
-    if (tracks.isNotEmpty) {
-      await _db.insertTracks(tracks);
-    }
-
     await _writeMetadata(playlistId);
   });
 
@@ -513,18 +507,15 @@ class PlaylistService {
       }
     }
 
-    final newTracks = _newTrackCompanions(
-      playlistId: playlist.id,
+    final added = await _insertNewEntries(
+      playlist: playlist,
       entries: freshEntries,
-      existingTracks: existingTracks,
+      existingTracks: await _db.getTracksForPlaylist(playlist.id),
     );
-    if (newTracks.isNotEmpty) {
-      await _db.insertTracks(newTracks);
-    }
 
     await _writeMetadata(playlist.id);
     return SyncResult(
-      added: newTracks.length,
+      added: added,
       markedUnavailable: markedUnavailable,
       markedAvailable: markedAvailable,
       removed: removed,
@@ -547,52 +538,208 @@ class PlaylistService {
     return byVideoId;
   }
 
-  /// Builds rows for remote entries that are not in [existingTracks] yet.
+  TracksCompanion _companionFor(
+    int playlistId,
+    int index,
+    Map<String, dynamic> entry,
+  ) {
+    final reason = _detectUnavailability(entry);
+    return TracksCompanion.insert(
+      playlistId: playlistId,
+      index: index,
+      videoId: entry['id'] as String,
+      title: entry['title'] as String? ?? 'Unknown',
+      thumbnailUrl: Value(entry['thumbnail'] as String?),
+      durationSeconds: Value(entry['duration'] as int?),
+      status: Value(reason != null ? 'unavailable' : 'pending'),
+      unavailableReason: Value(reason),
+    );
+  }
+
+  /// Adds the remote entries that are not in [existingTracks] yet, each at
+  /// the place the owner put it on YouTube, and returns how many were added.
   ///
-  /// A playlist without tracks keeps YouTube's own numbering so a fresh add
-  /// matches the remote order. Otherwise new tracks are appended after the
-  /// current maximum index; no two rows ever share an index.
-  List<TracksCompanion> _newTrackCompanions({
-    required int playlistId,
+  /// A playlist without tracks takes YouTube's own numbering. Otherwise each
+  /// new entry goes right after the nearest entry before it on YouTube that
+  /// is already in the app (or right before the first one, when it was added
+  /// at the top). Existing tracks never change their order relative to each
+  /// other: remote reorders are not mirrored, and tracks YouTube no longer
+  /// lists keep their place. A track only moves to a higher number when a
+  /// new entry needs its number; its file is renamed to match.
+  Future<int> _insertNewEntries({
+    required Playlist playlist,
     required List<dynamic> entries,
     required List<Track> existingTracks,
-  }) {
-    final existingVideoIds = existingTracks.map((t) => t.videoId).toSet();
-    final usedIndices = existingTracks.map((t) => t.index).toSet();
-    var maxIndex = usedIndices.fold<int>(0, (max, i) => i > max ? i : max);
-    final appendOnly = existingTracks.isNotEmpty;
-    final seenVideoIds = <String>{};
-    final companions = <TracksCompanion>[];
-
-    for (var i = 0; i < entries.length; i++) {
-      final entry = entries[i] as Map<String, dynamic>;
+  }) async {
+    final remote = <Map<String, dynamic>>[];
+    final seen = <String>{};
+    for (final raw in entries) {
+      final entry = raw as Map<String, dynamic>;
       final vid = entry['id'] as String? ?? '';
-      if (vid.isEmpty || !seenVideoIds.add(vid)) continue;
-      if (existingVideoIds.contains(vid)) continue;
-
-      var playlistIndex =
-          appendOnly
-              ? maxIndex + 1
-              : entry['playlist_index'] as int? ?? (i + 1);
-      if (usedIndices.contains(playlistIndex)) playlistIndex = maxIndex + 1;
-      usedIndices.add(playlistIndex);
-      if (playlistIndex > maxIndex) maxIndex = playlistIndex;
-
-      final reason = _detectUnavailability(entry);
-      companions.add(
-        TracksCompanion.insert(
-          playlistId: playlistId,
-          index: playlistIndex,
-          videoId: vid,
-          title: entry['title'] as String? ?? 'Unknown',
-          thumbnailUrl: Value(entry['thumbnail'] as String?),
-          durationSeconds: Value(entry['duration'] as int?),
-          status: Value(reason != null ? 'unavailable' : 'pending'),
-          unavailableReason: Value(reason),
-        ),
-      );
+      if (vid.isEmpty || !seen.add(vid)) continue;
+      remote.add(entry);
     }
-    return companions;
+
+    if (existingTracks.isEmpty) {
+      final used = <int>{};
+      var maxIndex = 0;
+      final rows = <TracksCompanion>[];
+      for (var i = 0; i < remote.length; i++) {
+        var index = remote[i]['playlist_index'] as int? ?? (i + 1);
+        if (index <= 0 || used.contains(index)) index = maxIndex + 1;
+        used.add(index);
+        if (index > maxIndex) maxIndex = index;
+        rows.add(_companionFor(playlist.id, index, remote[i]));
+      }
+      if (rows.isNotEmpty) await _db.insertTracks(rows);
+      return rows.length;
+    }
+
+    final plan = planPlacement(
+      existingTracks: existingTracks,
+      remoteVideoIds: [for (final e in remote) e['id'] as String],
+    );
+    if (plan.newIndexByVideoId.isEmpty) return 0;
+
+    final entryById = {for (final e in remote) e['id'] as String: e};
+    await _applyRenumbering(
+      playlist: playlist,
+      tracks: existingTracks,
+      newIndexByTrackId: plan.movedIndexByTrackId,
+      newTrackCount: existingTracks.length + plan.newIndexByVideoId.length,
+      inserts: [
+        for (final entry in plan.newIndexByVideoId.entries)
+          _companionFor(playlist.id, entry.value, entryById[entry.key]!),
+      ],
+    );
+    return plan.newIndexByVideoId.length;
+  }
+
+  /// Works out the order after adding the remote entries that are new.
+  ///
+  /// Returns the index of every new video and the new index of every
+  /// existing track that has to move up to make room. Indices only grow and
+  /// stay unique; existing tracks keep their relative order.
+  static ({
+    Map<String, int> newIndexByVideoId,
+    Map<int, int> movedIndexByTrackId,
+  })
+  planPlacement({
+    required List<Track> existingTracks,
+    required List<String> remoteVideoIds,
+  }) {
+    final ordered = [...existingTracks]
+      ..sort((a, b) => a.index.compareTo(b.index));
+    // The local order, as track ids (existing) or video ids (new).
+    final slots = <Object>[for (final t in ordered) t.id];
+    final videoOfTrack = {for (final t in ordered) t.id: t.videoId};
+    final positionOfVideo = <String, int>{};
+    void reindex() {
+      positionOfVideo.clear();
+      for (var i = 0; i < slots.length; i++) {
+        final slot = slots[i];
+        positionOfVideo[slot is int ? videoOfTrack[slot]! : slot as String] =
+            i;
+      }
+    }
+
+    reindex();
+    final existingIds = {for (final t in ordered) t.videoId};
+    final newIds = <String>{};
+    int? cursor;
+    for (var i = 0; i < remoteVideoIds.length; i++) {
+      final vid = remoteVideoIds[i];
+      if (existingIds.contains(vid) || newIds.contains(vid)) {
+        cursor = positionOfVideo[vid];
+        continue;
+      }
+      int insertAt;
+      if (cursor != null) {
+        insertAt = cursor + 1;
+      } else {
+        // Added above everything the app has: go right before the first
+        // later entry the app already has, or at the end if there is none.
+        insertAt = slots.length;
+        for (var j = i + 1; j < remoteVideoIds.length; j++) {
+          final next = remoteVideoIds[j];
+          if (existingIds.contains(next)) {
+            insertAt = positionOfVideo[next]!;
+            break;
+          }
+        }
+      }
+      slots.insert(insertAt, vid);
+      newIds.add(vid);
+      reindex();
+      cursor = insertAt;
+    }
+
+    final byId = {for (final t in ordered) t.id: t};
+    final newIndexByVideoId = <String, int>{};
+    final moved = <int, int>{};
+    var last = 0;
+    for (final slot in slots) {
+      if (slot is int) {
+        final track = byId[slot]!;
+        final index = track.index > last ? track.index : last + 1;
+        if (index != track.index) moved[track.id] = index;
+        last = index;
+      } else {
+        last = last + 1;
+        newIndexByVideoId[slot as String] = last;
+      }
+    }
+    return (newIndexByVideoId: newIndexByVideoId, movedIndexByTrackId: moved);
+  }
+
+  /// Moves existing tracks to new (higher) indices, renaming their files to
+  /// the new number, then inserts [inserts].
+  ///
+  /// Crash safety matches [forceInsert]: files are renamed from the highest
+  /// index down, each straight to its final name, with the track's recorded
+  /// path updated just before its file moves. Indices change in one
+  /// transaction at the end. If the app dies part-way, every track still
+  /// finds its file, the next repair puts the names back in line with the
+  /// unchanged indices, and the next update simply tries again.
+  Future<void> _applyRenumbering({
+    required Playlist playlist,
+    required List<Track> tracks,
+    required Map<int, int> newIndexByTrackId,
+    required int newTrackCount,
+    required List<TracksCompanion> inserts,
+  }) async {
+    final folder = playlist.outputPath;
+    final moving =
+        tracks.where((t) => newIndexByTrackId.containsKey(t.id)).toList()
+          ..sort((a, b) => b.index.compareTo(a.index));
+    final prefixPattern = RegExp(r'^\d+_');
+    for (final track in moving) {
+      final path = track.filePath;
+      if (path == null || !p.equals(p.dirname(path), folder)) continue;
+      if (!await File(path).exists()) continue;
+      final rest = p.basename(path).replaceFirst(prefixPattern, '');
+      final target = p.join(
+        folder,
+        '${MetadataService.paddedIndex(newIndexByTrackId[track.id]!, newTrackCount)}_$rest',
+      );
+      if (p.equals(path, target) || await File(target).exists()) continue;
+      await _db.updateTrackFields(track.id, filePath: target);
+      try {
+        await File(path).rename(target);
+      } catch (_) {
+        await _db.updateTrackFields(track.id, filePath: path);
+      }
+    }
+
+    await _db.transaction(() async {
+      for (final track in moving) {
+        await _db.updateTrackPlacement(
+          track.id,
+          index: newIndexByTrackId[track.id]!,
+        );
+      }
+      if (inserts.isNotEmpty) await _db.insertTracks(inserts);
+    });
   }
 
   /// Removes the playlist and its tracks from the database.

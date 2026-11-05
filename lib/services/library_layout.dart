@@ -10,8 +10,28 @@ import 'package:path/path.dart' as p;
 class LibraryLayout {
   LibraryLayout._();
 
-  static const audioBasePath = '/storage/emulated/0/Music/WoolyTube';
-  static const videoBasePath = '/storage/emulated/0/Movies/WoolyTube';
+  static const defaultAudioBasePath = '/storage/emulated/0/Music/WoolyTube';
+  static const defaultVideoBasePath = '/storage/emulated/0/Movies/WoolyTube';
+
+  static String _audioBasePath = defaultAudioBasePath;
+  static String _videoBasePath = defaultVideoBasePath;
+
+  static String get audioBasePath => _audioBasePath;
+  static String get videoBasePath => _videoBasePath;
+
+  /// Points the library at other folders. Tests only.
+  static void overrideBasePathsForTesting({
+    required String audio,
+    required String video,
+  }) {
+    _audioBasePath = audio;
+    _videoBasePath = video;
+  }
+
+  static void resetBasePathsForTesting() {
+    _audioBasePath = defaultAudioBasePath;
+    _videoBasePath = defaultVideoBasePath;
+  }
 
   /// Cover art the app shows offline, one file per track plus the playlist
   /// cover. Named by video id so the names survive a reinstall and import.
@@ -77,7 +97,7 @@ class LibraryLayout {
   /// level down (a playlist folder). Guards every recursive operation.
   static bool isPlaylistFolder(String path) {
     final normalized = p.normalize(p.absolute(path));
-    for (final base in const [audioBasePath, videoBasePath]) {
+    for (final base in [audioBasePath, videoBasePath]) {
       if (p.equals(p.dirname(normalized), base) &&
           !p.equals(normalized, base)) {
         return true;

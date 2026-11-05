@@ -504,7 +504,7 @@ for video) to keep a complete backup.
   /// Scans public WoolyTube folders for playlist metadata files.
   Future<List<DiscoveredPlaylist>> scanForPlaylists() async {
     final discovered = <DiscoveredPlaylist>[];
-    for (final scanPath in const [
+    for (final scanPath in [
       LibraryLayout.audioBasePath,
       LibraryLayout.videoBasePath,
     ]) {
