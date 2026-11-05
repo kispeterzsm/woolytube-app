@@ -1,0 +1,745 @@
+[
+ {
+  "id": "F01",
+  "title": "Playlist folders are named only from the title and files are matched only by index prefix, so re-adding a playlist or adding one with a colliding name overwrites the old sidecar and attaches other videos' files to tracks",
+  "goal": "multiple",
+  "severity": "critical",
+  "kind": "bug",
+  "locations": [
+   "lib/services/playlist_service.dart:109-117",
+   "lib/services/playlist_service.dart:144-161",
+   "lib/services/playlist_service.dart:394-397",
+   "lib/services/playlist_service.dart:192-201",
+   "lib/services/playlist_service.dart:424-435",
+   "lib/services/playlist_service.dart:702-708",
+   "lib/services/playlist_service.dart:873-875",
+   "lib/services/download_service.dart:530-567",
+   "lib/services/metadata_service.dart:266-275",
+   "lib/services/metadata_service.dart:433-466",
+   "lib/services/metadata_service.dart:562-578",
+   "lib/pages/add_playlist_page.dart:67-72",
+   "lib/pages/add_playlist_page.dart:128-147",
+   "lib/pages/home_page.dart:819-829"
+  ],
+  "scenario": "Main path (re-add): 1. Playlist 'Chill' was added months ago. Its append-only local order is 1 A, 2 B, 3 C, 4 D, 5 E, 6 X (X was inserted between A and B on YouTube, so the app appended it). C was later deleted from YouTube; only 00003_C.m4a remains. 2. The owner deletes the playlist in the app with 'Also delete downloaded files' unticked (the default). The rows are gone; the folder keeps 00001_A..00006_X plus woolytube_meta.json; the URL goes on the dismissed-imports list, so the import banner never offers it again and no UI can un-dismiss it. (Same state after a reinstall if the owner taps Dismiss on the banner, or simply adds playlists by URL instead of importing.) 3. The owner adds the same URL again. addPlaylist computes the same folder, Directory.create succeeds silently and the URL is un-dismissed. YouTube's order is now A, X, B, D, E. populateTracksFromInfo numbers a fresh playlist by YouTube's playlist_index (A=1, X=2, B=3, D=4, E=5) and immediately writes woolytube_meta.json, overwriting the only record of the old order, of C, and of its chapters, segment edits, local replacements and forced inserts. 4. downloadPlaylist reuses files by prefix: X (#2) is marked complete with 00002_B.m4a, B (#3) with 00003_C.m4a (the deleted video's audio), and so on. Nothing is downloaded and nothing warns; SponsorBlock segments for the new videoIds are applied to the wrong audio; 00006_X.m4a is orphaned and C disappears from the app. Those tracks were never really downloaded, so if their videos vanish later they are lost. 5. A later Redownload on a mislabeled track deletes another song's only copy; 'Replace with local file' deletes whatever file the prefix lookup returns first. Other ways to reach the same shared-folder state: (a) two different YouTube playlists with the same title, titles that sanitize the same ('AC/DC' vs 'AC_DC', 'A:B' vs 'A?B'), or 'Chill'/'chill' on case-insensitive shared storage: the second adopts the first's 00001..N files and never downloads its own songs, the two sidecars overwrite each other so only one survives a reinstall, and 'Delete playlist + Also delete downloaded files' on either one recursively deletes both libraries; (b) a playlist renamed in the app (its folder keeps the old name) followed by a new playlist with the old name; (c) a mode switch into a folder that a same-named playlist of the other mode already uses (reconcile re-points complete tracks to that playlist's files the next time the page opens); (d) the same URL added twice, which nothing prevents (see F22 for the import-scan breakage this causes).",
+  "evidence": "playlist_service.dart:113-117: `final sanitizedName = _sanitizeFolderName(name); final outputPath = '$basePath/$sanitizedName'; await Directory(outputPath).create(recursive: true); await _settings?.removeDismissedImportUrl(url);` with no check for an existing folder, sidecar, DB playlist or URL; add_playlist_page.dart _canAdd only checks fetch state. _sanitizeFolderName (873-875) only replaces <>:\"/\\|?* and trims; case is not normalised. _newTrackCompanions (394-397): `appendOnly ? maxIndex + 1 : entry['playlist_index'] as int? ?? (i + 1)`, and appendOnly is false for a new playlist. populateTracksFromInfo ends with `await _writeMetadata(playlistId);` (160); _writeMetadataNow renames its tmp file over woolytube_meta.json unconditionally (metadata_service.dart:266-275). download_service.dart:533-543: `final existingFile = MetadataService.resolveMediaFile(playlist.outputPath, '${indexStr}_'); if (existingFile != null) { await _db.updateTrackStatus(track.id, 'complete', filePath: existingFile, isLocalReplacement: false); ... refreshTrackSegments(...)`. resolveMediaFile returns the first `fileName.startsWith(indexPrefix)` match in listSync order (metadata_service.dart:566-575). File names carry no video id (template `<idx>_%(title)s.%(ext)s`) and info.json is deleted after use. reconcilePlaylist adopts `filesByPrefix[indexPrefix]` for pending/error/unavailable rows (441-447) and even overrides a valid recorded path when `track.filePath != fileOnDisk` (460-464). deletePlaylist: `final dir = Directory(playlist.outputPath); if (await dir.exists()) await dir.delete(recursive: true);` (427-431) then `addDismissedImportUrls([playlist.url])` (433). home_page.dart:819-829 _dismissImports is permanent. The code itself acknowledges prefix-only identity (home_page.dart:733 comment 'so the fresh download is not re-adopted by its index prefix').",
+  "suggested_fix": "1) Make each playlist own a unique, verified folder, in addPlaylist and in the mode-switch path of updatePlaylistSettings. If the target folder already has woolytube_meta.json with the same URL (compare normalised list= ids), import it (MetadataService.importPlaylist, then syncPlaylist) instead of creating a fresh row, so the old order and metadata are kept. If the folder belongs to another URL or another DB playlist (compare case-insensitively against existing outputPaths), or holds media without a sidecar, pick a unique name such as 'Chill (2)' or 'Chill [PLxxxx]'. Refuse to add a URL already in the DB. Never overwrite a sidecar whose url differs from the playlist being written; at minimum back it up as woolytube_meta.<timestamp>.bak. 2) Give files an identity independent of the index: add the video id to the template (`${indexStr}_%(title)s [%(id)s].%(ext)s`; the index prefix stays, as the owner decided) and in the reuse path, reconcilePlaylist and replaceWithLocalFile adopt a file only if its id matches track.videoId. For legacy names, fall back to the folder's existing sidecar fileName -> videoId map, read before any write. 3) In reconcilePlaylist keep track.filePath when that file exists and use the prefix lookup only when the recorded file is missing; never let one file back two tracks; if several files share a prefix, leave the track alone and log the conflict. 4) Make deletePlaylist(deleteFiles: true) delete only the media this playlist's tracks reference, its sidecar and its .woolytube_thumbnails dir, then remove the folder only if it is empty. 5) Add an 'Import / restore from folder' and un-dismiss entry in Settings (see F22).",
+  "sources": [
+   "durability",
+   "order",
+   "export",
+   "native-ytdlp",
+   "sync-lifecycle"
+  ]
+ },
+ {
+  "id": "F02",
+  "title": "A single-video URL (or any title that sanitizes to empty, '.' or '..') makes the playlist folder the WoolyTube base folder or its parent; 'delete files' then wipes every playlist",
+  "goal": "G2-durability",
+  "severity": "critical",
+  "kind": "bug",
+  "locations": [
+   "plugins/woolytube_ytdlp/android/src/main/kotlin/com/woolytube/ytdlp/YtDlpPlugin.kt:211",
+   "plugins/woolytube_ytdlp/android/src/main/kotlin/com/woolytube/ytdlp/YtDlpPlugin.kt:226-228",
+   "plugins/woolytube_ytdlp/android/src/main/kotlin/com/woolytube/ytdlp/YtDlpPlugin.kt:241",
+   "lib/pages/add_playlist_page.dart:93",
+   "lib/pages/add_playlist_page.dart:128-140",
+   "lib/services/playlist_service.dart:109-116",
+   "lib/services/playlist_service.dart:424-431",
+   "lib/services/playlist_service.dart:873-875",
+   "lib/services/metadata_service.dart:296-310"
+  ],
+  "scenario": "1. The owner pastes a single-video link (youtu.be/... or watch?v=... without list=) into Add Playlist to back up one song. 2. For a non-playlist URL, yt-dlp's --flat-playlist JSON is the video's own info with no playlist_title, so the Kotlin plugin returns title \"\". The add page keeps \"\" because `?? 'Unknown Playlist'` only replaces null, and _canAdd does not check the name. 3. _sanitizeFolderName('') returns '', so outputPath = '/storage/emulated/0/Music/WoolyTube/', the folder holding every audio playlist. The song lands as 00001_<title>.m4a in the base and the sidecar is written there too, where scanForPlaylists never looks (it only scans subfolders), so this entry can never be re-imported. A second single-video add shares the base: its track 1 adopts the first one's 00001_ file and is never downloaded. 4. When the owner deletes the stray one-song entry with 'Also delete downloaded files' ticked (the dialog says it deletes 'its downloaded files'), deletePlaylist runs Directory('/storage/emulated/0/Music/WoolyTube/').delete(recursive: true) and removes every audio playlist's media and sidecars. A YouTube playlist titled '.' behaves the same; '..' maps to /storage/emulated/0/Music, whose entire contents a recursive delete removes before rmdir fails.",
+  "evidence": "YtDlpPlugin.kt:211 `var playlistTitle = \"\"`, :227 `playlistTitle = json.optString(\"playlist_title\", \"\")`, :241 `output.put(\"title\", playlistTitle)`. yt-dlp sets only `info_dict['playlist'] = None` and `info_dict['playlist_index'] = None` for non-playlist videos (YoutubeDL.py:2883-2886); playlist_title is added only by _playlist_infodict. add_playlist_page.dart:93 `_playlistTitle = info['title'] as String? ?? 'Unknown Playlist';`. playlist_service.dart:873-875 replaces only <>:\"/\\|?* and trims, with no guard for '', '.' or '..'; :114 `final outputPath = '$basePath/$sanitizedName';`; :427-431 `final dir = Directory(playlist.outputPath); if (await dir.exists()) { await dir.delete(recursive: true); }`. metadata_service.dart:303-310 scanForPlaylists only iterates subdirectories.",
+  "suggested_fix": "In handleGetPlaylistInfo fall back to the playlist id (or the single entry's title) when playlist_title is missing, or reject single-video results in the add flow / ask for a name; on the Dart side treat a blank title as invalid. In addPlaylist and the mode-switch path, reject or replace names that sanitize to empty, '.', '..' or only dots/whitespace (fallback such as 'Playlist <id>'), strip leading/trailing dots and spaces, and assert that outputPath is a direct child of the Music/Movies WoolyTube base (p.isWithin(basePath, outputPath) and outputPath != basePath). In deletePlaylist(deleteFiles: true) never recurse unless the folder is a strict direct child of the base, no other DB playlist uses it and its sidecar URL matches the playlist being deleted; otherwise delete only the files this playlist references (see F01).",
+  "sources": [
+   "durability",
+   "order",
+   "native-ytdlp",
+   "sync-lifecycle"
+  ]
+ },
+ {
+  "id": "F03",
+  "title": "Redownload and 'Download Original' delete the only copy before the new download has even started, so a refused or failed download leaves nothing",
+  "goal": "G2-durability",
+  "severity": "critical",
+  "kind": "bug",
+  "locations": [
+   "lib/pages/playlist_detail_page.dart:1041-1045",
+   "lib/pages/playlist_detail_page.dart:2192-2261",
+   "lib/pages/playlist_detail_page.dart:2264-2293",
+   "lib/pages/playlist_detail_page.dart:907-916",
+   "lib/pages/home_page.dart:731-740",
+   "lib/services/playlist_service.dart:443-461",
+   "lib/services/playlist_service.dart:858-871",
+   "lib/services/download_service.dart:373-377",
+   "lib/services/download_service.dart:396",
+   "lib/services/download_service.dart:635-644",
+   "lib/services/download_network_policy.dart:19-33"
+  ],
+  "scenario": "(1) Redownload: a track is complete and the last sync saw its video as available (unavailableReason null), so canRedownload is true. Since then one of these happened: the video was deleted, made private, region- or copyright-blocked, or age-gated (flat-playlist listings still show such videos with a normal title and carry no age-gate or region signal, so _detectUnavailability never flags them); the hourly background worker holds the download lock; the phone is on Wi-Fi without internet (captive portal), which confirmManualDownload allows because it checks only the link type; or yt-dlp is transiently broken (bot check, extractor bug). The owner taps Redownload (for example because the file seems glitchy) and confirms. _startTrackDownload calls resetTrackForRedownload(track, deleteFile: true), which deletes the media file and thumbnail and resets the row to pending. Then downloadTrack either throws the lock-held StateError (the lock is only acquired inside downloadTrack, after the file is already gone) or yt-dlp fails ('Video unavailable', 'Sign in to confirm your age', 'Unable to download webpage'). The row ends as 'error' with no file and nothing is restored. The song is gone for good. (2) Download Original: sync flags a local-replacement track as 'available again' (e.g. private -> public but now age-gated). Picking 'Download Original' in the conflict dialog (home page or playlist page) immediately deletes the replacement file, its extracted cover art and every SponsorBlock segment, including the owner's local, override and hidden segments, and invalidates chapters. The dialog never says the replacement will be deleted. The actual download happens later inside downloadPlaylist and may fail or be refused by the lock, leaving nothing, and the replacement was exactly the copy YouTube did not have.",
+  "evidence": "playlist_detail_page.dart:2216-2220 `if (deleteExistingFile) { ... await playlistService.resetTrackForRedownload(track, deleteFile: true);` runs before `downloadService.downloadTrack(playlist, track)` (2238-2240); 2292 calls `_startTrackDownload(track, deleteExistingFile: true)`. canRedownload (1043-1045) = `!track.isLocalReplacement && !(track.status == 'complete' && track.unavailableReason != null)`, i.e. stale sync knowledge. playlist_service.dart:448-458 deletes `track.filePath` and `track.thumbnailPath`, and `if (clearSegments) replaceSponsorBlockSegments(track.id, const [])` drops every segment source. home_page.dart:732-739 and playlist_detail_page.dart:908-915 call it with deleteFile: true, clearSegments: true straight from the dialog. download_service.dart:373-377 `lockAcquired = await _lock.acquire(_lockOwner); if (!lockAcquired) { ... throw StateError(_lockHeldMessage); }` runs only after the deletion; on a yt-dlp error (635-644) only `updateTrackStatus(track.id, 'error', error: errorMsg)` happens. download_network_policy.dart:21-24 treats any wifi/ethernet result as able to download. Sync decides 'available again' only from the flat entry's availability/title (playlist_service.dart:858-871).",
+  "suggested_fix": "Never delete before success. Acquire the DownloadLock first. Download into a staging location (yt-dlp `-P temp:<playlist>/.woolytube-staging/<trackId>`, or a staging output name like `.woolytube-redownload-<trackId>.%(ext)s` kept out of the cleanup patterns while the lock is held). Only after yt-dlp succeeds and the new file resolves and verifies, move the old file aside (`.woolytube_trash/` or `.woolytube_replaced/`) or delete it, rename the new file into the `<index>_...` slot and update the DB in one step. On failure, cancellation or lock refusal, leave the old file and the old row intact (status, filePath, isLocalReplacement, thumbnailPath, segments, chapters) and show the error. For Download Original keep the replacement until the original is on disk, keep override/hidden segments (they belong to the YouTube timeline), and spell out the consequence in the dialog.",
+  "sources": [
+   "durability",
+   "offline",
+   "native-ytdlp",
+   "sync-lifecycle"
+  ]
+ },
+ {
+  "id": "F04",
+  "title": "YouTube downloads never get a thumbnail file on disk: every in-app image depends on a 200-entry, 30-day network cache, and the cached copy is purged once the video is deleted",
+  "goal": "multiple",
+  "severity": "critical",
+  "kind": "bug",
+  "locations": [
+   "lib/services/download_service.dart:532-568",
+   "lib/services/download_service.dart:617-622",
+   "plugins/woolytube_ytdlp/android/src/main/kotlin/com/woolytube/ytdlp/YtDlpPlugin.kt:329-335",
+   "lib/services/playlist_service.dart:745-787",
+   "lib/services/media_thumbnail_service.dart:10-26",
+   "lib/pages/playlist_detail_page.dart:694-716",
+   "lib/pages/home_page.dart:445-466",
+   "lib/widgets/mini_player.dart:231-252",
+   "lib/pages/player_page.dart:1191-1221",
+   "lib/pages/player_page.dart:1237-1246",
+   "lib/services/metadata_service.dart:220",
+   "lib/services/metadata_service.dart:286-293",
+   "lib/services/metadata_service.dart:380-384",
+   "lib/services/metadata_service.dart:512-532",
+   "lib/pages/add_playlist_page.dart:315-319",
+   "pubspec.lock:329-336",
+   "android/app/src/main/kotlin/com/woolytube/woolytube/MainActivity.kt:152-160",
+   "android/app/src/main/kotlin/com/woolytube/woolytube/AutoUpdateWorker.kt:46-79"
+  ],
+  "scenario": "(a) includeThumbnails on, normal YouTube download: yt-dlp runs with --embed-thumbnail only, so the cover goes into the m4a/mp4 and yt-dlp deletes its downloaded image. DownloadService saves status, filePath, chapters and segments; thumbnailPath stays null. The track list, home search, mini player and full player all fall back to CachedNetworkImage('https://i.ytimg.com/vi/<id>/hqdefault.jpg'). Offline, a cover appears only while that URL is still in flutter_cache_manager's store, which keeps at most 200 objects (LRU), drops anything unused for 30 days, and lives in the cache dir that 'Clear cache', low storage or an uninstall wipes. In airplane mode a 500- or 1,500-song library shows at most about 200 covers; the rest are grey placeholders, although every file contains its cover. (b) includeThumbnails off: no art exists anywhere locally, so art is permanently lost once the video goes. (c) Only local replacements and forced inserts get art extracted into .woolytube_thumbnails and work offline. (d) The video is deleted from YouTube: i.ytimg.com returns 404 (checked with curl; live thumbnails have max-age=7200, so cached copies go stale after 2 h). The next time the owner opens the playlist online, flutter_cache_manager shows the cached file, refreshes it, gets the 404, reports an error and calls removeFile(key): the tile switches to the placeholder and the only app-side copy of the art is deleted, for good, even though the m4a still holds the embedded cover. (e) Reinstall + import: the image cache is gone, and the sidecar has thumbnailFileName only for local replacements, so every YouTube track shows a placeholder offline and covers of deleted videos never come back. The goal 'thumbnails included, even after the originals are deleted' is not met.",
+  "evidence": "YtDlpPlugin.kt:329-331 `if (embedThumbnail) request.addOption(\"--embed-thumbnail\")`; there is no --write-thumbnail, so yt-dlp (__init__.py:707-715) sets writethumbnail only for embedding with already_have_thumbnail=False and EmbedThumbnailPP deletes the images after embedding (embedthumbnail.py:228-232). Any image left at the folder root is deleted by cleanupPlaylistFolder and reconcilePlaylist. updateTrackThumbnailPath (database.dart:494-501) is called only from PlaylistService._refreshEmbeddedThumbnail (playlist_service.dart:781), which is reached only from forceInsert, replaceWithLocalFile and backfillLocalThumbnails, and the backfill skips anything that is not a local replacement (`if (!track.isLocalReplacement || ...) continue;`). DownloadService success (617-622) and reuse (537-567) paths have no thumbnail step. Every display site uses `existingThumbnailPath(track.thumbnailPath)` and otherwise `CachedNetworkImage(imageUrl: resolveRemoteThumbnailUrl(...))`, falling back to `https://i.ytimg.com/vi/$youtubeVideoId/hqdefault.jpg` (media_thumbnail_service.dart:20). flutter_cache_manager 3.4.1: _config_io.dart `stalePeriod ?? const Duration(days: 30)`, `maxNrOfCacheObjects ?? 200`; file_system_io.dart uses getTemporaryDirectory(); cache_manager.dart:158-165 `if (cacheFile != null && e is HttpExceptionWithStatus && e.statusCode == 404) { addError(e); await removeFile(key); }`; cached_network_image evicts and shows errorWidget on that stream error. The add-playlist toggle reads 'Embed thumbnails in downloaded files' (add_playlist_page.dart:316-317). The media_metadata channel is registered only on MainActivity's engine (MainActivity.kt:152-160), not in AutoUpdateWorker's.",
+  "suggested_fix": "1) Save a thumbnail file for every downloaded track, whether or not embedding is on: in YtDlpPlugin.startDownload always add `--write-thumbnail --convert-thumbnails jpg` with a thumbnail output template under the playlist's `.woolytube_thumbnails/` subfolder (e.g. `-o \"thumbnail:<escaped path>/.woolytube_thumbnails/<indexStr>_%(id)s.%(ext)s\"`). Keep --embed-thumbnail only when includeThumbnails is on; with both flags yt-dlp keeps the written file. It must be in the subfolder because root-level images are deleted by cleanup (F15). After success in _downloadTrackFile, and in the reuse branch, record it with _db.updateTrackThumbnailPath and write the metadata (the sidecar already records thumbnailFileName). 2) Backfill the existing library offline: generalise backfillLocalThumbnails to every complete track without a local thumbnail; first extract the embedded art (MediaMetadataRetriever, no network); if none, copy the still-cached image via `DefaultCacheManager().getFileFromCache(url)` (no network, and saves covers of already-deleted videos before the 404 purge); only then download once while online. 3) Move the media_metadata handler into the woolytube_ytdlp plugin (registered in every engine) or register it in AutoUpdateWorker's engine, otherwise scheduled downloads get MissingPluginException and silently store null. 4) Name files by a stable key tied to the media, not the DB id (F17). 5) Re-word the toggle so it only controls embedding into the file; in-app/offline art should always be kept.",
+  "sources": [
+   "offline",
+   "native-ytdlp"
+  ]
+ },
+ {
+  "id": "F05",
+  "title": "Switching a playlist between audio-only and video orphans every existing file: deleted videos, local replacements and forced inserts become unplayable and the old folder's copies are no longer referenced",
+  "goal": "G2-durability",
+  "severity": "high",
+  "kind": "bug",
+  "locations": [
+   "lib/services/playlist_service.dart:192-201",
+   "lib/services/playlist_service.dart:240-245",
+   "lib/services/metadata_service.dart:130-141",
+   "lib/services/metadata_service.dart:230",
+   "lib/services/metadata_service.dart:327-340",
+   "lib/services/metadata_service.dart:346-356",
+   "lib/services/metadata_service.dart:433-459",
+   "lib/pages/playlist_settings_page.dart:145-183",
+   "lib/pages/playlist_detail_page.dart:62-66",
+   "lib/providers/providers.dart:180-186",
+   "lib/services/playlist_service.dart:424-431",
+   "lib/services/download_service.dart:587"
+  ],
+  "scenario": "A video playlist with 200 tracks: 15 videos have since been deleted from YouTube (status complete, unavailableReason 'deleted', files in Movies/WoolyTube/X), 2 tracks are local replacements and 1 is a forced insert. The owner switches it to audio-only to save space; the dialog says every track 'will be downloaded again' and 'The existing video files stay where they are.' (Switching audio -> video shows no dialog at all.) updatePlaylistSettings only changes outputPath to Music/WoolyTube/X and writes a sidecar there whose fileName entries are basenames of files that are still in Movies. On the next playlist open or app start, reconcilePlaylist lists only the new, empty folder and sets every complete row to pending with filePath and downloadedAt cleared and isLocalReplacement=false; the sidecar is rewritten without them. On the next update, what YouTube still has is re-downloaded; local replacements are silently swapped for the YouTube originals or fail; the 15 deleted videos fail and become 'unavailable'; the forced insert is sent to yt-dlp as 'watch?v=force-insert:...' and errors forever. The Movies folder still holds the only copies, but nothing references them; its frozen sidecar has the same URL, so findUnimportedPlaylists never offers it, and after a reinstall Import All imports both folders as two rows with the same URL (breaking later import scans, see F22). 'Delete playlist + files' later removes only the Music folder. An owner who frees space by deleting the Movies folder loses those tracks for good. If the switch is saved together with a rename, switching back computes a different folder and the old files are never found again.",
+  "evidence": "updatePlaylistSettings: `if (audioOnly != null && audioOnly != playlist.audioOnly) { ... outputPath = '$basePath/$folderName'; await Directory(outputPath).create(recursive: true); }` and only `outputPath: Value(outputPath)` is written (240-241): no file moves, no row changes. reconcilePlaylist builds filesByPrefix from `Directory(playlist.outputPath)` only, and `else if (fileOnDisk == null && track.status == 'complete') { await _db.updateTrackStatus(track.id, 'pending', clearFilePath: true, clearDownloadedAt: true, isLocalReplacement: false); }` (451-458) never checks whether track.filePath still exists. The sidecar stores `'fileName': t.filePath != null ? p.basename(t.filePath!) : null` (230), so the folder is implicit. playlist_settings_page.dart:151 `if (value && playlist != null && !playlist.audioOnly) { ...confirm... }` means audio -> video has no dialog. findUnimportedPlaylists skips URLs that already exist in the DB. providers.dart:181-185 runs reconcile for every playlist at each launch.",
+  "suggested_fix": "Make the switch non-destructive and affect only future downloads. Tracks that cannot be fetched again (unavailableReason != null, isLocalReplacement, forced-insert ids) keep their existing file: move them, with the .woolytube_thumbnails dir, into the new folder under their index prefix (File.rename on the same volume), or convert locally with the bundled ffmpeg (video -> audio: `ffmpeg -vn -c:a copy` into `<idx>_<title>.m4a`); for audio -> video keep the audio file as the fallback until a video download succeeds. Queue re-download only for still-available tracks, into staging, and replace each old file only after its new one succeeds. In reconcilePlaylist never demote a complete track whose recorded filePath exists, even outside outputPath. Confirm in both directions, list the tracks that cannot be re-downloaded, and fix the dialog text. Delete, rename or mark the old folder's sidecar as superseded so a restore does not import two diverging copies.",
+  "sources": [
+   "durability",
+   "export",
+   "native-ytdlp",
+   "sync-lifecycle"
+  ]
+ },
+ {
+  "id": "F06",
+  "title": "Opening a playlist while it downloads runs reconcile, which deletes yt-dlp's in-progress files and the thumbnail waiting to be embedded, and resets the 'downloading' row",
+  "goal": "G2-durability",
+  "severity": "high",
+  "kind": "bug",
+  "locations": [
+   "lib/pages/playlist_detail_page.dart:62-68",
+   "lib/services/metadata_service.dart:358-413",
+   "lib/services/metadata_service.dart:448-450",
+   "lib/providers/providers.dart:177-189",
+   "lib/services/background_worker.dart:133-137",
+   "plugins/woolytube_ytdlp/android/src/main/kotlin/com/woolytube/ytdlp/YtDlpPlugin.kt:329-335",
+   "lib/services/download_service.dart:604-622"
+  ],
+  "scenario": "The owner taps Update on the home page (or the hourly worker starts), then opens the playlist to watch progress. initState -> _loadPlaylist -> reconcilePlaylist runs with no guard. It lists the folder and deletes: the in-flight `00012_Title.m4a.part` or `.part-FragN` (yt-dlp keeps writing to the unlinked inode, then os.replace raises FileNotFoundError and the track errors); video intermediates `.f137.mp4` / `.f140.m4a` and `.temp.mp4` before or during the merge (the merge fails); and `00012_Title.webp`, which yt-dlp writes BEFORE the media download whenever --embed-thumbnail is set. If the page opens after the media download but before EmbedThumbnail runs (FixupM4a, merge, thumbnail conversion), the media survives but EmbedThumbnail only warns 'Skipping embedding the thumbnail because the file is missing' and yt-dlp exits 0, so the track is recorded complete with no cover art, permanently and silently; embedding is never retried, and once the video is gone the art is gone (the embedded art is the only durable thumbnail for YouTube downloads, see F04). Reconcile also flips the active row from 'downloading' to 'pending' mid-download. Each page open during a download can break one track; if its video disappears before the next update, it is never archived. Startup recovery is guarded only by a one-time hasActiveDownloads() check, and the background engine may be between tracks and start the next one while that recovery is still deleting files.",
+  "evidence": "playlist_detail_page.dart:65 `await ref.read(metadataServiceProvider).reconcilePlaylist(playlist);` with no isDownloading, hasActiveDownloads or DownloadLock check; compare providers.dart:181 `if (!await ytdlp.hasActiveDownloads())` guarding only the startup call. metadata_service.dart:380-383 `if (isTransientFile(fileName) || (imageExtensions.contains(ext) && fileName != _metaFileName)) { toDelete.add(entity); ...}` and 406-408 `await entity.delete()`; _partPattern `\\.part(-Frag\\d+)?$` and _formatIntermediatePattern `\\.f\\d+\\.\\w+$` match yt-dlp's live files; 448-449 `else if (fileOnDisk == null && track.status == 'downloading') await _db.resetInterruptedTrack(track.id);`. yt-dlp writes thumbnail and info.json before the media (YoutubeDL.py:3392-3396), EmbedThumbnailPP only warns when the thumbnail is missing (embedthumbnail.py:70-72); downloader/common.py:265-268 and http.py:343 rename the .part at the end.",
+  "suggested_fix": "Skip reconcile's destructive steps (delete, re-link, reset of 'downloading' rows) while DownloadService.isDownloading/_activePlaylist is this playlist, while ytdlp.hasActiveDownloads() is true, or while the DownloadLock is held by anyone. Better: split reconcile into a read-only 'link files' pass that is safe at any time and a 'cleanup and reset interrupted' pass that runs only inside the download service while it holds the lock. With the staging-dir approach (F20) in-flight files live in .woolytube-staging and cleanup removes only staging dirs not in use. After each download, check for embedded art (MediaMetadataRetriever.embeddedPicture); if missing, re-embed from the kept thumbnail and/or store a durable copy in .woolytube_thumbnails/ and record it in thumbnailPath (F04).",
+  "sources": [
+   "durability",
+   "native-ytdlp",
+   "sync-lifecycle"
+  ]
+ },
+ {
+  "id": "F07",
+  "title": "The schema-11 duplicate-index repair (and the same rule in sidecar import) keeps the oldest row instead of the row that owns the file, and the next reconcile then attaches files to the wrong tracks",
+  "goal": "multiple",
+  "severity": "high",
+  "kind": "bug",
+  "locations": [
+   "lib/database/database.dart:182-186",
+   "lib/database/database.dart:194-259",
+   "lib/services/metadata_service.dart:433-466",
+   "lib/services/metadata_service.dart:593-604",
+   "lib/services/metadata_service.dart:631-646",
+   "lib/services/metadata_service.dart:732-734",
+   "lib/providers/providers.dart:177-189",
+   "lib/pages/playlist_detail_page.dart:62-65",
+   "test/database/database_test.dart:493-528"
+  ],
+  "scenario": "This migration has not shipped yet (the v1.3.0 tag on the owner's phone predates it), so it will run exactly once on the owner's real library and cannot be undone. In v1.3.0, sync re-numbered tracks that were not complete to their new YouTube index while downloaded rows kept theirs, and download/reconcile adopted any file with a matching prefix. Shared-file case: 1. A playlist has an age-restricted song P (id 40, #40, status 'error' forever) followed by D (id 41, #41, file 00041_D.m4a). The owner adds a video before P on YouTube (with 'add to top' playlists every addition does this). 2. v1.3.0 sync moves P to #41 because it is not complete; D keeps #41. 3. The next v1.3.0 reconcile/download sees prefix 00041_ and marks P complete with 00041_D.m4a (downloadedAt = now). P and D now share #41 and the file. 4. On first launch of the new build, _repairDuplicateTrackIndices keeps the lowest id, P, at #41 with D's file, moves D to max+1 and, because the file is shared, resets D to pending with file_path NULL. Result: at #41 the app shows P but plays D; P is 'complete', so its real audio is never downloaded (and never backed up); D jumps to the end and is re-downloaded, or becomes an error row if its video is gone, while its audio plays under P's name. Distinct-file case (the repo's own test): the moved row keeps file_path 00005_Own.mp4 with a new index (#12). At the same first launch, recoverInterruptedDownloads -> reconcilePlaylist finds no 00012_ file and resets it to pending with filePath cleared, while the kept row may be re-pointed to Own's media because filesByPrefix keeps whichever 00005_ file was listed last; one song ends up unreferenced or under the wrong title, silently. importPlaylist applies the same 'first wins, others appended at max+1, file not renamed' rule to sidecars written by v1.3.0 and then calls reconcilePlaylist right away.",
+  "evidence": "database.dart:221-227 `SELECT id, file_path FROM tracks WHERE playlist_id = ? AND \"index\" = ? ORDER BY id` then `for (final row in rows.skip(1))`: the lowest id always keeps the index regardless of who downloaded the file. 235-255 reset the moved row (`status = 'pending', file_path = NULL ... is_local_replacement = 0`) only when its path is shared (`if (shared.read<int>('shared') > 0)`); otherwise only \"index\" changes and the file keeps its old prefix. reconcile: `filesByPrefix = { for (final f in mediaFiles) '${f.digits}_': f.path }` (433-435, last wins), adopts by prefix for pending rows (441-446), and demotes complete rows with no file at their own prefix (451-459). It runs at every startup (providers.dart:183-185) and every page open (playlist_detail_page.dart:65). Import: metadata_service.dart:639-645 `if (index <= 0 || !usedIndices.add(index)) { index = ++maxIndex; ...}` keeps filePath from the sidecar's old-prefix fileName, then reconcile at 732-734. v1.3.0: `git show v1.3.0:lib/services/playlist_service.dart` has `else if (freshIndex != track.index && track.status != 'complete') { await _db.updateTrackIndex(...) }`.",
+  "suggested_fix": "Choose each duplicate group's survivor by file ownership, not by id: among rows sharing a file, keep the row that actually downloaded it, comparing the title part of the file name with each row's title normalised the way yt-dlp's --restrict-filenames does, falling back to the earliest downloaded_at (adopting rows got downloaded_at = now when they adopted). Reset the others to pending. When a moved row owns a distinct file, rename that file to the new prefix in the same repair (or in a post-open step before the first reconcile), or make reconcile respect an existing file_path (F01). If ownership cannot be decided, keep the file under a neutral name and flag both rows for review rather than assigning it. Apply the same logic in importPlaylist before its reconcile call. Log what was repaired and show a one-time 'N tracks were re-numbered, please check' notice. Ship this before the build reaches the phone, because the migration runs exactly once.",
+  "sources": [
+   "durability",
+   "order",
+   "sync-lifecycle"
+  ]
+ },
+ {
+  "id": "F08",
+  "title": "Force insert renames every later file with no journal; if the app dies mid-way, the moved originals are deleted as 'transient' at the next start, or every later track gets its neighbour's file",
+  "goal": "multiple",
+  "severity": "high",
+  "kind": "bug",
+  "locations": [
+   "lib/services/playlist_service.dart:540-545",
+   "lib/services/playlist_service.dart:549-593",
+   "lib/services/playlist_service.dart:595-643",
+   "lib/services/playlist_service.dart:817-845",
+   "lib/services/metadata_service.dart:380-384",
+   "lib/services/metadata_service.dart:406-413",
+   "lib/services/metadata_service.dart:491-508",
+   "lib/services/metadata_service.dart:512-532",
+   "lib/providers/providers.dart:180-189"
+  ],
+  "scenario": "1. The owner force-inserts a local file at #1 of a 600- or 1,500-track playlist. 2. forceInsert renames each existing file to `.woolytube-force-move-<op>-<i>.<ext>`, then renames all of them again to their new prefix: thousands of renames through Android's FUSE layer. The DB transaction runs only after both loops and nothing records the planned moves. 3. The process dies in that window (app swiped away, killed for memory while the owner switches to a game, crash, phone shutdown). 4. At the next start, recoverInterruptedDownloads -> reconcilePlaylist lists the folder; every `.woolytube-force-move-*` file matches the staging-prefix rule in isTransientFile and is deleted (cleanupPlaylistFolder after any download does the same). The DB rows still point at the original paths, so they become pending with filePath cleared. They come back only if YouTube still has the videos: local replacements, earlier forced inserts and videos already deleted from YouTube are gone for good, silently. If the process dies after the second loop but before the commit, the DB still has indices k..n while the files carry k+1..n+1, so reconcile points each track at its predecessor's file (track N plays N-1), gives the new local file to the old #k, leaves the last file orphaned, and the sidecar is rewritten with that wrong mapping. A failed rename inside the best-effort `_rollbackForcedInsertMoves` (errors swallowed) also leaves originals under temporary names that the next reconcile deletes.",
+  "evidence": "Temp names: `temporaryPath: p.join(outputDirectory.path, '.woolytube-force-move-$operationId-$i${p.extension(oldPath)}')` (playlist_service.dart:569-572) and `'.woolytube-force-insert-$operationId$extension'`. Rename loops at 584-591, then `await _db.transaction(...)` at 595; rollback exists only in the catch block (626-643). `_stagingPrefixes = ['.woolytube-force-insert-', '.woolytube-force-move-', '.woolytube-local-replacement-']` and `return _stagingPrefixes.any(fileName.startsWith);` (metadata_service.dart:491-507). Reconcile: `if (isTransientFile(fileName) || ...) { toDelete.add(entity); ...}` then `await entity.delete();` (380-383, 406-409); cleanupPlaylistFolder 524-527 the same. Startup recovery: providers.dart:181-185. Prefix-based reassignment: metadata_service.dart:437-466. No journal file exists.",
+  "suggested_fix": "Write a journal (e.g. `.woolytube-force-insert-journal.json` in the playlist folder, written atomically and not matched by isTransientFile) before the first rename, with original, temporary and target paths per file, the inserted track and the planned index changes. At startup, process any journal before reconcile or cleanup runs: roll back if the DB commit is missing, otherwise finish the moves. Never let cleanup auto-delete `.woolytube-force-move-*` files; they are originals, not copies; without a journal, restore or log them. Simpler alternative: drop the temporary names and rename from the highest index downward directly to the target names (collision-free when shifting by +1 from the top), updating each DB row as its file moves or journaling each step. Long-term, avoid renaming existing files for inserts at all by using a sort key (F25).",
+  "sources": [
+   "durability",
+   "order",
+   "sync-lifecycle"
+  ]
+ },
+ {
+  "id": "F09",
+  "title": "Force insert (and local replacement / filename override) can run while a foreground or background download of the same playlist is in progress; the download keeps stale indices and later tracks get shifted files",
+  "goal": "multiple",
+  "severity": "high",
+  "kind": "bug",
+  "locations": [
+   "lib/pages/playlist_settings_page.dart:323-379",
+   "lib/services/playlist_service.dart:490-658",
+   "lib/services/playlist_service.dart:700-711",
+   "lib/pages/home_page.dart:597",
+   "lib/services/download_service.dart:77-82",
+   "lib/services/download_service.dart:215",
+   "lib/services/download_service.dart:255-270",
+   "lib/services/download_service.dart:306-314",
+   "lib/services/download_service.dart:530",
+   "lib/services/download_service.dart:584-586",
+   "lib/services/download_service.dart:604-617",
+   "lib/services/background_worker.dart:28-31",
+   "lib/services/background_worker.dart:51-66"
+  ],
+  "scenario": "1. A foreground Update or the hourly background worker is downloading new tracks #151-#200 of a playlist; #151-#159 are done in this run and #160 is in flight. 2. The owner opens the playlist settings from the home card (the button stays tappable during downloads) and force-inserts a local file at #100. 3. forceInsert never checks DownloadService.isDownloading, the yt-dlp process list or DownloadLock. It renames 00100_..00159_ to 00101_..00160_ and shifts DB indices 100-200 by +1. 4. yt-dlp finishes writing 00160_T160.m4a with its output template fixed at the old index, so prefix 00160_ now holds T159's renamed file and T160's new file; resolveMediaFile('00160_') returns whichever is listed first, so T160 may be recorded with T159's file. For a pending track not yet started, resolveMediaFile('<old index>_') can adopt the neighbour's renamed file, marking it complete without ever downloading it. 5. The loop keeps its snapshot of track.index: T161 (now DB #162) is downloaded as 00161_T161, and so on up to T200 (DB #201) as 00200_T200. 6. The next reconcile (page open or app restart) points each of T160-T199 at the next track's file; T200 has no 00201_ file and is reset and downloaded again; the sidecar records the shifted mapping. Every title from #160 on plays a different song, with no warning, and a later Redownload on any of them deletes another track's only copy. The cleanupPlaylistFolder at the end of the run can also delete the insert's temp files mid-operation. The same happens when a background download marks a pending track complete between forceInsert reading `tracks` and doing the renames: that file is never moved while its row's index is shifted.",
+  "evidence": "No guard in `_forceInsert` (playlist_settings_page.dart:323-374) or `PlaylistService.forceInsert`. The download loop uses a snapshot: `final pendingTracks = await _db.getPendingTracks(playlist.id);` (download_service.dart:215), and `final indexStr = MetadataService.paddedIndex(track.index, totalTracks);` (530) builds both the output template (584-586) and the post-download lookup `resolveMediaFile(playlist.outputPath, '${indexStr}_')` (604-607). The background engine has its own DownloadService (background_worker.dart:51-61), so the foreground isDownloading flag does not see it. DownloadLock would not help as written: `if (holder == owner) return false;` (download_service.dart:97), so a foreground forceInsert would get the 'foreground' lock even while the foreground download holds it.",
+  "suggested_fix": "Run force insert, replaceWithLocalFile and the filename override under the DownloadLock, and refuse (or wait) while downloadService.isDownloading, ytdlp.hasActiveDownloads() or lock.isHeldByOther(foreground) is true. Use a lock that is not same-owner re-entrant for the whole operation, and have the background worker check it before every sync and download. Make the download path defensive: re-read the track row (index) right before building the output template, and after yt-dlp returns check that the row's index is unchanged and that the resolved file is the one just written, looking it up by video id or the exact file name yt-dlp reports rather than by prefix.",
+  "sources": [
+   "durability",
+   "order"
+  ]
+ },
+ {
+  "id": "F10",
+  "title": "Per-track edits (title/filename overrides, Always skip, manual skip segments, SponsorBlock segment edits/hides/deletes) never rewrite woolytube_meta.json, so a reinstall loses them, permanently for archived playlists whose sync fails",
+  "goal": "multiple",
+  "severity": "high",
+  "kind": "bug",
+  "locations": [
+   "lib/services/playback_service.dart:565-570",
+   "lib/services/playback_service.dart:899-934",
+   "lib/pages/playlist_detail_page.dart:1253-1257",
+   "lib/pages/playlist_detail_page.dart:1574-1598",
+   "lib/pages/playlist_detail_page.dart:1696-1745",
+   "lib/pages/playlist_detail_page.dart:1886-1915",
+   "lib/pages/playlist_detail_page.dart:2099-2105",
+   "lib/services/background_worker.dart:63-71",
+   "lib/pages/home_page.dart:653-695",
+   "lib/services/metadata_service.dart:130-141",
+   "lib/pages/playlist_detail_page.dart:62-68"
+  ],
+  "scenario": "1. The playlist has been deleted or made private on YouTube (the archival case), or has Auto update off. 2. The owner overrides the titles of '[Private video]' tracks and renames their files via 'Override title / filename', marks skip segments from the player, hides, edits or deletes SponsorBlock segments, and sets 'Always skip' on some tracks. 3. None of these code paths calls writeMetadata. The sidecar is next written only by sync, a download run, settings save, chapter edit, replace or force insert; opening the playlist and app start write only if reconcile fixed something. 4. For a deleted/private YouTube playlist, syncPlaylist throws; the background worker catches it and skips downloadPlaylist, and manual Update shows 'Update failed' before any download, so no sidecar write ever happens for that playlist. 5. After a phone reset or reinstall, import reads the stale sidecar: the title fixes, skip marks, segment edits and always-skip flags are silently gone; a renamed file is missing from the stale fileName and is re-linked only through the prefix match, with the overridden title lost. For playlists that do sync, these edits are at risk until the next successful update (24 h by default).",
+  "evidence": "setAlwaysSkip: `await _db.updateTrackAlwaysSkip(track.id, alwaysSkip); if (currentTrack?.id == track.id) {...}` with no sidecar write. markLocalSegmentBoundary: `await _db.insertLocalSegment(...); ... await _loadActiveSegments(track); return SegmentMarkResult.saved(...)`; PlaybackService has no MetadataService reference (only static helpers at 353-354). Detail page segment sheet: `db.updateSegment(segment.id, source: 'sponsorblock')`, `db.deleteSegment`, `db.updateSegment(..., source: 'hidden')`, and in the edit dialog `db.deleteSegment` + `db.insertSegment` / `db.updateSegment`, followed only by reload(). _showOverrideDialog: `await currentFile.rename(newPath)` and `await db.updateTrackFields(track.id, title: ..., filePath: ...)` (2100) with no sidecar write. background_worker.dart:64-70 `try { await playlistService.syncPlaylist(playlist); ... await downloadService.downloadPlaylist(freshPlaylist); } catch (_) {}`. metadata_service.dart:135-138 writes at startup only when `playlistFixed > 0`. By contrast ChapterService.persist (chapter_service.dart:13-18) rewrites the sidecar after every chapter edit. grep for writeMetadata finds only PlaylistService, DownloadService and ChapterService callers.",
+  "suggested_fix": "Route every mirrored mutation through a service that persists afterwards: PlaybackService.setAlwaysSkip, markLocalSegmentBoundary, a new SegmentService for the detail-page hide/restore/delete/edit actions, and _showOverrideDialog. Also persist when reconcilePlaylist returns fixed > 0 in _loadPlaylist and importPlaylist. A more robust option is a single debounced SidecarWriter that listens to drift's tableUpdates for tracks and sponsor_block_segments (or a dirty-playlist-id stream emitted by DB helpers) and rewrites woolytube_meta.json (and the proposed .m3u8, F13) for each touched playlist within a few seconds, so future code paths cannot forget. Also write the sidecar in the background-worker and manual-update catch blocks when sync fails, so a playlist that no longer exists on YouTube still has its sidecar refreshed.",
+  "sources": [
+   "durability",
+   "export",
+   "sync-lifecycle"
+  ]
+ },
+ {
+  "id": "F11",
+  "title": "Downloaded files get no title/artist/album/track-number/date tags or embedded chapters, and yt-dlp's info.json (uploader/artist, album, upload date, description) is deleted right after chapters are read",
+  "goal": "multiple",
+  "severity": "high",
+  "kind": "bug",
+  "locations": [
+   "plugins/woolytube_ytdlp/android/src/main/kotlin/com/woolytube/ytdlp/YtDlpPlugin.kt:299-335",
+   "plugins/woolytube_ytdlp/android/src/main/kotlin/com/woolytube/ytdlp/YtDlpPlugin.kt:216-223",
+   "lib/services/metadata_service.dart:161-184",
+   "lib/services/metadata_service.dart:212-243",
+   "lib/services/metadata_service.dart:398-403",
+   "lib/database/database.dart:39-63"
+  ],
+  "scenario": "1. The owner copies /Music/WoolyTube/<playlist> to a PC, car USB stick or another phone and opens it in VLC, a car head unit, Samsung Music or Poweramp. 2. Each m4a/mp4 has only the YouTube stream's empty tags (plus cover art if includeThumbnails is on). Players show the file name as title (see F12), 'Unknown artist', no album and no track number; players that sort an album by track number or title tag do not follow the playlist order. For 'Artist - Topic' uploads the YouTube title is just the song name, so the artist exists nowhere in the export. 3. YouTube chapters exist only in the DB and the sidecar JSON (no --embed-chapters), so an hour-long album upload plays as one undivided track outside the app. 4. After each download, captureChapterMetadata reads `<prefix>.info.json`, keeps only chapters and duration, and deletes it. The uploader/channel, YouTube Music artist/track/album/release_year, upload date, description (often the tracklist, credits or lyrics) and tags are kept nowhere: not in the DB (no column), not in the sidecar, not in the file. Once YouTube deletes the video this information is unrecoverable; the sidecar holds only a title, a duration and an i.ytimg URL that no longer works.",
+  "evidence": "startDownload passes only -o, -f, `-x --audio-format m4a` (audio), optional `--embed-subs ...`, `--embed-thumbnail`, `--restrict-filenames`, `--no-mtime`, `--no-playlist`, `--write-info-json`; no --embed-metadata / --add-metadata / --embed-chapters / --parse-metadata. yt-dlp writes title/artist/date tags only through FFmpegMetadataPP, registered only `if opts.addmetadata or opts.addchapters or opts.embed_infojson` (yt_dlp/__init__.py:700); its mapping (postprocessor/ffmpeg.py:746-754) is `add('title', ('track','title'))`, `add('artist', ('artist',...,'uploader','uploader_id'))`, `add('date','upload_date')`, `add(('purl','comment'),'webpage_url')`, `add('album',...)`, `add('track','track_number')`. For an m4a source FFmpegExtractAudioPP only reports 'Not converting audio ... already in target format'. --embed-chapters is off by default (options.py:1709-1715). metadata_service.dart:163-180 reads `info['id']`, `ChapterData.fromVideoInfo(info)`, then `await infoFile.delete();`. Sidecar track entries (215-243) contain no uploader, artist or date fields; the Tracks table has no such columns; the flat entry built in the plugin keeps only id/title/thumbnail/duration/playlist_index/availability.",
+  "suggested_fix": "Add `--embed-metadata` (title, artist/uploader, date, purl/comment = watch URL, description, and YouTube chapters by default) and `--embed-chapters` to startDownload. Pass the local index and playlist name from Dart and add `--parse-metadata '<index>:%(meta_track)s'` and `--parse-metadata '<escaped playlist name>:%(meta_album)s'` (escape ':' as '\\:' per metadataparser.py:109 and '%' as '%%'); meta_* fields override tags in FFmpegMetadataPP, so every file gets track number = WoolyTube index and album = playlist. FFmpegMetadataPP uses temp files, so this is crash-safe. Optionally add `--convert-thumbnails jpg`, because some head units only read JPEG covr. Stop deleting info.json: move it to `<playlist>/.woolytube_info/<videoId>.info.json` (with --clean-info-json, optionally stripping formats) and reference it from the sidecar, and/or copy uploader/channel/artist/track/album/upload_date/description into new Tracks columns (schema 12) and the sidecar. For files already downloaded, add a 'refresh metadata' pass (getVideoInfo for still-available videos) and a one-time retag from DB titles (`ffmpeg -c copy -metadata ...`); re-tag a file when the owner overrides its title.",
+  "sources": [
+   "durability",
+   "export",
+   "native-ytdlp",
+   "sync-lifecycle"
+  ]
+ },
+ {
+  "id": "F12",
+  "title": "--restrict-filenames strips accents and reduces Cyrillic, CJK or emoji-only titles to '_', so files show no usable title outside the app",
+  "goal": "G4-export",
+  "severity": "high",
+  "kind": "bug",
+  "locations": [
+   "plugins/woolytube_ytdlp/android/src/main/kotlin/com/woolytube/ytdlp/YtDlpPlugin.kt:332",
+   "lib/services/download_service.dart:584-586",
+   "lib/services/metadata_service.dart:548-557"
+  ],
+  "scenario": "Files are saved as '<index>_%(title)s.%(ext)s' with --restrict-filenames. Running yt-dlp 2026.10.26's sanitize_filename(restricted=True): 'Kisp\u00e1l \u00e9s a Borz - Ha az \u00e9letben' -> 'Kispal_es_a_Borz_-_Ha_az_eletben'; 'P\u00fcnk\u00f6sdi r\u00f3zsa & G\u0151z\u00f6s' -> 'Punkosdi_rozsa_Gozos' (accents stripped, so '\u0151r\u00fclt' and '\u00f6r\u00fclt' both become 'orult'; '&' dropped); 'Quimby \u2013 Most m\u00falik pontosan' -> 'Quimby_Most_mulik_pontosan'; '\u00c1RV\u00cdZT\u0170R\u0150 t\u00fck\u00f6rf\u00far\u00f3g\u00e9p' -> 'ARVIZTURO_tukorfurogep'; '\u041a\u0438\u043d\u043e - \u0413\u0440\u0443\u043f\u043f\u0430 \u043a\u0440\u043e\u0432\u0438' -> '_'; '\u591c\u306b\u99c6\u3051\u308b' -> '_'; '\u7c73\u6d25\u7384\u5e2b - Lemon' -> 'Lemon'; 'YOASOBI\u300c\u30a2\u30a4\u30c9\u30eb\u300d Official Music Video' -> 'YOASOBI_Official_Music_Video'; '\ud83d\udd25\ud83d\udd25\ud83d\udd25' -> '_'. The resulting files are named like '00034__.m4a', '00035__.m4a'. Because the files carry no title tag (F11), any player without WoolyTube shows exactly these strings: every Cyrillic, Japanese or emoji-titled track is an anonymous '000NN__' entry and Hungarian titles lose accents and spaces. Folder names keep Unicode, so the export is inconsistent, and titles edited in the app never reach the files except through a manual rename.",
+  "evidence": "YtDlpPlugin.kt:332 `request.addOption(\"--restrict-filenames\")`. yt_dlp/utils/_utils.py sanitize_filename (655-673): `if restricted and char in ACCENT_CHARS: return ACCENT_CHARS[char]` ... `if restricted and (char in '!&\\'()[]{}$;`^,#' or char.isspace() or ord(char) > 127): return '' if unicodedata.category(char)[0] in 'CM' else '\\0_'`, followed by collapsing and stripping substitute characters at the ends, which leaves '_' when nothing survives. download_service.dart:584-586 builds `'${indexStr}_%(title)s.%(ext)s'`. metadata_service.dart:548-549 says its own sanitizer matches yt-dlp's non-restricted mode, so the flag is inconsistent with the rest of the code.",
+  "suggested_fix": "Remove `--restrict-filenames`; yt-dlp's default mode keeps Unicode and replaces only \"*:<>?|/\\ with full-width look-alikes, which are valid on FAT, exFAT and NTFS. Add `--windows-filenames` so names are also safe on Windows and FAT USB sticks (reserved names, trailing dots). Cap the title by bytes, not characters (ext4/F2FS/FUSE NAME_MAX is 255 bytes and CJK/emoji take 3-4 bytes each): `'${indexStr}_%(title).150B.%(ext)s'`. Existing files keep their names; the app matches by index prefix, so nothing else must change. Optionally offer a one-off 'rename files to full titles' action that renames to `<prefix>_<sanitizeFilename(track.title)><ext>` and updates filePath and the sidecar.",
+  "sources": [
+   "export",
+   "native-ytdlp",
+   "sync-lifecycle"
+  ]
+ },
+ {
+  "id": "F13",
+  "title": "No library export: no M3U8/order index, no folder cover, no single backup, and the order, curated titles, custom chapters and segments exist only in the app DB and proprietary JSON",
+  "goal": "G4-export",
+  "severity": "high",
+  "kind": "missing-feature",
+  "locations": [
+   "lib/pages/settings_page.dart:151-215",
+   "lib/services/metadata_service.dart:97",
+   "lib/services/metadata_service.dart:208-264",
+   "lib/database/database.dart:17",
+   "lib/database/database.dart:673-678",
+   "lib/services/app_settings_service.dart:10-15",
+   "lib/widgets/playlist_card.dart:156-158"
+  ],
+  "scenario": "1. The owner wants to stop using WoolyTube and copies /Music/WoolyTube and /Movies/WoolyTube to a laptop or car stick. 2. There is no Export or Backup action anywhere; Settings has only Pause for other apps, Download subtitles, Subtitle languages, Mobile data and App update. 3. No .m3u/.m3u8 file exists. Order outside the app depends on each player sorting by file name; many car head units and some TV players play in FAT directory-entry order, and players sorting by title or track tag ignore the prefix. 4. No folder.jpg/cover.jpg is written; the playlist cover is only a network URL (F21). 5. Curated titles, removed/unavailable status, custom chapters, 'always skip' flags and manual skip segments live only in the app-private SQLite DB (getApplicationDocumentsDirectory()/woolytube.sqlite, lost on uninstall) and in woolytube_meta.json, which no other player reads. 6. App settings (subtitle languages etc.) are in SharedPreferences and not exported. The 'entire database' cannot be taken to another device in a form a normal player understands.",
+  "evidence": "grep for export|backup|m3u|folder.jpg|cover.jpg in lib/, android/ and plugins/ finds nothing library-related; the only 'share' is _shareTrack, which shares the YouTube URL. _openConnection: `File(p.join(dbFolder.path, 'woolytube.sqlite'))` in getApplicationDocumentsDirectory (database.dart:673-678). The only on-disk mirror is `const _metaFileName = 'woolytube_meta.json'` (metadata_service.dart:97), a WoolyTube-specific schema. Playlists.thumbnailPath (database.dart:17) has no writer.",
+  "suggested_fix": "1. Whenever MetadataService.writeMetadata runs, also write `<folder>/<sanitized playlist name>.m3u8`: UTF-8, `#EXTM3U`, `#PLAYLIST:<name>`, then for every track with a file, in index order, `#EXTINF:<durationSeconds>,<curated title>` and the relative file name. This carries order, custom titles, removed/deleted tracks and local replacements to any player. 2. Write `folder.jpg` once per playlist (F21) and exempt it from cleanup (F15). 3. Add Settings > 'Export library...': rewrite every sidecar and m3u8, copy the DB with `VACUUM INTO '/storage/emulated/0/Music/WoolyTube/.woolytube_backup/woolytube-<date>.sqlite'`, and write app settings to a JSON beside it (F28). 4. Optionally export custom chapters per track as `<file>.chapters.txt` ('mm:ss Title') or an ffmetadata/.cue file, keeping the rule of never rewriting media while making chapters portable.",
+  "sources": [
+   "export",
+   "native-ytdlp",
+   "sync-lifecycle"
+  ]
+ },
+ {
+  "id": "F14",
+  "title": "Lock-screen, notification, Bluetooth/car and Android Auto art is missing offline even when the in-app cache still has the image",
+  "goal": "G3-offline",
+  "severity": "high",
+  "kind": "bug",
+  "locations": [
+   "lib/services/audio_handler.dart:11-35",
+   "lib/services/audio_handler.dart:64-78",
+   "lib/services/audio_handler.dart:169-205",
+   "lib/main.dart:47-58"
+  ],
+  "scenario": "The owner plays a downloaded song in airplane mode. The in-app list still shows its stale cached cover (getFileStream emits cached files even when stale). But thumbnailPath is null for YouTube downloads (F04), so resolveNotificationArtwork returns https://i.ytimg.com/vi/<id>/hqdefault.jpg. audio_service 0.18.18 first checks only the memory cache, sends the media item without art, then calls _loadArtwork -> cacheManager.getSingleFile(url), which returns the cached file only if validTill > now. i.ytimg.com sends 'cache-control: public, max-age=7200', so validTill is 2 h after the fetch; after that it calls downloadFile, which throws offline, and audio_service returns null. The media notification, lock screen, Bluetooth/AVRCP car display and Android Auto now-playing screen show no artwork. Android Auto's browse lists (getChildren) are the same: playlist items use p.thumbnailPath (never written) or the remote p.thumbnailUrl, and track items use the remote URL.",
+  "evidence": "audio_handler.dart:16-32: a local path is used only if it exists; otherwise `Uri.tryParse(remoteUrl)` or `resolveRemoteThumbnailUrl(youtubeVideoId: ...)`. main.dart:47-58 calls AudioService.init without a cacheManager, so DefaultCacheManager() is used. audio_service 0.18.18 lib/audio_service.dart:1058-1092 (file scheme -> artCacheFile directly; otherwise getFileFromMemory, then _loadArtwork) and 1242-1262 (`await cacheManager.getSingleFile(...)` in a try/catch returning null). flutter_cache_manager cache_manager.dart:71-82 and file_service.dart:87-104 take validTill from max-age. A local replacement gets Uri.file and works offline (test/services/audio_handler_test.dart:169-183).",
+  "suggested_fix": "The main fix is F04: once every track has a thumbnailPath, resolveNotificationArtwork returns Uri.file and audio_service uses the file directly. For tracks still without a local file, make resolution async and, for an http(s) URL, look up `DefaultCacheManager().getFileFromCache(url)` and return `Uri.file(cached.file.path)` regardless of validTill; or pass AudioService.init a cacheManager whose getSingleFile returns any cached file before trying the network. Use the same local-first resolution in getChildren for playlist and track items (with the playlist cover from F21).",
+  "sources": [
+   "offline"
+  ]
+ },
+ {
+  "id": "F15",
+  "title": "Folder cleanup deletes every image at a playlist folder's root (folder.jpg/cover.jpg, un-embedded thumbnails) on every app start, playlist open and download",
+  "goal": "multiple",
+  "severity": "medium",
+  "kind": "bug",
+  "locations": [
+   "lib/services/metadata_service.dart:358",
+   "lib/services/metadata_service.dart:380-384",
+   "lib/services/metadata_service.dart:406-413",
+   "lib/services/metadata_service.dart:512-532",
+   "lib/services/metadata_service.dart:130-141",
+   "lib/providers/providers.dart:180-189",
+   "lib/pages/playlist_detail_page.dart:61-66",
+   "lib/services/download_service.dart:306-314"
+  ],
+  "scenario": "1. So that other players, file managers, Windows, Kodi, Poweramp and car units show artwork when the folder is used without the app (G4), the owner, or a future export step, puts folder.jpg or cover.jpg into /storage/emulated/0/Music/WoolyTube/<playlist>/. 2. On the next app launch, recoverInterruptedDownloads runs reconcilePlaylist on every playlist, whose directory pass adds every root-level .jpg/.jpeg/.png/.webp/.gif to toDelete and deletes it. The same happens on every playlist open (_loadPlaylist) and after every download run (cleanupPlaylistFolder). 3. When thumbnail embedding fails (e.g. the webm fallback in F30), yt-dlp leaves '<prefix>_<title>.png/webp' as the only local copy of that track's art, and the same rule deletes it; the track is left with only its YouTube URL thumbnail, which disappears when the video is deleted. This also blocks any fix that keeps art beside the media at the folder root.",
+  "evidence": "metadata_service.dart:380-383: `if (isTransientFile(fileName) || (imageExtensions.contains(ext) && fileName != _metaFileName)) { toDelete.add(entity); continue; }`; the `fileName != _metaFileName` guard never matches an image, so every image is deleted. cleanupPlaylistFolder (517-527) has the same condition and `await entity.delete()`. The comment says the goal is 'orphaned thumbnails' (yt-dlp leftovers), but the rule matches any image name. providers.dart:180-189 runs recoverInterruptedDownloads (metadata_service.dart:130-141 -> reconcilePlaylist for all playlists) at every startup.",
+  "suggested_fix": "Restrict deletion to yt-dlp leftovers: image files whose name starts with an index prefix `^\\d+_` belonging to a known track and whose stem matches a media file in the folder. Never delete names without a prefix (folder.jpg, cover.jpg, AlbumArt*.jpg, anything the user put there); whitelist any folder.jpg the app writes for export. For a leftover belonging to a track whose media has no embedded art (MediaMetadataRetriever.embeddedPicture == null), move it to `.woolytube_thumbnails/` and record it as thumbnailPath instead of deleting it.",
+  "sources": [
+   "durability",
+   "offline",
+   "export",
+   "sync-lifecycle"
+  ]
+ },
+ {
+  "id": "F16",
+  "title": "Cleanup's transient-name patterns match real media whose name ends in '.f<digits>.<ext>' or '.temp.<ext>' (YouTube titles, local replacements, forced inserts, overrides) and delete it",
+  "goal": "G2-durability",
+  "severity": "medium",
+  "kind": "bug",
+  "locations": [
+   "lib/services/metadata_service.dart:486-508",
+   "lib/services/metadata_service.dart:358-413",
+   "lib/services/metadata_service.dart:512-532",
+   "lib/services/metadata_service.dart:550-557",
+   "lib/services/metadata_service.dart:562-578",
+   "lib/services/download_service.dart:604-616",
+   "lib/services/playlist_service.dart:531-539",
+   "lib/services/playlist_service.dart:684-691",
+   "lib/pages/playlist_detail_page.dart:2069-2081"
+  ],
+  "scenario": "(a) Local replacement: a video was deleted from YouTube; the owner has a copy made on a PC with yt-dlp but no ffmpeg, which leaves streams named like 'Song Title [dQw4w9WgXcQ].f140.m4a', and uses 'Pick local replacement'. replaceWithLocalFile keeps the picked basename (sanitizeFilename keeps dots), giving `00042_Song Title [dQw4w9WgXcQ].f140.m4a`. The track shows complete and plays. On the next app start or playlist open (reconcile), or at the end of any download run (cleanupPlaylistFolder), isTransientFile matches `\\.f\\d+\\.\\w+$` and the file is silently deleted; reconcile resets the row to pending with isLocalReplacement=false and sync marks it unavailable; the file picker's cache copy may also be gone. Forced-insert names and names entered in 'Override title / filename' are exposed the same way. (b) YouTube title: --restrict-filenames keeps '.', so a title ending in '.f1' or '.temp' (e.g. 'Formula.f1', 'Live.temp') produces `00012_Formula.f1.m4a`. yt-dlp succeeds, but resolveMediaFile skips the file as transient, so the track is marked 'Downloaded file not found', and cleanupPlaylistFolder then deletes the good file. This repeats on every update, so the track is never backed up.",
+  "evidence": "`static final _formatIntermediatePattern = RegExp(r'\\.f\\d+\\.\\w+$'); static final _postProcessTempPattern = RegExp(r'\\.temp\\.\\w+$');` (metadata_service.dart:489-490), applied by isTransientFile to every file name with no check against DB filePaths. resolveMediaFile skips transient names (570-572). replaceWithLocalFile: `final baseName = p.basenameWithoutExtension(pickedName); final safeName = MetadataService.sanitizeFilename(baseName); ... '${indexPrefix}_$safeName$extension'`; forceInsert does the same with safeTitle. sanitizeFilename only replaces `[\\/\\\\:*?\"<>|\\x00-\\x1f]`. Reconcile (380-383) and cleanupPlaylistFolder (524-527) delete matches.",
+  "suggested_fix": "Never delete a file that any track's filePath or thumbnailPath references. Confine yt-dlp intermediates to a staging dir (F20) and stop pattern-deleting inside the media folder; if patterns are kept, limit transient deletion to intermediates of tracks that are not complete (`<their prefix>_...` with .part/.ytdl/.fNNN/.temp), only while holding the lock, and treat '<base>.fNNN.<ext>' as an intermediate only when the matching final '<base>.<ext>' is being produced. When building names from user input (replacement, force insert, override), neutralise a trailing `.f<digits>` or `.temp` segment, e.g. by replacing that dot with '_'.",
+  "sources": [
+   "durability",
+   "native-ytdlp",
+   "sync-lifecycle"
+  ]
+ },
+ {
+  "id": "F17",
+  "title": "Extracted cover-art files are named after the DB track id, so after a reinstall + import one track's thumbnail can be deleted or overwritten by another track's",
+  "goal": "multiple",
+  "severity": "medium",
+  "kind": "bug",
+  "locations": [
+   "android/app/src/main/kotlin/com/woolytube/woolytube/MainActivity.kt:350-376",
+   "lib/services/metadata_service.dart:286-293",
+   "lib/services/metadata_service.dart:607-617",
+   "lib/services/metadata_service.dart:652-702",
+   "lib/services/playlist_service.dart:452-455",
+   "lib/services/playlist_service.dart:747-787",
+   "lib/pages/playlist_detail_page.dart:61-68",
+   "lib/database/database.dart:44"
+  ],
+  "scenario": "Old install: playlist B's track at index 10 (DB id 160) was replaced with a local MP3 that has a cover, giving B/.woolytube_thumbnails/track_160.jpg, recorded in the sidecar as thumbnailFileName. B's track at index 40 (id 190) was replaced with a WAV without art. The owner reinstalls and imports another 120-track playlist first (ids 1-120), then B (ids 121-220 in index order): the index-10 track becomes id 130 but keeps thumbnailPath .../track_160.jpg, and the index-40 WAV becomes id 160. When the owner opens B, _loadPlaylist calls backfillLocalThumbnails unprompted; for the art-less WAV it calls extractEmbeddedThumbnail(trackId: 160), and the Kotlin handler first deletes every file starting with 'track_160.' \u2014 the index-10 track's cover is gone, silently. If the WAV had art instead, track_160.jpg is overwritten and both tracks show the WAV's art; the next writeMetadata records the wrong file for the index-10 track, so the mix-up survives the next restore, and backfill never fixes it because the path 'exists'. The same happens whenever the owner later replaces or force-inserts a track whose new id (forceInsert uses max+1) equals an old id used in that folder. If the F04 fix reuses track_<id> naming for every download, almost every new download after a reinstall would clobber an imported track's art.",
+  "evidence": "MainActivity.kt:351-357 `val filePrefix = \"track_${trackId}.\"; thumbnailDir.listFiles()?.filter { it.isFile && it.name.startsWith(filePrefix) }?.forEach { it.delete() }`, then writes `File(thumbnailDir, \"track_${trackId}.$extension\")`. importPlaylist keeps the old relative name via thumbnailFileName (`thumbnailPath = normalizedCandidate;`, metadata_service.dart:607-617) but inserts rows with fresh autoincrement ids (652-702; database.dart:44). backfillLocalThumbnails re-extracts every local replacement whose thumbnail is missing (playlist_service.dart:752-764) on each detail-page open (playlist_detail_page.dart:67) and skips a track when `existingThumbnailPath(track.thumbnailPath) != null`.",
+  "suggested_fix": "Name thumbnail files by a key that is stable across reinstalls and tied to the media, e.g. `<media file basename>.jpg` or `<indexStr>_<videoId>.jpg` (videoIds, including force-insert ids, are unique per playlist). When re-extracting, delete only the file the track's own thumbnailPath points to (passed from Dart), never a name pattern. During importPlaylist, rename restored thumbnails to the new scheme (via temp names to avoid swaps) and update thumbnailPath. Remember 'no embedded art' (marker or checked timestamp) so backfill does not re-run on every open.",
+  "sources": [
+   "durability",
+   "offline",
+   "export",
+   "native-ytdlp"
+  ]
+ },
+ {
+  "id": "F18",
+  "title": "Custom chapters are erased by a Redownload or Retry of the same video, and stay hidden (then overwritten) if that download fails",
+  "goal": "G2-durability",
+  "severity": "medium",
+  "kind": "bug",
+  "locations": [
+   "lib/database/database.dart:528-552",
+   "lib/services/download_service.dart:396",
+   "lib/services/playlist_service.dart:459",
+   "lib/services/playlist_service.dart:713",
+   "lib/services/metadata_service.dart:161-179",
+   "lib/services/chapter_service.dart:97",
+   "lib/services/chapter_service.dart:111-139",
+   "lib/pages/chapters_page.dart:252-258"
+  ],
+  "scenario": "The owner marks 20-25 custom chapters (a tracklist) on a 1-2 hour mix or album video, then taps Redownload (e.g. after a corrupted file) or Retry in an error dialog. downloadTrack always calls _db.resetTrackForRedownload, which calls invalidateTrackChapters (valid=false). When the download succeeds, _captureChapterMetadataFile writes `custom: old.valid ? old.custom : null`, so the custom list is erased even though the same YouTube video has the same timeline, and the sidecar is rewritten without it. When the download fails, the chapters stay hidden (`active` returns [] for invalid data), and the next chapter save writes only the new entry with `downloaded: const []`, overwriting the old list. The batch download path does not invalidate, so the same file fetched by a normal update keeps its chapters: the loss depends only on which button was used. 'Restore downloaded chapters' also wipes the custom list in one tap with no confirmation or undo.",
+  "evidence": "database.dart:538-539 `resetTrackForRedownload(...) { await invalidateTrackChapters(trackId);`. download_service.dart:396 `await _db.resetTrackForRedownload(track.id);` runs before every single-track download. metadata_service.dart:172-178 `ChapterData(downloaded: data.downloaded, custom: old.valid ? old.custom : null, ...)`. chapter_service.dart:116 `[...old.active.where(...), chapter]` and 133 `downloaded: old.valid ? old.downloaded : const []`. chapters.dart `List<MediaChapter> get active => valid ? (custom ?? downloaded) : const [];`.",
+  "suggested_fix": "Invalidate chapters only when the media source really changes kind (YouTube <-> local file, forced insert). For a re-download of the same videoId keep the custom chapters valid. On capture, if old data is invalid but |new duration - old durationMs| <= ~2 s, re-validate and keep the custom list; if durations differ, keep it but flag it for review instead of nulling it. Never drop a custom list without a backup (e.g. a `customBackup` field in chaptersJson that the chapters page can restore). Confirm before 'Restore downloaded chapters'.",
+  "sources": [
+   "durability",
+   "sync-lifecycle"
+  ]
+ },
+ {
+  "id": "F19",
+  "title": "'Pick local replacement' deletes the existing downloaded file immediately, with no confirmation or backup, and deletes it before the staged copy is in place",
+  "goal": "G2-durability",
+  "severity": "medium",
+  "kind": "bug",
+  "locations": [
+   "lib/pages/playlist_detail_page.dart:1356-1374",
+   "lib/pages/playlist_detail_page.dart:1483-1556",
+   "lib/services/playlist_service.dart:684-723",
+   "lib/services/metadata_service.dart:491-508"
+  ],
+  "scenario": "A track's YouTube video was deleted and the app holds the only copy. The owner opens Storage -> 'Pick local replacement' to try a better rip, or picks the wrong file by mistake. Nothing asks for confirmation and the menu text does not say the current file will be deleted. replaceWithLocalFile copies the picked file to a `.woolytube-local-replacement-*` staging name, deletes the existing media (found by index prefix, so with shared or shifted prefixes, see F01/F09, it can be another track's file), then renames the staged copy into place. The original download cannot be recovered. If the rename fails after the delete, the catch block only removes the staged copy, so both are gone; if the process is killed between delete and rename, only the staging file is left and the next reconcile/cleanup deletes it as transient.",
+  "evidence": "playlist_detail_page.dart:1370-1373 `onTap: () async { Navigator.pop(sheetContext); await _pickLocalReplacement(track); }` with no dialog. playlist_service.dart:702-708 `final existing = MetadataService.resolveMediaFile(...); if (existing != null && await File(existing).exists()) { await File(existing).delete(); }` followed by `await stagedFile.rename(destinationPath);`. `.woolytube-local-replacement-` is in _stagingPrefixes (metadata_service.dart:491-495), so isTransientFile deletes leftovers.",
+  "suggested_fix": "Confirm before replacing and say explicitly that the downloaded original will be replaced. Run the operation under the DownloadLock (F09). Instead of deleting the old file, move it to `<folder>/.woolytube_replaced/<index>_<videoId>.<ext>` (recorded in the sidecar) so it can be restored; at minimum rename the old file aside, rename the staged file into place, update the DB, and only then delete the old file. Identify the file to replace by track.filePath, not by prefix.",
+  "sources": [
+   "sync-lifecycle",
+   "durability"
+  ]
+ },
+ {
+  "id": "F20",
+  "title": "An interrupted conversion or embed leaves a truncated or art-less final file, which the next reconcile or download adopts as complete and never retries",
+  "goal": "multiple",
+  "severity": "medium",
+  "kind": "bug",
+  "locations": [
+   "plugins/woolytube_ytdlp/android/src/main/kotlin/com/woolytube/ytdlp/YtDlpPlugin.kt:301-313",
+   "plugins/woolytube_ytdlp/android/src/main/kotlin/com/woolytube/ytdlp/YtDlpPlugin.kt:69-80",
+   "android/app/src/main/kotlin/com/woolytube/woolytube/AutoUpdateWorker.kt:81-86",
+   "plugins/woolytube_ytdlp/android/src/main/kotlin/com/woolytube/ytdlp/DownloadForegroundService.kt:116-123",
+   "lib/services/download_service.dart:532-543",
+   "lib/services/download_service.dart:652-676",
+   "lib/services/metadata_service.dart:433-447",
+   "lib/services/metadata_service.dart:460-464",
+   "lib/services/metadata_service.dart:500-531",
+   "lib/services/metadata_service.dart:562-578"
+  ],
+  "scenario": "The background worker is downloading an audio playlist and hits its 10-minute latch: engine.destroy() runs and onDetachedFromEngine kills yt-dlp while ffmpeg converts 00042_Mix.webm into 00042_Mix.m4a. That conversion happens whenever no m4a stream exists (bestaudio fallback to webm/opus) or the '/best' mp4 fallback is used. The same kill happens with the Stop button, swiping the app away, OOM or a reboot. ExtractAudio writes straight to the final .m4a name, so the folder now holds a truncated 00042_Mix.m4a with no moov atom (unplayable) next to the complete .webm. Cleanup removes only .part/.fNNN/.temp files and images, so both survive. On the next start, reconcile (filesByPrefix keeps whichever file is listed last) or the next update's reuse path (first file listed) takes a file for prefix 00042_ and marks the track complete with no integrity check. The track shows as downloaded but does not play and is never retried; if YouTube later deletes the video the backup is broken. Reconcile can even switch a correct track to the bad file (track.filePath != fileOnDisk). A kill during EmbedThumbnail or EmbedSubtitle (which write to <name>.temp.<ext>) leaves the final file without cover or subtitles; the image is then deleted and the file adopted as complete, silently missing its art.",
+  "evidence": "yt-dlp postprocessor/ffmpeg.py:509-526: `temp_path = new_path = replace_extension(path, extension, ...)`; a '.temp' path is used only when the extension is unchanged; run_ffmpeg writes to the final name and the source is removed only after os.replace. embedthumbnail.py:59 and 224-225 use '<name>.temp.<ext>' and os.replace. youtubedl-android destroyProcessById -> Process.destroy() kills python; the orphaned ffmpeg dies of SIGPIPE. resolveMediaFile returns the first media file whose name starts with the prefix; reconcile `filesByPrefix = {for (f in mediaFiles) '${f.digits}_': f.path}` (last wins) and adopts any prefix file for a 'downloading' row (441-446). download_service.dart:533-543 reuse path has no integrity or duration check.",
+  "suggested_fix": "Run yt-dlp with `-P home:<playlist>` and `-P temp:<playlist>/.woolytube-staging/<trackId>` and a relative `-o \"<idx>_%(title)s.%(ext)s\"`: all intermediates and post-processing then happen in staging and MoveFilesAfterDownloadPP (movefilesafterdownload.py:52, an atomic rename on the same volume) publishes the final file only after every post-processor finishes; this also removes the need for '%%' escaping of the path. Wipe staging dirs on cancel and on the next run. When recovering a row interrupted in 'downloading', treat media at its prefix as suspect. Before adopting an existing file, require the expected extension (m4a for audio-only) and a sane duration (MediaMetadataRetriever vs durationSeconds); if several media files share a prefix, never pick one silently: prefer the complete source, remove the partial output, or flag the track.",
+  "sources": [
+   "native-ytdlp",
+   "sync-lifecycle"
+  ]
+ },
+ {
+  "id": "F21",
+  "title": "Playlist cover images are remote-only: playlists.thumbnailPath is never written, the cover is the first video's thumbnail captured once, and it is never refreshed",
+  "goal": "G3-offline",
+  "severity": "medium",
+  "kind": "bug",
+  "locations": [
+   "plugins/woolytube_ytdlp/android/src/main/kotlin/com/woolytube/ytdlp/YtDlpPlugin.kt:229-234",
+   "lib/pages/add_playlist_page.dart:94",
+   "lib/pages/add_playlist_page.dart:134",
+   "lib/services/playlist_service.dart:97-123",
+   "lib/database/database.dart:16-17",
+   "lib/widgets/playlist_card.dart:155-165",
+   "lib/services/audio_handler.dart:169-182",
+   "lib/services/metadata_service.dart:251"
+  ],
+  "scenario": "After a reinstall + import, or after Android clears the app cache, the home screen offline shows the grey playlist_play placeholder for every playlist and Android Auto's playlist browse list has no art. Online there is a worse case: the stored cover is not the playlist's own image but the thumbnail of the first video, captured once when the playlist was added (YtDlpPlugin takes the last 'thumbnails' entry of the first flat entry). When that first video is later deleted or made private, i.ytimg.com answers 404, flutter_cache_manager deletes the cached copy (same mechanism as F04), and the playlist cover disappears for good; syncPlaylist never updates thumbnailUrl, so it never recovers. No folder.jpg exists for other players either (F13).",
+  "evidence": "database.dart:17 declares `TextColumn get thumbnailPath` on Playlists but nothing writes it (the only thumbnailPath writer, updateTrackThumbnailPath, works on tracks). playlist_card.dart:155-164 uses only `playlist.thumbnailUrl` with CachedNetworkImage. audio_handler.dart:177-180 passes `localPath: p.thumbnailPath` (always null). The sidecar writes only `'thumbnailUrl': playlist.thumbnailUrl` (metadata_service.dart:251). YtDlpPlugin.kt:229-233 `if (playlistThumbnail == null) { val thumbnails = json.optJSONArray(\"thumbnails\") ... thumbnails.getJSONObject(thumbnails.length() - 1).optString(\"url\") }` on the first entry.",
+  "suggested_fix": "When a playlist is added, and on sync if missing, save the cover to `<playlist>/.woolytube_thumbnails/playlist.jpg` (or copy the first downloaded track's local thumbnail from F04) and set playlists.thumbnailPath; use it first in PlaylistCard._buildThumbnail and getChildren, like track tiles do. Write a playlist-level thumbnailFileName into woolytube_meta.json and restore it in importPlaylist. Also write folder.jpg for other players, which requires the F15 cleanup fix first.",
+  "sources": [
+   "offline",
+   "native-ytdlp",
+   "export"
+  ]
+ },
+ {
+  "id": "F22",
+  "title": "Restore only works from two fixed folders and only at app start, one 'Dismiss' tap hides a playlist forever, and two DB rows with the same URL make every later import scan throw",
+  "goal": "G4-export",
+  "severity": "medium",
+  "kind": "bug",
+  "locations": [
+   "lib/services/metadata_service.dart:296-324",
+   "lib/services/metadata_service.dart:327-340",
+   "lib/database/database.dart:299-300",
+   "lib/providers/providers.dart:160-208",
+   "lib/pages/home_page.dart:819-851",
+   "lib/pages/add_playlist_page.dart:131-147",
+   "lib/services/playlist_service.dart:94-142"
+  ],
+  "scenario": "A. The owner restores a backup by copying the WoolyTube folder to Download/WoolyTube, an SD card, or inside a parent such as Music/Backup/WoolyTube. scanForPlaylists checks only '/storage/emulated/0/Music/WoolyTube' and '/storage/emulated/0/Movies/WoolyTube', one level deep, so nothing is found, and there is no 'Import from folder' option. B. The scan runs only inside initProvider: folders copied while the app is open are not offered until a restart; if the owner denies 'All files access' on the first prompt, openAppSettings() returns at once and the scan runs without permission and finds nothing. C. Tapping 'Dismiss' on the banner stores every URL in dismissed_import_urls permanently (as does deleting a playlist while keeping files); no screen lists or restores them, which leaves only the destructive re-add path of F01. D. If the DB ever has two rows with the same URL \u2014 after Import All of a mode-switched pair (F05), or after adding one YouTube playlist once as audio and once as video (or twice), which addPlaylist allows \u2014 findUnimportedPlaylists calls getPlaylistByUrl(url).getSingleOrNull(), which throws for more than one row. initProvider swallows the error, so the 'Found N playlists' banner never appears again for any newly copied or restored playlist.",
+  "evidence": "`final scanDirs = ['/storage/emulated/0/Music/WoolyTube', '/storage/emulated/0/Movies/WoolyTube']; ... await for (final entity in dir.list()) { if (entity is! Directory) continue;` lists one level. `final existing = await _db.getPlaylistByUrl(dp.url);` -> `(select(playlists)..where((p) => p.url.equals(url))).getSingleOrNull()` (database.dart:299-300); drift's getSingleOrNull throws when more than one row matches; metadata_service.dart:335 calls it for each folder inside one loop. initProvider wraps the scan in `try { ... } catch (_) { // Non-critical }` (providers.dart:207). _dismissImports calls `addDismissedImportUrls(imports.map((i) => i.url))`; no UI calls removeDismissedImportUrl except addPlaylist.",
+  "suggested_fix": "1. Add 'Import library from folder...' in Settings: directory picker or path, recursive scan for woolytube_meta.json, import with folderPath set to where the sidecar was found. 2. Re-run findUnimportedPlaylists on app resume and after the storage permission is granted, not only during init. 3. List dismissed playlists in Settings with an Import button; make the banner's Dismiss session-only or confirm it with 'You can import later from Settings'. 4. In findUnimportedPlaylists use `.get()` and treat any match as 'exists' (or match on outputPath == folderPath), compare normalised playlist ids, and skip a second sidecar for a URL already imported in the same batch. 5. Warn or block before adding a URL that already exists, unless the duplicate is intentionally a separate audio/video copy, and decide how the import check treats that case.",
+  "sources": [
+   "export",
+   "sync-lifecycle"
+  ]
+ },
+ {
+  "id": "F23",
+  "title": "With subtitles enabled, a subtitle fetch error (often HTTP 429) aborts the whole video download and is never retried",
+  "goal": "G2-durability",
+  "severity": "medium",
+  "kind": "bug",
+  "locations": [
+   "plugins/woolytube_ytdlp/android/src/main/kotlin/com/woolytube/ytdlp/YtDlpPlugin.kt:318-327",
+   "lib/services/download_service.dart:684-701",
+   "lib/services/download_service.dart:732-734"
+  ],
+  "scenario": "The owner turns on 'Download subtitles' (default language 'en') for a video playlist. A Hungarian video has only an auto-translated 'en' track, and YouTube's timedtext endpoint returns HTTP 429, which is common for translated auto-captions. yt-dlp aborts with \"Unable to download video subtitles for 'en': HTTP Error 429\" before downloading any media. _isTransientError does not match 429, so there is no retry and the track becomes 'error'. Every later update fails the same way. When the video is deleted from YouTube a month later it was never backed up, all because of an optional extra.",
+  "evidence": "yt-dlp writes subtitles before the media download (YoutubeDL.py:3387-3389: `sub_files = self._write_subtitles(...); if sub_files is None: return`). Any subtitle download error raises unless ignoreerrors is set (YoutubeDL.py:4492-4497: `if self.params.get('ignoreerrors') is not True: ... raise DownloadError(msg)`). _transientErrorPatterns contains no '429' and no 'too many requests'.",
+  "suggested_fix": "Treat subtitles as best-effort. If a download fails with 'Unable to download video subtitles', immediately retry the same track without the subtitle options and log a warning. Alternatively fetch subtitles in a separate `--skip-download --write-subs` pass after the media is safely on disk and embed them, or keep the .vtt next to the video (also better for export). Add '429' / 'too many requests' to the transient patterns.",
+  "sources": [
+   "native-ytdlp"
+  ]
+ },
+ {
+  "id": "F24",
+  "title": "If the YouTube playlist becomes private, deleted or empty, the app stops downloading even the tracks still pending in it, from the Update button and in the background",
+  "goal": "G2-durability",
+  "severity": "medium",
+  "kind": "bug",
+  "locations": [
+   "lib/services/background_worker.dart:63-71",
+   "lib/pages/playlist_detail_page.dart:835-873",
+   "lib/pages/home_page.dart:656-697",
+   "lib/services/playlist_service.dart:260-270"
+  ],
+  "scenario": "A playlist has 30 tracks pending or in error (e.g. they failed during an outage). The channel then makes the playlist private, deletes it, or empties it. getPlaylistInfo throws, or the 'no entries' guard throws StateError. The background worker catches the exception and skips downloadPlaylist for that playlist on every run; the Update button shows 'Update failed' and never calls downloadPlaylist. The individual videos are often still public for a while, but the only way to fetch them is one-by-one Redownload. If the videos vanish later, they were never archived. (The same failed sync also prevents any sidecar rewrite for that playlist, see F10.)",
+  "evidence": "background_worker.dart:64-70: `try { await playlistService.syncPlaylist(playlist); final freshPlaylist = ...; await downloadService.downloadPlaylist(freshPlaylist); } catch (_) { }`, so a sync failure skips the download. playlist_detail_page.dart:837 and home_page.dart:659 await syncPlaylist inside the same try that later calls downloadPlaylist.",
+  "suggested_fix": "Separate the two steps. If sync fails, log it, show a 'source unavailable' badge and record a separate 'last sync error', but still run downloadPlaylist for the existing pending and error tracks (they do not depend on the playlist listing), and still write the sidecar.",
+  "sources": [
+   "sync-lifecycle"
+  ]
+ },
+ {
+  "id": "F25",
+  "title": "Design question: videos inserted mid-list or at the top on YouTube (including 'Add new videos to top' playlists) are appended at the end, so local order drifts from 'where I put them' and that position is never recorded",
+  "goal": "G1-order",
+  "severity": "medium",
+  "kind": "design-question",
+  "locations": [
+   "lib/services/playlist_service.dart:337-344",
+   "lib/services/playlist_service.dart:376-417",
+   "lib/services/playlist_service.dart:549-625",
+   "plugins/woolytube_ytdlp/android/src/main/kotlin/com/woolytube/ytdlp/YtDlpPlugin.kt:204-224"
+  ],
+  "scenario": "In syncPlaylist, _newTrackCompanions walks YouTube's entries in order and gives each unknown id maxIndex + 1. k new entries in one sync get maxIndex+1..maxIndex+k, keeping their relative YouTube order but ignoring their YouTube neighbours: YouTube [A, B, X, Y, C, D] with local A1 B2 C3 D4 gives X5 Y6 (pinned by the test 'new remote entries are appended after the highest local index'). The local order is therefore 'order of sync batches, then YouTube order within each batch'. For playlists that put new videos first ('Add new videos to top', 'Date added (newest)', channel /videos URLs), the first add stores newest-first (a fresh playlist takes YouTube's numbering), then each later batch is appended newest-first within itself: one sync per new video gives oldest-first, a week offline puts that week's videos in reverse; the result matches neither YouTube nor date order and depends on how often sync ran. A song the owner drops at YouTube position 5 lands at max+1. Videos hidden as unavailable at first add that later reappear, or private videos made public, also land at the end. The YouTube neighbour of an appended track is never stored in the DB or the sidecar, so once YouTube removes or reorders things, 'where I originally put it' cannot be reconstructed, even by a future feature. forceInsert cannot be reused as-is: it shifts every row >= i and renames each file (F08/F09 problems), and it creates a synthetic `woolytube-local-` id with isLocalReplacement=true, so the row would never be downloaded.",
+  "evidence": "`var playlistIndex = appendOnly ? maxIndex + 1 : entry['playlist_index'] as int? ?? (i + 1);` (playlist_service.dart:394-397). For the first add, yt-dlp's playlist_index is the 1-based position in its own enumeration. forceInsert: `final newIndex = track.index >= index ? track.index + 1 : track.index;` with renames at 554-591 and `videoId: '$forcedInsertVideoIdPrefix$operationId'` at 615.",
+  "suggested_fix": "1) Cheap and urgent: when a new entry is discovered, store its YouTube position (playlist_index) and the id of the existing track just before it, in the DB and the sidecar; this information is gone once YouTube changes. 2) Separate display/playback order from the file prefix: add a sort-key column (REAL or gapped integer `position`) and give each new entry a position right after its nearest existing YouTube predecessor; UI, playback, search and the sidecar order by position while file prefixes stay append-only (the owner's decision); write `<playlist>.m3u8` in position order (F13) so external players follow it without renaming anything. Alternative: letter sub-indices like `00012a_Title` sort between `00012_` and `00013_` ('_'=0x5F < 'a'=0x61) without renaming, but the `^(\\d+)_` patterns in metadata_service, playlist_service and playback_service must be extended. 3) For newest-first playlists add a per-playlist option ('new videos go at: end / top / remote position'), or detect when every new entry precedes every known one, and append each batch in reverse YouTube order so the local order stays consistently chronological.",
+  "sources": [
+   "order",
+   "sync-lifecycle"
+  ]
+ },
+ {
+  "id": "F26",
+  "title": "Design question: a video that appears twice in a YouTube playlist is stored only once, so its second position is dropped",
+  "goal": "G1-order",
+  "severity": "medium",
+  "kind": "design-question",
+  "locations": [
+   "lib/services/playlist_service.dart:358-369",
+   "lib/services/playlist_service.dart:381-392",
+   "test/services/playlist_service_test.dart:721-740"
+  ],
+  "scenario": "The owner deliberately has the same song at #1/#3 and again as a reprise at #12/#40 of a YouTube playlist. On the first add, the later entry is skipped by seenVideoIds, leaving a gap at that index; in later syncs _entriesByVideoId keeps only the first occurrence, and adding the song again at the end of the YouTube playlist is ignored because the videoId already exists. The app, the sidecar and the exported folder contain the song only once, so anyone playing the folder hears it once and the sequence differs from what the owner built. This contradicts 'exact order where I put them', though a test codifies it as intended.",
+  "evidence": "`if (vid.isEmpty || !seenVideoIds.add(vid)) continue; if (existingVideoIds.contains(vid)) continue;` (playlist_service.dart:391). `byVideoId.putIfAbsent(vid, () => entry);` (366). The test 'duplicate remote video IDs are stored once' expects a single 'dup' row.",
+  "suggested_fix": "If the owner wants exact positions, key remote entries by (videoId, occurrence number in YouTube order): the k-th remote occurrence maps to the k-th local row with that videoId, and extra occurrences become new rows (appended under the append-only rule). The extra row can hold its own copy (hard link or copy with its own prefix, needed for folder-order export) or reference the first row's file with the M3U8 listing it twice. At minimum record the skipped duplicate positions in the sidecar/M3U8.",
+  "sources": [
+   "order",
+   "sync-lifecycle"
+  ]
+ },
+ {
+  "id": "F27",
+  "title": "Design question: video downloads usually pick AV1 (and HDR AV1 when available), which many devices and players cannot play",
+  "goal": "G4-export",
+  "severity": "medium",
+  "kind": "design-question",
+  "locations": [
+   "plugins/woolytube_ytdlp/android/src/main/kotlin/com/woolytube/ytdlp/YtDlpPlugin.kt:315"
+  ],
+  "scenario": "1. A video playlist downloads with `-f bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best`. 2. Within ext=mp4, yt-dlp's YouTube sort is ('quality','res','fps','hdr:12','source','vcodec',...), with vcodec order ['av0?1','vp9.2','vp9','h265','h264',...]. At 1080p YouTube offers avc1 (137) and av01 (399), and AV1 wins; above 1080p mp4 has only AV1; 'hdr:12' prefers HDR10 AV1 when the upload has it. 3. The owner copies the Movies folder to a TV over USB, a car screen, an older Android phone, an iPhone without hardware AV1 (pre-A17 Pro), a Windows PC without the AV1 Video Extension, or an older Chromecast/Fire TV: black screen, won't open, or washed-out HDR. H.264 plays essentially everywhere. (The '/best' webm fallback is covered in F30.)",
+  "evidence": "YtDlpPlugin.kt:315 `request.addOption(\"-f\", \"bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best\")`. yt_dlp/extractor/youtube/_video.py:4204-4207 `_format_sort_fields: ('quality','res','fps','hdr:12','source','vcodec',...)`. yt_dlp/utils/_utils.py:5375 vcodec order `['av0?1', r'vp0?9\\.0?2', 'vp0?9', '[hx]265|he?vc?', '[hx]264|avc', ...]`.",
+  "suggested_fix": "For maximum compatibility (the owner's 'any device'), prefer H.264 SDR: `-f \"bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4][vcodec^=avc1]/bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b\"` with `-S \"hdr:sdr\"`, plus `--merge-output-format mp4` and `--remux-video mp4` so fallbacks still end up as mp4. Optionally make it a per-playlist or global toggle ('Maximum compatibility, H.264 up to 1080p' vs 'Best quality, AV1'), defaulting to compatibility.",
+  "sources": [
+   "export"
+  ]
+ },
+ {
+  "id": "F28",
+  "title": "The sidecar drops segment actionType/votes/locked/description and track downloadedAt, and app settings are never exported",
+  "goal": "G4-export",
+  "severity": "low",
+  "kind": "bug",
+  "locations": [
+   "lib/services/metadata_service.dart:45-59",
+   "lib/services/metadata_service.dart:231-242",
+   "lib/services/metadata_service.dart:694-696",
+   "lib/services/metadata_service.dart:709-723",
+   "lib/database/database.dart:74-80",
+   "lib/services/playback_service.dart:73-74",
+   "lib/services/app_settings_service.dart:10-15"
+  ],
+  "scenario": "1. SponsorBlock 'poi_highlight' segments are stored with actionType 'poi' as a 1-second range, and the owner has set Highlight to 'Auto skip' (the UI offers all three actions for every category). 2. Before the reinstall shouldSkip is false because actionType != 'skip'. 3. After import, actionType falls back to the column default 'skip', so playback now skips one second at every highlight point; the track keeps sponsorBlockCheckedAt and 'sponsorblock'-sourced rows, so the backfill never re-fetches and corrects them. 4. votes, locked and description, including on the owner's override rows, are lost. 5. downloadedAt is reset to the import time. 6. App-wide settings (download subtitles, subtitle languages, pause on interruption, mobile-data downloads) live only in SharedPreferences and are in no export.",
+  "evidence": "Sidecar segments are written as `{'source','uuid','category','startMs','endMs'}` only; DiscoveredSponsorBlockSegment has only these fields; the import companion sets no actionType, so `withDefault(const Constant('skip'))` applies. `bool get shouldSkip => action == SponsorBlockCategoryAction.autoSkip && actionType == 'skip';` (playback_service.dart:73-74). Import sets `downloadedAt: Value(row.status == 'complete' ? DateTime.now() : null)`.",
+  "suggested_fix": "Write and parse actionType (default 'skip' when absent, for older sidecars), votes, locked, description and createdAt per segment, and downloadedAt per track. Add a library-level `/storage/emulated/0/Music/WoolyTube/woolytube_settings.json`, written on every settings change and offered for restore during import. Bump the sidecar 'version' to 2 and add a write -> parse -> import round-trip test that compares every column.",
+  "sources": [
+   "export",
+   "durability"
+  ]
+ },
+ {
+  "id": "F29",
+  "title": "Reconcile treats 'file not visible' as 'file deleted' and permanently clears isLocalReplacement, e.g. when it runs before All-files access is granted",
+  "goal": "G2-durability",
+  "severity": "low",
+  "kind": "bug",
+  "locations": [
+   "lib/providers/providers.dart:163-169",
+   "lib/providers/providers.dart:177-189",
+   "lib/services/metadata_service.dart:451-458",
+   "android/app/src/main/AndroidManifest.xml:16-21"
+  ],
+  "scenario": "All-files access is missing: the owner revoked it, or after a reinstall Android Auto Backup restored woolytube.sqlite from app_flutter (the manifest does not set allowBackup=false) and the owner backed out of the permission screen. initProvider calls openAppSettings() and carries on; recoverInterruptedDownloads then reconciles every playlist. Files this install does not own are invisible, so every complete track is reset to pending with filePath cleared and isLocalReplacement=false. Once the permission is granted, reconcile re-adopts the files by prefix, but the replacement flag is gone for good. As a result SponsorBlock segments timed to the YouTube video are applied to the local file, Redownload becomes available on it (which deletes it, F03), conflict prompts stop appearing, and forced inserts lose the flag.",
+  "evidence": "providers.dart:164-168 `if (!status.isGranted) { await openAppSettings(); }` is followed straight away by recovery at 181-185. metadata_service.dart:451-458 `updateTrackStatus(track.id, 'pending', clearFilePath: true, clearDownloadedAt: true, isLocalReplacement: false)` runs whenever no prefix file is listed.",
+  "suggested_fix": "Run recovery and reconcile only when MANAGE_EXTERNAL_STORAGE is granted. Treat a listing with zero media files while the DB has complete tracks as 'unreadable' and change nothing. Never clear isLocalReplacement in reconcile; only the explicit replace and redownload flows should change it.",
+  "sources": [
+   "durability"
+  ]
+ },
+ {
+  "id": "F30",
+  "title": "If thumbnail embedding fails (single-file webm from the '/best' fallback), a complete file is marked error and its artwork is deleted",
+  "goal": "multiple",
+  "severity": "low",
+  "kind": "bug",
+  "locations": [
+   "plugins/woolytube_ytdlp/android/src/main/kotlin/com/woolytube/ytdlp/YtDlpPlugin.kt:315",
+   "plugins/woolytube_ytdlp/android/src/main/kotlin/com/woolytube/ytdlp/YtDlpPlugin.kt:329-331",
+   "lib/services/download_service.dart:532-543",
+   "lib/services/download_service.dart:635-644",
+   "lib/services/metadata_service.dart:524-528"
+  ],
+  "scenario": "For a video where neither 'bestvideo[ext=mp4]+bestaudio[ext=m4a]' nor 'best[ext=mp4]' is available, '/best' picks a single webm. yt-dlp switches webm to mkv only for merged formats, and EmbedThumbnailPP raises 'Supported filetypes for thumbnail embedding are: ...' for webm; that is reported as 'Postprocessing:' and yt-dlp exits 1. The app marks the track 'error' and a single-track download shows 'Download failed', although the complete .webm is on disk. Cleanup deletes the leftover thumbnail (F15). The next update adopts the webm as complete by prefix, with no artwork anywhere. m4a and mp4 outputs are fine.",
+  "evidence": "Format `bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best` plus `--embed-thumbnail`. YoutubeDL.py:3489-3497 (webm -> mkv only for merged requested_formats); embedthumbnail.py:221-222 raises EmbedThumbnailPPError for any extension except mp3/mkv/mka/ogg/opus/flac/m4a/mp4/m4v/mov; YoutubeDL.py:3664 exits with error. In the catch, `updateTrackStatus(track.id, 'error', error: errorMsg)`; the file is never deleted (cleanup removes only images and transient files).",
+  "suggested_fix": "For video playlists add `--remux-video webm>mkv` (or `--merge-output-format mkv`, or remux to mp4 per F27) so every output is an embeddable container. When yt-dlp fails with a 'Postprocessing:' thumbnail error but resolveMediaFile finds the media file, record it complete with a warning. Keep the thumbnail locally (F04).",
+  "sources": [
+   "native-ytdlp",
+   "export"
+  ]
+ },
+ {
+  "id": "F31",
+  "title": "The library and playback of downloaded files are unreachable if yt-dlp fails to initialise",
+  "goal": "G3-offline",
+  "severity": "low",
+  "kind": "bug",
+  "locations": [
+   "lib/providers/providers.dart:152-158",
+   "lib/main.dart:340-386",
+   "lib/services/ytdlp_service.dart:22-34",
+   "plugins/woolytube_ytdlp/android/src/main/kotlin/com/woolytube/ytdlp/YtDlpPlugin.kt:99-111"
+  ],
+  "scenario": "YoutubeDL.init/FFmpeg.init fail, e.g. on the first launch after an install, reinstall or an update that changes the bundled Python runtime, on a phone whose storage is nearly full (plausible for someone backing up a large media library), so extracting the runtime throws. initProvider throws and InitWrapper shows only 'Failed to initialize: ...' with a Retry button. Home, playlists, search and playback of already-downloaded files are all blocked although none need yt-dlp. No network is involved, but it defeats 'fully available offline' for the whole library.",
+  "evidence": "providers.dart:157 `await ytdlp.initialize();` is the first awaited step of initProvider. ytdlp_service.dart:24-33 retries only on MissingPluginException; a PlatformException ('INIT_ERROR', YtDlpPlugin.kt:106-108) propagates. main.dart:362-385: the error state renders only the message and Retry; HomePage is reached only on data.",
+  "suggested_fix": "Take downloader setup off the critical path: catch and log ytdlp.initialize() failures (or run it unawaited) and still show HomePage. Keep a 'yt-dlp ready' flag and, while it is false, disable only Update/Download/Redownload/Fetch-chapters actions, with an explanation and a retry.",
+  "sources": [
+   "offline"
+  ]
+ }
+]

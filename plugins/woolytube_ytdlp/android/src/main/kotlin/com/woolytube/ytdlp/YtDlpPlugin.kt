@@ -19,6 +19,7 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     companion object {
         private const val METHOD_CHANNEL = "com.woolytube/ytdlp"
         private const val EVENT_CHANNEL = "com.woolytube/ytdlp_progress"
+        private const val MEDIA_METADATA_CHANNEL = "com.woolytube/media_metadata"
         private const val TAG = "WoolyTube"
 
         private val activeProcessIds = ConcurrentHashMap.newKeySet<String>()
@@ -42,6 +43,7 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
     private lateinit var methodChannel: MethodChannel
     private lateinit var eventChannel: EventChannel
+    private lateinit var mediaMetadataChannel: MethodChannel
     private lateinit var context: Context
     private var progressSink: EventChannel.EventSink? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -52,6 +54,17 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         context = binding.applicationContext
         methodChannel = MethodChannel(binding.binaryMessenger, METHOD_CHANNEL)
         methodChannel.setMethodCallHandler(this)
+
+        // Registered here rather than in MainActivity so that the background
+        // worker's headless engine can extract artwork too.
+        mediaMetadataChannel = MethodChannel(binding.binaryMessenger, MEDIA_METADATA_CHANNEL)
+        mediaMetadataChannel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "extractEmbeddedThumbnail" ->
+                    handleExtractEmbeddedThumbnail(call.arguments as? Map<*, *>, result)
+                else -> result.notImplemented()
+            }
+        }
 
         eventChannel = EventChannel(binding.binaryMessenger, EVENT_CHANNEL)
         eventChannel.setStreamHandler(object : EventChannel.StreamHandler {
@@ -68,6 +81,7 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         methodChannel.setMethodCallHandler(null)
+        mediaMetadataChannel.setMethodCallHandler(null)
         eventChannel.setStreamHandler(null)
         progressSink = null
         val hadActiveDownloads = ownedProcessIds.isNotEmpty()
@@ -115,6 +129,10 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         val outputPath = args["outputPath"] as? String
         val audioOnly = args["audioOnly"] as? Boolean ?: false
         val embedThumbnail = args["embedThumbnail"] as? Boolean ?: true
+        val writeThumbnail = args["writeThumbnail"] as? Boolean ?: false
+        val embedMetadata = args["embedMetadata"] as? Boolean ?: false
+        val metadataAlbum = args["metadataAlbum"] as? String
+        val metadataTrackNumber = (args["metadataTrackNumber"] as? Number)?.toInt()
         val downloadSubtitles = args["downloadSubtitles"] as? Boolean ?: false
         val subtitleLanguages = args["subtitleLanguages"] as? String ?: "en"
         val outputTemplate = args["outputTemplate"] as? String
@@ -139,6 +157,10 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     outputPath,
                     audioOnly,
                     embedThumbnail,
+                    writeThumbnail,
+                    embedMetadata,
+                    metadataAlbum,
+                    metadataTrackNumber,
                     downloadSubtitles,
                     subtitleLanguages,
                     outputTemplate,
@@ -210,6 +232,7 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 val entries = org.json.JSONArray()
                 var playlistTitle = ""
                 var playlistThumbnail: String? = null
+                var isPlaylistResult = false
 
                 for ((index, line) in lines.withIndex()) {
                     try {
@@ -226,6 +249,9 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                         if (playlistTitle.isEmpty()) {
                             playlistTitle = json.optString("playlist_title", "")
                         }
+                        if (json.has("playlist_id") || json.has("playlist_title")) {
+                            isPlaylistResult = true
+                        }
                         if (playlistThumbnail == null) {
                             val thumbnails = json.optJSONArray("thumbnails")
                             if (thumbnails != null && thumbnails.length() > 0) {
@@ -237,8 +263,14 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     }
                 }
 
+                // A single-video URL has no playlist title. Never hand back an
+                // empty name: it would become an empty folder name.
+                if (playlistTitle.isBlank() && entries.length() > 0) {
+                    playlistTitle = entries.getJSONObject(0).optString("title", "")
+                }
                 val output = org.json.JSONObject()
                 output.put("title", playlistTitle)
+                output.put("isPlaylist", isPlaylistResult)
                 output.put("thumbnail", playlistThumbnail ?: "")
                 output.put("count", entries.length())
                 output.put("entries", entries)
@@ -286,6 +318,10 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         outputPath: String,
         audioOnly: Boolean,
         embedThumbnail: Boolean,
+        writeThumbnail: Boolean,
+        embedMetadata: Boolean,
+        metadataAlbum: String?,
+        metadataTrackNumber: Int?,
         downloadSubtitles: Boolean,
         subtitleLanguages: String,
         outputTemplate: String?,
@@ -313,6 +349,12 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             request.addOption("--audio-format", "m4a")
         } else {
             request.addOption("-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best")
+            // Prefer H.264 within those formats. yt-dlp's default order picks
+            // AV1 (often 4K) or VP9, which many TVs, car screens, older phones
+            // and PCs cannot play; the library must play on any device.
+            request.addOption("-S", "vcodec:h264")
+            // A single-file webm fallback cannot hold embedded artwork; mkv can.
+            request.addOption("--remux-video", "webm>mkv")
         }
 
         if (downloadSubtitles && !audioOnly) {
@@ -329,7 +371,38 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         if (embedThumbnail) {
             request.addOption("--embed-thumbnail")
         }
-        request.addOption("--restrict-filenames")
+        if (writeThumbnail) {
+            // Keep the cover as a JPEG beside the media so the app has it
+            // offline even when it is not embedded, or YouTube deletes it.
+            request.addOption("--write-thumbnail")
+            request.addOption("--convert-thumbnails", "jpg")
+        }
+        if (embedMetadata) {
+            // Title, artist, date and source URL go into the file so other
+            // players show them. Chapters stay out: yt-dlp's ffmpeg-based
+            // thumbnail embedding fails on the chapter data stream, and the
+            // app keeps chapters in its own metadata.
+            request.addOption("--embed-metadata")
+            request.addOption("--no-embed-chapters")
+            val extraTags = mutableListOf<String>()
+            if (!metadataAlbum.isNullOrBlank()) {
+                extraTags.add("-metadata")
+                extraTags.add("album=$metadataAlbum")
+            }
+            if (metadataTrackNumber != null && metadataTrackNumber > 0) {
+                extraTags.add("-metadata")
+                extraTags.add("track=$metadataTrackNumber")
+            }
+            if (extraTags.isNotEmpty()) {
+                request.addOption(
+                    "--postprocessor-args",
+                    "Metadata+ffmpeg_o:" + extraTags.joinToString(" ") { shellQuote(it) }
+                )
+            }
+        }
+        // Unicode titles stay readable outside the app; names stay valid on
+        // Windows, FAT and exFAT so the library can be copied anywhere.
+        request.addOption("--windows-filenames")
         request.addOption("--no-mtime")
         request.addOption("--no-playlist")
         request.addOption("--write-info-json")
@@ -344,6 +417,78 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 ))
             }
         }
+    }
+
+    /** Quotes [value] for yt-dlp's shlex-based --postprocessor-args parsing. */
+    private fun shellQuote(value: String): String =
+        "'" + value.replace("'", "'\"'\"'") + "'"
+
+    /**
+     * Writes the cover art embedded in a media file to `<targetStem>.<ext>`.
+     * Only files with that exact stem are replaced. The caller passes a stem
+     * that belongs to one track, so no other track's artwork can be touched.
+     */
+    private fun handleExtractEmbeddedThumbnail(args: Map<*, *>?, result: MethodChannel.Result) {
+        val mediaPath = args?.get("mediaPath") as? String
+        val targetStem = args?.get("targetStem") as? String
+        if (mediaPath.isNullOrBlank() || targetStem.isNullOrBlank()) {
+            result.error("INVALID_ARGS", "mediaPath and targetStem are required", null)
+            return
+        }
+        scope.launch {
+            val retriever = android.media.MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(mediaPath)
+                val artwork = retriever.embeddedPicture
+                if (artwork == null || artwork.isEmpty()) {
+                    withContext(Dispatchers.Main) { result.success(null) }
+                    return@launch
+                }
+                val directory = java.io.File(targetStem).parentFile
+                if (directory != null && !directory.exists() && !directory.mkdirs()) {
+                    throw IllegalStateException("Could not create thumbnail directory")
+                }
+                val target = java.io.File("$targetStem.${imageExtension(artwork)}")
+                val temporary = java.io.File("${target.path}.tmp")
+                temporary.writeBytes(artwork)
+                for (ext in listOf("jpg", "png", "webp", "gif")) {
+                    val stale = java.io.File("$targetStem.$ext")
+                    if (stale.path != target.path && stale.exists()) stale.delete()
+                }
+                if (!temporary.renameTo(target)) {
+                    target.writeBytes(artwork)
+                    temporary.delete()
+                }
+                withContext(Dispatchers.Main) { result.success(target.absolutePath) }
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not extract embedded artwork from $mediaPath", e)
+                withContext(Dispatchers.Main) { result.success(null) }
+            } finally {
+                try {
+                    retriever.release()
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    private fun imageExtension(bytes: ByteArray): String {
+        fun byteAt(index: Int): Int = bytes[index].toInt() and 0xff
+        if (bytes.size >= 3 && byteAt(0) == 0xff && byteAt(1) == 0xd8 && byteAt(2) == 0xff) {
+            return "jpg"
+        }
+        if (bytes.size >= 4 && byteAt(0) == 0x89 && bytes[1].toInt().toChar() == 'P' &&
+            bytes[2].toInt().toChar() == 'N' && bytes[3].toInt().toChar() == 'G') {
+            return "png"
+        }
+        if (bytes.size >= 12 && String(bytes, 0, 4, Charsets.US_ASCII) == "RIFF" &&
+            String(bytes, 8, 4, Charsets.US_ASCII) == "WEBP") {
+            return "webp"
+        }
+        if (bytes.size >= 3 && String(bytes, 0, 3, Charsets.US_ASCII) == "GIF") {
+            return "gif"
+        }
+        return "jpg"
     }
 
     private fun sendProgress(data: Map<String, Any>) {
