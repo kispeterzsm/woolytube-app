@@ -210,6 +210,33 @@ void main() {
       expect(messages, ['Skipped "missing": file not found']);
     });
 
+    test('a queued track whose file a sync renamed still plays', () async {
+      final first = await addTrack('first');
+      final second = await addTrack('second');
+      await db.markTrackDownloaded(
+        second.id,
+        filePath: second.filePath!,
+        thumbnailPath: null,
+      );
+      final queued = (await db.getTrack(second.id))!;
+      await playback.playAll([first, queued]);
+
+      // A sync placed a new video above it: the same recording under a new
+      // number. Its download time stays the same.
+      final renamed = '${dir.path}/00003_second.m4a';
+      await File(queued.filePath!).rename(renamed);
+      await db.updateTrackFields(queued.id, filePath: renamed);
+      expect((await db.getTrack(queued.id))!.downloadedAt, queued.downloadedAt);
+
+      await playback.next();
+      await settle();
+
+      expect(playback.currentTrack!.id, queued.id);
+      expect(player.opened, hasLength(2));
+      expect(player.opened.last.uri, endsWith('00003_second.m4a'));
+      expect(messages, isEmpty);
+    });
+
     test('denied audio focus leaves everything untouched', () async {
       final track = await addTrack('track');
       session.grantFocus = false;

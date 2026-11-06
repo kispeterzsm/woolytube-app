@@ -1284,16 +1284,36 @@ for video) to keep a complete backup.
     }
 
     final infoFile = _findStaged(stagingDir, (n) => n.endsWith('.info.json'));
+    var chaptersApplied = false;
     if (infoFile != null) {
       try {
         final info =
             jsonDecode(await infoFile.readAsString()) as Map<String, dynamic>;
         if (info['id'] == fresh.videoId) {
           await _applyDownloadedChapters(trackId, info, wasLocal: wasLocal);
+          chaptersApplied = true;
           await keepVideoInfo(folder, fresh.videoId, info);
         }
       } catch (_) {
         // Chapters and info are extras.
+      }
+    }
+    if (wasLocal && !chaptersApplied) {
+      // Without YouTube's chapter list, still undo what the local file
+      // changed: chapters made for it go, earlier ones fit again.
+      final current = await _db.getTrack(trackId);
+      if (current?.chaptersJson != null) {
+        final old = ChapterData.decode(current!.chaptersJson);
+        await _db.writeTrackChapters(
+          trackId,
+          ChapterData(
+            downloaded: old.downloaded,
+            custom: old.valid ? null : old.custom,
+            shuffleChapters: old.shuffleChapters,
+            checkedAt: old.checkedAt,
+            durationMs: old.durationMs,
+          ),
+        );
       }
     }
     if (wasLocal) {

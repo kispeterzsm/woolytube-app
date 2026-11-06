@@ -471,15 +471,16 @@ class AppDatabase extends _$AppDatabase {
 
   /// Tracks an update should download. A local replacement whose file is
   /// missing (for example still being copied back after a restore) is not
-  /// among them: downloading would silently swap the owner's chosen file
-  /// for the YouTube version. The owner can ask for the original.
+  /// among them unless the owner asked for the original: downloading would
+  /// silently swap the owner's chosen file for the YouTube version.
   Future<List<Track>> getPendingTracks(int playlistId) =>
       (select(tracks)
             ..where(
               (t) =>
                   t.playlistId.equals(playlistId) &
                   (t.status.equals('pending') | t.status.equals('error')) &
-                  t.isLocalReplacement.equals(false),
+                  (t.isLocalReplacement.equals(false) |
+                      t.replaceRequested.equals(true)),
             )
             ..orderBy([(t) => OrderingTerm.asc(t.index)]))
           .get();
