@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:drift/drift.dart';
+import 'package:path/path.dart' as p;
 
 import '../database/database.dart';
 import 'library_gate.dart';
@@ -47,6 +48,9 @@ class SidecarMirror {
           ]),
         )
         .listen((_) => _schedule());
+    // Edits made while the app was last closing, or by the background
+    // worker, have no table event in this engine: write once now.
+    _schedule();
   }
 
   void _schedule() {
@@ -54,21 +58,40 @@ class SidecarMirror {
     _timer = Timer(delay, () => unawaited(flush()));
   }
 
-  /// Writes all sidecars now. While another operation holds the library
-  /// gate (a download, or a playlist being deleted with its files) the write
-  /// waits, so it never puts a sidecar back into a folder being emptied.
+  /// Operations that move or empty a playlist folder. While one runs, the
+  /// mirror waits, so it never puts a sidecar back into a folder being
+  /// emptied or left. Downloads and syncs write their own sidecars.
+  static const _folderChangingOperations = {
+    'playlist deletion',
+    'format switch',
+    'startup check',
+  };
+
+  /// Writes all sidecars that changed. Unchanged files are not rewritten.
   Future<void> flush() async {
     if (_running) {
       _pending = true;
       return;
     }
-    if (_gate.isBusy) {
+    if (_folderChangingOperations.contains(_gate.activeOperation)) {
       _schedule();
       return;
     }
     _running = true;
     try {
-      for (final playlist in await _db.getAllPlaylists()) {
+      final playlists = await _db.getAllPlaylists();
+      final perFolder = <String, int>{};
+      for (final playlist in playlists) {
+        final key = p.normalize(p.absolute(playlist.outputPath)).toLowerCase();
+        perFolder[key] = (perFolder[key] ?? 0) + 1;
+      }
+      for (final playlist in playlists) {
+        final key = p.normalize(p.absolute(playlist.outputPath)).toLowerCase();
+        if ((perFolder[key] ?? 0) > 1) {
+          // Two playlists in one folder would overwrite each other's file;
+          // the startup check gives each its own folder first.
+          continue;
+        }
         try {
           await _metadata.writeMetadataFor(playlist.id);
         } catch (e) {

@@ -63,9 +63,26 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   Future<void> _loadPlaylist() async {
     final db = ref.read(databaseProvider);
     final playlist = await db.getPlaylist(widget.playlistId);
-    await ref.read(metadataServiceProvider).reconcilePlaylist(playlist);
     if (mounted) setState(() => _playlist = playlist);
+    unawaited(_linkFiles(playlist));
     unawaited(_backfillThumbnails(playlist));
+  }
+
+  /// Links tracks to files that appeared on disk (copied back, restored).
+  /// Only while nothing else is changing files: a sync that is renumbering
+  /// them, or a download, keeps the rows right by itself.
+  Future<void> _linkFiles(Playlist playlist) async {
+    try {
+      final gate = ref.read(libraryGateProvider);
+      if (await gate.tryEnter('playlist check') != null) return;
+      try {
+        await ref.read(metadataServiceProvider).reconcilePlaylist(playlist);
+      } finally {
+        await gate.exit();
+      }
+    } catch (_) {
+      // The list still shows; the next update links the files.
+    }
   }
 
   /// Saves a cover file for every downloaded track that has none yet (from
@@ -1396,6 +1413,46 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                             },
                           ),
                         if (selectedGroup == _TrackActionGroup.storage &&
+                            track.isLocalReplacement &&
+                            !track.replaceRequested &&
+                            track.unavailableReason == null &&
+                            !PlaylistService.isForcedInsertVideoId(
+                              track.videoId,
+                            ))
+                          ListTile(
+                            key: const ValueKey(
+                              'track-actions-download-original',
+                            ),
+                            leading: const Icon(
+                              Icons.cloud_download,
+                              color: Colors.white70,
+                            ),
+                            title: const Text(
+                              'Download original',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                            subtitle: const Text(
+                              'Replace your file with the YouTube version on '
+                              'the next update; yours is kept',
+                              style: TextStyle(color: Color(0xFF888888)),
+                            ),
+                            onTap: () async {
+                              Navigator.pop(sheetContext);
+                              await ref
+                                  .read(playlistServiceProvider)
+                                  .requestOriginalDownload(track);
+                              if (!mounted) return;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text(
+                                    'The original downloads on the next '
+                                    'update. Your file is kept until then.',
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                        if (selectedGroup == _TrackActionGroup.storage &&
                             track.status == 'error' &&
                             track.lastError != null)
                           ListTile(
@@ -2189,10 +2246,16 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
       downloadService
           .downloadTrack(playlist, track)
           .then(
-            (_) {
+            (downloaded) {
               if (!mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Downloaded "${track.title}"')),
+                SnackBar(
+                  content: Text(
+                    downloaded
+                        ? 'Downloaded "${track.title}"'
+                        : 'Stopped; nothing was changed',
+                  ),
+                ),
               );
             },
             onError: (Object e, StackTrace _) {

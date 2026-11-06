@@ -50,10 +50,7 @@ void backgroundMain() async {
       }
 
       const thumbnails = MediaThumbnailService();
-      final gate = LibraryGate(
-        lock: lock,
-        owner: DownloadLock.backgroundOwner,
-      );
+      final gate = LibraryGate(lock: lock, owner: DownloadLock.backgroundOwner);
       final playlistService = PlaylistService(
         db,
         ytdlp,

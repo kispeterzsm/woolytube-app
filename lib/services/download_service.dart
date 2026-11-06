@@ -130,7 +130,6 @@ class DownloadLock {
   }
 }
 
-
 enum _TrackDownloadResult { downloaded, reused, failed, cancelled }
 
 /// Words in a yt-dlp error that mean the video itself can no longer be
@@ -206,7 +205,8 @@ class DownloadService {
     LibraryGate? gate,
     MediaThumbnailService? thumbnails,
   ]) : _settings = settings ?? AppSettingsService(),
-       _gate = gate ?? LibraryGate(lock: lock ?? DownloadLock(), owner: lockOwner),
+       _gate =
+           gate ?? LibraryGate(lock: lock ?? DownloadLock(), owner: lockOwner),
        _thumbnails = thumbnails ?? const MediaThumbnailService();
 
   /// yt-dlp reads `%` in `-o` as the start of a format field, so a literal
@@ -266,7 +266,8 @@ class DownloadService {
       // A manual or scheduled update is an explicit download trigger. Repair
       // anything a previous process left behind before selecting work.
       await _metadata.discardStaging(playlist.outputPath);
-      final recovered = await _metadata.recoverInterruptedPlaylist(playlist);
+      var recovered = await _metadata.recoverInterruptedPlaylist(playlist);
+      recovered += await _metadata.adoptStrayFiles(playlist);
       if (recovered > 0) {
         _log.info('Recovered $recovered interrupted download files/states');
         await _writeMetadataForPlaylist(playlist.id);
@@ -274,11 +275,10 @@ class DownloadService {
 
       final pendingTracks = await _db.getPendingTracks(playlist.id);
       final replaceTracks = await _db.getReplacementRequests(playlist.id);
-      final work =
-          [
-            for (final track in pendingTracks) (track: track, replace: false),
-            for (final track in replaceTracks) (track: track, replace: true),
-          ]..sort((a, b) => a.track.index.compareTo(b.track.index));
+      final work = [
+        for (final track in pendingTracks) (track: track, replace: false),
+        for (final track in replaceTracks) (track: track, replace: true),
+      ]..sort((a, b) => a.track.index.compareTo(b.track.index));
       totalTracks = await _db.getTotalTrackCount(playlist.id);
 
       _log.info(
@@ -419,7 +419,10 @@ class DownloadService {
   /// Downloads one track now: a retry of a failed track, or a fresh copy of
   /// a downloaded one. A downloaded file is replaced only once the new copy
   /// is complete; if the download fails the old file stays as it was.
-  Future<void> downloadTrack(Playlist playlist, Track track) async {
+  ///
+  /// Returns true when a new file was saved, false when the owner stopped
+  /// it (nothing changed then). Throws with the reason when it failed.
+  Future<bool> downloadTrack(Playlist playlist, Track track) async {
     // A caller must never report success for a download that never ran.
     if (_isDownloading) {
       throw StateError('A download is already in progress.');
@@ -447,7 +450,7 @@ class DownloadService {
       final totalTracks = await _db.getTotalTrackCount(playlist.id);
       if (_cancelRequested) {
         _emit(DownloadProgress.idle);
-        return;
+        return false;
       }
 
       await _startDownloadReporting(
@@ -457,7 +460,7 @@ class DownloadService {
       );
       if (_cancelRequested) {
         _emit(DownloadProgress.idle);
-        return;
+        return false;
       }
 
       final replace =
@@ -484,7 +487,7 @@ class DownloadService {
         if (_cancelRequested) {
           await _writeMetadataForPlaylist(playlist.id);
           _emit(DownloadProgress.idle);
-          return;
+          return false;
         }
         // The caller shows this failure, so carry the recorded reason.
         final failed = await _db.getTrack(track.id);
@@ -511,11 +514,12 @@ class DownloadService {
         fresh.title,
         notificationId: playlist.id,
       );
+      return true;
     } catch (e) {
       if (_cancelRequested) {
         await _writeMetadataForPlaylist(playlist.id);
         _emit(DownloadProgress.idle);
-        return;
+        return false;
       }
       // A single-track download is always user-initiated and its caller
       // reports the failure, so do not also raise the global error event.
@@ -605,24 +609,22 @@ class DownloadService {
         track,
       );
       if (existingFile != null) {
+        // A local file that was briefly missing stays a local file: its
+        // timeline is not the YouTube video's.
         await _db.updateTrackStatus(
           track.id,
           'complete',
           filePath: existingFile,
-          isLocalReplacement: false,
         );
-        await _metadata.captureChapterMetadata(
-          track.copyWith(isLocalReplacement: false),
-          playlist.outputPath,
+        await _metadata.captureChapterMetadata(track, playlist.outputPath);
+        if (!track.isLocalReplacement) {
+          await _sponsorBlock?.refreshTrackSegments(
+            track.copyWith(filePath: Value(existingFile), status: 'complete'),
+          );
+        }
+        _log.info(
+          '$trackLabel Found existing file: ${p.basename(existingFile)}',
         );
-        await _sponsorBlock?.refreshTrackSegments(
-          track.copyWith(
-            filePath: Value(existingFile),
-            status: 'complete',
-            isLocalReplacement: false,
-          ),
-        );
-        _log.info('$trackLabel Found existing file: ${p.basename(existingFile)}');
         _emit(
           DownloadProgress(
             playlistId: playlist.id,
@@ -696,7 +698,6 @@ class DownloadService {
           audioOnly: playlist.audioOnly,
           embedThumbnail: playlist.includeThumbnails,
           metadataAlbum: playlist.name,
-          metadataTrackNumber: track.index,
           outputTemplate: outputTemplate,
           trackLabel: trackLabel,
         );
@@ -705,7 +706,9 @@ class DownloadService {
       }
 
       if (_cancelRequested) {
-        if (!replaceExisting) await _db.resetInterruptedTrack(track.id);
+        if (!replaceExisting) {
+          await _db.resetInterruptedTrack(track.id, onlyIfDownloading: true);
+        }
         _log.info('$trackLabel Interrupted; nothing was changed');
         return _TrackDownloadResult.cancelled;
       }
@@ -835,7 +838,7 @@ class DownloadService {
 
     final trackId = _activeTrackId;
     if (trackId != null && !_activeTrackIsReplacement) {
-      await _db.resetInterruptedTrack(trackId);
+      await _db.resetInterruptedTrack(trackId, onlyIfDownloading: true);
     }
 
     final playlist = _activePlaylist;
@@ -884,6 +887,13 @@ class DownloadService {
     return _transientErrorPatterns.any(lower.contains);
   }
 
+  static bool _isExtrasError(String message) {
+    final lower = message.toLowerCase();
+    return (lower.contains('postprocessing:') ||
+            lower.contains('preprocessing:')) &&
+        !lower.contains('audio conversion');
+  }
+
   static bool _isSubtitleError(String message) =>
       message.toLowerCase().contains('subtitles');
 
@@ -893,7 +903,6 @@ class DownloadService {
     required bool audioOnly,
     required bool embedThumbnail,
     required String metadataAlbum,
-    required int metadataTrackNumber,
     required String outputTemplate,
     required String trackLabel,
   }) async {
@@ -903,6 +912,7 @@ class DownloadService {
         downloadSubtitles ? await _settings.getSubtitleLanguages() : 'en';
     const backoffs = [Duration(seconds: 5), Duration(seconds: 15)];
     var attempt = 0;
+    var withExtras = true;
     while (true) {
       if (_cancelRequested) return;
       try {
@@ -910,11 +920,10 @@ class DownloadService {
           url: url,
           outputPath: outputPath,
           audioOnly: audioOnly,
-          embedThumbnail: embedThumbnail,
-          writeThumbnail: true,
-          embedMetadata: true,
+          embedThumbnail: embedThumbnail && withExtras,
+          writeThumbnail: withExtras,
+          embedMetadata: withExtras,
           metadataAlbum: metadataAlbum,
-          metadataTrackNumber: metadataTrackNumber,
           downloadSubtitles: downloadSubtitles,
           subtitleLanguages: subtitleLanguages,
           outputTemplate: outputTemplate,
@@ -924,8 +933,23 @@ class DownloadService {
         final cleaned = _cleanErrorMessage(e);
         if (downloadSubtitles && _isSubtitleError(cleaned)) {
           // Subtitles are an extra. Never let them cost the media itself.
-          _log.warn('$trackLabel: subtitles failed, retrying without: $cleaned');
+          _log.warn(
+            '$trackLabel: subtitles failed, retrying without: $cleaned',
+          );
           downloadSubtitles = false;
+          continue;
+        }
+        if (withExtras && _isExtrasError(cleaned)) {
+          // Cover art, tags and the kept thumbnail are extras too. yt-dlp
+          // reports their failure with the same bare "Conversion failed!"
+          // as a failed merge, so try once more without them: the media
+          // already in staging is reused, and a real merge failure fails
+          // again.
+          _log.warn(
+            '$trackLabel: post-processing failed, retrying without '
+            'cover/tags: $cleaned',
+          );
+          withExtras = false;
           continue;
         }
         if (attempt >= backoffs.length || !_isTransientError(cleaned)) {
@@ -1037,6 +1061,12 @@ class DownloadService {
       raw = e.toString();
     }
     var cleaned = raw.replaceAll(_ansiPattern, '').trim();
+    // yt-dlp prints warnings before the error; keep the error lines.
+    final errorLines = [
+      for (final line in cleaned.split('\n'))
+        if (line.trimLeft().startsWith('ERROR:')) line.trim(),
+    ];
+    if (errorLines.isNotEmpty) cleaned = errorLines.join('\n');
     // Strip a leading "ERROR: [youtube] xxxx: " prefix once.
     cleaned = cleaned.replaceFirst(_ytPrefixPattern, '').trim();
     if (cleaned.isEmpty) cleaned = raw.trim();

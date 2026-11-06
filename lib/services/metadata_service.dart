@@ -114,6 +114,17 @@ class DiscoveredPlaylist {
 
 const _metaFileName = 'woolytube_meta.json';
 
+/// Thrown when a playlist is added or imported that is already in the
+/// library (same folder, or same YouTube playlist in the same mode).
+class PlaylistExistsException implements Exception {
+  final String message;
+
+  const PlaylistExistsException(this.message);
+
+  @override
+  String toString() => message;
+}
+
 /// Index prefix yt-dlp output files and sidecars share, e.g. `00012_`.
 final _indexPrefixPattern = RegExp(r'^(\d+)_');
 
@@ -221,17 +232,22 @@ class MetadataService {
   /// for this video's timeline (a local replacement had only disabled them).
   Future<void> _applyDownloadedChapters(
     int trackId,
-    Map<String, dynamic> info,
-  ) async {
+    Map<String, dynamic> info, {
+    bool wasLocal = false,
+  }) async {
     final fresh = await _db.getTrack(trackId);
     if (fresh == null) return;
     final old = ChapterData.decode(fresh.chaptersJson);
     final data = ChapterData.fromVideoInfo(info);
+    // Replacing a local file disables its chapters. Chapters still disabled
+    // were made for this video before the replacement and fit again; ones
+    // the owner made (and so enabled) while the local file played do not.
+    final keepCustom = !wasLocal || !old.valid;
     await _db.writeTrackChapters(
       trackId,
       ChapterData(
         downloaded: data.downloaded,
-        custom: old.custom,
+        custom: keepCustom ? old.custom : null,
         shuffleChapters: old.shuffleChapters,
         checkedAt: data.checkedAt,
         durationMs: data.durationMs,
@@ -567,12 +583,27 @@ for video) to keep a complete backup.
     return _readSidecar(folder, File(p.join(folder, _metaFileName)));
   }
 
+  /// Reads the sidecar a format switch set aside in [folder]
+  /// (`woolytube_meta.json.superseded`), if any.
+  Future<DiscoveredPlaylist?> readSupersededFolder(String folder) {
+    return _readSidecar(
+      folder,
+      File(p.join(folder, '$_metaFileName.superseded')),
+    );
+  }
+
   /// Returns only playlists not already in the database. A folder counts as
   /// imported when a playlist uses it, or when a playlist of the same mode
   /// already has its URL.
+  ///
+  /// With [skipOtherModeCopies] (the startup banner), a folder of a playlist
+  /// that is already in the library in the other mode is not offered: it is
+  /// almost always what an older version left behind after a format switch.
+  /// The Restore screen still lists it, for a copy kept on purpose.
   Future<List<DiscoveredPlaylist>> findUnimportedPlaylists({
     Set<String> excludeUrls = const {},
     List<DiscoveredPlaylist>? candidates,
+    bool skipOtherModeCopies = false,
   }) async {
     final discovered = candidates ?? await scanForPlaylists();
     final existing = await _db.getAllPlaylists();
@@ -581,18 +612,29 @@ for video) to keep a complete backup.
 
     for (final dp in discovered) {
       if (excludeUrls.contains(dp.url)) continue;
-      final folder = p.normalize(p.absolute(dp.folderPath));
+      final folder = _folderKey(dp.folderPath);
       if (!seenFolders.add(folder)) continue;
       final imported = existing.any(
         (pl) =>
-            p.equals(p.normalize(p.absolute(pl.outputPath)), folder) ||
-            (samePlaylistUrl(pl.url, dp.url) && pl.audioOnly == dp.audioOnly),
+            _folderKey(pl.outputPath) == folder ||
+            (samePlaylistUrl(pl.url, dp.url) &&
+                (pl.audioOnly == dp.audioOnly || skipOtherModeCopies)),
       );
-      if (!imported) result.add(dp);
+      // One offer per playlist and mode, even if several folders hold it.
+      final offered = result.any(
+        (other) =>
+            samePlaylistUrl(other.url, dp.url) &&
+            other.audioOnly == dp.audioOnly,
+      );
+      if (!imported && !offered) result.add(dp);
     }
 
     return result;
   }
+
+  /// Folder identity on Android's shared storage, which ignores case.
+  static String _folderKey(String path) =>
+      p.normalize(p.absolute(path)).toLowerCase();
 
   /// Whether two playlist URLs point at the same YouTube playlist.
   static bool samePlaylistUrl(String a, String b) {
@@ -1171,17 +1213,18 @@ for video) to keep a complete backup.
 
     final oldPath = fresh.filePath;
     final oldExists = oldPath != null && await File(oldPath).exists();
-    var replacesOldInPlace =
-        oldExists && p.equals(p.normalize(oldPath), p.normalize(targetPath));
+    final wasLocal = fresh.isLocalReplacement;
+    var replacesOldInPlace = oldExists && await samePath(oldPath, targetPath);
     var oldMovedAside = false;
-    if (await File(targetPath).exists() &&
-        !(replacesOldInPlace && !fresh.isLocalReplacement)) {
-      final usedByOther = (await _db.getTracksForPlaylist(playlist.id)).any(
-        (t) =>
-            t.id != trackId &&
+    if (await File(targetPath).exists() && !(replacesOldInPlace && !wasLocal)) {
+      var usedByOther = false;
+      for (final t in await _db.getTracksForPlaylist(playlist.id)) {
+        if (t.id != trackId &&
             t.filePath != null &&
-            p.equals(p.normalize(t.filePath!), p.normalize(targetPath)),
-      );
+            await samePath(t.filePath!, targetPath)) {
+          usedByOther = true;
+        }
+      }
       if (usedByOther) {
         // Another track's file has this name: never touch it, use another.
         targetPath = await uniquePath(targetPath);
@@ -1208,23 +1251,31 @@ for video) to keep a complete backup.
       thumbnailPath: thumbnailPath,
     );
 
-    if (oldExists && !replacesOldInPlace && !oldMovedAside) {
+    if (oldExists &&
+        !replacesOldInPlace &&
+        !oldMovedAside &&
+        !await samePath(oldPath, targetPath)) {
       try {
         // Older versions could point two tracks at one file; never remove
         // a file another track still uses.
-        final sharedWithOther = (await _db.getTracksForPlaylist(
-          playlist.id,
-        )).any(
-          (t) =>
-              t.id != trackId &&
+        var sharedWithOther = false;
+        for (final t in await _db.getTracksForPlaylist(playlist.id)) {
+          if (t.id != trackId &&
               t.filePath != null &&
-              p.equals(p.normalize(t.filePath!), p.normalize(oldPath)),
-        );
+              await samePath(t.filePath!, oldPath)) {
+            sharedWithOther = true;
+          }
+        }
         if (sharedWithOther) {
           // Leave it to the track that also uses it.
-        } else if (fresh.isLocalReplacement) {
+        } else if (!p.equals(p.dirname(oldPath), folder)) {
+          // A file in another folder (before a format switch) stays.
+        } else if (wasLocal || !titleMatchesFileName(fresh.title, oldPath)) {
+          // A local file, or a file that may not be a copy of this video
+          // (it was matched only by its number): keep it.
           await moveAside(folder, oldPath);
-        } else if (p.equals(p.dirname(oldPath), folder)) {
+        } else {
+          // An older copy of the same video.
           await File(oldPath).delete();
         }
       } catch (_) {
@@ -1238,14 +1289,39 @@ for video) to keep a complete backup.
         final info =
             jsonDecode(await infoFile.readAsString()) as Map<String, dynamic>;
         if (info['id'] == fresh.videoId) {
-          await _applyDownloadedChapters(trackId, info);
+          await _applyDownloadedChapters(trackId, info, wasLocal: wasLocal);
           await keepVideoInfo(folder, fresh.videoId, info);
         }
       } catch (_) {
         // Chapters and info are extras.
       }
     }
+    if (wasLocal) {
+      // Skip marks the owner made while the local file played were timed
+      // to that file, not to the YouTube original.
+      final since = fresh.downloadedAt;
+      for (final segment in await _db.getSegmentsForTrack(trackId)) {
+        if (segment.source == 'local' &&
+            (since == null || !segment.createdAt.isBefore(since))) {
+          await _db.deleteSegment(segment.id);
+        }
+      }
+    }
     return _db.getTrack(trackId);
+  }
+
+  /// Whether two paths name the same file. Android's shared storage ignores
+  /// case, so "00005_song.m4a" and "00005_Song.m4a" are one file there.
+  static Future<bool> samePath(String a, String b) async {
+    final na = p.normalize(p.absolute(a));
+    final nb = p.normalize(p.absolute(b));
+    if (p.equals(na, nb)) return true;
+    if (na.toLowerCase() != nb.toLowerCase()) return false;
+    try {
+      return await FileSystemEntity.identical(na, nb);
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<String?> _publishThumbnail({
@@ -1329,6 +1405,34 @@ for video) to keep a complete backup.
     }
   }
 
+  /// Finishes a format switch the app could not complete: a downloaded
+  /// track that YouTube can no longer provide (or a local file) and whose
+  /// file is still in another folder is moved into the playlist folder.
+  /// Call only while holding the library gate.
+  Future<int> adoptStrayFiles(Playlist playlist) async {
+    var adopted = 0;
+    for (final track in await _db.getTracksForPlaylist(playlist.id)) {
+      final path = track.filePath;
+      if (track.status != 'complete' || track.replaceRequested) continue;
+      if (path == null || p.equals(p.dirname(path), playlist.outputPath)) {
+        continue;
+      }
+      final downloadable =
+          !track.videoId.startsWith(forcedInsertVideoIdPrefix) &&
+          !track.isLocalReplacement &&
+          track.unavailableReason == null;
+      if (!await File(path).exists()) continue;
+      if (downloadable) {
+        // Get the playlist's own format; this file keeps playing meanwhile.
+        await _db.setTrackReplaceRequested(track.id, true);
+      } else {
+        await adoptKeptFile(playlist, track.id);
+      }
+      adopted++;
+    }
+    return adopted;
+  }
+
   /// Moves [path] into the playlist's `.woolytube_replaced/` folder and
   /// returns the new path. Used instead of deleting a file the owner might
   /// still want.
@@ -1379,6 +1483,18 @@ for video) to keep a complete backup.
 
   /// Imports a discovered playlist into the database.
   Future<int> importPlaylist(DiscoveredPlaylist discovered) async {
+    // Never let two playlists own one folder or one playlist twice: they
+    // would rename and relink each other's files.
+    for (final existing in await _db.getAllPlaylists()) {
+      if (_folderKey(existing.outputPath) ==
+              _folderKey(discovered.folderPath) ||
+          (samePlaylistUrl(existing.url, discovered.url) &&
+              existing.audioOnly == discovered.audioOnly)) {
+        throw PlaylistExistsException(
+          '"${existing.name}" is already in your library.',
+        );
+      }
+    }
     // Resolve files first so the database transaction below stays short.
     final rows =
         <

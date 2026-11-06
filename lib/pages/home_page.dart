@@ -838,6 +838,12 @@ class _HomePageState extends ConsumerState<HomePage> {
           final remaining = ref.read(pendingImportsProvider);
           ref.read(pendingImportsProvider.notifier).state =
               remaining.where((p) => p.url != discovered.url).toList();
+        } on PlaylistExistsException {
+          // Already in the library (for example added again by URL since
+          // the banner appeared): nothing to import.
+          final remaining = ref.read(pendingImportsProvider);
+          ref.read(pendingImportsProvider.notifier).state =
+              remaining.where((p) => p.url != discovered.url).toList();
         } catch (e) {
           failures.add(discovered.name);
           ref

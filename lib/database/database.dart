@@ -469,12 +469,17 @@ class AppDatabase extends _$AppDatabase {
     );
   }
 
+  /// Tracks an update should download. A local replacement whose file is
+  /// missing (for example still being copied back after a restore) is not
+  /// among them: downloading would silently swap the owner's chosen file
+  /// for the YouTube version. The owner can ask for the original.
   Future<List<Track>> getPendingTracks(int playlistId) =>
       (select(tracks)
             ..where(
               (t) =>
                   t.playlistId.equals(playlistId) &
-                  (t.status.equals('pending') | t.status.equals('error')),
+                  (t.status.equals('pending') | t.status.equals('error')) &
+                  t.isLocalReplacement.equals(false),
             )
             ..orderBy([(t) => OrderingTerm.asc(t.index)]))
           .get();
@@ -501,18 +506,17 @@ class AppDatabase extends _$AppDatabase {
     int trackId, {
     required String filePath,
     required String? thumbnailPath,
-  }) =>
-      (update(tracks)..where((t) => t.id.equals(trackId))).write(
-        TracksCompanion(
-          status: const Value('complete'),
-          filePath: Value(filePath),
-          thumbnailPath: Value(thumbnailPath),
-          isLocalReplacement: const Value(false),
-          replaceRequested: const Value(false),
-          downloadedAt: Value(DateTime.now()),
-          lastError: const Value(null),
-        ),
-      );
+  }) => (update(tracks)..where((t) => t.id.equals(trackId))).write(
+    TracksCompanion(
+      status: const Value('complete'),
+      filePath: Value(filePath),
+      thumbnailPath: Value(thumbnailPath),
+      isLocalReplacement: const Value(false),
+      replaceRequested: const Value(false),
+      downloadedAt: Value(DateTime.now()),
+      lastError: const Value(null),
+    ),
+  );
 
   Future<int> getDownloadedTrackCount(int playlistId) async {
     final count = tracks.id.count();
@@ -670,12 +674,24 @@ class AppDatabase extends _$AppDatabase {
   /// A process can disappear between setting `downloading` and recording the
   /// completed file. This deliberately preserves playlist/index metadata while
   /// clearing state that only applies to a finished download.
-  Future<void> resetInterruptedTrack(int trackId) async {
-    await (update(tracks)..where((t) => t.id.equals(trackId))).write(
+  ///
+  /// With [onlyIfDownloading], a track that has meanwhile finished (for
+  /// example a cancel that arrives while the file is being saved) is left
+  /// alone. The local-file flag is kept: an interrupted download replaced
+  /// nothing.
+  Future<void> resetInterruptedTrack(
+    int trackId, {
+    bool onlyIfDownloading = false,
+  }) async {
+    await (update(tracks)..where(
+      (t) =>
+          onlyIfDownloading
+              ? t.id.equals(trackId) & t.status.equals('downloading')
+              : t.id.equals(trackId),
+    )).write(
       const TracksCompanion(
         status: Value('pending'),
         filePath: Value(null),
-        isLocalReplacement: Value(false),
         downloadedAt: Value(null),
         lastError: Value(null),
       ),

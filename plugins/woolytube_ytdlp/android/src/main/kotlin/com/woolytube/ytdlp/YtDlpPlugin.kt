@@ -400,9 +400,11 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 )
             }
         }
-        // Unicode titles stay readable outside the app; names stay valid on
-        // Windows, FAT and exFAT so the library can be copied anywhere.
-        request.addOption("--windows-filenames")
+        // No --restrict-filenames: Unicode titles stay readable outside the
+        // app. yt-dlp's default already swaps characters Windows, FAT and
+        // exFAT reject for look-alikes in the title. (--windows-filenames
+        // must not be used: it also rewrites the folder part of -o, so a
+        // folder named "Vol. 2." would be saved outside the staging folder.)
         request.addOption("--no-mtime")
         request.addOption("--no-playlist")
         request.addOption("--write-info-json")

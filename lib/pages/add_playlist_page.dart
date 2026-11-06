@@ -149,6 +149,13 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
         updateFrequencyHours: _updateFrequencyHours,
         includeThumbnails: _includeThumbnails,
       );
+      // The import banner must not offer this playlist's folder again.
+      final pending = ref.read(pendingImportsProvider);
+      if (pending.isNotEmpty) {
+        ref.read(pendingImportsProvider.notifier).state = await ref
+            .read(metadataServiceProvider)
+            .findUnimportedPlaylists(candidates: pending);
+      }
     } on PlaylistExistsException catch (e) {
       if (!mounted) return;
       setState(() {

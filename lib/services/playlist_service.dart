@@ -7,6 +7,7 @@ import 'ytdlp_service.dart';
 import 'library_gate.dart';
 import 'library_layout.dart';
 import 'metadata_service.dart';
+export 'metadata_service.dart' show PlaylistExistsException;
 import 'sponsorblock_service.dart';
 import 'media_thumbnail_service.dart' as media_thumbnail_service;
 import 'app_settings_service.dart';
@@ -21,15 +22,6 @@ class ForceInsertException implements Exception {
 }
 
 /// Thrown when the owner adds a playlist that is already in the library.
-class PlaylistExistsException implements Exception {
-  final String message;
-
-  const PlaylistExistsException(this.message);
-
-  @override
-  String toString() => message;
-}
-
 class SyncResult {
   final int added;
   final int markedUnavailable;
@@ -129,17 +121,34 @@ class PlaylistService {
 
     final actions =
         sponsorBlockCategoryActions ?? defaultSponsorBlockCategoryActions();
-    final choice = await _chooseFolder(
-      audioOnly: audioOnly,
-      name: name,
-      url: url,
-      existing: existing,
-    );
+    // A backup of this playlist may sit in a folder with another name (the
+    // playlist was renamed on YouTube, or the owner typed a new name).
+    DiscoveredPlaylist? backup;
+    try {
+      for (final found in await _metadata.findUnimportedPlaylists()) {
+        if (MetadataService.samePlaylistUrl(found.url, url) &&
+            found.audioOnly == audioOnly) {
+          backup = found;
+          break;
+        }
+      }
+    } catch (_) {
+      // Without a readable library there is nothing to restore.
+    }
+    final restore =
+        backup ??
+        (await _chooseFolder(
+          audioOnly: audioOnly,
+          name: name,
+          url: url,
+          existing: existing,
+        )).restore;
     await _settings?.removeDismissedImportUrl(url);
 
-    final restore = choice.restore;
     if (restore != null) {
       final playlistId = await _metadata.importPlaylist(restore);
+      // Only what the add form asks about; SponsorBlock choices made for
+      // this playlist before are kept.
       await _db.updatePlaylistFields(
         playlistId,
         PlaylistsCompanion(
@@ -147,18 +156,19 @@ class PlaylistService {
           playChapters: Value(playChapters),
           updateFrequencyHours: Value(updateFrequencyHours),
           includeThumbnails: Value(includeThumbnails),
-          sponsorBlockEnabled: Value(sponsorBlockEnabled),
-          sponsorBlockCategories: Value(
-            jsonEncode(autoSkipCategoriesFromActions(actions)),
-          ),
-          sponsorBlockCategoryActions: Value(
-            encodeSponsorBlockCategoryActions(actions),
-          ),
         ),
       );
       await _writeMetadata(playlistId);
       return playlistId;
     }
+
+    final choice = await _chooseFolder(
+      audioOnly: audioOnly,
+      name: name,
+      url: url,
+      existing: existing,
+      allowRestore: false,
+    );
 
     await Directory(choice.path).create(recursive: true);
     final playlistId = await _db.insertPlaylist(
@@ -265,6 +275,7 @@ class PlaylistService {
     Map<String, dynamic> playlistInfo,
   ) => _gate.run('playlist update', () async {
     final entries = playlistInfo['entries'] as List<dynamic>? ?? [];
+    await _metadata.reconcilePlaylist(await _db.getPlaylist(playlistId));
     await _insertNewEntries(
       playlist: await _db.getPlaylist(playlistId),
       entries: entries,
@@ -358,33 +369,61 @@ class PlaylistService {
     required bool audioOnly,
     required PlaylistsCompanion fields,
   }) async {
-    final choice = await _chooseFolder(
-      audioOnly: audioOnly,
-      // Keep the folder name the playlist already has, so a later rename
-      // in the app does not scatter its folders.
-      name: p.basename(playlist.outputPath),
-      url: playlist.url,
-      // A kept backup in the target folder is a different set of files; a
-      // switch must never write over it or adopt its files.
-      allowRestore: false,
-      existing: [
-        for (final other in await _db.getAllPlaylists())
-          if (other.id != playlist.id) other,
-      ],
-    );
+    final others = [
+      for (final other in await _db.getAllPlaylists())
+        if (other.id != playlist.id) other,
+    ];
     final oldFolder = playlist.outputPath;
-    final newFolder = choice.path;
+
+    // Switching back to a format the playlist had before: reuse that folder
+    // and the files it still holds instead of downloading them again.
+    String? newFolder;
+    final earlierFiles = <String, String>{};
+    final earlier = p.join(
+      LibraryLayout.basePathFor(audioOnly: audioOnly),
+      p.basename(oldFolder),
+    );
+    final earlierInUse = others.any(
+      (o) => o.outputPath.toLowerCase() == earlier.toLowerCase(),
+    );
+    if (!earlierInUse && LibraryLayout.isPlaylistFolder(earlier)) {
+      final set = await _metadata.readSupersededFolder(earlier);
+      if (set != null &&
+          MetadataService.samePlaylistUrl(set.url, playlist.url) &&
+          set.audioOnly == audioOnly) {
+        newFolder = earlier;
+        for (final t in set.tracks) {
+          final name = t.fileName;
+          if (name == null) continue;
+          final file = p.normalize(p.join(earlier, name));
+          if (p.equals(p.dirname(file), earlier) && await File(file).exists()) {
+            earlierFiles[t.videoId] = file;
+          }
+        }
+      }
+    }
+    newFolder ??=
+        (await _chooseFolder(
+          audioOnly: audioOnly,
+          // Keep the folder name the playlist already has, so a later
+          // rename in the app does not scatter its folders.
+          name: p.basename(oldFolder),
+          url: playlist.url,
+          // A kept backup in the target folder is a different set of files;
+          // a switch must never write over it or adopt its files.
+          allowRestore: false,
+          existing: others,
+        )).path;
     await Directory(newFolder).create(recursive: true);
 
-    await _db.updatePlaylistFields(
-      playlist.id,
-      fields.copyWith(
-        audioOnly: Value(audioOnly),
-        outputPath: Value(newFolder),
-      ),
-    );
-    final switched = await _db.getPlaylist(playlist.id);
+    final targetFolder = newFolder;
 
+    // Decide for every track first, then commit all of it at once, so an
+    // interrupted switch never leaves some tracks without a plan.
+    final targetBase = LibraryLayout.basePathFor(audioOnly: audioOnly);
+    final adopt = <int>[];
+    final request = <int>[];
+    final link = <int, String>{};
     for (final track in await _db.getTracksForPlaylist(playlist.id)) {
       final path = track.filePath;
       if (track.status != 'complete' ||
@@ -392,16 +431,55 @@ class PlaylistService {
           !await File(path).exists()) {
         continue;
       }
-      if (!canDownloadAgain(track)) {
-        // Nothing better can be downloaded: take the file along.
-        await _metadata.adoptKeptFile(switched, track.id);
+      final earlierFile = earlierFiles[track.videoId];
+      if (earlierFile != null && !track.isLocalReplacement) {
+        link[track.id] = earlierFile;
+      } else if (p.isWithin(targetBase, path) || !canDownloadAgain(track)) {
+        // Already in the target format, or nothing better can be
+        // downloaded: take the file along.
+        adopt.add(track.id);
       } else {
-        await _db.setTrackReplaceRequested(track.id, true);
+        request.add(track.id);
       }
     }
+    await _db.transaction(() async {
+      await _db.updatePlaylistFields(
+        playlist.id,
+        fields.copyWith(
+          audioOnly: Value(audioOnly),
+          outputPath: Value(targetFolder),
+        ),
+      );
+      for (final id in request) {
+        await _db.setTrackReplaceRequested(id, true);
+      }
+      for (final id in [...adopt, ...link.keys]) {
+        await _db.setTrackReplaceRequested(id, false);
+      }
+      for (final entry in link.entries) {
+        await _db.updateTrackFields(entry.key, filePath: entry.value);
+      }
+    });
 
-    // The old folder's sidecar would offer the same playlist for import a
-    // second time after a reinstall; the new sidecar now describes it.
+    // Moving files can be interrupted; the next update finishes it (see
+    // MetadataService.adoptStrayFiles).
+    final switched = await _db.getPlaylist(playlist.id);
+    for (final id in adopt) {
+      await _metadata.adoptKeptFile(switched, id);
+    }
+
+    // New sidecar first, then set the old one aside: the old folder's
+    // sidecar would offer the same playlist for import a second time after
+    // a reinstall.
+    await _writeMetadata(playlist.id);
+    final reusedSidecar = File(
+      p.join(newFolder, '${MetadataService.metaFileName}.superseded'),
+    );
+    if (await reusedSidecar.exists()) {
+      try {
+        await reusedSidecar.delete();
+      } catch (_) {}
+    }
     final oldSidecar = File(p.join(oldFolder, MetadataService.metaFileName));
     if (await oldSidecar.exists()) {
       try {
@@ -412,7 +490,127 @@ class PlaylistService {
         // Import skips folders a playlist already uses.
       }
     }
-    await _writeMetadata(playlist.id);
+  }
+
+  /// Older versions could give two playlists one folder (same name, or the
+  /// same URL added twice). They would overwrite each other's sidecar and
+  /// renumber each other's files. Moves every playlist but the oldest into
+  /// a folder of its own, taking its own files along. A file both use is
+  /// copied if it is this playlist's song (its name matches the title), and
+  /// otherwise left to the other playlist, this track downloading its own.
+  /// Call only while holding the library gate.
+  Future<int> separateSharedFolders() async {
+    var separated = 0;
+    while (true) {
+      final all = await _db.getAllPlaylists();
+      final byFolder = <String, List<Playlist>>{};
+      for (final playlist in all) {
+        byFolder
+            .putIfAbsent(
+              p.normalize(p.absolute(playlist.outputPath)).toLowerCase(),
+              () => [],
+            )
+            .add(playlist);
+      }
+      final shared = byFolder.values.where((g) => g.length > 1).toList();
+      if (shared.isEmpty) return separated;
+      final group = shared.first..sort((a, b) => a.id.compareTo(b.id));
+      final mover = group.last;
+      await _moveToOwnFolder(mover, [
+        for (final other in group)
+          if (other.id != mover.id) other,
+      ], all);
+      separated++;
+    }
+  }
+
+  Future<void> _moveToOwnFolder(
+    Playlist mover,
+    List<Playlist> staying,
+    List<Playlist> all,
+  ) async {
+    final oldFolder = mover.outputPath;
+    final choice = await _chooseFolder(
+      audioOnly: mover.audioOnly,
+      name: mover.name,
+      url: mover.url,
+      allowRestore: false,
+      existing: all,
+    );
+    final newFolder = choice.path;
+    await Directory(newFolder).create(recursive: true);
+
+    final stayingFiles = <String>{};
+    for (final other in staying) {
+      for (final t in await _db.getTracksForPlaylist(other.id)) {
+        for (final f in [t.filePath, t.thumbnailPath]) {
+          if (f != null) stayingFiles.add(p.normalize(f).toLowerCase());
+        }
+      }
+    }
+
+    String targetFor(String path) =>
+        p.join(newFolder, p.relative(path, from: oldFolder));
+
+    for (final track in await _db.getTracksForPlaylist(mover.id)) {
+      final media = track.filePath;
+      if (media != null &&
+          p.isWithin(oldFolder, media) &&
+          await File(media).exists()) {
+        final usedByOther = stayingFiles.contains(
+          p.normalize(media).toLowerCase(),
+        );
+        if (!usedByOther) {
+          final target = await MetadataService.uniquePath(targetFor(media));
+          await Directory(p.dirname(target)).create(recursive: true);
+          await MetadataService.moveFile(media, target);
+          await _db.updateTrackFields(track.id, filePath: target);
+        } else if (titleMatchesFileName(track.title, media)) {
+          final target = await MetadataService.uniquePath(targetFor(media));
+          await Directory(p.dirname(target)).create(recursive: true);
+          await File(media).copy(target);
+          await _db.updateTrackFields(track.id, filePath: target);
+        } else {
+          // The other playlist's song; this track gets its own again.
+          await _db.updateTrackStatus(
+            track.id,
+            'pending',
+            clearFilePath: true,
+            clearDownloadedAt: true,
+          );
+        }
+      }
+      final cover = track.thumbnailPath;
+      if (cover != null &&
+          p.isWithin(oldFolder, cover) &&
+          await File(cover).exists()) {
+        final target = targetFor(cover);
+        await Directory(p.dirname(target)).create(recursive: true);
+        if (stayingFiles.contains(p.normalize(cover).toLowerCase())) {
+          await File(cover).copy(target);
+        } else {
+          await MetadataService.moveFile(cover, target);
+        }
+        await _db.updateTrackThumbnailPath(track.id, target);
+      }
+      final info = File(LibraryLayout.infoJsonPath(oldFolder, track.videoId));
+      if (await info.exists()) {
+        final target = LibraryLayout.infoJsonPath(newFolder, track.videoId);
+        await Directory(p.dirname(target)).create(recursive: true);
+        await info.copy(target);
+      }
+    }
+    await _db.updatePlaylistFields(
+      mover.id,
+      PlaylistsCompanion(
+        outputPath: Value(newFolder),
+        thumbnailPath: const Value(null),
+      ),
+    );
+    await _writeMetadata(mover.id);
+    for (final other in staying) {
+      await _writeMetadata(other.id);
+    }
   }
 
   /// Whether YouTube can still give this track's file again.
@@ -446,6 +644,10 @@ class PlaylistService {
     Playlist playlist,
     Map<String, dynamic> info,
   ) async {
+    // A renumbering interrupted earlier can leave a track whose recorded
+    // path is gone while its file still has the old number. Link files
+    // first, so the plan below starts from where the files really are.
+    await _metadata.reconcilePlaylist(playlist);
     final freshEntries = info['entries'] as List<dynamic>? ?? [];
     final existingTracks = await _db.getTracksForPlaylist(playlist.id);
 
@@ -855,7 +1057,23 @@ class PlaylistService {
     required int trackId,
     String? title,
     String? fileName,
-  }) => _gate.run('rename', () async {
+  }) async {
+    // Renaming a file must wait for downloads; changing only the title
+    // does not touch any file.
+    if (fileName == null || fileName.trim().isEmpty) {
+      return _overrideTrack(trackId: trackId, title: title, fileName: null);
+    }
+    return _gate.run(
+      'rename',
+      () => _overrideTrack(trackId: trackId, title: title, fileName: fileName),
+    );
+  }
+
+  Future<bool> _overrideTrack({
+    required int trackId,
+    String? title,
+    String? fileName,
+  }) async {
     final track = await _db.getTrack(trackId);
     if (track == null) throw StateError('The track no longer exists.');
     final newTitle = title?.trim();
@@ -893,7 +1111,7 @@ class PlaylistService {
     );
     await _writeMetadata(track.playlistId);
     return true;
-  });
+  }
 
   Future<List<Track>> getPendingTracks(int playlistId) =>
       _db.getPendingTracks(playlistId);
@@ -999,6 +1217,7 @@ class PlaylistService {
       throw ForceInsertException('Could not copy the selected file: $error');
     }
 
+    await _metadata.reconcilePlaylist(playlist);
     final tracks = await _db.getTracksForPlaylist(playlistId);
     var highestIndex = 0;
     for (final track in tracks) {
@@ -1285,6 +1504,14 @@ class PlaylistService {
         mediaPath: mediaPath,
         targetStem: stem,
       );
+      if (thumbnailPath == null) {
+        // This file has no cover; an earlier local file's cover under the
+        // same name would otherwise come back on the next backfill.
+        for (final ext in const ['.jpg', '.jpeg', '.png', '.webp', '.gif']) {
+          final stale = File('$stem$ext');
+          if (await stale.exists()) await stale.delete();
+        }
+      }
       await _db.updateTrackThumbnailPath(track.id, thumbnailPath);
       return thumbnailPath;
     } catch (_) {

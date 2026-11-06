@@ -269,13 +269,21 @@ final initProvider = FutureProvider<bool>((ref) async {
   // download running in the background.
   if (storageGranted) {
     try {
-      final repaired = await ref
-          .read(libraryGateProvider)
-          .run(
-            'startup check',
-            () =>
-                ref.read(metadataServiceProvider).recoverInterruptedDownloads(),
-          );
+      final repaired = await ref.read(libraryGateProvider).run(
+        'startup check',
+        () async {
+          // Older versions could give two playlists one folder; split
+          // them before anything writes into it.
+          final separated =
+              await ref.read(playlistServiceProvider).separateSharedFolders();
+          if (separated > 0) {
+            log.info('init: gave $separated playlists their own folder');
+          }
+          return ref
+              .read(metadataServiceProvider)
+              .recoverInterruptedDownloads();
+        },
+      );
       if (repaired > 0) {
         log.info('init: recovered $repaired interrupted download files/states');
       }
@@ -297,6 +305,7 @@ final initProvider = FutureProvider<bool>((ref) async {
           await ref.watch(appSettingsServiceProvider).getDismissedImportUrls();
       final unimported = await metadata.findUnimportedPlaylists(
         excludeUrls: dismissed,
+        skipOtherModeCopies: true,
       );
       if (unimported.isNotEmpty) {
         ref.read(pendingImportsProvider.notifier).state = unimported;

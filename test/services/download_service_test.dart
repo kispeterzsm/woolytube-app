@@ -704,7 +704,9 @@ void main() {
         expect(call.writeThumbnail, isTrue);
         expect(call.embedMetadata, isTrue);
         expect(call.metadataAlbum, 'Road Trip');
-        expect(call.metadataTrackNumber, 3);
+        // No track-number tag: it would go stale when videos are inserted
+        // above; the file name and the .m3u8 carry the order.
+        expect(call.metadataTrackNumber, isNull);
 
         final updated = (await db.getTrack(track.id))!;
         final mediaPath = p.join(folder, '00003_Title.m4a');
@@ -777,13 +779,37 @@ void main() {
       },
     );
 
-    test('a successful redownload replaces the old file', () async {
+    test('a successful redownload sets aside an old file whose name does '
+        'not match the video', () async {
       final playlist = await insertTestPlaylist(
         db,
         outputPath: folder,
         audioOnly: true,
       );
       final track = await completeTrack(playlist, name: '00001_Old Name.m4a');
+      ytdlp.mediaContent = 'new';
+
+      await service.downloadTrack(playlist, track);
+
+      final updated = (await db.getTrack(track.id))!;
+      expect(updated.filePath, p.join(folder, '00001_Title.m4a'));
+      // Matched only by its number, it may be another recording: kept.
+      expect(await File(track.filePath!).exists(), isFalse);
+      expect(
+        await File(
+          p.join(folder, '.woolytube_replaced', '00001_Old Name.m4a'),
+        ).readAsString(),
+        'old',
+      );
+    });
+
+    test('a successful redownload replaces the old file', () async {
+      final playlist = await insertTestPlaylist(
+        db,
+        outputPath: folder,
+        audioOnly: true,
+      );
+      final track = await completeTrack(playlist, name: '00001_Song.mp3');
       ytdlp.mediaContent = 'new';
 
       await service.downloadTrack(playlist, track);

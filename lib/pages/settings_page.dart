@@ -555,10 +555,23 @@ class _ExportSummaryDialog extends StatelessWidget {
                 '${_displayPath(LibraryExportService.backupDir)}.',
               ),
             ],
+            if (result.foldersOutsideLibrary.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              const Text(
+                'These playlists were restored from other folders and are '
+                'still there:',
+              ),
+              const SizedBox(height: 4),
+              for (final folder in result.foldersOutsideLibrary)
+                Text(_displayPath(folder), style: strong),
+            ],
             const SizedBox(height: 12),
-            const Text(
-              'Copy these two folders to keep a complete backup that plays '
-              'without the app.',
+            Text(
+              result.foldersOutsideLibrary.isEmpty
+                  ? 'Copy these two folders to keep a complete backup that '
+                      'plays without the app.'
+                  : 'Copy all of these folders to keep a complete backup that '
+                      'plays without the app.',
             ),
             if (result.problems.isNotEmpty) ...[
               const SizedBox(height: 16),
@@ -625,6 +638,23 @@ class _RestorePlaylistsPageState extends ConsumerState<_RestorePlaylistsPage> {
       if (mounted) _showMessage('Could not look for playlists: $error');
     }
     if (mounted) setState(() => _found = found);
+  }
+
+  Future<void> _restoreSettings() async {
+    final messenger = ScaffoldMessenger.of(context);
+    String message;
+    try {
+      final applied = await ref
+          .read(libraryExportServiceProvider)
+          .restoreSettings(folder: _source);
+      message =
+          applied == null
+              ? 'No settings backup found. Export the library first.'
+              : 'Restored $applied settings.';
+    } catch (e) {
+      message = 'Could not restore settings: $e';
+    }
+    messenger.showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _chooseFolder() async {
@@ -703,6 +733,15 @@ class _RestorePlaylistsPageState extends ConsumerState<_RestorePlaylistsPage> {
             ),
             enabled: idle,
             onTap: _chooseFolder,
+          ),
+          ListTile(
+            leading: const Icon(Icons.settings_backup_restore),
+            title: const Text('Restore app settings'),
+            subtitle: const Text(
+              'From the backup an export saved in the library folder',
+            ),
+            enabled: idle,
+            onTap: _restoreSettings,
           ),
           if (source != null)
             ListTile(

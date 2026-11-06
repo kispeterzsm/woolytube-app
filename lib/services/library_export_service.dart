@@ -36,6 +36,7 @@ class LibraryExportResult {
     required this.databaseCopyPath,
     required this.settingsPath,
     required this.problems,
+    this.foldersOutsideLibrary = const [],
   });
 
   /// Playlists whose folder is now complete and up to date.
@@ -56,6 +57,11 @@ class LibraryExportResult {
 
   /// One line per thing that could not be exported.
   final List<String> problems;
+
+  /// Folders of playlists that live outside Music/WoolyTube and
+  /// Movies/WoolyTube (restored from another folder). A backup must copy
+  /// these as well.
+  final List<String> foldersOutsideLibrary;
 }
 
 /// Makes the library folders a complete backup: every playlist folder gets
@@ -181,7 +187,14 @@ class LibraryExportService {
       '$newCovers new covers, ${problems.length} problems',
     );
 
+    final outside = <String>[
+      for (final playlist in playlists)
+        if (!p.isWithin(LibraryLayout.audioBasePath, playlist.outputPath) &&
+            !p.isWithin(LibraryLayout.videoBasePath, playlist.outputPath))
+          playlist.outputPath,
+    ];
     return LibraryExportResult(
+      foldersOutsideLibrary: outside,
       playlists: exported,
       tracks: tracks,
       trackCovers: trackCovers,
@@ -256,6 +269,28 @@ class LibraryExportService {
         // Tried again on the next export.
       }
     }
+  }
+
+  /// Restores the app settings saved by an export, from the library's
+  /// backup folder or from [folder] (or its `.woolytube_backup`). Returns
+  /// how many settings were applied, or null when no settings file exists.
+  Future<int?> restoreSettings({String? folder}) async {
+    final candidates = [
+      if (folder != null) ...[
+        p.join(folder, backupDirName, settingsFileName),
+        p.join(folder, settingsFileName),
+      ],
+      p.join(backupDir, settingsFileName),
+    ];
+    for (final path in candidates) {
+      final file = File(path);
+      if (!await file.exists()) continue;
+      final decoded = jsonDecode(await file.readAsString());
+      if (decoded is! Map) continue;
+      final values = decoded['settings'] is Map ? decoded['settings'] : decoded;
+      return _settings.importSettings(Map<String, Object?>.from(values as Map));
+    }
+    return null;
   }
 
   /// Writes every app setting to `.woolytube_backup/woolytube_settings.json`.
