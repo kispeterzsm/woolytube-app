@@ -77,7 +77,13 @@ Future<bool> downloadImageToFile(String url, File target) async {
 ///
 /// Only ever adds image files and records their paths; never touches media.
 /// Works through tracks one at a time: libraries have thousands of tracks
-/// and phones are slow.
+/// and phones are slow. New covers are recorded in small batches, so the
+/// open pages update a few times instead of once per cover.
+///
+/// It never takes the library gate (that would refuse the owner's own
+/// actions for minutes); instead it pauses while [shouldPause] says an
+/// operation that moves or deletes playlist folders runs, and it never
+/// creates a playlist folder that is gone.
 class ThumbnailBackfillService {
   ThumbnailBackfillService(
     this._db,
@@ -86,8 +92,10 @@ class ThumbnailBackfillService {
     this._log, {
     CachedImageLookup? lookupCachedImage,
     ImageDownloader? downloadImage,
+    bool Function()? shouldPause,
   }) : _lookupCachedImage = lookupCachedImage ?? lookupCachedNetworkImage,
-       _downloadImage = downloadImage ?? downloadImageToFile;
+       _downloadImage = downloadImage ?? downloadImageToFile,
+       _shouldPause = shouldPause;
 
   final AppDatabase _db;
   final MetadataService _metadata;
@@ -95,6 +103,13 @@ class ThumbnailBackfillService {
   final LogService _log;
   final CachedImageLookup _lookupCachedImage;
   final ImageDownloader _downloadImage;
+  final bool Function()? _shouldPause;
+
+  /// New covers are recorded once this many are found ...
+  static const _writeBatchSize = 25;
+
+  /// ... or this long after the first one waiting, whichever comes first.
+  static const _writeBatchDelay = Duration(milliseconds: 1500);
 
   static const imageExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
 
@@ -142,11 +157,19 @@ class ThumbnailBackfillService {
     ).whenComplete(() => _backfillAll = null);
   }
 
+  /// Forgets what this service remembers about [trackIds] (after a
+  /// playlist was deleted or moved to another folder).
+  void forgetTracks(Iterable<int> trackIds) {
+    for (final id in trackIds) {
+      _verified.remove(id);
+      _noCover.remove(id);
+    }
+  }
+
   Future<int> _runBackfillAll(bool allowNetwork) async {
-    final playlists = await _db.getAllPlaylists();
     var added = 0;
-    final withoutCover = <Playlist>[];
-    for (final playlist in playlists) {
+    final withoutCover = <int>[];
+    for (final playlist in await _db.getAllPlaylists()) {
       try {
         final cover = await ensurePlaylistCover(
           playlist,
@@ -154,14 +177,16 @@ class ThumbnailBackfillService {
         );
         if (cover != null) {
           added++;
-        } else if (existingThumbnailPath(playlist.thumbnailPath) == null) {
-          withoutCover.add(playlist);
+        } else if (!await thumbnailFileExists(playlist.thumbnailPath)) {
+          withoutCover.add(playlist.id);
         }
       } catch (e) {
         _log.warn('cover backfill failed for ${playlist.name}: $e');
       }
     }
-    for (final playlist in playlists) {
+    // Read the playlists again: one may have been deleted or moved to
+    // another folder while the covers were fetched.
+    for (final playlist in await _db.getAllPlaylists()) {
       try {
         added += await ensureTrackThumbnails(
           playlist,
@@ -171,7 +196,9 @@ class ThumbnailBackfillService {
         _log.warn('thumbnail backfill failed for ${playlist.name}: $e');
       }
     }
-    for (final playlist in withoutCover) {
+    for (final id in withoutCover) {
+      final playlist = await _db.getPlaylistOrNull(id);
+      if (playlist == null) continue;
       try {
         if (await ensurePlaylistCover(playlist) != null) added++;
       } catch (e) {
@@ -179,6 +206,23 @@ class ThumbnailBackfillService {
       }
     }
     return added;
+  }
+
+  /// Waits while an operation that moves or deletes playlist folders runs.
+  Future<void> _waitWhilePaused() async {
+    final shouldPause = _shouldPause;
+    if (shouldPause == null) return;
+    while (shouldPause()) {
+      await Future<void>.delayed(const Duration(seconds: 1));
+    }
+  }
+
+  /// Whether [folder] is still the folder of playlist [playlistId] and
+  /// exists.
+  Future<bool> _stillInPlace(int playlistId, String folder) async {
+    final current = await _db.getPlaylistOrNull(playlistId);
+    if (current == null || current.outputPath != folder) return false;
+    return Directory(folder).exists();
   }
 
   /// Runs work for one playlist strictly one after another, so the startup
@@ -200,39 +244,79 @@ class ThumbnailBackfillService {
     Playlist playlist,
     bool allowNetwork,
   ) async {
+    await _waitWhilePaused();
+    // The caller's copy may be out of date (a format switch moves the
+    // playlist to another folder).
+    final fresh = await _db.getPlaylistOrNull(playlist.id);
+    if (fresh == null) return 0;
+    playlist = fresh;
     final folder = playlist.outputPath;
     // Never create anything inside a folder that is gone.
     if (!await Directory(folder).exists()) return 0;
     final tracks = await _db.getTracksForPlaylist(playlist.id);
     var added = 0;
-    for (final track in tracks) {
-      if (track.status != 'complete' || track.filePath == null) continue;
-      final current = track.thumbnailPath;
-      if (current != null && current.isNotEmpty) {
-        if (_verified[track.id] == current) continue;
-        if (await File(current).exists()) {
-          _verified[track.id] = current;
+    final found = <int, String>{};
+    final sinceFirstFound = Stopwatch();
+
+    Future<void> record() async {
+      if (found.isEmpty) return;
+      final batch = Map.of(found);
+      found.clear();
+      sinceFirstFound
+        ..stop()
+        ..reset();
+      // Only covers inside the playlist's current folder are recorded.
+      final current = await _db.getPlaylistOrNull(playlist.id);
+      if (current == null || current.outputPath != folder) return;
+      await _db.updateTrackThumbnailPaths(batch);
+      for (final entry in batch.entries) {
+        _verified[entry.key] = entry.value;
+        _noCover.remove(entry.key);
+      }
+      added += batch.length;
+    }
+
+    try {
+      for (final track in tracks) {
+        if (track.status != 'complete' || track.filePath == null) continue;
+        final current = track.thumbnailPath;
+        if (current != null && current.isNotEmpty) {
+          if (_verified[track.id] == current) continue;
+          if (await thumbnailFileExists(current)) {
+            _verified[track.id] = current;
+            continue;
+          }
+        }
+        final triedWithNetwork = _noCover[track.id];
+        if (triedWithNetwork != null && (triedWithNetwork || !allowNetwork)) {
           continue;
         }
+        // This track needs work, which may write into the folder: make
+        // sure the playlist is still there and not being moved.
+        if (_shouldPause?.call() ?? false) {
+          await record();
+          await _waitWhilePaused();
+        }
+        if (!await _stillInPlace(playlist.id, folder)) break;
+        String? cover;
+        try {
+          cover = await _findTrackThumbnail(playlist, track, allowNetwork);
+        } catch (e) {
+          _log.warn('thumbnail for "${track.title}" failed: $e');
+        }
+        if (cover == null) {
+          _noCover[track.id] = allowNetwork;
+          continue;
+        }
+        found[track.id] = cover;
+        if (!sinceFirstFound.isRunning) sinceFirstFound.start();
+        if (found.length >= _writeBatchSize ||
+            sinceFirstFound.elapsed >= _writeBatchDelay) {
+          await record();
+        }
       }
-      final triedWithNetwork = _noCover[track.id];
-      if (triedWithNetwork != null && (triedWithNetwork || !allowNetwork)) {
-        continue;
-      }
-      String? found;
-      try {
-        found = await _findTrackThumbnail(playlist, track, allowNetwork);
-      } catch (e) {
-        _log.warn('thumbnail for "${track.title}" failed: $e');
-      }
-      if (found == null) {
-        _noCover[track.id] = allowNetwork;
-        continue;
-      }
-      await _db.updateTrackThumbnailPath(track.id, found);
-      _verified[track.id] = found;
-      _noCover.remove(track.id);
-      added++;
+    } finally {
+      await record();
     }
     if (added > 0) await _metadata.writeMetadataFor(playlist.id);
     return added;
@@ -254,7 +338,7 @@ class ThumbnailBackfillService {
 
     final mediaPath = track.filePath!;
     if (await File(mediaPath).exists()) {
-      await _prepareDir(p.dirname(stem));
+      if (!await _prepareDir(p.dirname(stem))) return null;
       final extracted = await _thumbnails.extractEmbeddedThumbnail(
         mediaPath: mediaPath,
         targetStem: stem,
@@ -280,8 +364,10 @@ class ThumbnailBackfillService {
     int playlistId,
     bool allowNetwork,
   ) async {
-    final playlist = await _db.getPlaylist(playlistId);
-    if (existingThumbnailPath(playlist.thumbnailPath) != null) return null;
+    await _waitWhilePaused();
+    final playlist = await _db.getPlaylistOrNull(playlistId);
+    if (playlist == null) return null;
+    if (await thumbnailFileExists(playlist.thumbnailPath)) return null;
     final folder = playlist.outputPath;
     if (!await Directory(folder).exists()) return null;
     final stem = LibraryLayout.playlistCoverStem(folder);
@@ -293,8 +379,8 @@ class ThumbnailBackfillService {
     }
     if (cover == null) {
       for (final track in await _db.getTracksForPlaylist(playlist.id)) {
-        final source = existingThumbnailPath(track.thumbnailPath);
-        if (source == null) continue;
+        final source = track.thumbnailPath;
+        if (source == null || !await thumbnailFileExists(source)) continue;
         cover = await _installImage(stem, (tmp) async {
           await File(source).copy(tmp.path);
           return true;
@@ -303,6 +389,7 @@ class ThumbnailBackfillService {
       }
     }
     if (cover == null) return null;
+    if (!await _stillInPlace(playlist.id, folder)) return null;
     await _db.updatePlaylistFields(
       playlist.id,
       PlaylistsCompanion(thumbnailPath: Value(cover)),
@@ -346,7 +433,7 @@ class ThumbnailBackfillService {
     String stem,
     Future<bool> Function(File tmp) produce,
   ) async {
-    await _prepareDir(p.dirname(stem));
+    if (!await _prepareDir(p.dirname(stem))) return null;
     final tmp = File(
       '$stem.tmp.${DateTime.now().microsecondsSinceEpoch}.${_tmpCounter++}',
     );
@@ -356,6 +443,7 @@ class ThumbnailBackfillService {
       if (extension == null) return null;
       final target = '$stem$extension';
       await tmp.rename(target);
+      noteThumbnailWritten(target);
       return target;
     } finally {
       try {
@@ -408,14 +496,22 @@ class ThumbnailBackfillService {
   }
 
   /// Creates the thumbnails folder with a `.nomedia` file so gallery apps
-  /// do not list the covers.
-  static Future<void> _prepareDir(String dir) async {
-    await Directory(dir).create(recursive: true);
+  /// do not list the covers. Returns false, creating nothing, when the
+  /// playlist folder it belongs in is gone: a deleted playlist's folder must
+  /// never come back.
+  static Future<bool> _prepareDir(String dir) async {
+    if (!await Directory(p.dirname(dir)).exists()) return false;
+    try {
+      await Directory(dir).create();
+    } on FileSystemException {
+      if (!await Directory(dir).exists()) return false;
+    }
     try {
       final marker = File(p.join(dir, '.nomedia'));
       if (!await marker.exists()) await marker.create();
     } catch (_) {
       // Only hides covers from gallery apps.
     }
+    return true;
   }
 }

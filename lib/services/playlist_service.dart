@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
 import 'package:drift/drift.dart';
@@ -11,6 +12,15 @@ export 'metadata_service.dart' show PlaylistExistsException;
 import 'sponsorblock_service.dart';
 import 'media_thumbnail_service.dart' as media_thumbnail_service;
 import 'app_settings_service.dart';
+
+/// Thrown by [PlaylistService.syncPlaylist] when the owner stopped the
+/// update while YouTube was being asked for the playlist.
+class SyncCancelledException implements Exception {
+  const SyncCancelledException();
+
+  @override
+  String toString() => 'The update was stopped.';
+}
 
 class ForceInsertException implements Exception {
   final String message;
@@ -82,6 +92,44 @@ class PlaylistService {
        _gate = gate ?? LibraryGate.unlocked();
 
   Stream<List<Playlist>> watchAllPlaylists() => _db.watchAllPlaylists();
+
+  /// Per playlist: total, downloaded, unavailable and failed track counts.
+  /// Emits only when a number changes.
+  Stream<Map<int, PlaylistCounts>> watchPlaylistTrackCounts() =>
+      _db.watchPlaylistTrackCounts();
+
+  final _syncing = <int>{};
+  final _cancelledSyncs = <int>{};
+  final _syncingController = StreamController<Set<int>>.broadcast();
+
+  /// Playlists whose update is asking YouTube for the playlist or applying
+  /// the answer right now (the download that follows is reported by the
+  /// download service).
+  Set<int> get syncingPlaylistIds => Set.unmodifiable(_syncing);
+
+  /// [syncingPlaylistIds] after every change.
+  Stream<Set<int>> get syncingStream => _syncingController.stream;
+
+  void _setSyncing(int playlistId, bool syncing) {
+    final changed =
+        syncing ? _syncing.add(playlistId) : _syncing.remove(playlistId);
+    if (changed && !_syncingController.isClosed) {
+      _syncingController.add(Set.unmodifiable(_syncing));
+    }
+  }
+
+  /// Stops the update of [playlistId] while YouTube is still being asked:
+  /// its answer is then ignored and nothing changes. Returns whether such an
+  /// update was running. Once the answer is being applied, it finishes.
+  bool cancelSync(int playlistId) {
+    if (!_syncing.contains(playlistId)) return false;
+    _cancelledSyncs.add(playlistId);
+    return true;
+  }
+
+  void dispose() {
+    _syncingController.close();
+  }
 
   Future<Playlist> getPlaylist(int id) => _db.getPlaylist(id);
 
@@ -630,14 +678,62 @@ class PlaylistService {
   /// Throws a [StateError] when YouTube returns no entries for a playlist that
   /// already has tracks; an empty response is far more likely a transient
   /// fetch problem than a playlist that was really emptied.
+  ///
+  /// Only one update per playlist runs at a time: a second request while one
+  /// is running throws [LibraryBusyException]. [cancelSync] stops it while
+  /// YouTube is being asked ([SyncCancelledException]).
   Future<SyncResult> syncPlaylist(Playlist playlist) async {
-    final info = await _ytdlp.getPlaylistInfo(playlist.url);
-    // Re-read inside the gate: the caller's copy may predate a format
-    // switch, and the sync renames files in the current folder.
-    return _gate.run(
-      'playlist update',
-      () async => _applySync(await _db.getPlaylist(playlist.id), info),
-    );
+    if (_syncing.contains(playlist.id)) {
+      throw const LibraryBusyException(
+        'This playlist is already being updated.',
+      );
+    }
+    _setSyncing(playlist.id, true);
+    _cancelledSyncs.remove(playlist.id);
+    try {
+      // Recorded even when the check fails, so the scheduled update takes
+      // the playlists it tried longest ago first.
+      await _db.markPlaylistUpdateAttempt(playlist.id, DateTime.now());
+      final info = await _ytdlp.getPlaylistInfo(playlist.url);
+      if (_cancelledSyncs.remove(playlist.id)) {
+        throw const SyncCancelledException();
+      }
+      // Re-read inside the gate: the caller's copy may predate a format
+      // switch, and the sync renames files in the current folder.
+      return await _gate.run('playlist update', () async {
+        final current = await _db.getPlaylistOrNull(playlist.id);
+        if (current == null) {
+          throw StateError('"${playlist.name}" was deleted.');
+        }
+        return _applySync(current, info);
+      });
+    } finally {
+      _cancelledSyncs.remove(playlist.id);
+      _setSyncing(playlist.id, false);
+    }
+  }
+
+  /// Puts every track of [playlistId] that a download found removed from
+  /// YouTube back in the queue, so the next update tries them again.
+  /// Returns how many there were.
+  Future<int> retryRemovedTracks(int playlistId) async {
+    var count = 0;
+    for (final track in await _db.getTracksForPlaylist(playlistId)) {
+      if (track.unavailableReason != removedFromYouTubeReason) continue;
+      await _db.clearRemovedFromYouTube(track.id);
+      count++;
+    }
+    if (count > 0) await _writeMetadata(playlistId);
+    return count;
+  }
+
+  /// Puts one track that a download found removed from YouTube back in the
+  /// queue (see [retryRemovedTracks]).
+  Future<void> retryRemovedTrack(int trackId) async {
+    final track = await _db.getTrack(trackId);
+    if (track == null) return;
+    await _db.clearRemovedFromYouTube(trackId);
+    await _writeMetadata(track.playlistId);
   }
 
   Future<SyncResult> _applySync(
@@ -663,8 +759,12 @@ class PlaylistService {
     final replacementConflicts = <Track>[];
 
     // Helper: check if track has a valid file on disk
-    bool hasFileOnDisk(Track t) =>
-        t.filePath != null && File(t.filePath!).existsSync();
+    Future<bool> hasFileOnDisk(Track t) async =>
+        t.filePath != null && await File(t.filePath!).exists();
+
+    // Decide for every track first, then write all changes in one
+    // transaction: one update of the open pages instead of one per track.
+    final changes = <Future<void> Function()>[];
 
     // Process existing tracks against fresh data
     for (final track in existingTracks) {
@@ -673,15 +773,15 @@ class PlaylistService {
 
       if (freshEntry == null) {
         // Video removed from playlist entirely
-        if (hasFileOnDisk(track)) {
+        if (await hasFileOnDisk(track)) {
           // File on disk — keep playable, just note removal
           if (track.unavailableReason != 'removed') {
-            await _db.updateTrackOnlineStatus(track.id, 'removed');
+            changes.add(() => _db.updateTrackOnlineStatus(track.id, 'removed'));
             removed++;
           }
         } else if (track.status != 'unavailable' ||
             track.unavailableReason != 'removed') {
-          await _db.updateTrackUnavailable(track.id, 'removed');
+          changes.add(() => _db.updateTrackUnavailable(track.id, 'removed'));
           removed++;
         }
         continue;
@@ -691,37 +791,51 @@ class PlaylistService {
 
       if (reason != null) {
         // Video is unavailable online
-        if (hasFileOnDisk(track)) {
+        if (await hasFileOnDisk(track)) {
           // File on disk — keep playable, just update online status
           if (track.unavailableReason != reason) {
-            await _db.updateTrackOnlineStatus(track.id, reason);
+            changes.add(() => _db.updateTrackOnlineStatus(track.id, reason));
           }
         } else if (track.status != 'unavailable') {
-          await _db.updateTrackUnavailable(track.id, reason);
+          changes.add(() => _db.updateTrackUnavailable(track.id, reason));
           markedUnavailable++;
         }
+      } else if (track.unavailableReason == removedFromYouTubeReason) {
+        // A download found the video taken down for good. The playlist
+        // listing often still shows such a video as normal, so it does not
+        // count as "available again"; only a manual retry brings it back.
+        continue;
       } else if (track.unavailableReason != null) {
         // Video is available again (was previously flagged)
-        if (hasFileOnDisk(track)) {
+        if (await hasFileOnDisk(track)) {
           if (track.isLocalReplacement) {
             // Local replacement exists — user needs to decide
             replacementConflicts.add(track);
           }
           // Clear the unavailable reason since video is back
-          await _db.updateTrackOnlineStatus(track.id, null);
+          changes.add(() => _db.updateTrackOnlineStatus(track.id, null));
         } else if (track.status == 'unavailable') {
-          await _db.updateTrackAvailable(
-            track.id,
-            title: freshEntry['title'] as String? ?? 'Unknown',
-            thumbnailUrl: freshEntry['thumbnail'] as String?,
-            durationSeconds: freshEntry['duration'] as int?,
+          changes.add(
+            () => _db.updateTrackAvailable(
+              track.id,
+              title: freshEntry['title'] as String? ?? 'Unknown',
+              thumbnailUrl: freshEntry['thumbnail'] as String?,
+              durationSeconds: (freshEntry['duration'] as num?)?.toInt(),
+            ),
           );
         } else {
           // Status is pending/error, reason was set informationally
-          await _db.updateTrackOnlineStatus(track.id, null);
+          changes.add(() => _db.updateTrackOnlineStatus(track.id, null));
         }
         markedAvailable++;
       }
+    }
+    if (changes.isNotEmpty) {
+      await _db.transaction(() async {
+        for (final change in changes) {
+          await change();
+        }
+      });
     }
 
     final added = await _insertNewEntries(
@@ -761,13 +875,21 @@ class PlaylistService {
     Map<String, dynamic> entry,
   ) {
     final reason = _detectUnavailability(entry);
+    // Flat playlist entries of live streams and premieres have no duration,
+    // and some have no thumbnail; store "unknown", not "" and 0:00.
+    final thumbnail = entry['thumbnail'] as String?;
+    final duration = (entry['duration'] as num?)?.toInt();
     return TracksCompanion.insert(
       playlistId: playlistId,
       index: index,
       videoId: entry['id'] as String,
       title: entry['title'] as String? ?? 'Unknown',
-      thumbnailUrl: Value(entry['thumbnail'] as String?),
-      durationSeconds: Value(entry['duration'] as int?),
+      thumbnailUrl: Value(
+        thumbnail == null || thumbnail.isEmpty ? null : thumbnail,
+      ),
+      durationSeconds: Value(
+        duration == null || duration <= 0 ? null : duration,
+      ),
       status: Value(reason != null ? 'unavailable' : 'pending'),
       unavailableReason: Value(reason),
     );
@@ -912,11 +1034,13 @@ class PlaylistService {
   /// the new number, then inserts [inserts].
   ///
   /// Crash safety matches [forceInsert]: files are renamed from the highest
-  /// index down, each straight to its final name, with the track's recorded
-  /// path updated just before its file moves. Indices change in one
-  /// transaction at the end. If the app dies part-way, every track still
-  /// finds its file, the next repair puts the names back in line with the
-  /// unchanged indices, and the next update simply tries again.
+  /// index down, each straight to its final name, with the tracks' recorded
+  /// paths updated just before their files move (a chunk of tracks per
+  /// transaction). Indices change in one transaction at the end. If the app
+  /// dies part-way, every track still finds its file (by its recorded path,
+  /// or by its unchanged index for files not moved yet), the next repair
+  /// puts the names back in line with the unchanged indices, and the next
+  /// update simply tries again.
   Future<void> _applyRenumbering({
     required Playlist playlist,
     required List<Track> tracks,
@@ -929,22 +1053,56 @@ class PlaylistService {
         tracks.where((t) => newIndexByTrackId.containsKey(t.id)).toList()
           ..sort((a, b) => b.index.compareTo(a.index));
     final prefixPattern = RegExp(r'^\d+_');
+
+    // One listing instead of two disk checks per track. Android's shared
+    // storage ignores letter case, so compare names without it.
+    final present = <String>{};
+    final dir = Directory(folder);
+    if (await dir.exists()) {
+      await for (final entity in dir.list()) {
+        if (entity is File) present.add(p.normalize(entity.path).toLowerCase());
+      }
+    }
+    String key(String path) => p.normalize(path).toLowerCase();
+
+    // Plan every rename in order: a file moved earlier frees its name for
+    // the next one.
+    final planned = <({int trackId, String from, String to})>[];
     for (final track in moving) {
       final path = track.filePath;
       if (path == null || !p.equals(p.dirname(path), folder)) continue;
-      if (!await File(path).exists()) continue;
+      if (!present.contains(key(path))) continue;
       final rest = p.basename(path).replaceFirst(prefixPattern, '');
       final target = p.join(
         folder,
         '${MetadataService.paddedIndex(newIndexByTrackId[track.id]!, newTrackCount)}_$rest',
       );
-      if (p.equals(path, target) || await File(target).exists()) continue;
-      await _db.updateTrackFields(track.id, filePath: target);
-      try {
-        await File(path).rename(target);
-      } catch (_) {
-        await _db.updateTrackFields(track.id, filePath: path);
+      if (p.equals(path, target) || present.contains(key(target))) continue;
+      present
+        ..remove(key(path))
+        ..add(key(target));
+      planned.add((trackId: track.id, from: path, to: target));
+    }
+
+    const chunkSize = 50;
+    for (var start = 0; start < planned.length; start += chunkSize) {
+      final chunk = planned.sublist(
+        start,
+        start + chunkSize > planned.length ? planned.length : start + chunkSize,
+      );
+      await _db.updateTrackFilePaths({for (final m in chunk) m.trackId: m.to});
+      final failed = <int, String>{};
+      for (final move in chunk) {
+        try {
+          if (await File(move.to).exists()) {
+            throw FileSystemException('Target exists', move.to);
+          }
+          await File(move.from).rename(move.to);
+        } catch (_) {
+          failed[move.trackId] = move.from;
+        }
       }
+      await _db.updateTrackFilePaths(failed);
     }
 
     await _db.transaction(() async {
@@ -996,6 +1154,7 @@ class PlaylistService {
       await _db.deletePlaylist(id);
 
       final folder = playlist.outputPath;
+      media_thumbnail_service.forgetThumbnailsUnder(folder);
       for (final track in tracks) {
         for (final path in [track.filePath, track.thumbnailPath]) {
           if (path == null || otherFiles.contains(p.normalize(path))) continue;
@@ -1259,7 +1418,7 @@ class PlaylistService {
       moves.add((track: track, from: oldPath, to: targetPath));
     }
     try {
-      _validateForcedInsertTargets(moves, destinationPath);
+      await _validateForcedInsertTargets(moves, destinationPath);
     } catch (_) {
       await _deleteQuietly(staging);
       rethrow;
@@ -1473,8 +1632,9 @@ class PlaylistService {
       if (!track.isLocalReplacement ||
           track.filePath == null ||
           !await File(track.filePath!).exists() ||
-          media_thumbnail_service.existingThumbnailPath(track.thumbnailPath) !=
-              null) {
+          await media_thumbnail_service.thumbnailFileExists(
+            track.thumbnailPath,
+          )) {
         continue;
       }
       final path = await _refreshEmbeddedThumbnail(
@@ -1510,6 +1670,7 @@ class PlaylistService {
         for (final ext in const ['.jpg', '.jpeg', '.png', '.webp', '.gif']) {
           final stale = File('$stem$ext');
           if (await stale.exists()) await stale.delete();
+          media_thumbnail_service.noteThumbnailRemoved(stale.path);
         }
       }
       await _db.updateTrackThumbnailPath(track.id, thumbnailPath);
@@ -1520,12 +1681,12 @@ class PlaylistService {
     }
   }
 
-  void _validateForcedInsertTargets(
+  Future<void> _validateForcedInsertTargets(
     List<({Track track, String from, String to})> moves,
     String destinationPath,
-  ) {
+  ) async {
     final originalPaths = moves.map((move) => move.from).toSet();
-    if (File(destinationPath).existsSync() &&
+    if (await File(destinationPath).exists() &&
         !originalPaths.contains(destinationPath)) {
       throw const ForceInsertException(
         'A file already occupies the requested index in this playlist.',
@@ -1538,7 +1699,7 @@ class PlaylistService {
           'Existing playlist files have conflicting index prefixes.',
         );
       }
-      if (File(move.to).existsSync() && !originalPaths.contains(move.to)) {
+      if (await File(move.to).exists() && !originalPaths.contains(move.to)) {
         throw ForceInsertException(
           'Cannot move ${p.basename(move.from)} because '
           '${p.basename(move.to)} already exists.',

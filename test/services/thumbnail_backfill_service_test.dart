@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:drift/drift.dart' show Value;
+import 'package:drift/drift.dart' show TableUpdate, TableUpdateQuery, Value;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:woolytube/database/database.dart';
@@ -339,6 +339,75 @@ void main() {
 
       expect(await service.ensureTrackThumbnails(playlist), 0);
       expect(Directory(folder).existsSync(), isFalse);
+    });
+
+    test('records many covers in a few batches', () async {
+      for (var i = 1; i <= 30; i++) {
+        final track = await addTrack(index: i, videoId: 'v$i');
+        media.embedded[track.filePath!] = _jpeg;
+      }
+      final updates = <Set<TableUpdate>>[];
+      final sub = db
+          .tableUpdates(TableUpdateQuery.onTable(db.tracks))
+          .listen(updates.add);
+      addTearDown(sub.cancel);
+
+      expect(await service.ensureTrackThumbnails(playlist), 30);
+      await pumpEventQueue();
+
+      for (final track in await db.getTracksForPlaylist(playlist.id)) {
+        expect(track.thumbnailPath, isNotNull);
+      }
+      expect(updates.length, lessThanOrEqualTo(3));
+    });
+
+    test('stops when the playlist is deleted meanwhile, and never brings '
+        'its folder back', () async {
+      final first = await addTrack(index: 1, videoId: 'v1');
+      await addTrack(index: 2, videoId: 'v2');
+      cache[ytUrl('v2')] = await cachedImage('v2', _jpeg);
+      media.embedded[first.filePath!] = _jpeg;
+      // The first cover is extracted, then the playlist and its folder go.
+      var deleted = false;
+      final paused = ThumbnailBackfillService(
+        db,
+        metadata,
+        media,
+        LogService(),
+        lookupCachedImage: (url) async => cache[url],
+        shouldPause: () {
+          if (!deleted && media.requests.isNotEmpty) {
+            deleted = true;
+            db.deletePlaylist(playlist.id);
+            Directory(folder).deleteSync(recursive: true);
+          }
+          return false;
+        },
+      );
+
+      await paused.ensureTrackThumbnails(playlist);
+
+      expect(Directory(folder).existsSync(), isFalse);
+    });
+
+    test('waits while a folder is being moved or deleted', () async {
+      final track = await addTrack();
+      media.embedded[track.filePath!] = _jpeg;
+      var busy = true;
+      final waiting = ThumbnailBackfillService(
+        db,
+        metadata,
+        media,
+        LogService(),
+        lookupCachedImage: (url) async => null,
+        shouldPause: () => busy,
+      );
+
+      final run = waiting.ensureTrackThumbnails(playlist);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(media.requests, isEmpty);
+      busy = false;
+      expect(await run, 1);
     });
   });
 
