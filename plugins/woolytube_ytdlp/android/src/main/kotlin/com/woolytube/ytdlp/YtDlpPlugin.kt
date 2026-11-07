@@ -2,6 +2,9 @@ package com.woolytube.ytdlp
 
 import android.content.Context
 import android.content.Intent
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
@@ -12,17 +15,62 @@ import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.*
+import java.io.File
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArraySet
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 
+/**
+ * yt-dlp bridge. One instance exists per Flutter engine (the app's engine
+ * and, rarely, the background worker's headless engine), while yt-dlp, the
+ * download service and the process ids are shared by the whole process.
+ *
+ * With Flutter 3.29's merged threads the Android main thread is also the
+ * Dart UI thread, so everything here keeps main-thread work small: progress
+ * is throttled before it is posted, and the notification is updated
+ * without a service IPC per progress line.
+ */
 class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     companion object {
         private const val METHOD_CHANNEL = "com.woolytube/ytdlp"
         private const val EVENT_CHANNEL = "com.woolytube/ytdlp_progress"
         private const val MEDIA_METADATA_CHANNEL = "com.woolytube/media_metadata"
+        private const val CONTROL_CHANNEL = "com.woolytube/ytdlp_control"
         private const val TAG = "WoolyTube"
 
+        /** At most this often a 'downloading' event crosses to Dart. */
+        private const val PROGRESS_INTERVAL_MS = 250L
+
+        /** How long Dart gets to stop a run cleanly before native kills it. */
+        private const val CANCEL_FALLBACK_MS = 3_000L
+        private const val TASK_REMOVED_FALLBACK_MS = 1_500L
+
         private val activeProcessIds = ConcurrentHashMap.newKeySet<String>()
+
+        /** Engines that have asked for the download notification. */
+        private val serviceRequesters = ConcurrentHashMap.newKeySet<YtDlpPlugin>()
+
+        /** Every attached engine's plugin instance. */
+        private val instances = CopyOnWriteArraySet<YtDlpPlugin>()
+
+        /**
+         * Downloads and info calls hold the read side, the self-update holds
+         * the write side, so the binary is never swapped under a running
+         * yt-dlp process.
+         */
+        private val runtimeLock = ReentrantReadWriteLock()
+
+        private val initLock = Any()
+
+        @Volatile
+        private var runtimeInitialized = false
+
+        private val mainHandler = Handler(Looper.getMainLooper())
 
         fun hasActiveDownloads(): Boolean = activeProcessIds.isNotEmpty()
 
@@ -39,16 +87,67 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             }
             return ids.size
         }
+
+        /**
+         * The user asked to stop downloading (notification Cancel, or the
+         * app was swiped away). Each engine's Dart side is asked to stop its
+         * run, so the interrupted track goes back to the queue and the run
+         * ends instead of moving on to the next track. Native kills the
+         * processes itself only when no engine handled the request.
+         */
+        fun requestCancelFromUser(context: Context, reason: String) {
+            mainHandler.post {
+                val appContext = context.applicationContext
+                val targets = serviceRequesters.toList().ifEmpty { instances.toList() }
+                val handled = AtomicBoolean(false)
+                for (plugin in targets) {
+                    plugin.sendCancelRequest(reason) { accepted ->
+                        if (accepted) handled.set(true)
+                    }
+                }
+                val delay = if (reason == "taskRemoved") {
+                    TASK_REMOVED_FALLBACK_MS
+                } else {
+                    CANCEL_FALLBACK_MS
+                }
+                mainHandler.postDelayed({
+                    if (!handled.get() || reason == "taskRemoved") {
+                        val killed = cancelAllActiveDownloads()
+                        if (killed > 0) {
+                            Log.i(TAG, "Cancelled $killed yt-dlp process(es) ($reason)")
+                        }
+                    }
+                    if (!handled.get()) {
+                        serviceRequesters.clear()
+                        stopDownloadService(appContext)
+                    }
+                }, delay)
+            }
+        }
+
+        private fun stopDownloadService(context: Context) {
+            // stopService never creates the service and has no background
+            // start restriction, unlike startService(ACTION_STOP).
+            try {
+                context.stopService(Intent(context, DownloadForegroundService::class.java))
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to stop download service", e)
+            }
+        }
     }
 
     private lateinit var methodChannel: MethodChannel
     private lateinit var eventChannel: EventChannel
     private lateinit var mediaMetadataChannel: MethodChannel
+    private lateinit var controlChannel: MethodChannel
     private lateinit var context: Context
+    @Volatile
     private var progressSink: EventChannel.EventSink? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val ownedProcessIds = ConcurrentHashMap.newKeySet<String>()
-    private var isInitialized = false
+
+    /** Info calls of this engine; killed when the engine goes away. */
+    private val ownedInfoProcessIds = ConcurrentHashMap.newKeySet<String>()
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         context = binding.applicationContext
@@ -66,6 +165,8 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             }
         }
 
+        controlChannel = MethodChannel(binding.binaryMessenger, CONTROL_CHANNEL)
+
         eventChannel = EventChannel(binding.binaryMessenger, EVENT_CHANNEL)
         eventChannel.setStreamHandler(object : EventChannel.StreamHandler {
             override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
@@ -76,20 +177,23 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             }
         })
 
+        instances.add(this)
         Log.i(TAG, "yt-dlp channels attached to Flutter engine")
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        instances.remove(this)
         methodChannel.setMethodCallHandler(null)
         mediaMetadataChannel.setMethodCallHandler(null)
         eventChannel.setStreamHandler(null)
         progressSink = null
-        val hadActiveDownloads = ownedProcessIds.isNotEmpty()
         cancelOwnedDownloads()
-        // Another engine (foreground app or background worker) may still be
-        // downloading through the same service.
-        if (hadActiveDownloads && !hasActiveDownloads()) {
-            context.stopService(Intent(context, DownloadForegroundService::class.java))
+        cancelOwnedInfoCalls()
+        // The engine may go away between two tracks, when no process runs
+        // but its run still holds the notification and wake lock.
+        val requested = serviceRequesters.remove(this)
+        if (requested && serviceRequesters.isEmpty() && !hasActiveDownloads()) {
+            stopDownloadService(context)
         }
         scope.cancel()
     }
@@ -110,12 +214,40 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         }
     }
 
+    /** Asks this engine's Dart side to stop; [onReply] gets true if it did. */
+    private fun sendCancelRequest(reason: String, onReply: (Boolean) -> Unit) {
+        try {
+            controlChannel.invokeMethod(
+                "cancelRequestedByUser",
+                mapOf("reason" to reason),
+                object : MethodChannel.Result {
+                    override fun success(result: Any?) = onReply(true)
+                    override fun error(code: String, message: String?, details: Any?) =
+                        onReply(false)
+                    override fun notImplemented() = onReply(false)
+                }
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not forward cancel request", e)
+            onReply(false)
+        }
+    }
+
     private fun handleInitialize(result: MethodChannel.Result) {
+        if (runtimeInitialized) {
+            // The other engine already started yt-dlp in this process.
+            result.success(true)
+            return
+        }
         scope.launch {
             try {
-                YoutubeDL.getInstance().init(context)
-                FFmpeg.getInstance().init(context)
-                isInitialized = true
+                synchronized(initLock) {
+                    if (!runtimeInitialized) {
+                        YoutubeDL.getInstance().init(context)
+                        FFmpeg.getInstance().init(context)
+                        runtimeInitialized = true
+                    }
+                }
                 withContext(Dispatchers.Main) { result.success(true) }
             } catch (e: Exception) {
                 Log.e(TAG, "Init failed", e)
@@ -142,15 +274,17 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             result.error("INVALID_ARGS", "url and outputPath required", null)
             return
         }
-        if (!isInitialized) {
+        if (!runtimeInitialized) {
             result.error("NOT_INITIALIZED", "Call initialize first", null)
             return
         }
 
+        // Registered before the coroutine starts, so a cancelDownloads or
+        // hasActiveDownloads call right after this one already sees it.
+        val processId = UUID.randomUUID().toString()
+        ownedProcessIds.add(processId)
+        activeProcessIds.add(processId)
         scope.launch {
-            val processId = UUID.randomUUID().toString()
-            ownedProcessIds.add(processId)
-            activeProcessIds.add(processId)
             try {
                 startDownload(
                     url,
@@ -179,7 +313,7 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 Log.e(TAG, "Download failed", e)
                 ownedProcessIds.remove(processId)
                 activeProcessIds.remove(processId)
-                withContext(Dispatchers.Main) {
+                withContext(NonCancellable + Dispatchers.Main) {
                     sendProgress(mapOf(
                         "status" to "error",
                         "progress" to 0.0,
@@ -191,6 +325,22 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 ownedProcessIds.remove(processId)
                 activeProcessIds.remove(processId)
             }
+        }
+    }
+
+    /**
+     * Runs a yt-dlp call that only reads information. It is killed when this
+     * engine goes away, and never overlaps a yt-dlp self-update.
+     */
+    private fun executeInfoRequest(request: YoutubeDLRequest): String {
+        val processId = UUID.randomUUID().toString()
+        ownedInfoProcessIds.add(processId)
+        try {
+            return runtimeLock.read {
+                YoutubeDL.getInstance().execute(request, processId).out
+            }
+        } finally {
+            ownedInfoProcessIds.remove(processId)
         }
     }
 
@@ -206,10 +356,21 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 request.addOption("--dump-json")
                 request.addOption("--no-playlist")
                 request.addOption("--no-download")
-                val response = YoutubeDL.getInstance().execute(request)
-                withContext(Dispatchers.Main) { result.success(response.out) }
+                val out = executeInfoRequest(request)
+                // The full info is hundreds of KB (every format, thumbnail
+                // and caption URL). Dart only reads these fields, so only
+                // these cross the channel and get decoded on the UI thread.
+                val full = org.json.JSONObject(out.trim().lineSequence().first { it.isNotBlank() })
+                val trimmed = org.json.JSONObject()
+                for (key in listOf("id", "title", "duration", "chapters", "uploader", "channel")) {
+                    if (full.has(key) && !full.isNull(key)) trimmed.put(key, full.get(key))
+                }
+                val json = trimmed.toString()
+                withContext(Dispatchers.Main) { result.success(json) }
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) { result.error("INFO_ERROR", e.message, null) }
+                withContext(NonCancellable + Dispatchers.Main) {
+                    result.error("INFO_ERROR", e.message, null)
+                }
             }
         }
     }
@@ -226,9 +387,9 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 request.addOption("--flat-playlist")
                 request.addOption("--dump-json")
                 request.addOption("--no-download")
-                val response = YoutubeDL.getInstance().execute(request)
+                val out = executeInfoRequest(request)
 
-                val lines = response.out.trim().split("\n").filter { it.isNotBlank() }
+                val lines = out.trim().split("\n").filter { it.isNotBlank() }
                 val entries = org.json.JSONArray()
                 var playlistTitle = ""
                 var playlistThumbnail: String? = null
@@ -240,8 +401,15 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                         val entry = org.json.JSONObject()
                         entry.put("id", json.optString("id", ""))
                         entry.put("title", json.optString("title", "Unknown"))
-                        entry.put("thumbnail", json.optString("thumbnail", ""))
-                        entry.put("duration", json.optInt("duration", 0))
+                        // Flat entries often lack a thumbnail or a duration
+                        // (live streams, premieres). Leave them out so Dart
+                        // stores null instead of "" and 0:00.
+                        val thumbnail = json.optString("thumbnail", "")
+                        if (thumbnail.isNotBlank()) entry.put("thumbnail", thumbnail)
+                        val duration = json.optDouble("duration", Double.NaN)
+                        if (!duration.isNaN() && duration > 0) {
+                            entry.put("duration", Math.round(duration).toInt())
+                        }
                         entry.put("playlist_index", json.optInt("playlist_index", index + 1))
                         entry.put("availability", json.optString("availability", ""))
                         entries.put(entry)
@@ -255,7 +423,9 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                         if (playlistThumbnail == null) {
                             val thumbnails = json.optJSONArray("thumbnails")
                             if (thumbnails != null && thumbnails.length() > 0) {
-                                playlistThumbnail = thumbnails.getJSONObject(thumbnails.length() - 1).optString("url")
+                                playlistThumbnail = thumbnails.getJSONObject(thumbnails.length() - 1)
+                                    .optString("url")
+                                    .takeIf { it.isNotBlank() }
                             }
                         }
                     } catch (e: Exception) {
@@ -271,14 +441,17 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 val output = org.json.JSONObject()
                 output.put("title", playlistTitle)
                 output.put("isPlaylist", isPlaylistResult)
-                output.put("thumbnail", playlistThumbnail ?: "")
+                playlistThumbnail?.let { output.put("thumbnail", it) }
                 output.put("count", entries.length())
                 output.put("entries", entries)
 
-                withContext(Dispatchers.Main) { result.success(output.toString()) }
+                val json = output.toString()
+                withContext(Dispatchers.Main) { result.success(json) }
             } catch (e: Exception) {
                 Log.e(TAG, "Playlist info failed", e)
-                withContext(Dispatchers.Main) { result.error("PLAYLIST_ERROR", e.message, null) }
+                withContext(NonCancellable + Dispatchers.Main) {
+                    result.error("PLAYLIST_ERROR", e.message, null)
+                }
             }
         }
     }
@@ -298,17 +471,33 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         return ids.size
     }
 
+    private fun cancelOwnedInfoCalls() {
+        for (processId in ownedInfoProcessIds.toList()) {
+            try {
+                YoutubeDL.getInstance().destroyProcessById(processId)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to cancel yt-dlp info call $processId", e)
+            } finally {
+                ownedInfoProcessIds.remove(processId)
+            }
+        }
+    }
+
     private fun handleUpdateYtDlp(result: MethodChannel.Result) {
         scope.launch {
             try {
-                val status = YoutubeDL.getInstance().updateYoutubeDL(
-                    context,
-                    YoutubeDL.UpdateChannel.NIGHTLY
-                )
+                val status = runtimeLock.write {
+                    YoutubeDL.getInstance().updateYoutubeDL(
+                        context,
+                        YoutubeDL.UpdateChannel.NIGHTLY
+                    )
+                }
                 withContext(Dispatchers.Main) { result.success(status?.name ?: "UNKNOWN") }
             } catch (e: Exception) {
                 Log.e(TAG, "yt-dlp update failed", e)
-                withContext(Dispatchers.Main) { result.error("UPDATE_ERROR", e.message, null) }
+                withContext(NonCancellable + Dispatchers.Main) {
+                    result.error("UPDATE_ERROR", e.message, null)
+                }
             }
         }
     }
@@ -409,14 +598,23 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         request.addOption("--no-playlist")
         request.addOption("--write-info-json")
 
-        YoutubeDL.getInstance().execute(request, processId) { progress, etaInSeconds, line ->
-            scope.launch(Dispatchers.Main) {
-                sendProgress(mapOf(
-                    "status" to "downloading",
-                    "progress" to progress.toDouble(),
-                    "eta" to etaInSeconds.toLong(),
-                    "line" to (line ?: "")
-                ))
+        // yt-dlp prints a progress line for every block it reads, often tens
+        // per second, and the library calls back for each line. Only whole
+        // percent changes, at most every PROGRESS_INTERVAL_MS, cross to the
+        // main (= Dart UI) thread. --progress-delta is not used: an older
+        // bundled yt-dlp would reject the unknown option.
+        val throttle = ProgressThrottle(PROGRESS_INTERVAL_MS)
+        runtimeLock.read {
+            YoutubeDL.getInstance().execute(request, processId) { progress, _, _ ->
+                val percent = throttle.accept(progress)
+                if (percent != null) {
+                    mainHandler.post {
+                        sendProgress(mapOf(
+                            "status" to "downloading",
+                            "progress" to percent.toDouble()
+                        ))
+                    }
+                }
             }
         }
     }
@@ -438,23 +636,40 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             return
         }
         scope.launch {
+            val mediaFile = File(mediaPath)
+            // A file known to have no cover is not opened again until it
+            // changes; the backfill asks for every cover-less track on each
+            // start, and each attempt parses the whole container.
+            val marker = noCoverMarker(mediaPath)
+            val signature = "${mediaFile.lastModified()}:${mediaFile.length()}"
+            if (mediaFile.exists() && marker.exists() &&
+                runCatching { marker.readText() }.getOrNull() == signature
+            ) {
+                withContext(Dispatchers.Main) { result.success(null) }
+                return@launch
+            }
             val retriever = android.media.MediaMetadataRetriever()
             try {
                 retriever.setDataSource(mediaPath)
                 val artwork = retriever.embeddedPicture
                 if (artwork == null || artwork.isEmpty()) {
+                    runCatching {
+                        marker.parentFile?.mkdirs()
+                        marker.writeText(signature)
+                    }
                     withContext(Dispatchers.Main) { result.success(null) }
                     return@launch
                 }
-                val directory = java.io.File(targetStem).parentFile
+                marker.delete()
+                val directory = File(targetStem).parentFile
                 if (directory != null && !directory.exists() && !directory.mkdirs()) {
                     throw IllegalStateException("Could not create thumbnail directory")
                 }
-                val target = java.io.File("$targetStem.${imageExtension(artwork)}")
-                val temporary = java.io.File("${target.path}.tmp")
+                val target = File("$targetStem.${imageExtension(artwork)}")
+                val temporary = File("${target.path}.tmp")
                 temporary.writeBytes(artwork)
                 for (ext in listOf("jpg", "png", "webp", "gif")) {
-                    val stale = java.io.File("$targetStem.$ext")
+                    val stale = File("$targetStem.$ext")
                     if (stale.path != target.path && stale.exists()) stale.delete()
                 }
                 if (!temporary.renameTo(target)) {
@@ -463,8 +678,8 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 }
                 withContext(Dispatchers.Main) { result.success(target.absolutePath) }
             } catch (e: Exception) {
-                Log.w(TAG, "Could not extract embedded artwork from $mediaPath", e)
-                withContext(Dispatchers.Main) { result.success(null) }
+                Log.w(TAG, "Could not extract embedded artwork from $mediaPath: ${e.message}")
+                withContext(NonCancellable + Dispatchers.Main) { result.success(null) }
             } finally {
                 try {
                     retriever.release()
@@ -472,6 +687,13 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 }
             }
         }
+    }
+
+    private fun noCoverMarker(mediaPath: String): File {
+        val digest = MessageDigest.getInstance("SHA-1")
+            .digest(mediaPath.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        return File(File(context.noBackupFilesDir, "no_cover"), digest)
     }
 
     private fun imageExtension(bytes: ByteArray): String {
@@ -499,59 +721,75 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
     private fun handleStartDownloadService(args: Map<*, *>, result: MethodChannel.Result) {
         val playlistName = args["playlistName"] as? String ?: "playlist"
+        serviceRequesters.add(this)
+        DownloadForegroundService.publishState(
+            playlistName = playlistName,
+            currentTrack = 0,
+            totalTracks = 0,
+            progress = 0,
+            trackTitle = null
+        )
         val intent = Intent(context, DownloadForegroundService::class.java).apply {
-            action = DownloadForegroundService.ACTION_START_OR_UPDATE
-            putExtra(DownloadForegroundService.EXTRA_PLAYLIST_NAME, playlistName)
-            putExtra(DownloadForegroundService.EXTRA_CURRENT_TRACK, 0)
-            putExtra(DownloadForegroundService.EXTRA_TOTAL_TRACKS, 0)
-            putExtra(DownloadForegroundService.EXTRA_PROGRESS, 0)
+            action = DownloadForegroundService.ACTION_START
         }
         try {
             ContextCompat.startForegroundService(context, intent)
             result.success(null)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start download service", e)
+            // Android 12+ refuses to start a foreground service from the
+            // background. The download still runs; it just has no
+            // notification.
+            Log.w(TAG, "Failed to start download service: ${e.message}")
             result.error("FG_SERVICE_ERROR", e.message, null)
         }
     }
 
     private fun handleUpdateDownloadServiceProgress(args: Map<*, *>, result: MethodChannel.Result) {
-        val playlistName = args["playlistName"] as? String ?: "playlist"
-        val currentTrack = (args["currentTrack"] as? Number)?.toInt() ?: 0
-        val totalTracks = (args["totalTracks"] as? Number)?.toInt() ?: 0
-        val progress = (args["progress"] as? Number)?.toInt() ?: 0
-        val intent = Intent(context, DownloadForegroundService::class.java).apply {
-            action = DownloadForegroundService.ACTION_START_OR_UPDATE
-            putExtra(DownloadForegroundService.EXTRA_PLAYLIST_NAME, playlistName)
-            putExtra(DownloadForegroundService.EXTRA_CURRENT_TRACK, currentTrack)
-            putExtra(DownloadForegroundService.EXTRA_TOTAL_TRACKS, totalTracks)
-            putExtra(DownloadForegroundService.EXTRA_PROGRESS, progress)
-        }
-        try {
-            ContextCompat.startForegroundService(context, intent)
-            result.success(null)
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to update download service progress", e)
-            result.success(null)
-        }
+        // Updates go to the running service directly. Starting the service
+        // again for every progress line cost a binder call on the main
+        // thread each time.
+        DownloadForegroundService.publishState(
+            playlistName = args["playlistName"] as? String ?: "playlist",
+            currentTrack = (args["currentTrack"] as? Number)?.toInt() ?: 0,
+            totalTracks = (args["totalTracks"] as? Number)?.toInt() ?: 0,
+            progress = (args["progress"] as? Number)?.toInt() ?: 0,
+            trackTitle = args["trackTitle"] as? String
+        )
+        result.success(null)
     }
 
     private fun handleStopDownloadService(result: MethodChannel.Result) {
+        serviceRequesters.remove(this)
         // The foreground and background engines share one service. Keep it (and
-        // its wake lock) alive while any engine still has a yt-dlp process.
-        if (hasActiveDownloads()) {
-            Log.i(TAG, "Not stopping download service: downloads still active")
+        // its wake lock) alive while any engine still has a yt-dlp process or
+        // a run in progress.
+        if (hasActiveDownloads() || serviceRequesters.isNotEmpty()) {
+            Log.i(TAG, "Not stopping download service: another run is active")
             result.success(null)
             return
         }
-        val intent = Intent(context, DownloadForegroundService::class.java).apply {
-            action = DownloadForegroundService.ACTION_STOP
-        }
-        try {
-            context.startService(intent)
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to stop download service", e)
-        }
+        stopDownloadService(context)
         result.success(null)
+    }
+}
+
+/**
+ * Lets a progress value through when its whole percent changed and at least
+ * [intervalMs] passed since the last one; 100 always passes once.
+ * yt-dlp calls back from a single reader thread per process.
+ */
+internal class ProgressThrottle(private val intervalMs: Long) {
+    private var lastPercent = -1
+    private var lastAtMs = 0L
+
+    fun accept(progress: Float): Int? {
+        if (progress.isNaN()) return null
+        val percent = progress.toInt().coerceIn(0, 100)
+        if (percent == lastPercent) return null
+        val now = SystemClock.elapsedRealtime()
+        if (percent < 100 && lastPercent >= 0 && now - lastAtMs < intervalMs) return null
+        lastPercent = percent
+        lastAtMs = now
+        return percent
     }
 }

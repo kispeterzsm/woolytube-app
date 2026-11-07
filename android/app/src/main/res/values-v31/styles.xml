@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Android 12+ draws its own splash screen (with the app icon) from
+         these attributes; keep it dark like the app, and do not show the
+         icon a second time after it. -->
+    <style name="LaunchTheme" parent="@android:style/Theme.Black.NoTitleBar">
+        <item name="android:windowBackground">@color/woolytube_background</item>
+        <item name="android:windowSplashScreenBackground">@color/woolytube_background</item>
+    </style>
+    <style name="NormalTheme" parent="@android:style/Theme.Black.NoTitleBar">
+        <item name="android:windowBackground">@color/woolytube_background</item>
+    </style>
+</resources>
