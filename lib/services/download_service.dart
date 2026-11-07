@@ -916,6 +916,126 @@ class DownloadService {
     }
   }
 
+  /// Downloads [url], a reupload of [track]'s video, and hands the finished
+  /// file to [adopt] while the library gate is still held, so nothing can
+  /// touch the playlist folder in between. The track's row and status are
+  /// left alone until [adopt] changes them: a failed or stopped download
+  /// changes nothing.
+  ///
+  /// Returns true when [adopt] ran, false when the owner stopped it.
+  /// Throws with the reason when it failed.
+  Future<bool> downloadReupload(
+    Playlist playlist,
+    Track track,
+    String url, {
+    required Future<void> Function(File media) adopt,
+  }) async {
+    while (_isDownloading && _finishing) {
+      await runFinished;
+    }
+    if (_isDownloading) {
+      throw StateError('A download is already in progress.');
+    }
+    _beginRun(playlist);
+    var entered = false;
+    Directory? staging;
+
+    try {
+      final busy = await _gate.tryEnter('download', wait: LibraryGate.userWait);
+      if (busy != null) throw StateError(busy);
+      entered = true;
+
+      final currentPlaylist = await _db.getPlaylistOrNull(playlist.id);
+      if (currentPlaylist == null) {
+        throw StateError('The playlist no longer exists.');
+      }
+      playlist = currentPlaylist;
+      _activePlaylist = playlist;
+      final fresh = await _db.getTrack(track.id);
+      if (fresh == null) throw StateError('The track no longer exists.');
+
+      _workTotal = 1;
+      _position = 1;
+      _currentTitle = fresh.title;
+      _currentTrackId = fresh.id;
+      await _startDownloadReporting(playlist);
+      if (_cancelRequested) {
+        _emit(DownloadProgress.idle);
+        return false;
+      }
+      _emitRun(playlist, DownloadPhase.downloading);
+      // Marked as a replacement so a Stop leaves the track as it is.
+      _activeTrackId = fresh.id;
+      _activeTrackIsReplacement = true;
+
+      final trackLabel = '[reupload] ${fresh.title}';
+      _log.info('$trackLabel Downloading $url');
+      staging = await _metadata.prepareStagingDir(
+        playlist.outputPath,
+        fresh.id,
+      );
+      String? failure;
+      try {
+        await _downloadWithRetry(
+          url: url,
+          outputPath: staging.path,
+          audioOnly: playlist.audioOnly,
+          embedThumbnail: playlist.includeThumbnails,
+          metadataAlbum: playlist.name,
+          outputTemplate:
+              '${escapeOutputTemplateLiteral(staging.path)}/'
+              'reupload_%(title).${titleByteLimit}B.%(ext)s',
+          trackLabel: trackLabel,
+        );
+      } catch (e) {
+        failure = _cleanErrorMessage(e);
+      }
+      if (_cancelRequested) {
+        _log.info('$trackLabel Stopped; nothing was changed');
+        _emit(DownloadProgress.idle);
+        return false;
+      }
+      final staged = MetadataService.findStagedMedia(staging);
+      if (failure != null &&
+          !(staged != null && _isPostProcessingError(failure))) {
+        _log.error('$trackLabel Failed: $failure');
+        throw StateError(failure);
+      }
+      if (staged == null) throw StateError('Downloaded file not found');
+
+      _emitRun(playlist, DownloadPhase.finishing, trackProgress: 100);
+      await adopt(staged);
+      _log.info('$trackLabel Replaced with the reupload');
+      await _metadata.discardStagingDir(staging);
+      await _cleanupFolder(playlist);
+
+      _emit(
+        DownloadProgress(
+          playlistId: playlist.id,
+          currentTrackIndex: 1,
+          totalTracks: 1,
+          trackProgress: 100,
+          status: 'complete',
+          downloadedCount: 1,
+        ),
+      );
+      await _notifications?.showDownloadComplete(
+        playlist.name,
+        notificationId: playlist.id,
+        trackTitle: fresh.title,
+        audioOnly: playlist.audioOnly,
+      );
+      return true;
+    } catch (e) {
+      _emit(DownloadProgress.idle);
+      if (_cancelRequested) return false;
+      rethrow;
+    } finally {
+      if (staging != null) await _metadata.discardStagingDir(staging);
+      await _finishRun(entered: entered);
+    }
+  }
+
   /// Ends a run. The service counts as busy until the teardown (stopping
   /// the progress feed and the foreground service, releasing the gate) is
   /// done, so a request arriving meanwhile is queued instead of colliding

@@ -15,6 +15,7 @@ import 'package:woolytube/services/download_service.dart';
 import 'package:woolytube/services/log_service.dart';
 import 'package:woolytube/services/metadata_service.dart';
 import 'package:woolytube/services/notification_service.dart';
+import 'package:woolytube/services/playlist_service.dart';
 import 'package:woolytube/services/sponsorblock_service.dart';
 
 import '../helpers/fakes.dart';
@@ -1577,5 +1578,153 @@ void main() {
       DownloadService.shouldRecheckSponsorBlock(track(47, weekAgo), now),
       isFalse,
     );
+  });
+
+  group('replace with a reupload', () {
+    const reuploadUrl = 'https://www.youtube.com/watch?v=reup-1';
+
+    PlaylistService playlistService() => PlaylistService(
+      db,
+      ytdlp,
+      MetadataService(db),
+      thumbnails,
+      null,
+      service.gate,
+    );
+
+    Future<Track> removedTrack(Playlist playlist) => insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 59,
+      videoId: 'gone-1',
+      title: 'vibe mix 59',
+      status: 'unavailable',
+      unavailableReason: removedFromYouTubeReason,
+      lastError: 'ERROR: Video unavailable. This video has been removed',
+    );
+
+    test('downloads the link and uses it as the track file', () async {
+      final playlist = await insertTestPlaylist(
+        db,
+        outputPath: folder,
+        audioOnly: true,
+      );
+      final track = await removedTrack(playlist);
+      ytdlp.title = 'vibe mix 59 (reupload)';
+
+      final done = await service.downloadReupload(
+        playlist,
+        track,
+        reuploadUrl,
+        adopt:
+            (media) => playlistService().replaceWithReuploadFile(
+              trackId: track.id,
+              downloadedPath: media.path,
+            ),
+      );
+
+      expect(done, isTrue);
+      expect(ytdlp.calls.single.url, reuploadUrl);
+      final updated = (await db.getTrack(track.id))!;
+      expect(updated.status, 'complete');
+      expect(updated.isLocalReplacement, isTrue);
+      // It still stands for the original video.
+      expect(updated.videoId, 'gone-1');
+      expect(updated.title, 'vibe mix 59');
+      expect(updated.unavailableReason, removedFromYouTubeReason);
+      expect(p.basename(updated.filePath!), '00059_vibe mix 59.m4a');
+      expect(await File(updated.filePath!).readAsString(), 'media');
+      expect(
+        await Directory(p.join(folder, '.woolytube-staging')).exists(),
+        isFalse,
+      );
+      // The gate is free again.
+      expect(service.gate.isBusy, isFalse);
+      expect(service.isDownloading, isFalse);
+    });
+
+    test('a failed reupload download changes nothing', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final track = await removedTrack(playlist);
+      ytdlp.downloadError = PlatformException(
+        code: 'DOWNLOAD_ERROR',
+        message: 'ERROR: Unsupported URL',
+      );
+      var adopted = false;
+
+      await expectLater(
+        service.downloadReupload(
+          playlist,
+          track,
+          reuploadUrl,
+          adopt: (_) async => adopted = true,
+        ),
+        throwsA(isA<StateError>()),
+      );
+
+      expect(adopted, isFalse);
+      expect(await db.getTrack(track.id), track);
+      expect(service.gate.isBusy, isFalse);
+    });
+
+    test('stopping a reupload download changes nothing', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final track = await removedTrack(playlist);
+      ytdlp.downloadCompleter = Completer<void>();
+      ytdlp.downloadStarted = Completer<void>();
+      var adopted = false;
+
+      final download = service.downloadReupload(
+        playlist,
+        track,
+        reuploadUrl,
+        adopt: (_) async => adopted = true,
+      );
+      await ytdlp.downloadStarted!.future;
+      await service.cancelActiveDownloads();
+
+      expect(await download, isFalse);
+      expect(adopted, isFalse);
+      expect(await db.getTrack(track.id), track);
+    });
+
+    test('adopting a reupload outside the gate is refused', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final track = await removedTrack(playlist);
+      final source = File(p.join(tempDir.path, 'x.m4a'))
+        ..writeAsStringSync('x');
+
+      await expectLater(
+        playlistService().replaceWithReuploadFile(
+          trackId: track.id,
+          downloadedPath: source.path,
+        ),
+        throwsA(isA<StateError>()),
+      );
+    });
+
+    test('only links to one video are accepted', () {
+      for (final ok in [
+        'https://www.youtube.com/watch?v=abc&list=PL1',
+        ' https://youtu.be/abc ',
+        'https://m.youtube.com/watch?v=abc',
+        'https://music.youtube.com/watch?v=abc',
+        'https://www.youtube.com/shorts/abc',
+        'https://vimeo.com/12345',
+      ]) {
+        expect(PlaylistService.parseReuploadUrl(ok), isNotNull, reason: ok);
+      }
+      for (final bad in [
+        '',
+        'not a link',
+        'youtube.com/watch?v=abc',
+        'ftp://example.com/a.mp3',
+        'https://www.youtube.com/playlist?list=PL1',
+        'https://www.youtube.com/@channel',
+        'https://www.youtube.com/watch',
+      ]) {
+        expect(PlaylistService.parseReuploadUrl(bad), isNull, reason: bad);
+      }
+    });
   });
 }

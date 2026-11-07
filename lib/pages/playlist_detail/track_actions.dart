@@ -299,6 +299,19 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
           unawaited(_pickLocalReplacement(track));
         },
       ),
+      if ((!isDownloaded || track.unavailableReason != null) &&
+          !isDownloading &&
+          isYouTubeVideo)
+        tile(
+          key: const ValueKey('track-actions-replace-reupload'),
+          icon: Icons.link,
+          title: 'Replace with a reupload',
+          subtitle: 'Paste a link to a copy of this video and download it',
+          onTap: () {
+            close();
+            unawaited(_replaceWithReupload(track));
+          },
+        ),
       if (isDownloaded && canRedownload)
         tile(
           key: const ValueKey('track-actions-redownload'),
@@ -558,6 +571,93 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
         );
       }
     }
+  }
+
+  /// Downloads a link the owner pastes (a reupload of a removed video) and
+  /// uses it as this track's file, like [_pickLocalReplacement] does with a
+  /// file from the phone.
+  Future<void> _replaceWithReupload(Track track) async {
+    final playlist = _playlist;
+    if (playlist == null) return;
+
+    String? clipboard;
+    try {
+      clipboard = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
+    } catch (_) {
+      // Prefilling is a convenience only.
+    }
+    if (!mounted) return;
+    final prefill =
+        clipboard != null &&
+                PlaylistService.parseReuploadUrl(clipboard) != null &&
+                !clipboard.contains(track.videoId)
+            ? clipboard.trim()
+            : '';
+    final hasFile =
+        track.filePath != null && await File(track.filePath!).exists();
+    if (!mounted) return;
+    final url = await showDialog<String>(
+      context: context,
+      builder:
+          (_) => _ReuploadLinkDialog(
+            title: track.title,
+            initialUrl: prefill,
+            keepsCurrentFile: hasFile,
+          ),
+    );
+    if (url == null || !mounted) return;
+
+    final downloadService = ref.read(downloadServiceProvider);
+    void showMessage(String message) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    }
+
+    if (downloadService.isDownloading) {
+      showMessage('A download is already in progress');
+      return;
+    }
+    if (explainDownloadsUnavailable(context, ref)) return;
+    if (!await confirmManualDownload(
+      context,
+      ref.read(downloadNetworkPolicyProvider),
+    )) {
+      return;
+    }
+    if (downloadService.isDownloading) {
+      showMessage('A download is already in progress');
+      return;
+    }
+
+    showMessage('Downloading the reupload of "${track.title}"');
+    final playlistService = ref.read(playlistServiceProvider);
+    unawaited(
+      downloadService
+          .downloadReupload(
+            playlist,
+            track,
+            url,
+            adopt:
+                (media) => playlistService.replaceWithReuploadFile(
+                  trackId: track.id,
+                  downloadedPath: media.path,
+                ),
+          )
+          .then(
+            (done) => showMessage(
+              done
+                  ? 'Replaced "${track.title}" with the reupload'
+                  : 'Stopped; nothing was changed',
+            ),
+            onError:
+                (Object e, StackTrace _) => showMessage(
+                  'Could not download the reupload: '
+                  '${friendlyDownloadError(_errorText(e))}',
+                ),
+          ),
+    );
   }
 
   Future<void> _showOverrideDialog(Track track) async {
@@ -827,6 +927,117 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
               ).showSnackBar(SnackBar(content: Text(message)));
             },
           ),
+    );
+  }
+}
+
+/// Asks for the link of a reupload. Pops with the link, or null.
+class _ReuploadLinkDialog extends StatefulWidget {
+  const _ReuploadLinkDialog({
+    required this.title,
+    required this.initialUrl,
+    required this.keepsCurrentFile,
+  });
+
+  final String title;
+  final String initialUrl;
+  final bool keepsCurrentFile;
+
+  @override
+  State<_ReuploadLinkDialog> createState() => _ReuploadLinkDialogState();
+}
+
+class _ReuploadLinkDialogState extends State<_ReuploadLinkDialog> {
+  late final _controller = TextEditingController(text: widget.initialUrl);
+  String? _error;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final text = _controller.text.trim();
+    if (PlaylistService.parseReuploadUrl(text) == null) {
+      setState(
+        () =>
+            _error =
+                text.isEmpty
+                    ? 'Paste a link'
+                    : 'Paste a link to one video, not a playlist',
+      );
+      return;
+    }
+    Navigator.pop(context, text);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    var explanation =
+        'The video at this link is downloaded and becomes the file of '
+        '"${widget.title}". The track keeps its place and title.';
+    if (widget.keepsCurrentFile) {
+      explanation +=
+          "\n\nThe current file is not deleted: it is kept in this playlist's "
+          'replaced-files folder (.woolytube_replaced).';
+    }
+    return AlertDialog(
+      backgroundColor: const Color(0xFF2A2A2A),
+      title: const Text(
+        'Replace with a reupload',
+        style: TextStyle(color: Colors.white),
+      ),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(explanation, style: const TextStyle(color: Color(0xFFCCCCCC))),
+            const SizedBox(height: 16),
+            TextField(
+              key: const ValueKey('reupload-link-field'),
+              controller: _controller,
+              autofocus: widget.initialUrl.isEmpty,
+              keyboardType: TextInputType.url,
+              style: const TextStyle(color: Colors.white),
+              decoration: InputDecoration(
+                labelText: 'Link to the reupload',
+                hintText: 'https://www.youtube.com/watch?v=…',
+                errorText: _error,
+                suffixIcon: IconButton(
+                  tooltip: 'Paste',
+                  icon: const Icon(Icons.content_paste),
+                  onPressed: () async {
+                    final text =
+                        (await Clipboard.getData(Clipboard.kTextPlain))?.text;
+                    if (text == null || !mounted) return;
+                    setState(() {
+                      _controller.text = text.trim();
+                      _error = null;
+                    });
+                  },
+                ),
+              ),
+              onChanged: (_) {
+                if (_error != null) setState(() => _error = null);
+              },
+              onSubmitted: (_) => _submit(),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        TextButton(
+          key: const ValueKey('reupload-link-confirm'),
+          onPressed: _submit,
+          child: const Text('Download'),
+        ),
+      ],
     );
   }
 }

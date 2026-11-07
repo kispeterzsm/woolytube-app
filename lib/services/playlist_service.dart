@@ -1550,6 +1550,62 @@ class PlaylistService {
     ),
   );
 
+  /// [replaceWithLocalFile] for a file downloaded from a reupload link. The
+  /// caller must already hold the library gate (the download service holds
+  /// it for the whole download). The file is named after the track's title,
+  /// like the rest of the playlist.
+  Future<Track> replaceWithReuploadFile({
+    required int trackId,
+    required String downloadedPath,
+  }) async {
+    if (!_gate.isBusy) {
+      throw StateError('A reupload is only adopted inside the library gate.');
+    }
+    final track = await _db.getTrack(trackId);
+    if (track == null) throw StateError('The selected track no longer exists.');
+    // Same title length cap as a normal download: names are limited to
+    // 255 bytes and non-Latin letters take several bytes each.
+    var runes = MetadataService.sanitizeFilename(track.title).runes.toList();
+    while (runes.length > 1 &&
+        utf8.encode(String.fromCharCodes(runes)).length > 150) {
+      runes = runes.sublist(0, runes.length - 1);
+    }
+    final name =
+        String.fromCharCodes(runes).trim() + p.extension(downloadedPath);
+    return _replaceWithLocalFile(
+      trackId: trackId,
+      sourcePath: downloadedPath,
+      sourceFileName: name,
+    );
+  }
+
+  /// Whether [input] is a link yt-dlp can be given as a reupload: a web
+  /// address that is not a whole playlist or channel.
+  static Uri? parseReuploadUrl(String input) {
+    final uri = Uri.tryParse(input.trim());
+    if (uri == null ||
+        !(uri.scheme == 'http' || uri.scheme == 'https') ||
+        uri.host.isEmpty) {
+      return null;
+    }
+    final host = uri.host.toLowerCase();
+    final isYouTube =
+        host == 'youtu.be' ||
+        host == 'youtube.com' ||
+        host.endsWith('.youtube.com');
+    if (isYouTube) {
+      final path = uri.path.toLowerCase();
+      final single =
+          host == 'youtu.be' ||
+          (path == '/watch' && uri.queryParameters['v'] != null) ||
+          path.startsWith('/shorts/') ||
+          path.startsWith('/live/') ||
+          path.startsWith('/embed/');
+      if (!single) return null;
+    }
+    return uri;
+  }
+
   Future<Track> _replaceWithLocalFile({
     required int trackId,
     required String sourcePath,
