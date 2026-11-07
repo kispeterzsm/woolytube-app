@@ -64,8 +64,15 @@ class _SeekBarState extends ConsumerState<SeekBar> {
     final pending = _pendingSeekMs;
     if (pending == null) return null;
     if ((liveMs - pending).abs() < 1000) {
-      // The player has caught up; follow the live position again.
+      // The player has caught up; follow the live position again. This runs
+      // in the slider's builder, so rebuild once more after this frame for
+      // the time labels, which are built outside it.
       _pendingSeekMs = null;
+      _pendingTimer?.cancel();
+      _pendingTimer = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) setState(() {});
+      });
       return null;
     }
     return pending;

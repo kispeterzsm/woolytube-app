@@ -55,12 +55,13 @@ class _PlayerSheetState extends ConsumerState<PlayerSheet> {
     _shell.presence,
     _shell.dismissal,
     _shell.fitMode,
+    _shell.activeDrag,
   ]);
 
   late final Widget _mini = MiniPlayerBar(
     onOpen: _shell.expand,
     onStop: _shell.stopPlayback,
-    onDragStart: _onDragStart,
+    onDragStart: (_) => _shell.beginDrag(PlayerDragOrigin.miniBar),
     onDragUpdate: _onDragUpdate,
     onDragEnd: _onDragEnd,
   );
@@ -68,7 +69,7 @@ class _PlayerSheetState extends ConsumerState<PlayerSheet> {
     sliderOpacity: _sliderOpacity,
     onCollapse: _shell.collapse,
     onStop: _shell.stopPlayback,
-    onDragStart: _onDragStart,
+    onDragStart: (_) => _shell.beginDrag(PlayerDragOrigin.panel),
     onDragUpdate: _onDragUpdate,
     onDragEnd: _onDragEnd,
   );
@@ -89,8 +90,6 @@ class _PlayerSheetState extends ConsumerState<PlayerSheet> {
     _sliderOpacity.dispose();
     super.dispose();
   }
-
-  void _onDragStart(DragStartDetails details) => _shell.beginDrag();
 
   void _onDragUpdate(DragUpdateDetails details) =>
       _shell.updateDrag(details.primaryDelta ?? details.delta.dy);
@@ -151,6 +150,9 @@ class _PlayerSheetState extends ConsumerState<PlayerSheet> {
     final v = _shell.videoness.value;
     final p = _shell.presence.value;
     final d = _shell.dismissal.value;
+    // A part that owns the drag in progress stays mounted (at opacity 0) even
+    // where it is normally removed, so its recognizer sees the drag end.
+    final drag = _shell.activeDrag.value;
 
     final sheetHeight = g.sheetHeight(t, v);
     final top =
@@ -295,7 +297,7 @@ class _PlayerSheetState extends ConsumerState<PlayerSheet> {
             ),
           ),
         ),
-        if (t < 1)
+        if (t < 1 || drag == PlayerDragOrigin.miniBar)
           Positioned(
             key: const ValueKey('layer-mini'),
             left: 0,
@@ -310,7 +312,7 @@ class _PlayerSheetState extends ConsumerState<PlayerSheet> {
               ),
             ),
           ),
-        if (t > 0 && v < 1)
+        if ((t > 0 || drag == PlayerDragOrigin.panel) && v < 1)
           Positioned(
             key: const ValueKey('layer-panel'),
             left: 0,
@@ -318,7 +320,7 @@ class _PlayerSheetState extends ConsumerState<PlayerSheet> {
             top: top,
             height: g.panelHeight - g.bottomInset,
             child: IgnorePointer(
-              ignoring: t < 1 && !_shell.isDragging,
+              ignoring: t < 1 && drag != PlayerDragOrigin.panel,
               child: Opacity(
                 opacity: panelOpacity,
                 child: _ScrollIfNeeded(child: _audioPanel),

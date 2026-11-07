@@ -43,6 +43,9 @@ class PlayerShell extends ConsumerStatefulWidget {
 
 enum _DragMode { expand, dismiss }
 
+/// Which part of the player a drag started on.
+enum PlayerDragOrigin { miniBar, panel }
+
 class PlayerShellState extends ConsumerState<PlayerShell>
     with TickerProviderStateMixin {
   static const Duration _expandDuration = Duration(milliseconds: 340);
@@ -75,6 +78,12 @@ class PlayerShellState extends ConsumerState<PlayerShell>
   final ValueNotifier<bool> videoLocked = ValueNotifier(false);
   final ValueNotifier<bool> _pagesHidden = ValueNotifier(false);
 
+  /// Where the drag in progress started, or null when there is none. The
+  /// sheet keeps that part mounted until the drag ends, even if the drag
+  /// reaches the end where the part is normally removed; otherwise its
+  /// gesture recognizer would be disposed mid-drag and never report the end.
+  final ValueNotifier<PlayerDragOrigin?> activeDrag = ValueNotifier(null);
+
   late final GlobalKey<NavigatorState> _pagesKey =
       widget.pagesNavigatorKey ?? GlobalKey<NavigatorState>();
   final HeroController _heroController =
@@ -105,7 +114,6 @@ class PlayerShellState extends ConsumerState<PlayerShell>
   bool _hasTrack = false;
   bool _video = false;
   bool _collapsing = false;
-  bool _dragging = false;
   _DragMode? _dragMode;
   bool _systemFullscreen = false;
   bool? _appliedLandscape;
@@ -113,7 +121,7 @@ class PlayerShellState extends ConsumerState<PlayerShell>
 
   NavigatorState? get pagesNavigator => _pagesKey.currentState;
   bool get isExpanded => expansion.value > 0;
-  bool get isDragging => _dragging;
+  bool get isDragging => activeDrag.value != null;
   PlayerGeometry get geometry => _geometry;
 
   @override
@@ -137,6 +145,7 @@ class PlayerShellState extends ConsumerState<PlayerShell>
     fitMode.dispose();
     videoLocked.dispose();
     _pagesHidden.dispose();
+    activeDrag.dispose();
     _heroController.dispose();
     super.dispose();
   }
@@ -146,6 +155,7 @@ class PlayerShellState extends ConsumerState<PlayerShell>
   /// Opens the player: the audio panel, or full-screen video.
   void expand() {
     if (!_hasTrack) return;
+    _cancelDrag();
     _collapsing = false;
     if (dismissal.value != 0) dismissal.animateTo(0);
     _animateExpansion(1);
@@ -154,6 +164,7 @@ class PlayerShellState extends ConsumerState<PlayerShell>
   /// Collapses the player back to the mini bar. System UI and orientation
   /// are restored at once, not after the animation.
   void collapse() {
+    _cancelDrag();
     videoLocked.value = false;
     if (expansion.value == 0) {
       expansion.stop();
@@ -170,16 +181,16 @@ class PlayerShellState extends ConsumerState<PlayerShell>
     unawaited(ref.read(playbackServiceProvider).stop());
   }
 
-  void beginDrag() {
+  void beginDrag(PlayerDragOrigin origin) {
     if (!_hasTrack) return;
     expansion.stop();
     dismissal.stop();
-    _dragging = true;
     _dragMode = null;
+    activeDrag.value = origin;
   }
 
   void updateDrag(double dy) {
-    if (!_dragging) return;
+    if (!isDragging) return;
     _dragMode ??=
         expansion.value == 0 && dy > 0 ? _DragMode.dismiss : _DragMode.expand;
     if (_dragMode == _DragMode.dismiss) {
@@ -195,16 +206,27 @@ class PlayerShellState extends ConsumerState<PlayerShell>
   }
 
   void endDrag(double velocity) {
-    if (!_dragging) return;
-    _dragging = false;
+    if (!isDragging) return;
     final mode = _dragMode;
-    _dragMode = null;
+    _cancelDrag();
     switch (mode) {
       case _DragMode.dismiss:
-        if (dismissal.value > 0.5 || velocity > 700) {
+        // Stopping clears the queue, so it needs real travel: a fling only
+        // finishes a swipe that already moved a good part of the bar, and a
+        // quick flick (for example while meaning to scroll) springs back.
+        final stop =
+            dismissal.value > 0.5 || (velocity > 700 && dismissal.value > 0.3);
+        if (stop) {
           dismissal.animateTo(1, curve: Curves.easeOut).whenCompleteOrCancel(
             () {
-              if (mounted && dismissal.value == 1) stopPlayback();
+              if (mounted && dismissal.value == 1) {
+                stopPlayback();
+                ScaffoldMessenger.maybeOf(context)
+                  ?..hideCurrentSnackBar()
+                  ..showSnackBar(
+                    const SnackBar(content: Text('Playback stopped')),
+                  );
+              }
             },
           );
         } else {
@@ -224,6 +246,11 @@ class PlayerShellState extends ConsumerState<PlayerShell>
   }
 
   // Internals ----------------------------------------------------------------
+
+  void _cancelDrag() {
+    _dragMode = null;
+    activeDrag.value = null;
+  }
 
   void _animateExpansion(double target) {
     final distance = (expansion.value - target).abs();
@@ -270,7 +297,7 @@ class PlayerShellState extends ConsumerState<PlayerShell>
         _video &&
         expansion.value == 1 &&
         videoness.value == 1 &&
-        !_dragging &&
+        !isDragging &&
         !_collapsing;
     _pagesHidden.value = fullScreenVideo;
     videoFullscreenNotifier.value = fullScreenVideo;
@@ -298,7 +325,7 @@ class PlayerShellState extends ConsumerState<PlayerShell>
         _hasTrack &&
         _video &&
         expansion.value == 1 &&
-        !_dragging &&
+        !isDragging &&
         !_collapsing;
     if (want != _systemFullscreen) {
       _systemFullscreen = want;
@@ -625,8 +652,13 @@ class _PagePushObserver extends NavigatorObserver {
 
 /// The page navigator. Popup routes (dialogs, bottom sheets, menus,
 /// dropdowns) pushed on it go to the root navigator instead, so they are
-/// drawn above the player and dim it. `pop`, `maybePop` and `canPop` close
-/// such a popup first, exactly as if it had stayed on this navigator.
+/// drawn above the player and dim it.
+///
+/// `pop`, `maybePop` and `canPop` keep the semantics of a single navigator:
+/// while anything sits above the shell on the root navigator (a redirected
+/// popup, a dialog shown on the root navigator directly, or a stack of
+/// both), they act on the root navigator's top route, so page code that
+/// closes a sheet or dialog with the page's context still closes it.
 class _PagesNavigator extends Navigator {
   const _PagesNavigator({
     super.key,
@@ -639,38 +671,40 @@ class _PagesNavigator extends Navigator {
 }
 
 class _PagesNavigatorState extends NavigatorState {
-  final List<Route<dynamic>> _popups = [];
+  /// The app's root navigator. Cached, because `canPop` is also asked while
+  /// this navigator is being taken down, when ancestors can no longer be
+  /// looked up.
+  NavigatorState? _root;
 
-  NavigatorState? get _root {
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
     final root = context.findRootAncestorStateOfType<NavigatorState>();
-    return identical(root, this) ? null : root;
+    _root = identical(root, this) ? null : root;
   }
 
-  Route<dynamic>? get _currentPopup {
-    _popups.removeWhere((route) => !route.isActive);
-    for (final route in _popups.reversed) {
-      if (route.isCurrent) return route;
-    }
-    return null;
+  /// The root navigator when something is shown above the shell on it. The
+  /// shell is the root navigator's only route of its own, so the root can
+  /// pop exactly when such a route is present.
+  NavigatorState? get _rootAboveShell {
+    final root = _root;
+    return root != null && root.mounted && root.canPop() ? root : null;
   }
 
   @override
   Future<T?> push<T extends Object?>(Route<T> route) {
     if (route is PopupRoute<T>) {
       final root = _root;
-      if (root != null) {
-        _popups.add(route);
-        return root.push(route);
-      }
+      if (root != null) return root.push(route);
     }
     return super.push(route);
   }
 
   @override
   void pop<T extends Object?>([T? result]) {
-    final popup = _currentPopup;
-    if (popup != null) {
-      popup.navigator?.pop<T>(result);
+    final root = _rootAboveShell;
+    if (root != null) {
+      root.pop<T>(result);
       return;
     }
     super.pop<T>(result);
@@ -678,12 +712,11 @@ class _PagesNavigatorState extends NavigatorState {
 
   @override
   Future<bool> maybePop<T extends Object?>([T? result]) {
-    final popup = _currentPopup;
-    final navigator = popup?.navigator;
-    if (navigator != null) return navigator.maybePop<T>(result);
+    final root = _rootAboveShell;
+    if (root != null) return root.maybePop<T>(result);
     return super.maybePop<T>(result);
   }
 
   @override
-  bool canPop() => _currentPopup != null || super.canPop();
+  bool canPop() => _rootAboveShell != null || super.canPop();
 }

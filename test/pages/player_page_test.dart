@@ -133,6 +133,58 @@ void main() {
     expect(shell.expansion.value, 0);
   });
 
+  testWidgets('dragging past either end still ends the drag', (tester) async {
+    final harness = await pumpPlayerShell(tester);
+    final shell = harness.shellState(tester);
+    await tester.tap(_miniTitle, warnIfMissed: false);
+    await tester.pumpAndSettle();
+    expect(shell.expansion.value, 1);
+
+    // Drag the panel down past fully closed, with frames in between, so the
+    // panel would be removed mid-gesture if the sheet did not keep it.
+    final range = shell.geometry.dragRange(0);
+    var gesture = await tester.startGesture(tester.getCenter(_dragArea));
+    await gesture.moveBy(const Offset(0, 30));
+    await tester.pump();
+    await gesture.moveBy(Offset(0, range * 1.3));
+    await tester.pump();
+    expect(shell.expansion.value, 0);
+    expect(shell.isDragging, isTrue);
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(shell.expansion.value, 0);
+    expect(shell.isDragging, isFalse);
+    expect(find.byKey(const ValueKey('layer-panel')), findsNothing);
+    expect(audioPlayerOverlayHeightNotifier.value, 0);
+
+    // A video then opens properly, and dragging the bar up past fully open
+    // ends in the real full screen: immersive mode and the pages hidden.
+    harness.play(harness.videoTrack, video: true);
+    await tester.pumpAndSettle();
+    expect(videoFullscreenNotifier.value, isTrue);
+    shell.collapse();
+    await tester.pumpAndSettle();
+    expect(videoFullscreenNotifier.value, isFalse);
+    harness.systemCalls.clear();
+
+    gesture = await tester.startGesture(tester.getCenter(_miniBar));
+    await gesture.moveBy(const Offset(0, -30));
+    await tester.pump();
+    await gesture.moveBy(Offset(0, -shell.geometry.dragRange(1) * 1.3));
+    await tester.pump();
+    expect(shell.expansion.value, 1);
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(shell.isDragging, isFalse);
+    expect(videoFullscreenNotifier.value, isTrue);
+    expect(find.text('Row 0'), findsNothing, reason: 'pages are offstage');
+    expect(find.byKey(const ValueKey('layer-mini')), findsNothing);
+    expect(
+      harness.systemCalls.map((c) => c.arguments.toString()),
+      contains(contains('immersiveSticky')),
+    );
+  });
+
   testWidgets('back collapses the player before popping pages', (tester) async {
     final harness = await pumpPlayerShell(tester);
     final shell = harness.shellState(tester);
@@ -216,6 +268,28 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Question'), findsNothing);
     expect(shell.expansion.value, 1);
+
+    // Sheet -> confirmation dialog: popping with the page's context closes
+    // the top route each time, as with a single navigator.
+    showModalBottomSheet<void>(
+      context: pageContext,
+      builder: (_) => const ListTile(title: Text('Sheet action')),
+    );
+    await tester.pumpAndSettle();
+    showDialog<void>(
+      context: tester.element(find.text('Sheet action')),
+      builder: (_) => const AlertDialog(title: Text('Sure?')),
+    );
+    await tester.pumpAndSettle();
+    expect(Navigator.of(pageContext).canPop(), isTrue);
+    Navigator.of(pageContext).pop();
+    await tester.pumpAndSettle();
+    expect(find.text('Sure?'), findsNothing);
+    expect(find.text('Sheet action'), findsOneWidget);
+    Navigator.of(pageContext).pop();
+    await tester.pumpAndSettle();
+    expect(find.text('Sheet action'), findsNothing);
+    expect(find.text('Row 0'), findsOneWidget);
   });
 
   testWidgets('snackbars appear above the mini player', (tester) async {
@@ -333,11 +407,19 @@ void main() {
   testWidgets('swiping the mini bar down stops playback', (tester) async {
     final harness = await pumpPlayerShell(tester);
     final shell = harness.shellState(tester);
+    // A short, fast flick (for example while meaning to scroll) does not
+    // stop playback: stopping needs real travel.
+    await tester.fling(_miniBar, const Offset(0, 30), 1500);
+    await tester.pumpAndSettle();
+    expect(harness.playback.stopCalls, 0);
+    expect(shell.dismissal.value, 0);
+
     await tester.drag(_miniBar, const Offset(0, 80));
     await tester.pumpAndSettle();
     expect(harness.playback.stopCalls, 1);
     expect(_background, findsNothing);
     expect(shell.presence.value, 0);
+    expect(find.text('Playback stopped'), findsOneWidget);
 
     // A small swipe springs back and keeps playing.
     harness.play(harness.audioTrack);
@@ -429,6 +511,18 @@ void main() {
     expect(
       tester.widget<Slider>(slider).value,
       closeTo(target.inMilliseconds.toDouble(), 1),
+    );
+
+    // Once the seek has landed, the time labels follow the live position
+    // again right away (not only when the hold times out).
+    final later = Duration(seconds: target.inSeconds + 20);
+    harness.position.add(later);
+    await tester.pump();
+    await tester.pump();
+    expect(find.text(formatClock(later)), findsOneWidget);
+    expect(
+      find.text('-${formatClock(const Duration(minutes: 3) - later)}'),
+      findsOneWidget,
     );
   });
 

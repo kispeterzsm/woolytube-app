@@ -35,43 +35,6 @@ void paintSponsorBlockSegments(
   }
 }
 
-/// A thin progress line with SponsorBlock segments.
-class SegmentedProgressBar extends StatelessWidget {
-  final double progress;
-  final int durationMs;
-  final List<PlaybackSponsorBlockSegment> segments;
-  final double height;
-  final Color backgroundColor;
-  final Color progressColor;
-
-  const SegmentedProgressBar({
-    super.key,
-    required this.progress,
-    required this.durationMs,
-    required this.segments,
-    this.height = 3,
-    this.backgroundColor = const Color(0xFF333333),
-    this.progressColor = const Color(0xFF2196F3),
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: height,
-      child: CustomPaint(
-        painter: SegmentedProgressPainter(
-          progress: progress.clamp(0.0, 1.0),
-          durationMs: durationMs,
-          segments: segments,
-          backgroundColor: backgroundColor,
-          progressColor: progressColor,
-        ),
-        child: const SizedBox.expand(),
-      ),
-    );
-  }
-}
-
 /// Paints a rounded track filling its whole canvas: background, progress and
 /// SponsorBlock segments.
 class SegmentedProgressPainter extends CustomPainter {
