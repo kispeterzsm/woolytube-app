@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="18 18 72 72" width="432" height="432">
+<defs><mask id="m"><rect x="22" y="32" width="64" height="44" rx="12" fill="white"/><g transform="translate(54.0 55.5) scale(0.56) translate(-55.5 -52.0)" ><path d="M70,60 C73,73 83,74 87,63" fill="none" stroke="black" stroke-width="6" stroke-linecap="round"/><path d="M29,70 C24,62 25,52 31,46 C37,39 45,34 54,32 C58,25 70,22 77,30 C81,35 82,42 80,48 C82,58 84,68 81,75 C79,80 73,80 72,76 C75,70 75,63 70,59 L69,82 L59,82 L59,73 C52,74 47,74 42,73 L42,82 L33,82 L33,72 Z" fill="black"/></g>
+<path d="M50.46,49.00 L61.26,55.00 L50.46,61.00 Z" fill="white" stroke="white" stroke-width="3" stroke-linejoin="round"/></mask></defs>
+<rect width="108" height="108" fill="#FFFFFF" mask="url(#m)"/>
+</svg>

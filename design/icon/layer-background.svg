@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="432" height="432">
+<title>WoolyTube - Ice Archive b</title>
+<defs>
+<linearGradient id="bg" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="108" y2="108"><stop offset="0" stop-color="#12305A"/><stop offset="1" stop-color="#06111F"/></linearGradient>
+<linearGradient id="ice" gradientUnits="userSpaceOnUse" x1="22.0" y1="32.0" x2="86.0" y2="76.0"><stop offset="0" stop-color="#E1F5FE"/><stop offset="1" stop-color="#4FC3F7"/></linearGradient>
+<radialGradient id="glow" gradientUnits="userSpaceOnUse" cx="54" cy="54" r="48"><stop offset="0" stop-color="#4FC3F7" stop-opacity="0.45"/><stop offset="1" stop-color="#4FC3F7" stop-opacity="0"/></radialGradient>
+<radialGradient id="tglow" gradientUnits="userSpaceOnUse" cx="55" cy="55" r="11.399999999999999"><stop offset="0" stop-color="#FFFFFF" stop-opacity="0.75"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/></radialGradient>
+<clipPath id="block"><rect x="22.0" y="32.0" width="64" height="44" rx="12"/></clipPath>
+<mask id="cut"><rect width="108" height="108" fill="white"/><path d="M50.46,49.00 L61.26,55.00 L50.46,61.00 Z" fill="black" stroke="black" stroke-width="3" stroke-linejoin="round"/></mask>
+</defs>
+<rect width="108" height="108" fill="url(#bg)"/>
+<circle cx="54" cy="54" r="48" fill="url(#glow)"/>
+</svg>

@@ -31,7 +31,7 @@ class DownloadNotificationService {
 
   Future<void> initialize() async {
     const androidSettings = AndroidInitializationSettings(
-      '@mipmap/ic_launcher',
+      '@drawable/ic_stat_woolytube',
     );
     await _plugin.initialize(
       const InitializationSettings(android: androidSettings),
