@@ -1416,6 +1416,7 @@ for video) to keep a complete backup.
           final stale = File('$stem$ext');
           if (stale.path != target && await stale.exists()) {
             await stale.delete();
+            noteThumbnailRemoved(stale.path);
           }
         }
         await moveFile(staged.path, target);

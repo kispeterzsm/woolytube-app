@@ -644,7 +644,9 @@ class PlaylistService {
           await File(cover).copy(target);
         } else {
           await MetadataService.moveFile(cover, target);
+          media_thumbnail_service.noteThumbnailRemoved(cover);
         }
+        media_thumbnail_service.noteThumbnailWritten(target);
         await _db.updateTrackThumbnailPath(track.id, target);
       }
       final info = File(LibraryLayout.infoJsonPath(oldFolder, track.videoId));
