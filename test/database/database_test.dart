@@ -652,6 +652,33 @@ void main() {
     );
   });
 
+  test('upgrading removes tracks left behind by deleted playlists', () async {
+    final migrated = _openSchema10(
+      [_v10Track(10, 1, 'kept', 'pending', null)],
+      orphans: [
+        _v10Track(20, 1, 'orphan-a', 'error', null),
+        _v10Track(21, 2, 'orphan-b', 'complete', '/tmp/gone/00002_B.mp4'),
+      ],
+    );
+    addTearDown(migrated.close);
+
+    final tracks = await migrated.getAllTracks();
+    expect(tracks.map((track) => track.videoId), ['kept']);
+    final segments =
+        await migrated
+            .customSelect('SELECT COUNT(*) AS n FROM sponsor_block_segments')
+            .getSingle();
+    expect(segments.read<int>('n'), 0);
+    final revisions =
+        await migrated
+            .customSelect('SELECT playlist_id FROM playlist_revisions')
+            .get();
+    expect(
+      revisions.map((row) => row.read<int>('playlist_id')),
+      isNot(contains(6)),
+    );
+  });
+
   // Updated: the repair now keeps the row that owns the file instead of the
   // lowest id, so the appended rows follow that order too.
   test('upgrading from schema 10 repairs duplicate indices before adding the '
@@ -871,7 +898,12 @@ _V10Row _v10Track(
 ];
 
 /// A database as an app with schema 10 left it, opened by the current app.
-AppDatabase _openSchema10(List<_V10Row> tracks) => AppDatabase.forTesting(
+/// [orphans] go into playlist 6, which does not exist, as older app
+/// versions left them behind after deleting a playlist.
+AppDatabase _openSchema10(
+  List<_V10Row> tracks, {
+  List<_V10Row> orphans = const [],
+}) => AppDatabase.forTesting(
   NativeDatabase.memory(
     setup: (raw) {
       for (final statement in _schemaV10) {
@@ -881,12 +913,23 @@ AppDatabase _openSchema10(List<_V10Row> tracks) => AppDatabase.forTesting(
         "INSERT INTO playlists (id, url, name, created_at, output_path) "
         "VALUES (1, 'https://example.com/list', 'List', 0, '/tmp/list')",
       );
-      for (final row in tracks) {
+      for (final (playlistId, rows) in [(1, tracks), (6, orphans)]) {
+        for (final row in rows) {
+          raw.execute(
+            'INSERT INTO tracks (id, playlist_id, "index", video_id, '
+            'title, status, file_path, thumbnail_path, downloaded_at, '
+            'is_local_replacement) VALUES (?, $playlistId, ?, ?, ?, ?, ?, ?, '
+            '?, ?)',
+            row,
+          );
+        }
+      }
+      for (final row in orphans) {
         raw.execute(
-          'INSERT INTO tracks (id, playlist_id, "index", video_id, '
-          'title, status, file_path, thumbnail_path, downloaded_at, '
-          'is_local_replacement) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?)',
-          row,
+          'INSERT INTO sponsor_block_segments (track_id, video_id, source, '
+          "category, start_ms, end_ms, created_at) VALUES (?, ?, 'remote', "
+          "'sponsor', 0, 1000, 0)",
+          [row[0], row[2]],
         );
       }
       raw.execute('PRAGMA user_version = 10');

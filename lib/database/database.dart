@@ -146,7 +146,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 13;
+  int get schemaVersion => 14;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -242,6 +242,9 @@ class AppDatabase extends _$AppDatabase {
         await migrator.addColumn(playlists, playlists.lastUpdateAttempt);
         await _createRevisionTracking();
       }
+      if (from < 14) {
+        await _deleteOrphanedTracks();
+      }
     },
   );
 
@@ -304,6 +307,27 @@ class AppDatabase extends _$AppDatabase {
         'CREATE TRIGGER IF NOT EXISTS ${entry.key} ${entry.value}',
       );
     }
+  }
+
+  /// Removes tracks whose playlist no longer exists, with their skip
+  /// segments and revision counters. App versions before foreign keys were
+  /// enforced could delete a playlist and leave its tracks behind, where
+  /// they still showed up in the library search. Foreign keys now prevent
+  /// new ones, so this runs once on upgrade.
+  Future<void> _deleteOrphanedTracks() async {
+    const orphaned =
+        'SELECT id FROM tracks WHERE playlist_id NOT IN (SELECT id FROM playlists)';
+    await customStatement(
+      'DELETE FROM sponsor_block_segments WHERE track_id IN ($orphaned)',
+    );
+    await customStatement(
+      'DELETE FROM tracks WHERE playlist_id NOT IN (SELECT id FROM playlists)',
+    );
+    // Deleting the tracks raised the counters of their missing playlists.
+    await customStatement(
+      'DELETE FROM playlist_revisions '
+      'WHERE playlist_id NOT IN (SELECT id FROM playlists)',
+    );
   }
 
   static const _createUniqueTrackIndexSql =
