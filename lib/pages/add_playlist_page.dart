@@ -1,13 +1,36 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../database/database.dart';
+import '../providers/playback_providers.dart';
 import '../providers/providers.dart';
+import '../services/add_playlist_defaults.dart';
 import '../services/download_errors.dart';
-import '../services/playlist_service.dart';
+import '../services/metadata_service.dart';
 import '../widgets/mobile_data_download_guard.dart';
 import '../widgets/update_frequency_dropdown.dart';
+import 'playlist_detail_page.dart';
+
+/// Remembers the options of the last playlist added (see
+/// [AddPlaylistDefaults]).
+final addPlaylistDefaultsProvider = Provider<AddPlaylistDefaults>(
+  (ref) => AddPlaylistDefaults(),
+);
+
+/// Whether [text] looks like a YouTube link (worth looking up right away
+/// after pasting).
+bool looksLikeYouTubeUrl(String text) {
+  final uri = Uri.tryParse(text.trim());
+  if (uri == null || !uri.hasScheme || uri.host.isEmpty) return false;
+  final host = uri.host.toLowerCase();
+  return host == 'youtu.be' ||
+      host == 'youtube.com' ||
+      host.endsWith('.youtube.com');
+}
 
 class AddPlaylistPage extends ConsumerStatefulWidget {
   const AddPlaylistPage({super.key});
@@ -17,6 +40,9 @@ class AddPlaylistPage extends ConsumerStatefulWidget {
 }
 
 class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
+  static const _accent = Color(0xFF2196F3);
+  static const _muted = Color(0xFF888888);
+
   final _urlController = TextEditingController();
 
   /// The playlist's name in the app and its folder name; starts as the
@@ -28,9 +54,17 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
   int _updateFrequencyHours = 24;
   bool _includeThumbnails = true;
 
+  /// Set once the owner touched an option, so the remembered defaults that
+  /// load a moment later do not overwrite the choice.
+  bool _optionsTouched = false;
+
   bool _fetching = false;
   bool _adding = false;
   String? _error;
+
+  /// Bumped by every lookup, URL edit and Cancel: a lookup whose number is
+  /// no longer current is ignored when its answer arrives.
+  int _fetchGeneration = 0;
 
   // Fetched playlist info
   String? _playlistThumbnail;
@@ -46,6 +80,7 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
   void initState() {
     super.initState();
     _urlController.addListener(_onUrlChanged);
+    unawaited(_loadDefaults());
   }
 
   @override
@@ -56,10 +91,39 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
     super.dispose();
   }
 
-  void _onUrlChanged() {
-    if (_playlistInfo == null && _error == null) return;
-    if (_urlController.text.trim() == _fetchedUrl) return;
+  Future<void> _loadDefaults() async {
+    try {
+      final options = await ref.read(addPlaylistDefaultsProvider).load();
+      if (!mounted || _optionsTouched) return;
+      setState(() {
+        _audioOnly = options.audioOnly;
+        _autoUpdate = options.autoUpdate;
+        _updateFrequencyHours = options.updateFrequencyHours;
+        _playChapters = options.playChapters;
+        _includeThumbnails = options.includeThumbnails;
+      });
+    } catch (_) {
+      // The built-in defaults stay.
+    }
+  }
+
+  void _setOption(VoidCallback change) {
     setState(() {
+      _optionsTouched = true;
+      change();
+    });
+  }
+
+  void _onUrlChanged() {
+    final text = _urlController.text.trim();
+    if (text == _fetchedUrl) return;
+    // Rebuilds the clear button, and drops a preview or lookup that belongs
+    // to another link.
+    setState(() {
+      if (_fetching) {
+        _fetchGeneration++;
+        _fetching = false;
+      }
       _playlistInfo = null;
       _playlistThumbnail = null;
       _trackCount = 0;
@@ -70,19 +134,64 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
 
   bool get _nameValid => _nameController.text.trim().isNotEmpty;
 
-  bool get _canAdd =>
+  /// The playlist already in the library for the fetched link and the
+  /// chosen format, if any (the same link may be added once as audio and
+  /// once as video).
+  Playlist? _existing(List<Playlist> playlists) {
+    final url = _fetchedUrl;
+    if (url == null) return null;
+    for (final playlist in playlists) {
+      if (playlist.audioOnly == _audioOnly &&
+          MetadataService.samePlaylistUrl(playlist.url, url)) {
+        return playlist;
+      }
+    }
+    return null;
+  }
+
+  bool _canAdd(Playlist? existing) =>
       !_adding &&
       !_fetching &&
+      existing == null &&
       _nameValid &&
       _playlistInfo != null &&
       _fetchedUrl != null &&
       _urlController.text.trim() == _fetchedUrl;
 
+  Future<void> _paste() async {
+    String? text;
+    try {
+      text = (await Clipboard.getData(Clipboard.kTextPlain))?.text?.trim();
+    } catch (_) {
+      text = null;
+    }
+    if (!mounted) return;
+    if (text == null || text.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('The clipboard is empty')));
+      return;
+    }
+    _urlController.text = text;
+    _urlController.selection = TextSelection.collapsed(offset: text.length);
+    if (looksLikeYouTubeUrl(text)) unawaited(_fetchInfo());
+  }
+
+  void _cancelFetch() {
+    setState(() {
+      _fetchGeneration++;
+      _fetching = false;
+    });
+  }
+
   Future<void> _fetchInfo() async {
-    if (_fetching) return;
+    if (_fetching || _adding) return;
     final url = _urlController.text.trim();
     if (url.isEmpty) return;
+    if (url == _fetchedUrl && _playlistInfo != null) return;
+    FocusManager.instance.primaryFocus?.unfocus();
 
+    final generation = ++_fetchGeneration;
     setState(() {
       _fetching = true;
       _error = null;
@@ -93,7 +202,7 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
     try {
       final ytdlp = ref.read(ytdlpServiceProvider);
       final info = await ytdlp.getPlaylistInfo(url);
-      if (!mounted) return;
+      if (!mounted || generation != _fetchGeneration) return;
       final title = (info['title'] as String? ?? '').trim();
       setState(() {
         _playlistInfo = info;
@@ -105,57 +214,57 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
         _fetching = false;
       });
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || generation != _fetchGeneration) return;
       setState(() {
-        _error =
-            'Failed to fetch playlist info: ${friendlyDownloadError('$e')}';
+        _error = "Couldn't read this link: ${friendlyDownloadError('$e')}";
         _fetching = false;
       });
     }
   }
 
   Future<void> _addPlaylist() async {
-    if (!_canAdd) return;
+    final existing = _existing(
+      ref.read(playlistsProvider).valueOrNull ?? const [],
+    );
+    if (!_canAdd(existing)) return;
     final info = _playlistInfo;
     final url = _fetchedUrl;
     final name = _nameController.text.trim();
     if (info == null || url == null || name.isEmpty) return;
-
-    if (!await confirmManualDownload(
-      context,
-      ref.read(downloadNetworkPolicyProvider),
-    )) {
-      return;
-    }
-    if (!mounted) return;
-
+    // Set before the first await, so a second tap cannot add it twice.
     setState(() => _adding = true);
+    FocusManager.instance.primaryFocus?.unfocus();
 
     // Read providers before awaiting: `ref` is unusable after disposal and
-    // the download must still start if the user leaves this page.
+    // the download must still start if the owner leaves this page.
     final service = ref.read(playlistServiceProvider);
     final db = ref.read(databaseProvider);
     final downloadService = ref.read(downloadServiceProvider);
+    final policy = ref.read(downloadNetworkPolicyProvider);
+    final settings = ref.read(appSettingsServiceProvider);
+    final defaults = ref.read(addPlaylistDefaultsProvider);
+    final metadata = ref.read(metadataServiceProvider);
+    final pendingImports = ref.read(pendingImportsProvider.notifier);
     final messenger = ScaffoldMessenger.of(context);
+    final options = AddPlaylistOptions(
+      audioOnly: _audioOnly,
+      autoUpdate: _autoUpdate,
+      updateFrequencyHours: _updateFrequencyHours,
+      playChapters: _playChapters,
+      includeThumbnails: _includeThumbnails,
+    );
     final int playlistId;
     try {
       playlistId = await service.addPlaylist(
         url: url,
         name: name,
         thumbnailUrl: _playlistThumbnail,
-        audioOnly: _audioOnly,
-        playChapters: _playChapters,
-        autoUpdate: _autoUpdate,
-        updateFrequencyHours: _updateFrequencyHours,
-        includeThumbnails: _includeThumbnails,
+        audioOnly: options.audioOnly,
+        playChapters: options.playChapters,
+        autoUpdate: options.autoUpdate,
+        updateFrequencyHours: options.updateFrequencyHours,
+        includeThumbnails: options.includeThumbnails,
       );
-      // The import banner must not offer this playlist's folder again.
-      final pending = ref.read(pendingImportsProvider);
-      if (pending.isNotEmpty) {
-        ref.read(pendingImportsProvider.notifier).state = await ref
-            .read(metadataServiceProvider)
-            .findUnimportedPlaylists(candidates: pending);
-      }
     } on PlaylistExistsException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -167,30 +276,68 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
       if (!mounted) return;
       final reason = e is StateError ? e.message : '$e';
       setState(() {
-        _error = 'Failed to add playlist: ${friendlyDownloadError(reason)}';
+        _error = "Couldn't add the playlist: ${friendlyDownloadError(reason)}";
         _adding = false;
       });
       return;
     }
+    unawaited(defaults.save(options).catchError((_) {}));
 
     // The playlist exists from here on, so the page closes whatever happens
     // next; Update on the playlist retries anything left undone.
     String message;
     try {
+      // The import banner must not offer this playlist's folder again.
+      final pending = pendingImports.state;
+      if (pending.isNotEmpty) {
+        pendingImports.state = await metadata.findUnimportedPlaylists(
+          candidates: pending,
+        );
+      }
       // A backup found in the playlist's folder was restored with its
       // tracks and their order; the fetched list only adds what is new.
       final restored = await service.getTotalCount(playlistId);
       await service.populateTracksFromInfo(playlistId, info);
-
-      // Start downloading automatically. The download runs regardless of
-      // whether this page is still open.
       final playlist = await db.getPlaylist(playlistId);
-      unawaited(downloadService.downloadPlaylist(playlist));
-      message =
+      final added =
           restored > 0
-              ? 'Added "${playlist.name}". Restored $restored '
-                  'track${restored == 1 ? '' : 's'} from the existing folder.'
-              : 'Added "${playlist.name}"';
+              ? 'Added "${playlist.name}" and restored $restored '
+                  'track${restored == 1 ? '' : 's'} from its folder.'
+              : 'Added "${playlist.name}".';
+
+      // Asked only now: declining must not throw the new playlist away.
+      final choice =
+          mounted
+              ? await decideDownloadNow(
+                context,
+                policy,
+                settings: settings,
+                message:
+                    "You're on mobile data. Download it now, or wait until "
+                    "you're on Wi-Fi?",
+                laterLabel: 'Later on Wi-Fi',
+              )
+              : DownloadNowChoice.later;
+      switch (choice) {
+        case DownloadNowChoice.now:
+          final busy = downloadService.isDownloading;
+          // The download runs whether or not this page is still open.
+          unawaited(downloadService.downloadPlaylist(playlist));
+          message =
+              busy ? '$added It downloads after the current download.' : added;
+        case DownloadNowChoice.later:
+          message =
+              options.autoUpdate
+                  ? '$added It downloads with the next automatic update on '
+                      'Wi-Fi.'
+                  : '$added Tap Update on it to download.';
+        case DownloadNowChoice.offline:
+          message =
+              options.autoUpdate
+                  ? "$added You're offline; it downloads with the next "
+                      'automatic update.'
+                  : "$added You're offline; tap Update on it later.";
+      }
     } catch (e) {
       final reason = e is StateError ? e.message : '$e';
       message =
@@ -202,141 +349,271 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
     messenger.showSnackBar(SnackBar(content: Text(message)));
   }
 
+  void _openExisting(Playlist playlist) {
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(
+        builder:
+            (_) => PlaylistDetailPage(
+              playlistId: playlist.id,
+              initialName: playlist.name,
+            ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final ytDlpError = ref.watch(ytDlpInitErrorProvider);
+    final playlists = ref.watch(playlistsProvider).valueOrNull ?? const [];
+    final existing = _existing(playlists);
+    final hasPreview = _playlistInfo != null;
+
     return Scaffold(
-      appBar: AppBar(title: const Text('Add Playlist')),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            TextField(
-              key: const ValueKey('add-playlist-url-field'),
-              controller: _urlController,
-              style: const TextStyle(color: Colors.white),
-              decoration: InputDecoration(
-                hintText: 'Paste YouTube playlist URL...',
-                prefixIcon: const Icon(Icons.link, color: Color(0xFF888888)),
-                suffixIcon:
-                    _fetching
-                        ? const Padding(
-                          padding: EdgeInsets.all(12),
-                          child: SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                        )
-                        : IconButton(
-                          icon: const Icon(
-                            Icons.search,
-                            color: Color(0xFF2196F3),
-                          ),
-                          tooltip: 'Fetch playlist info',
-                          onPressed: _fetchInfo,
-                        ),
-              ),
-              onSubmitted: (_) {
-                if (!_fetching) _fetchInfo();
-              },
-            ),
-            if (_error != null) ...[
-              const SizedBox(height: 12),
-              Text(
-                _error!,
-                style: const TextStyle(color: Colors.red, fontSize: 13),
-              ),
-            ],
-            if (_playlistInfo != null) ...[
-              const SizedBox(height: 24),
-              _buildPreview(),
-              const SizedBox(height: 24),
-              _buildSettings(),
-              const SizedBox(height: 24),
-              SizedBox(
-                height: 48,
-                child: ElevatedButton(
-                  key: const ValueKey('add-playlist-button'),
-                  onPressed: _canAdd ? _addPlaylist : null,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF2196F3),
-                    disabledBackgroundColor: const Color(0xFF333333),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                  child: Text(
-                    _adding ? 'Adding...' : 'Add Playlist',
+      appBar: AppBar(title: const Text('Add playlist')),
+      body: ValueListenableBuilder<double>(
+        valueListenable: audioPlayerOverlayHeightNotifier,
+        builder:
+            (context, overlayHeight, child) => ListView(
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+              padding: EdgeInsets.fromLTRB(16, 16, 16, 24 + overlayHeight),
+              children: [
+                _buildUrlField(),
+                const SizedBox(height: 12),
+                if (ytDlpError != null) ...[
+                  _buildYtDlpNotice(ytDlpError),
+                  const SizedBox(height: 12),
+                ],
+                if (_fetching)
+                  _buildFetchingCard()
+                else if (!hasPreview)
+                  _buildLookupButtons(enabled: ytDlpError == null),
+                if (_error != null) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    _error!,
+                    key: const ValueKey('add-playlist-error'),
                     style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.white,
+                      color: Color(0xFFEF5350),
+                      fontSize: 13,
                     ),
                   ),
-                ),
-              ),
-            ],
-          ],
+                ],
+                if (hasPreview) ...[
+                  const SizedBox(height: 4),
+                  _buildPreview(),
+                  if (existing != null) ...[
+                    const SizedBox(height: 12),
+                    _buildExistingNotice(existing),
+                  ],
+                  const SizedBox(height: 16),
+                  _buildOptions(),
+                ],
+              ],
+            ),
+      ),
+      bottomNavigationBar:
+          hasPreview ? _buildAddButton(enabled: _canAdd(existing)) : null,
+    );
+  }
+
+  Widget _buildUrlField() {
+    final hasText = _urlController.text.isNotEmpty;
+    return TextField(
+      key: const ValueKey('add-playlist-url-field'),
+      controller: _urlController,
+      enabled: !_adding,
+      keyboardType: TextInputType.url,
+      textInputAction: TextInputAction.go,
+      autocorrect: false,
+      style: const TextStyle(color: Colors.white),
+      decoration: InputDecoration(
+        labelText: 'YouTube playlist link',
+        labelStyle: const TextStyle(color: _muted),
+        hintText: 'https://youtube.com/playlist?list=…',
+        prefixIcon: const Icon(Icons.link, color: _muted),
+        suffixIcon:
+            hasText
+                ? IconButton(
+                  icon: const Icon(Icons.clear),
+                  color: _muted,
+                  tooltip: 'Clear',
+                  onPressed: _urlController.clear,
+                )
+                : null,
+      ),
+      onSubmitted: (_) => _fetchInfo(),
+    );
+  }
+
+  Widget _buildLookupButtons({required bool enabled}) {
+    final hasText = _urlController.text.trim().isNotEmpty;
+    return Row(
+      children: [
+        Expanded(
+          child: OutlinedButton.icon(
+            key: const ValueKey('add-playlist-paste'),
+            onPressed: enabled ? _paste : null,
+            icon: const Icon(Icons.content_paste),
+            label: const Text('Paste'),
+            style: OutlinedButton.styleFrom(
+              minimumSize: const Size.fromHeight(48),
+            ),
+          ),
         ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: FilledButton.icon(
+            key: const ValueKey('add-playlist-lookup'),
+            onPressed: enabled && hasText ? _fetchInfo : null,
+            icon: const Icon(Icons.playlist_play),
+            label: const Text('Look up'),
+            style: FilledButton.styleFrom(
+              minimumSize: const Size.fromHeight(48),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildFetchingCard() {
+    return Container(
+      key: const ValueKey('add-playlist-fetching'),
+      padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF2A2A2A),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          const SizedBox(
+            width: 24,
+            height: 24,
+            child: CircularProgressIndicator(strokeWidth: 2.5),
+          ),
+          const SizedBox(width: 16),
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Reading the playlist…',
+                  style: TextStyle(color: Colors.white, fontSize: 14),
+                ),
+                SizedBox(height: 2),
+                Text(
+                  'Large playlists can take a minute.',
+                  style: TextStyle(color: _muted, fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+          TextButton(
+            key: const ValueKey('add-playlist-cancel-lookup'),
+            onPressed: _cancelFetch,
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildYtDlpNotice(String reason) {
+    final retrying = ref.watch(ytDlpRetryingProvider);
+    return _Notice(
+      icon: Icons.warning_amber_rounded,
+      color: const Color(0xFFFFB74D),
+      text: 'Downloads are unavailable: $reason',
+      action: TextButton(
+        onPressed:
+            retrying
+                ? null
+                : () =>
+                    unawaited(ref.read(libraryStartupProvider).retryYtDlp()),
+        child: Text(retrying ? 'Retrying…' : 'Retry'),
+      ),
+    );
+  }
+
+  Widget _buildExistingNotice(Playlist existing) {
+    return _Notice(
+      key: const ValueKey('add-playlist-exists'),
+      icon: Icons.info_outline,
+      color: _accent,
+      text:
+          'Already in your library as "${existing.name}" '
+          '(${existing.audioOnly ? 'audio' : 'video'}).',
+      action: TextButton(
+        onPressed: () => _openExisting(existing),
+        child: const Text('Open'),
       ),
     );
   }
 
   Widget _buildPreview() {
+    final isPlaylist = _playlistInfo?['isPlaylist'] as bool? ?? true;
+    final cover = _playlistThumbnail;
+    final coverWidth = 128.0;
+    final cacheWidth =
+        (coverWidth * MediaQuery.devicePixelRatioOf(context)).round();
     return Container(
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: const Color(0xFF2A2A2A),
         borderRadius: BorderRadius.circular(12),
       ),
-      clipBehavior: Clip.antiAlias,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (_playlistThumbnail != null && _playlistThumbnail!.isNotEmpty)
-            AspectRatio(
-              aspectRatio: 16 / 9,
-              child: CachedNetworkImage(
-                imageUrl: _playlistThumbnail!,
-                fit: BoxFit.cover,
-                placeholder:
-                    (_, __) => Container(
-                      color: const Color(0xFF333333),
-                      child: const Center(child: CircularProgressIndicator()),
-                    ),
-                errorWidget:
-                    (_, __, ___) => Container(color: const Color(0xFF333333)),
+          Row(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: SizedBox(
+                  width: coverWidth,
+                  height: coverWidth * 9 / 16,
+                  child:
+                      cover != null && cover.isNotEmpty
+                          ? CachedNetworkImage(
+                            imageUrl: cover,
+                            fit: BoxFit.cover,
+                            memCacheWidth: cacheWidth,
+                            placeholder:
+                                (_, __) =>
+                                    const ColoredBox(color: Color(0xFF333333)),
+                            errorWidget: (_, __, ___) => _coverPlaceholder(),
+                          )
+                          : _coverPlaceholder(),
+                ),
               ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  isPlaylist
+                      ? '$_trackCount video${_trackCount == 1 ? '' : 's'}'
+                      : 'A single video, added as a playlist with one track',
+                  style: const TextStyle(color: _muted, fontSize: 14),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            key: const ValueKey('add-playlist-name-field'),
+            controller: _nameController,
+            enabled: !_adding,
+            onChanged: (_) => setState(() {}),
+            textCapitalization: TextCapitalization.sentences,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
             ),
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                TextField(
-                  key: const ValueKey('add-playlist-name-field'),
-                  controller: _nameController,
-                  onChanged: (_) => setState(() {}),
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                  ),
-                  decoration: InputDecoration(
-                    labelText: 'Name',
-                    labelStyle: const TextStyle(color: Color(0xFF888888)),
-                    errorText: _nameValid ? null : 'Enter a name',
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  '$_trackCount videos',
-                  style: const TextStyle(
-                    color: Color(0xFF888888),
-                    fontSize: 14,
-                  ),
-                ),
-              ],
+            decoration: InputDecoration(
+              labelText: 'Name',
+              labelStyle: const TextStyle(color: _muted),
+              fillColor: const Color(0xFF333333),
+              errorText: _nameValid ? null : 'Enter a name',
             ),
           ),
         ],
@@ -344,77 +621,242 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
     );
   }
 
-  Widget _buildSettings() {
+  Widget _coverPlaceholder() => const ColoredBox(
+    color: Color(0xFF333333),
+    child: Center(
+      child: Icon(Icons.playlist_play, color: Color(0xFF555555), size: 32),
+    ),
+  );
+
+  Widget _buildOptions() {
+    final enabled = !_adding;
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _settingsToggle(
-          'Audio only',
-          'Download audio tracks only (m4a)',
-          _audioOnly,
-          (v) => setState(() => _audioOnly = v),
+        const _SectionLabel('Download as'),
+        SegmentedButton<bool>(
+          key: const ValueKey('add-playlist-format'),
+          segments: const [
+            ButtonSegment(
+              value: true,
+              icon: Icon(Icons.music_note),
+              label: Text('Audio'),
+            ),
+            ButtonSegment(
+              value: false,
+              icon: Icon(Icons.movie_outlined),
+              label: Text('Video'),
+            ),
+          ],
+          selected: {_audioOnly},
+          showSelectedIcon: false,
+          onSelectionChanged:
+              enabled
+                  ? (selection) =>
+                      _setOption(() => _audioOnly = selection.first)
+                  : null,
         ),
-        _settingsToggle(
-          'Auto-update',
-          'Automatically check for new videos',
-          _autoUpdate,
-          (v) => setState(() => _autoUpdate = v),
+        const SizedBox(height: 4),
+        Text(
+          _audioOnly
+              ? 'Saves the sound only (m4a); smaller files.'
+              : 'Saves the full video.',
+          style: const TextStyle(color: _muted, fontSize: 12),
         ),
-        _settingsToggle(
-          'Play chapters as tracks',
-          'Use chapter titles, progress, and next/previous controls',
-          _playChapters,
-          (v) => setState(() => _playChapters = v),
+        const SizedBox(height: 12),
+        SwitchListTile(
+          key: const ValueKey('add-playlist-auto-update'),
+          contentPadding: EdgeInsets.zero,
+          value: _autoUpdate,
+          onChanged: enabled ? (v) => _setOption(() => _autoUpdate = v) : null,
+          title: const Text('Keep up to date'),
+          subtitle: const Text(
+            'Check for new videos automatically',
+            style: TextStyle(color: _muted),
+          ),
         ),
-        _settingsToggle(
-          'Include thumbnails',
-          'Embed thumbnails in downloaded files',
-          _includeThumbnails,
-          (v) => setState(() => _includeThumbnails = v),
+        AnimatedSize(
+          duration: const Duration(milliseconds: 200),
+          alignment: Alignment.topCenter,
+          child:
+              _autoUpdate
+                  ? Padding(
+                    padding: const EdgeInsets.only(top: 4, bottom: 8),
+                    child: DropdownButtonFormField<int>(
+                      key: const ValueKey('add-playlist-frequency'),
+                      value: nearestUpdateFrequency(_updateFrequencyHours),
+                      isExpanded: true,
+                      dropdownColor: const Color(0xFF2A2A2A),
+                      decoration: const InputDecoration(
+                        labelText: 'Check every',
+                        labelStyle: TextStyle(color: _muted),
+                      ),
+                      items: [
+                        for (final entry in updateFrequencyOptions.entries)
+                          DropdownMenuItem(
+                            value: entry.key,
+                            child: Text(entry.value),
+                          ),
+                      ],
+                      onChanged:
+                          enabled
+                              ? (hours) {
+                                if (hours == null) return;
+                                _setOption(() => _updateFrequencyHours = hours);
+                              }
+                              : null,
+                    ),
+                  )
+                  : const SizedBox(width: double.infinity),
         ),
-        const SizedBox(height: 16),
-        UpdateFrequencyDropdown(
-          value: _updateFrequencyHours,
-          enabled: _autoUpdate,
-          onChanged: (hours) => setState(() => _updateFrequencyHours = hours),
+        Theme(
+          // No divider lines around the expansion tile.
+          data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+          child: ExpansionTile(
+            key: const ValueKey('add-playlist-more-options'),
+            tilePadding: EdgeInsets.zero,
+            childrenPadding: EdgeInsets.zero,
+            title: const Text('More options'),
+            children: [
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _playChapters,
+                onChanged:
+                    enabled ? (v) => _setOption(() => _playChapters = v) : null,
+                title: const Text('Split chapters into tracks'),
+                subtitle: const Text(
+                  'A video with chapters plays as separate tracks, with '
+                  'next and previous between them',
+                  style: TextStyle(color: _muted),
+                ),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _includeThumbnails,
+                onChanged:
+                    enabled
+                        ? (v) => _setOption(() => _includeThumbnails = v)
+                        : null,
+                title: const Text('Save cover art inside files'),
+                subtitle: const Text(
+                  'Other music apps then show the cover too',
+                  style: TextStyle(color: _muted),
+                ),
+              ),
+            ],
+          ),
         ),
       ],
     );
   }
 
-  Widget _settingsToggle(
-    String title,
-    String subtitle,
-    bool value,
-    ValueChanged<bool> onChanged,
-  ) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(color: Colors.white, fontSize: 14),
-                ),
-                Text(
-                  subtitle,
-                  style: const TextStyle(
-                    color: Color(0xFF888888),
-                    fontSize: 12,
+  Widget _buildAddButton({required bool enabled}) {
+    return ValueListenableBuilder<double>(
+      valueListenable: audioPlayerOverlayHeightNotifier,
+      builder:
+          (context, overlayHeight, _) => SafeArea(
+            top: false,
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(16, 8, 16, 12 + overlayHeight),
+              child: FilledButton(
+                key: const ValueKey('add-playlist-button'),
+                onPressed: enabled ? _addPlaylist : null,
+                style: FilledButton.styleFrom(
+                  minimumSize: const Size.fromHeight(52),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
                   ),
                 ),
-              ],
+                child:
+                    _adding
+                        ? const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            ),
+                            SizedBox(width: 12),
+                            Text('Adding…'),
+                          ],
+                        )
+                        : const Text(
+                          'Add & download',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+              ),
             ),
           ),
-          Switch(
-            value: value,
-            onChanged: onChanged,
-            activeColor: const Color(0xFF2196F3),
-            inactiveTrackColor: const Color(0xFF333333),
+    );
+  }
+}
+
+class _SectionLabel extends StatelessWidget {
+  const _SectionLabel(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Text(
+        text,
+        style: const TextStyle(
+          color: Color(0xFF2196F3),
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+}
+
+/// A one-line notice with an icon and an optional button.
+class _Notice extends StatelessWidget {
+  const _Notice({
+    super.key,
+    required this.icon,
+    required this.color,
+    required this.text,
+    this.action,
+  });
+
+  final IconData icon;
+  final Color color;
+  final String text;
+  final Widget? action;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withValues(alpha: 0.6), width: 0.5),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: color, size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              child: Text(
+                text,
+                style: const TextStyle(color: Color(0xFFDDDDDD), fontSize: 13),
+              ),
+            ),
           ),
+          if (action != null) action!,
         ],
       ),
     );
