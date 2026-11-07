@@ -275,6 +275,37 @@ void main() {
     expect(find.byKey(const ValueKey('test-video-surface')), findsOneWidget);
   });
 
+  testWidgets('locked video ignores back; swipe down minimizes', (
+    tester,
+  ) async {
+    final harness = await pumpPlayerShell(tester, video: true);
+    final shell = harness.shellState(tester);
+    expect(shell.expansion.value, 1);
+
+    await tester.tap(find.byTooltip('Lock controls'));
+    await tester.pumpAndSettle();
+    expect(shell.videoLocked.value, isTrue);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(shell.expansion.value, 1, reason: 'back is blocked while locked');
+
+    await tester.tap(find.byTooltip('Unlock controls'));
+    await tester.pumpAndSettle();
+    expect(shell.videoLocked.value, isFalse);
+
+    // Swipe on an empty part of the picture (not on a button).
+    final layer = tester.getRect(
+      find.byKey(const ValueKey('video-gesture-layer')),
+    );
+    await tester.flingFrom(
+      Offset(layer.left + 30, layer.center.dy - 60),
+      const Offset(0, 200),
+      1200,
+    );
+    await tester.pumpAndSettle();
+    expect(shell.expansion.value, 0);
+  });
+
   testWidgets('turning audio-only off opens the video player', (tester) async {
     final harness = await pumpPlayerShell(tester);
     final shell = harness.shellState(tester);

@@ -487,7 +487,15 @@ class PlayerShellState extends ConsumerState<PlayerShell>
                 child: _pagesNavigator,
               ),
               if (_hasTrack || presence.value > 0)
-                PlayerSheet(shell: this, geometry: geometry, video: _video),
+                // Fixed row heights: keep very large text from overflowing.
+                MediaQuery.withClampedTextScaling(
+                  maxScaleFactor: 1.2,
+                  child: PlayerSheet(
+                    shell: this,
+                    geometry: geometry,
+                    video: _video,
+                  ),
+                ),
             ],
           ),
         ),
