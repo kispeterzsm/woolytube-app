@@ -90,11 +90,45 @@ void main() {
     );
 
     expect(service.cancelSync(playlist.id), isTrue);
-    ytdlp.release.complete();
-    await expectLater(running, throwsA(isA<SyncCancelledException>()));
+    // Stopped at once, not when YouTube answers.
     expect(service.syncingPlaylistIds, isEmpty);
     await pumpEventQueue();
     expect(states.last, isEmpty);
+
+    // A new update may start right away; the stopped one returning late
+    // does not end it.
+    final again = service.syncPlaylist(playlist);
+    expect(service.syncingPlaylistIds, {playlist.id});
+    ytdlp.release.complete();
+    await expectLater(running, throwsA(isA<SyncCancelledException>()));
+    expect(service.syncingPlaylistIds, {playlist.id});
+    await again;
+    expect(service.syncingPlaylistIds, isEmpty);
+    expect(service.cancelSync(playlist.id), isFalse);
+  });
+
+  test('an update is refused before asking YouTube while a download '
+      'runs', () async {
+    final ytdlp = FakeYtDlpService();
+    final gate = LibraryGate.unlocked();
+    final service = PlaylistService(
+      db,
+      ytdlp,
+      MetadataService(db),
+      null,
+      null,
+      gate,
+    );
+    final playlist = await insertTestPlaylist(db, outputPath: folder);
+    expect(await gate.tryEnter('download'), isNull);
+
+    await expectLater(
+      service.syncPlaylist(playlist),
+      throwsA(isA<LibraryBusyException>()),
+    );
+    expect(ytdlp.requestedPlaylistUrls, isEmpty);
+    expect(service.syncingPlaylistIds, isEmpty);
+    await gate.exit();
   });
 
   test('new entries without duration or thumbnail store nothing', () async {

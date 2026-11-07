@@ -105,7 +105,8 @@ class PlaylistService {
       _db.watchPlaylistTrackCounts();
 
   final _syncing = <int>{};
-  final _cancelledSyncs = <int>{};
+  final _syncGeneration = <int, int>{};
+  var _nextSyncGeneration = 0;
   final _syncingController = StreamController<Set<int>>.broadcast();
 
   /// Playlists whose update is asking YouTube for the playlist or applying
@@ -125,13 +126,20 @@ class PlaylistService {
   }
 
   /// Stops the update of [playlistId] while YouTube is still being asked:
-  /// its answer is then ignored and nothing changes. Returns whether such an
-  /// update was running. Once the answer is being applied, it finishes.
+  /// its answer is then ignored and nothing changes. The playlist stops
+  /// counting as updating at once, so it can be updated again right away.
+  /// Returns whether such an update was running. Once the answer is being
+  /// applied, it finishes.
   bool cancelSync(int playlistId) {
     if (!_syncing.contains(playlistId)) return false;
-    _cancelledSyncs.add(playlistId);
+    if (_applyingSyncs.contains(playlistId)) return false;
+    _syncGeneration.remove(playlistId);
+    _setSyncing(playlistId, false);
     return true;
   }
+
+  /// Playlists whose YouTube answer is being written; too late to cancel.
+  final _applyingSyncs = <int>{};
 
   void dispose() {
     _syncingController.close();
@@ -696,16 +704,24 @@ class PlaylistService {
         'This playlist is already being updated.',
       );
     }
+    // Asking YouTube for a long playlist takes a while; do not do it only
+    // to be refused by the running download afterwards.
+    final active = _gate.activeOperation;
+    if (active != null && !LibraryGate.shortOperations.contains(active)) {
+      throw LibraryBusyException('Wait until the current $active finishes.');
+    }
+    final generation = ++_nextSyncGeneration;
+    _syncGeneration[playlist.id] = generation;
+    bool isCurrent() => _syncGeneration[playlist.id] == generation;
     _setSyncing(playlist.id, true);
-    _cancelledSyncs.remove(playlist.id);
     try {
       // Recorded even when the check fails, so the scheduled update takes
       // the playlists it tried longest ago first.
       await _db.markPlaylistUpdateAttempt(playlist.id, DateTime.now());
+      if (!isCurrent()) throw const SyncCancelledException();
       final info = await _ytdlp.getPlaylistInfo(playlist.url);
-      if (_cancelledSyncs.remove(playlist.id)) {
-        throw const SyncCancelledException();
-      }
+      if (!isCurrent()) throw const SyncCancelledException();
+      _applyingSyncs.add(playlist.id);
       // Re-read inside the gate: the caller's copy may predate a format
       // switch, and the sync renames files in the current folder.
       return await _locked('playlist update', () async {
@@ -716,8 +732,12 @@ class PlaylistService {
         return _applySync(current, info);
       });
     } finally {
-      _cancelledSyncs.remove(playlist.id);
-      _setSyncing(playlist.id, false);
+      // A cancelled call that returns late must not end a newer update.
+      if (isCurrent()) {
+        _applyingSyncs.remove(playlist.id);
+        _syncGeneration.remove(playlist.id);
+        _setSyncing(playlist.id, false);
+      }
     }
   }
 
@@ -1726,9 +1746,8 @@ class PlaylistService {
 
   Future<void> _writeMetadata(int playlistId) async {
     try {
-      final playlist = await _db.getPlaylist(playlistId);
-      final tracks = await _db.getTracksForPlaylist(playlistId);
-      await _metadata.writeMetadata(playlist, tracks);
+      // Reads the playlist and its tracks itself when the write starts.
+      await _metadata.writeMetadataFor(playlistId);
     } catch (_) {
       // Non-critical — don't block playlist operations
     }
