@@ -191,6 +191,9 @@ class PlaybackService
 
   /// Pause requests that arrived while a file was being opened.
   bool _pauseAfterLoad = false;
+
+  /// The next file is opened paused (after "stop after this song").
+  bool _openNextPaused = false;
   bool _pauseAfterLoadKeepFocus = false;
 
   /// Coalescing of rapid Next/Previous presses.
@@ -970,7 +973,7 @@ class PlaybackService
   }) async {
     if (!await _requestFocus()) return _LoadResult.focusDenied;
     _loading = true;
-    _pauseAfterLoad = false;
+    _pauseAfterLoad = _openNextPaused;
     _pauseAfterLoadKeepFocus = false;
     _loadedTrackId = null;
     _currentFilePath = filePath;
@@ -985,9 +988,11 @@ class PlaybackService
     _resumeAtSource = null;
     _pendingSkipTarget = null;
     _skipOrigin = null;
-    if (_detectedVideo.value != null) _detectedVideo.add(null);
     _currentItem.add(item);
     _currentTrack.add(item.displayTrack);
+    // After the track, so the previous track is never re-evaluated without
+    // its detection result (which could flash "video" for it).
+    if (_detectedVideo.value != null) _detectedVideo.add(null);
     _setPosition(
       startAt == null ? Duration.zero : item.relativePosition(startAt),
       immediate: true,
@@ -1008,6 +1013,7 @@ class PlaybackService
                   : Duration(milliseconds: item.startMs)),
           end: end,
         ),
+        play: !_openNextPaused,
       );
       _loadedTrackId = item.track.id;
     } catch (_) {
@@ -1133,8 +1139,20 @@ class PlaybackService
         _completionAdvancePending = false;
         if (generation != _generation || currentMediaId != endedId) return;
         if (_stopAfterCurrent.value) {
+          // "Stop after this song": get the next song ready, paused, so
+          // Play continues the queue.
           _stopAfterCurrent.add(false);
           await _player.pause();
+          if (autoplayEnabled) {
+            _openNextPaused = true;
+            try {
+              final result = await _advance();
+              if (result == _AdvanceResult.loaded) return;
+              if (result == _AdvanceResult.nothingLeft) _queueEnded = true;
+            } finally {
+              _openNextPaused = false;
+            }
+          }
           await _abandonFocus();
           _saveSession(force: true);
           return;
@@ -1597,7 +1615,7 @@ class PlaybackService
     _itemEnded = false;
     _queueEnded = false;
     _boundaryHandled = false;
-    if (_loadedTrackId == null) {
+    if (_loadedTrackId == null && !_loading) {
       // Not opened yet (a restored session): start there on Play.
       if (item != null) {
         _resumeAtSource = target;

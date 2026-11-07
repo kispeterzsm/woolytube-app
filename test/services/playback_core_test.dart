@@ -287,9 +287,16 @@ void main() {
       playback.setStopAfterCurrent(true);
       player.finish();
       await settle();
-      expect(playback.currentTrack!.id, tracks[0].id);
-      expect(player.opened, hasLength(1));
+      // The next song is ready but paused, and focus goes back.
+      expect(playback.currentTrack!.id, tracks[1].id);
+      expect(player.state.playing, isFalse);
+      expect(playback.isPlaying, isFalse);
       expect(playback.stopAfterCurrent, isFalse);
+      expect(session.activeChanges.last, isFalse);
+
+      await playback.resume();
+      expect(player.state.playing, isTrue);
+      expect(player.opened, hasLength(2));
     });
 
     test('playlist settings apply to songs that have not started', () async {
