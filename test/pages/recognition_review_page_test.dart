@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:woolytube/pages/recognition_review_page.dart';
 import 'package:woolytube/providers/playback_providers.dart';
 import 'package:woolytube/providers/providers.dart';
+import 'package:woolytube/services/chapter_service.dart';
 import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/playback_service.dart';
 import 'package:woolytube/services/recognition/chapter_estimator.dart';
@@ -236,9 +237,23 @@ void main() {
       // The file was replaced at the same path after the scan.
       await media.writeAsBytes([4, 5, 6]);
       await tapApply();
-      expect(find.textContaining('Scan the file again'), findsOneWidget);
+      expect(find.text(StaleRecognitionRun.fileChangedMessage), findsOneWidget);
       expect(applied, isNull);
       expect((await db.getTrack(track.id))!.chaptersJson, stored);
+
+      // Replaced and the epoch moved on (as a replacement does): still the
+      // file's message, not the one about undone chapters.
+      await db.writeTrackChapters(
+        track.id,
+        const ChapterData(
+          custom: [mine],
+          durationMs: 180000,
+          recognitionEpoch: 1,
+        ),
+      );
+      await tapApply();
+      expect(find.text(StaleRecognitionRun.fileChangedMessage), findsOneWidget);
+      expect(applied, isNull);
 
       // Same file, but the chapters were undone since the scan.
       await media.writeAsBytes([1, 2, 3]);
@@ -252,9 +267,50 @@ void main() {
       );
       final undone = (await db.getTrack(track.id))!.chaptersJson;
       await tapApply();
-      expect(find.textContaining('Scan the file again'), findsOneWidget);
+      expect(
+        find.text(StaleRecognitionRun.chaptersChangedMessage),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Recognize again'), findsOneWidget);
       expect(applied, isNull);
       expect((await db.getTrack(track.id))!.chaptersJson, undone);
+
+      // This run was applied and then undone: the undo moved the epoch on,
+      // so the way on is Recognize again, not "already applied".
+      await db.writeTrackChapters(
+        track.id,
+        const ChapterData(
+          custom: [mine],
+          durationMs: 180000,
+          recognitionEpoch: 1,
+          lastRecognitionRunId: 'run1',
+        ),
+      );
+      final appliedThenUndone = (await db.getTrack(track.id))!.chaptersJson;
+      await tapApply();
+      expect(
+        find.text(StaleRecognitionRun.chaptersChangedMessage),
+        findsOneWidget,
+      );
+      expect(find.textContaining('already applied'), findsNothing);
+      expect(applied, isNull);
+      expect((await db.getTrack(track.id))!.chaptersJson, appliedThenUndone);
+
+      // Applied in this very epoch: that is what the message says.
+      await db.writeTrackChapters(
+        track.id,
+        const ChapterData(
+          custom: [mine],
+          durationMs: 180000,
+          lastRecognitionRunId: 'run1',
+        ),
+      );
+      await tapApply();
+      expect(
+        find.text('These proposals were already applied to this file.'),
+        findsOneWidget,
+      );
+      expect(applied, isNull);
 
       // Back as the scan saw it: the run applies around the user's chapter.
       await db.writeTrackChapters(

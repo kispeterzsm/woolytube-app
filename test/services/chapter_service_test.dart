@@ -558,6 +558,148 @@ void main() {
       },
     );
 
+    test('undo of recognition on a file without YouTube chapters follows '
+        'YouTube again', () async {
+      // As seen on a device: nothing downloaded, nothing custom.
+      await db.writeTrackChapters(
+        track.id,
+        const ChapterData(durationMs: 60000),
+      );
+      expect(
+        await service.applyRecognition(
+          track,
+          runId: 'run-1',
+          epoch: 0,
+          durationMs: 60000,
+          fileKey: null,
+          proposals: [chapter('song', 0, 60000)],
+        ),
+        isTrue,
+      );
+      final applied = await data();
+      expect(applied.custom, hasLength(1));
+      expect(applied.undoChapters, isEmpty);
+      expect(applied.undoFollowsDownloaded, isTrue);
+
+      await service.undo(track);
+      final undone = await data();
+      expect(undone.custom, isNull);
+      expect(undone.undoChapters, isNull);
+      expect(undone.undoFollowsDownloaded, isFalse);
+      expect(undone.recognitionEpoch, 1);
+      final sidecar =
+          jsonDecode(
+                await File('${dir.path}/woolytube_meta.json').readAsString(),
+              )
+              as Map;
+      final stored =
+          ((sidecar['tracks'] as List).single as Map)['chapters'] as Map;
+      expect(stored.containsKey('custom'), isTrue);
+      expect(stored['custom'], isNull);
+      expect(stored.containsKey('undoFollowsDownloaded'), isFalse);
+
+      // A later YouTube fetch shows, as it would have without the scan.
+      await service.refresh(track);
+      expect((await data()).active.map((c) => c.title), ['First', 'Second']);
+    });
+
+    test('every change made while following YouTube undoes back to '
+        'following it', () async {
+      final youtube = ChapterData.fromVideoInfo(await ytdlp.getVideoInfo('x'));
+      final first = youtube.downloaded.first;
+      final second = youtube.downloaded.last;
+      final changes = <String, Future<void> Function()>{
+        'save':
+            () => service.save(
+              track,
+              first.copyWith(title: 'Mine'),
+              durationMs: 60000,
+            ),
+        'rename': () => service.rename(track, first.id, 'Mine'),
+        'moveBoundary':
+            () =>
+                service.moveBoundary(track, first.id, second.id, 30000, 20000),
+        'merge':
+            () => service.merge(
+              track,
+              first,
+              second,
+              keepEarlier: true,
+              title: 'Both',
+            ),
+        'delete': () => service.delete(track, first.id),
+        'removeAutomatic': () => service.removeAutomatic(track),
+        'restore': () => service.restore(track),
+        'applyRecognition':
+            () => service.applyRecognition(
+              track,
+              runId: 'run-1',
+              epoch: 0,
+              durationMs: 60000,
+              fileKey: null,
+              proposals: [chapter('song', 0, 60000)],
+            ),
+      };
+      for (final MapEntry(key: name, value: change) in changes.entries) {
+        await db.writeTrackChapters(
+          track.id,
+          ChapterData(
+            downloaded: youtube.downloaded,
+            durationMs: 60000,
+            checkedAt: youtube.checkedAt,
+          ),
+        );
+        await change();
+        final changed = await data();
+        expect(changed.undoChapters, isNotNull, reason: name);
+        expect(changed.undoFollowsDownloaded, isTrue, reason: name);
+        expect(
+          (jsonDecode(changed.encode()) as Map)['undoFollowsDownloaded'],
+          isTrue,
+          reason: name,
+        );
+        // YouTube's list changes before the undo; undo follows it.
+        await db.writeTrackChapters(
+          track.id,
+          changed.copyWith(downloaded: [first.copyWith(endMs: 60000)]),
+        );
+        await service.undo(track);
+        final undone = await data();
+        expect(undone.custom, isNull, reason: name);
+        expect(undone.active.map((c) => c.id), [first.id], reason: name);
+        expect(undone.undoChapters, isNull, reason: name);
+      }
+    });
+
+    test(
+      'undo of a change to an own (even empty) list restores that list',
+      () async {
+        await db.writeTrackChapters(
+          track.id,
+          ChapterData(
+            downloaded: [
+              chapter('yt', 0, 60000, origin: ChapterOrigin.original),
+            ],
+            custom: const [],
+            durationMs: 60000,
+          ),
+        );
+        await service.save(track, chapter('mine', 0, 30000), durationMs: 60000);
+        final changed = await data();
+        expect(changed.undoFollowsDownloaded, isFalse);
+        expect(
+          (jsonDecode(changed.encode()) as Map).containsKey(
+            'undoFollowsDownloaded',
+          ),
+          isFalse,
+        );
+        await service.undo(track);
+        final undone = await data();
+        expect(undone.custom, isEmpty);
+        expect(undone.active, isEmpty);
+      },
+    );
+
     test('removeAutomatic keeps edited and user-made chapters', () async {
       await seed([
         chapter('auto', 0, 20000, origin: ChapterOrigin.auto),

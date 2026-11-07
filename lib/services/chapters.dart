@@ -157,6 +157,11 @@ class ChapterData {
   final bool valid;
   final bool shuffleChapters;
   final List<MediaChapter>? undoChapters;
+
+  /// True when the state [undoChapters] was taken from followed the
+  /// downloaded (YouTube) chapters (custom was null). Undo then follows them
+  /// again instead of freezing a copy, so later YouTube fetches still show.
+  final bool undoFollowsDownloaded;
   final int recognitionEpoch;
   final String? lastRecognitionRunId;
 
@@ -168,6 +173,7 @@ class ChapterData {
     this.valid = true,
     this.shuffleChapters = false,
     this.undoChapters,
+    this.undoFollowsDownloaded = false,
     this.recognitionEpoch = 0,
     this.lastRecognitionRunId,
   });
@@ -186,6 +192,7 @@ class ChapterData {
     bool? valid,
     bool? shuffleChapters,
     Object? undoChapters = _unset,
+    bool? undoFollowsDownloaded,
     int? recognitionEpoch,
     String? lastRecognitionRunId,
   }) => ChapterData(
@@ -200,6 +207,7 @@ class ChapterData {
         identical(undoChapters, _unset)
             ? this.undoChapters
             : undoChapters as List<MediaChapter>?,
+    undoFollowsDownloaded: undoFollowsDownloaded ?? this.undoFollowsDownloaded,
     recognitionEpoch: recognitionEpoch ?? this.recognitionEpoch,
     lastRecognitionRunId: lastRecognitionRunId ?? this.lastRecognitionRunId,
   );
@@ -238,6 +246,8 @@ class ChapterData {
       'valid': valid,
       'shuffleChapters': shuffleChapters,
       if (undoChapters != null) 'undoChapters': edited(undoChapters!),
+      if (undoChapters != null && undoFollowsDownloaded)
+        'undoFollowsDownloaded': true,
       if (recognitionEpoch != 0) 'recognitionEpoch': recognitionEpoch,
       if (lastRecognitionRunId != null)
         'lastRecognitionRunId': lastRecognitionRunId,
@@ -294,6 +304,9 @@ class ChapterData {
           value['undoChapters'] == null
               ? null
               : MediaChapter.parse(value['undoChapters'], originals: originals),
+      undoFollowsDownloaded:
+          value['undoChapters'] != null &&
+          value['undoFollowsDownloaded'] == true,
       recognitionEpoch:
           value['recognitionEpoch'] is int
               ? value['recognitionEpoch'] as int

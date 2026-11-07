@@ -101,6 +101,7 @@ void main() {
           origin: ChapterOrigin.original,
         ),
       ],
+      undoFollowsDownloaded: true,
       checkedAt: DateTime.utc(2026, 11, 7),
       durationMs: 120000,
       shuffleChapters: true,
@@ -126,6 +127,7 @@ void main() {
     expect(describe(back.downloaded), describe(data.downloaded));
     expect(describe(back.custom), describe(data.custom));
     expect(describe(back.undoChapters), describe(data.undoChapters));
+    expect(back.undoFollowsDownloaded, isTrue);
     expect(back.recognitionEpoch, 3);
     expect(back.lastRecognitionRunId, 'run-42');
     expect(back.shuffleChapters, isTrue);
@@ -134,6 +136,39 @@ void main() {
 
     // Encoding what was read back gives the same text again.
     expect(back.encode(), data.encode());
+  });
+
+  test('an undo step back to an own list stores no follow flag', () {
+    const step = MediaChapter(
+      id: 'user-1',
+      title: 'Mine',
+      startMs: 0,
+      endMs: 1000,
+    );
+    const own = ChapterData(downloaded: youtube, undoChapters: [step]);
+    expect(own.toJson().containsKey('undoFollowsDownloaded'), isFalse);
+    expect(ChapterData.decode(own.encode()).undoFollowsDownloaded, isFalse);
+
+    // The flag only means something together with an undo step.
+    final orphan = ChapterData.fromJson({
+      ...const ChapterData(downloaded: youtube).toJson(),
+      'undoFollowsDownloaded': true,
+    });
+    expect(orphan.undoFollowsDownloaded, isFalse);
+    expect(orphan.toJson().containsKey('undoFollowsDownloaded'), isFalse);
+
+    const following = ChapterData(
+      downloaded: youtube,
+      undoChapters: [],
+      undoFollowsDownloaded: true,
+    );
+    final json = following.toJson();
+    expect(json['undoChapters'], isEmpty);
+    expect(json['undoFollowsDownloaded'], isTrue);
+    expect(
+      ChapterData.decode(following.encode()).undoFollowsDownloaded,
+      isTrue,
+    );
   });
 
   test('a user chapter that reuses no YouTube id needs no origin key', () {

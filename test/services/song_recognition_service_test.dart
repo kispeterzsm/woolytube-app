@@ -769,6 +769,52 @@ void main() {
     expect(await service.loadRun(track), isNull);
   });
 
+  test('after an undo, Recognize again gives a fresh run that applies, '
+      'from the saved lookups', () async {
+    final chapters = ChapterService(db, YtDlpService());
+    Future<bool> apply(RecognitionRun run) => chapters.applyRecognition(
+      track,
+      runId: run.runId,
+      epoch: run.epoch,
+      fileKey: run.fileKey,
+      durationMs: run.durationMs,
+      proposals: run.proposals.map((c) => c.toChapter()).toList(),
+    );
+    Future<ChapterData> data() async =>
+        ChapterData.decode((await db.getTrack(track.id))!.chaptersJson);
+
+    final first = await service.scan(track);
+    expect(await apply(first), isTrue);
+    await chapters.undo(track);
+    var current = await data();
+    // The file had no chapters of its own and follows YouTube again.
+    expect(current.custom, isNull);
+    expect(current.recognitionEpoch, first.epoch + 1);
+    expect(current.lastRecognitionRunId, first.runId);
+    // The undone run never applies again.
+    expect(await apply(first), isFalse);
+
+    final lookups = recognizer.calls.length;
+    final decodes = decoder.decodeCalls;
+    final again = await service.scan(track);
+    expect(recognizer.calls.length, lookups);
+    expect(decoder.decodeCalls, decodes);
+    expect(again.runId, isNot(first.runId));
+    expect(again.epoch, current.recognitionEpoch);
+    expect((await service.loadRun(track))!.runId, again.runId);
+    expect(again.proposals.length, first.proposals.length);
+
+    expect(await apply(again), isTrue);
+    current = await data();
+    expect(current.lastRecognitionRunId, again.runId);
+    expect(current.active.map((c) => c.title), [
+      'Artist — First song',
+      'Artist — Second song',
+    ]);
+    // Applied once per epoch: the same run is not applied twice.
+    expect(await apply(again), isFalse);
+  });
+
   test('the epoch is read when the scan starts', () async {
     recognizer.gate = Completer<void>();
     final future = service.scan(track);

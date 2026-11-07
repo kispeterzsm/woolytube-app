@@ -261,6 +261,7 @@ class MetadataService {
         // An undo step for dropped chapters no longer applies, and song
         // recognition results timed to a local file are stale.
         undoChapters: keepCustom ? old.undoChapters : null,
+        undoFollowsDownloaded: keepCustom && old.undoFollowsDownloaded,
         recognitionEpoch:
             wasLocal ? old.recognitionEpoch + 1 : old.recognitionEpoch,
         lastRecognitionRunId: old.lastRecognitionRunId,
@@ -1406,6 +1407,7 @@ for video) to keep a complete backup.
             checkedAt: old.checkedAt,
             durationMs: old.durationMs,
             undoChapters: old.valid ? null : old.undoChapters,
+            undoFollowsDownloaded: !old.valid && old.undoFollowsDownloaded,
             recognitionEpoch: old.recognitionEpoch + 1,
             lastRecognitionRunId: old.lastRecognitionRunId,
           ),

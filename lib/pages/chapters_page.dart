@@ -933,6 +933,34 @@ class _RecognitionSection extends ConsumerWidget {
             : null;
     final scanningOther = progress?.running == true && scan == null;
     final run = this.run;
+    // A run applies once per recognition epoch, which an undo, a reset or a
+    // replaced file moves on. Recognize again rebuilds a fresh run from the
+    // saved lookups, so only an appliable run is offered for review.
+    final applied = run != null && data.lastRecognitionRunId == run.runId;
+    final stale = run != null && data.recognitionEpoch != run.epoch;
+    // Applying keeps each proposal's id as the prefix of the chapters made
+    // from it, so this tells whether any of the run's chapters are listed.
+    final runShown =
+        run != null &&
+        data.active.any(
+          (c) => run.proposals.any((p) => c.id.startsWith('${p.id}-')),
+        );
+    final runHint =
+        run == null || scan != null
+            ? null
+            : stale
+            ? applied && !runShown
+                ? 'These results were taken back. Recognize again rebuilds '
+                    'them from saved lookups.'
+                : 'The chapters were undone or reset since this scan. '
+                    'Recognize again rebuilds its proposals from saved '
+                    'lookups.'
+            : applied
+            ? runShown
+                ? 'The results of the last scan are applied.'
+                : 'The results of the last scan were applied, then removed. '
+                    'Recognize again rebuilds them from saved lookups.'
+            : null;
     final hasAutomatic = data.active.any(
       (c) => c.origin == ChapterOrigin.auto && !c.manuallyEdited,
     );
@@ -1017,7 +1045,7 @@ class _RecognitionSection extends ConsumerWidget {
                     run == null ? 'Recognize songs' : 'Recognize again',
                   ),
                 ),
-              if (run != null && scan == null)
+              if (run != null && scan == null && runHint == null)
                 FilledButton.tonalIcon(
                   key: const ValueKey('review-proposals'),
                   onPressed: enabled ? () => onReview(run) : null,
@@ -1033,6 +1061,15 @@ class _RecognitionSection extends ConsumerWidget {
             ],
           ),
         ),
+        if (runHint != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Text(
+              runHint,
+              key: const ValueKey('recognition-run-hint'),
+              style: const TextStyle(color: Color(0xFF999999), fontSize: 12),
+            ),
+          ),
         if (scanningOther)
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 16),

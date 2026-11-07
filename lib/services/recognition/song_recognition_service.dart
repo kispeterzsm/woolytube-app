@@ -321,6 +321,20 @@ class SongRecognitionService {
   /// second call can never start alongside it.
   int? _activeTrackId;
 
+  /// The time stamp of the last run id handed out, so a rescan served from
+  /// cached lookups within the same millisecond still gets a new id (a run
+  /// id that was applied before is never applied again).
+  static int _lastRunStamp = 0;
+
+  static String _nextRunId() {
+    final stamp = math.max(
+      DateTime.now().millisecondsSinceEpoch,
+      _lastRunStamp + 1,
+    );
+    _lastRunStamp = stamp;
+    return stamp.toRadixString(36);
+  }
+
   Stream<RecognitionProgress> get progressStream => _progress.stream;
   RecognitionProgress? get currentProgress => _current;
   bool get isScanning => _activeTrackId != null;
@@ -522,7 +536,7 @@ class SongRecognitionService {
           phase: RecognitionPhase.estimating,
         ),
       );
-      final runId = DateTime.now().millisecondsSinceEpoch.toRadixString(36);
+      final runId = _nextRunId();
       final proposals = ChapterEstimator.estimate(
         runName: 'r$runId',
         durationMs: durationMs,

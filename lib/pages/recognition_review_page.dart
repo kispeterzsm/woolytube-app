@@ -166,15 +166,17 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
     if (fresh == null) throw StateError('The track no longer exists.');
     final run = widget.run;
     final current = ChapterData.decode(fresh.chaptersJson);
-    if (current.lastRecognitionRunId == run.runId) {
-      _showMessage('These proposals were already applied to this file.');
-      return;
-    }
     // Proposals are rebased onto edits made since the scan, but not onto an
     // undo, a reset or a replaced file: those bump the epoch, and a run
     // from another file content is refused by its key inside the apply.
+    // Checked before "already applied": after an undo of this very run its
+    // id is still the last one applied, but the way on is Recognize again.
     if (run.trackId != fresh.id || current.recognitionEpoch != run.epoch) {
-      throw const StaleRecognitionRun();
+      throw await _staleReason(fresh);
+    }
+    if (current.lastRecognitionRunId == run.runId) {
+      _showMessage('These proposals were already applied to this file.');
+      return;
     }
     final applied = await ref
         .read(chapterServiceProvider)
@@ -189,17 +191,30 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
     if (!mounted) return;
     if (!applied) {
       // Something changed between the check above and the apply.
-      final after = ChapterData.decode(
-        (await db.getTrack(fresh.id))?.chaptersJson,
-      );
-      if (after.lastRecognitionRunId == run.runId) {
+      final afterTrack = await db.getTrack(fresh.id);
+      if (afterTrack == null) throw StateError('The track no longer exists.');
+      final after = ChapterData.decode(afterTrack.chaptersJson);
+      if (after.recognitionEpoch == run.epoch &&
+          after.lastRecognitionRunId == run.runId) {
         _showMessage('These proposals were already applied to this file.');
         return;
       }
-      throw const StaleRecognitionRun();
+      throw await _staleReason(afterTrack);
     }
     await _stopPreview();
     if (mounted) Navigator.of(context).pop(_proposals.length);
+  }
+
+  /// Why the run no longer fits [track]: a replaced file needs a new scan,
+  /// undone or reset chapters only need the proposals rebuilt.
+  Future<StaleRecognitionRun> _staleReason(Track track) async {
+    if (widget.run.trackId != track.id ||
+        track.filePath != widget.track.filePath ||
+        await SongRecognitionService.currentFileKey(track) !=
+            widget.run.fileKey) {
+      return const StaleRecognitionRun.fileChanged();
+    }
+    return const StaleRecognitionRun();
   }
 
   @override

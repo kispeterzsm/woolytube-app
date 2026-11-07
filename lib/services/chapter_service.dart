@@ -298,6 +298,8 @@ class ChapterService {
       durationMs: durationMs ?? (old.valid ? old.durationMs : null),
       shuffleChapters: old.shuffleChapters,
       undoChapters: old.active,
+      // Undo goes back to following YouTube, not to a frozen copy of it.
+      undoFollowsDownloaded: old.custom == null,
       recognitionEpoch: old.recognitionEpoch,
       lastRecognitionRunId: old.lastRecognitionRunId,
     );
@@ -502,8 +504,11 @@ class ChapterService {
           old.undoChapters == null
               ? old
               : old.copyWith(
-                custom: old.undoChapters,
+                // A file that followed its YouTube chapters before the
+                // change follows them again, including later fetches.
+                custom: old.undoFollowsDownloaded ? null : old.undoChapters,
                 undoChapters: null,
+                undoFollowsDownloaded: false,
                 recognitionEpoch: old.recognitionEpoch + 1,
               ),
     );
@@ -517,6 +522,7 @@ class ChapterService {
       return old.copyWith(
         custom: null,
         undoChapters: old.active,
+        undoFollowsDownloaded: old.custom == null,
         recognitionEpoch: old.recognitionEpoch + 1,
       );
     });
@@ -624,7 +630,7 @@ class ChapterService {
   static Future<void> _checkRunFile(Track track, String fileKey) async {
     final current = await SongRecognitionService.currentFileKey(track);
     if (current == null || current != fileKey) {
-      throw const StaleRecognitionRun();
+      throw const StaleRecognitionRun.fileChanged();
     }
   }
 
@@ -649,16 +655,22 @@ List<(int, int)> subtractChapterRange((int, int) range, (int, int) removed) {
   ];
 }
 
-/// A recognition run that no longer fits the track: its file was replaced,
-/// or its chapters were undone or reset since the scan.
+/// A recognition run that no longer fits the track: its chapters were
+/// undone or reset since the scan, or its file was replaced
+/// ([StaleRecognitionRun.fileChanged]).
 class StaleRecognitionRun implements Exception {
+  static const chaptersChangedMessage =
+      'These proposals were made before the chapters were undone or reset, '
+      'so they were not applied. Use Recognize again: it rebuilds them from '
+      'saved lookups.';
+  static const fileChangedMessage =
+      'These proposals were made for an earlier version of this file, so '
+      'they were not applied. Use Recognize again to scan the file as it is '
+      'now.';
+
   final String message;
-  const StaleRecognitionRun([
-    this.message =
-        'This scan was made for an earlier version of this file or its '
-            'chapters, so nothing was changed. Scan the file again to get '
-            'suggestions for it as it is now.',
-  ]);
+  const StaleRecognitionRun([this.message = chaptersChangedMessage]);
+  const StaleRecognitionRun.fileChanged() : message = fileChangedMessage;
   @override
   String toString() => message;
 }
