@@ -9,6 +9,7 @@ import 'package:woolytube/providers/providers.dart';
 import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/playback_service.dart';
 import 'package:woolytube/services/recognition/chapter_estimator.dart';
+import 'package:woolytube/services/recognition/song_recognition_service.dart';
 
 import '../helpers/recognition_fakes.dart';
 import '../helpers/test_database.dart';
@@ -60,7 +61,7 @@ void main() {
           notes: [ChapterProposal.unrecognizedNote],
         ),
         proposal('b', 'Artist — B', 90000, 180000),
-      ]);
+      ], fileKey: (await SongRecognitionService.currentFileKey(track))!);
 
       int? applied;
       await tester.pumpWidget(
@@ -141,9 +142,133 @@ void main() {
       );
       expect(data.active.map((c) => c.title), ['Song A', 'Artist — B']);
       expect(data.active.every((c) => c.origin == ChapterOrigin.auto), isTrue);
+      // The typed title is the user's own work: later scans keep it.
+      expect(data.active.map((c) => c.manuallyEdited), [true, false]);
       expect(data.lastRecognitionRunId, 'run1');
       // Let transient UI timers (snack bars, transitions) run out before the
       // framework checks for leaks.
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 10));
+    });
+  });
+
+  testWidgets('Apply refuses a run from a replaced file or undone chapters', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 3200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.runAsync(() async {
+      final db = openTestDatabase();
+      addTearDown(db.close);
+      final dir = await Directory.systemTemp.createTemp('woolytube-review-');
+      addTearDown(() => dir.delete(recursive: true));
+      final media = await File(
+        '${dir.path}/00001_mix.m4a',
+      ).writeAsBytes([1, 2, 3]);
+      final playlist = await insertTestPlaylist(db, outputPath: dir.path);
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        status: 'complete',
+        filePath: media.path,
+        durationSeconds: 180,
+      );
+      const mine = MediaChapter(
+        id: 'mine',
+        title: 'Mine',
+        startMs: 0,
+        endMs: 60000,
+      );
+      await db.writeTrackChapters(
+        track.id,
+        const ChapterData(custom: [mine], durationMs: 180000),
+      );
+      final playback = PlaybackService(db, player: FakePlayer());
+      addTearDown(playback.dispose);
+      final recognition = fakeRecognitionService(db, dir);
+      addTearDown(recognition.dispose);
+      final run = fakeRun(track.id, [
+        proposal('a', 'Artist — A', 0, 90000),
+        proposal('b', 'Artist — B', 90000, 180000),
+      ], fileKey: (await SongRecognitionService.currentFileKey(track))!);
+
+      int? applied;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            databaseProvider.overrideWithValue(db),
+            playbackServiceProvider.overrideWithValue(playback),
+            songRecognitionServiceProvider.overrideWithValue(recognition),
+          ],
+          child: MaterialApp(
+            home: Builder(
+              builder:
+                  (context) => TextButton(
+                    onPressed: () async {
+                      applied = await Navigator.of(context).push<int>(
+                        MaterialPageRoute(
+                          builder:
+                              (_) =>
+                                  RecognitionReviewPage(track: track, run: run),
+                        ),
+                      );
+                    },
+                    child: const Text('Open'),
+                  ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Open'));
+      await settle(tester);
+      final stored = (await db.getTrack(track.id))!.chaptersJson;
+
+      Future<void> tapApply() async {
+        ScaffoldMessenger.of(
+          tester.element(find.text('Recognized songs')),
+        ).clearSnackBars();
+        await settle(tester);
+        await tester.tap(find.byKey(const ValueKey('apply-proposals')));
+        await settle(tester);
+      }
+
+      // The file was replaced at the same path after the scan.
+      await media.writeAsBytes([4, 5, 6]);
+      await tapApply();
+      expect(find.textContaining('Scan the file again'), findsOneWidget);
+      expect(applied, isNull);
+      expect((await db.getTrack(track.id))!.chaptersJson, stored);
+
+      // Same file, but the chapters were undone since the scan.
+      await media.writeAsBytes([1, 2, 3]);
+      await db.writeTrackChapters(
+        track.id,
+        const ChapterData(
+          custom: [mine],
+          durationMs: 180000,
+          recognitionEpoch: 1,
+        ),
+      );
+      final undone = (await db.getTrack(track.id))!.chaptersJson;
+      await tapApply();
+      expect(find.textContaining('Scan the file again'), findsOneWidget);
+      expect(applied, isNull);
+      expect((await db.getTrack(track.id))!.chaptersJson, undone);
+
+      // Back as the scan saw it: the run applies around the user's chapter.
+      await db.writeTrackChapters(
+        track.id,
+        const ChapterData(custom: [mine], durationMs: 180000),
+      );
+      await tapApply();
+      expect(applied, 2);
+      expect(
+        ChapterData.decode(
+          (await db.getTrack(track.id))!.chaptersJson,
+        ).active.map((c) => c.title),
+        ['Mine', 'Artist — A', 'Artist — B'],
+      );
       await tester.pumpWidget(const SizedBox());
       await tester.pump(const Duration(seconds: 10));
     });

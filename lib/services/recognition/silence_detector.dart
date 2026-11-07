@@ -27,31 +27,62 @@ class SilenceDetector {
   List<QuietInterval> detect(
     Int16List samples, {
     Duration offset = Duration.zero,
-  }) {
-    final limit = threshold;
-    final minimumSamples =
-        (minimumDuration.inMicroseconds * sampleRate / 1000000).round();
+  }) => (SilenceScan(this)..add(samples, offset: offset)).close();
+}
+
+/// Runs a [SilenceDetector] over consecutive chunks of one stretch of audio.
+///
+/// A quiet run that is still open at the end of a chunk carries over into
+/// the next one, so splitting a stretch into chunks finds the same
+/// intervals as one pass over the whole stretch, including gaps that
+/// straddle a chunk edge.
+class SilenceScan {
+  SilenceScan(this.detector)
+    : _limit = detector.threshold,
+      _minimumSamples =
+          (detector.minimumDuration.inMicroseconds *
+                  detector.sampleRate /
+                  1000000)
+              .round();
+
+  final SilenceDetector detector;
+  final int _limit;
+  final int _minimumSamples;
+  final _result = <QuietInterval>[];
+
+  /// Start of the open quiet run in seconds, and its length in samples.
+  double? _runStart;
+  int _runSamples = 0;
+  double _end = 0;
+
+  /// Adds the next chunk; [offset] is where its first sample lies.
+  void add(Int16List samples, {required Duration offset}) {
+    final rate = detector.sampleRate;
     final base = offset.inMicroseconds / 1000000;
-    final result = <QuietInterval>[];
-    int? runStart;
     for (var i = 0; i < samples.length; i++) {
       final s = samples[i];
-      final quiet = s < limit && s > -limit;
-      if (quiet) {
-        runStart ??= i;
-      } else if (runStart != null) {
-        if (i - runStart >= minimumSamples) {
-          result.add((base + runStart / sampleRate, base + i / sampleRate));
+      if (s < _limit && s > -_limit) {
+        _runStart ??= base + i / rate;
+        _runSamples++;
+      } else if (_runStart != null) {
+        if (_runSamples >= _minimumSamples) {
+          _result.add((_runStart!, base + i / rate));
         }
-        runStart = null;
+        _runStart = null;
+        _runSamples = 0;
       }
     }
-    if (runStart != null && samples.length - runStart >= minimumSamples) {
-      result.add((
-        base + runStart / sampleRate,
-        base + samples.length / sampleRate,
-      ));
+    _end = base + samples.length / rate;
+  }
+
+  /// The intervals found; a run still open is closed at the end of the last
+  /// chunk.
+  List<QuietInterval> close() {
+    if (_runStart != null && _runSamples >= _minimumSamples) {
+      _result.add((_runStart!, _end));
     }
-    return result;
+    _runStart = null;
+    _runSamples = 0;
+    return _result;
   }
 }

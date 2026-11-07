@@ -8,6 +8,7 @@ import 'package:woolytube/providers/playback_providers.dart';
 import 'package:woolytube/providers/providers.dart';
 import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/playback_service.dart';
+import 'package:woolytube/services/recognition/song_recognition_service.dart';
 
 import '../helpers/recognition_fakes.dart';
 import '../helpers/test_database.dart';
@@ -78,7 +79,7 @@ void main() {
         fakeRun(track.id, [
           proposal('a', 'Artist — A', 0, 90000),
           proposal('b', 'Artist — B', 90000, 180000),
-        ]),
+        ], fileKey: (await SongRecognitionService.currentFileKey(track))!),
         track,
       );
 

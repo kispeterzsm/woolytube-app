@@ -1241,7 +1241,19 @@ class _ChapterEditDialogState extends State<ChapterEditDialog> {
         ...widget.chapters.where((c) => c.id != chapter.id),
         chapter,
       ]..sort((a, b) => a.startMs.compareTo(b.startMs));
-      validateChapters(entries, durationMs: widget.durationMs);
+      validateChapters(entries);
+      // Only the end typed here is checked against the length. The other
+      // chapters were accepted before; one that ends a little past a later,
+      // rounder length estimate must not block editing this one.
+      final durationMs = widget.durationMs;
+      if (durationMs != null &&
+          durationMs > 0 &&
+          chapter.endMs > durationMs &&
+          chapter.endMs != widget.chapter?.endMs) {
+        throw const FormatException(
+          'Chapters must stay within the media duration.',
+        );
+      }
       Navigator.pop(context, chapter);
     } on FormatException catch (e) {
       setState(() => _error = e.message);

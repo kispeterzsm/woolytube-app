@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../database/database.dart';
 import '../providers/playback_providers.dart';
 import '../providers/providers.dart';
+import '../services/chapter_service.dart';
 import '../services/chapters.dart';
 import '../services/playback_service.dart';
 import '../services/recognition/chapter_estimator.dart';
@@ -29,7 +30,11 @@ class RecognitionReviewPage extends ConsumerStatefulWidget {
 }
 
 class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
-  late final List<ChapterProposal> _proposals = [...widget.run.proposals];
+  // Runs saved by older builds can hold empty proposals; they never apply.
+  late final List<ChapterProposal> _proposals = [
+    for (final p in widget.run.proposals)
+      if (p.endMs > p.startMs) p,
+  ];
   bool _busy = false;
   PlaybackService? _previewPlayer;
   Timer? _previewStop;
@@ -59,6 +64,11 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  void _showMessage(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
   }
 
   Future<void> _persist() async {
@@ -110,9 +120,7 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
       builder: (_) => _RenameDialog(initial: _proposals[index].title),
     );
     if (title == null || title.isEmpty) return;
-    setState(
-      () => _proposals[index] = _proposals[index].copyWith(title: title),
-    );
+    setState(() => _proposals[index] = _proposals[index].renamed(title));
     await _persist();
   }
 
@@ -140,6 +148,8 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
       notes: {...left.notes, ...right.notes}.toList(),
       firstSampleMs: left.firstSampleMs,
       lastSampleMs: right.lastSampleMs,
+      // The user decided these belong together; later scans keep it.
+      edited: true,
     );
     setState(() => _proposals.replaceRange(index, index + 2, [merged]));
     await _persist();
@@ -154,26 +164,39 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
     final db = ref.read(databaseProvider);
     final fresh = await db.getTrack(widget.track.id);
     if (fresh == null) throw StateError('The track no longer exists.');
-    // The user is looking at the current chapters, so the proposals are
-    // rebased onto whatever edits exist now.
-    final epoch = ChapterData.decode(fresh.chaptersJson).recognitionEpoch;
+    final run = widget.run;
+    final current = ChapterData.decode(fresh.chaptersJson);
+    if (current.lastRecognitionRunId == run.runId) {
+      _showMessage('These proposals were already applied to this file.');
+      return;
+    }
+    // Proposals are rebased onto edits made since the scan, but not onto an
+    // undo, a reset or a replaced file: those bump the epoch, and a run
+    // from another file content is refused by its key inside the apply.
+    if (run.trackId != fresh.id || current.recognitionEpoch != run.epoch) {
+      throw const StaleRecognitionRun();
+    }
     final applied = await ref
         .read(chapterServiceProvider)
         .applyRecognition(
           fresh,
-          runId: widget.run.runId,
-          epoch: epoch,
-          durationMs: widget.run.durationMs,
+          runId: run.runId,
+          epoch: run.epoch,
+          fileKey: run.fileKey,
+          durationMs: run.durationMs,
           proposals: _proposals.map((p) => p.toChapter()).toList(),
         );
     if (!mounted) return;
     if (!applied) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('These proposals were already applied to this file.'),
-        ),
+      // Something changed between the check above and the apply.
+      final after = ChapterData.decode(
+        (await db.getTrack(fresh.id))?.chaptersJson,
       );
-      return;
+      if (after.lastRecognitionRunId == run.runId) {
+        _showMessage('These proposals were already applied to this file.');
+        return;
+      }
+      throw const StaleRecognitionRun();
     }
     await _stopPreview();
     if (mounted) Navigator.of(context).pop(_proposals.length);
@@ -264,7 +287,7 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
             ),
           for (var i = 0; i < _proposals.length; i++)
             _ProposalCard(
-              key: ValueKey('proposal-${_proposals[i].id}'),
+              key: ValueKey('proposal-$i-${_proposals[i].id}'),
               proposal: _proposals[i],
               busy: _busy,
               canMerge: i + 1 < _proposals.length,

@@ -6,6 +6,8 @@ import 'package:woolytube/database/database.dart';
 import 'package:woolytube/services/chapter_service.dart';
 import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/metadata_service.dart';
+import 'package:woolytube/services/recognition/chapter_estimator.dart';
+import 'package:woolytube/services/recognition/song_recognition_service.dart';
 import 'package:woolytube/services/ytdlp_service.dart';
 import '../helpers/test_database.dart';
 
@@ -593,6 +595,7 @@ void main() {
         runId: 'run-1',
         epoch: 0,
         durationMs: 60000,
+        fileKey: null,
         proposals: [
           chapter('song-1', 0, 28000),
           chapter('song-2', 28000, 55000),
@@ -628,6 +631,7 @@ void main() {
         runId: 'run-1',
         epoch: 0,
         durationMs: 60000,
+        fileKey: null,
         proposals: [
           chapter('b', 25000, 70000),
           chapter('a', 0, 30000),
@@ -650,6 +654,7 @@ void main() {
           epoch: 3,
           durationMs: 60000,
           proposals: proposals,
+          fileKey: null,
         ),
         isFalse,
       );
@@ -660,6 +665,7 @@ void main() {
           epoch: 0,
           durationMs: 60000,
           proposals: proposals,
+          fileKey: null,
         ),
         isTrue,
       );
@@ -670,6 +676,7 @@ void main() {
           epoch: 0,
           durationMs: 60000,
           proposals: proposals,
+          fileKey: null,
         ),
         isFalse,
       );
@@ -683,11 +690,234 @@ void main() {
           epoch: 0,
           durationMs: 60000,
           proposals: proposals,
+          fileKey: null,
         ),
         isFalse,
       );
       expect((await data()).active.map((c) => c.id), ['mine']);
     });
+
+    test(
+      'applyRecognition refuses a run made from other file content',
+      () async {
+        await seed([chapter('mine', 0, 10000)]);
+        final before = (await db.getTrack(track.id))!.chaptersJson;
+        final key = (await SongRecognitionService.currentFileKey(track))!;
+        expect(key, startsWith('${track.id}-'));
+        Future<bool> apply(String runId) => service.applyRecognition(
+          track,
+          runId: runId,
+          epoch: 0,
+          durationMs: 60000,
+          fileKey: key,
+          proposals: [
+            chapter('song', 10000, 60000, origin: ChapterOrigin.auto),
+          ],
+        );
+
+        // The file was replaced at the same path after the scan.
+        await media.writeAsBytes([9, 9, 9, 9, 9]);
+        await expectLater(apply('run-1'), throwsA(isA<StaleRecognitionRun>()));
+        expect((await db.getTrack(track.id))!.chaptersJson, before);
+
+        // Gone altogether.
+        await media.delete();
+        await expectLater(apply('run-1'), throwsA(isA<StaleRecognitionRun>()));
+        expect((await db.getTrack(track.id))!.chaptersJson, before);
+
+        // The original content back (a byte-identical redownload) applies.
+        await media.writeAsBytes([0, 1, 2, 3, 255]);
+        expect(await apply('run-1'), isTrue);
+        expect((await data()).active.map((c) => c.id), [
+          'mine',
+          'song-10000-60000',
+        ]);
+      },
+    );
+
+    test('applyRecognition keeps protected chapters that end past the probed '
+        'length', () async {
+      // YouTube chapters end at the whole-second length; the file probes
+      // 20 ms shorter.
+      await service.refresh(track);
+      await db.writeTrackChapters(
+        track.id,
+        (await data()).copyWith(
+          custom: [
+            chapter('youtube-0-0', 0, 30000, origin: ChapterOrigin.original),
+            chapter('old-auto', 30000, 45000, origin: ChapterOrigin.auto),
+            chapter('youtube-1-45000', 45000, 60000),
+          ],
+        ),
+      );
+      expect(
+        await service.applyRecognition(
+          track,
+          runId: 'run-1',
+          epoch: 0,
+          durationMs: 59980,
+          fileKey: null,
+          proposals: [chapter('song', 0, 60000, origin: ChapterOrigin.auto)],
+        ),
+        isTrue,
+      );
+      final current = await data();
+      expect(current.active.map((c) => (c.id, c.startMs, c.endMs)).toList(), [
+        ('youtube-0-0', 0, 30000),
+        ('song-30000-45000', 30000, 45000),
+        ('youtube-1-45000', 45000, 60000),
+      ]);
+      expect(current.durationMs, 60000);
+      // Later edits still work on it.
+      await service.delete(track, 'song-30000-45000');
+      await service.undo(track);
+      expect((await data()).active, hasLength(3));
+
+      // A proposal past the probed length is clipped to the real file.
+      await seed(const [], durationMs: 70000);
+      await service.applyRecognition(
+        track,
+        runId: 'run-2',
+        epoch: (await data()).recognitionEpoch,
+        durationMs: 59980,
+        fileKey: null,
+        proposals: [chapter('song', 0, 70000, origin: ChapterOrigin.auto)],
+      );
+      expect((await data()).active.single.endMs, 59980);
+    });
+
+    test('edits after a shorter YouTube length still delete, undo, remove '
+        'and rename', () async {
+      // Recognition stored the probed length; a later YouTube refresh
+      // stores its whole-second length, 512 ms shorter.
+      await seed([
+        chapter('a', 0, 30000, origin: ChapterOrigin.auto),
+        chapter('b', 30000, 45000, origin: ChapterOrigin.auto),
+        chapter('c', 45000, 60512, origin: ChapterOrigin.auto),
+      ], durationMs: 60512);
+      await service.refresh(track);
+      expect((await data()).durationMs, 60000);
+      expect((await data()).active.last.endMs, 60512);
+
+      await service.delete(track, 'b');
+      expect((await data()).active.map((c) => c.id), ['a', 'c']);
+      await service.undo(track);
+      expect((await data()).active.map((c) => c.id), ['a', 'b', 'c']);
+      await service.rename(track, 'c', 'Last song');
+      expect((await data()).active.last.title, 'Last song');
+      await service.removeAutomatic(track);
+      expect((await data()).active.map((c) => c.id), ['c']);
+      await service.undo(track);
+      expect((await data()).active, hasLength(3));
+      // Retitling the last chapter keeps its stored end.
+      await service.save(
+        track,
+        const MediaChapter(
+          id: 'a',
+          title: 'First song',
+          startMs: 0,
+          endMs: 30000,
+        ),
+      );
+      await service.restore(track);
+      expect((await data()).custom, isNull);
+      await service.undo(track);
+      expect((await data()).active.first.title, 'First song');
+      // A new end past the length is still refused.
+      await service.delete(track, 'c');
+      await expectLater(
+        service.save(
+          track,
+          const MediaChapter(
+            id: 'new',
+            title: 'Too long',
+            startMs: 45000,
+            endMs: 60600,
+          ),
+        ),
+        throwsFormatException,
+      );
+    });
+
+    test(
+      'renamed and merged review proposals apply as the user\'s work',
+      () async {
+        ChapterProposal draft(String id, int startMs, int endMs) =>
+            ChapterProposal(
+              id: id,
+              title: 'Unrecognized section',
+              startMs: startMs,
+              endMs: endMs,
+              trackKey: null,
+              referenceId: null,
+              sampleCount: 1,
+              referenceSampleCount: 0,
+              referenceStartMs: null,
+              referenceSpreadMs: null,
+              boundaryMethod: 'sample-bracket',
+              selectedQuietIntervalMs: null,
+              nearestSilenceMs: null,
+              distanceFromSilenceEndMs: null,
+              consistentReference: false,
+              notes: const [
+                ChapterProposal.unrecognizedNote,
+                ChapterProposal.provisionalBoundaryNote,
+              ],
+              firstSampleMs: startMs,
+              lastSampleMs: startMs,
+            );
+        final renamed = draft('a', 0, 20000).renamed('Real song');
+        expect(renamed.notes, [ChapterProposal.provisionalBoundaryNote]);
+        expect(
+          ChapterProposal.fromJson(renamed.toJson()).edited,
+          isTrue,
+          reason: 'review edits survive a restart',
+        );
+        final merged = draft('b', 20000, 40000).copyWith(edited: true);
+        final untouched = draft('c', 40000, 60000);
+        await seed(const []);
+        await service.applyRecognition(
+          track,
+          runId: 'run-1',
+          epoch: 0,
+          durationMs: 60000,
+          fileKey: null,
+          proposals: [
+            for (final p in [renamed, merged, untouched]) p.toChapter(),
+          ],
+        );
+        var current = (await data()).active;
+        expect(current.map((c) => c.manuallyEdited), [true, true, false]);
+        expect(current.first.title, 'Real song');
+        expect(
+          current.first.reviewReasons.where((r) => r.startsWith('Name:')),
+          isEmpty,
+        );
+        expect(current.first.protectedFromRecognition, isTrue);
+
+        // A later scan replaces only the untouched one.
+        await service.applyRecognition(
+          track,
+          runId: 'run-2',
+          epoch: 0,
+          durationMs: 60000,
+          fileKey: null,
+          proposals: [chapter('again', 0, 60000, origin: ChapterOrigin.auto)],
+        );
+        current = (await data()).active;
+        expect(current.map((c) => c.title), [
+          'Real song',
+          'Unrecognized section',
+          'again',
+        ]);
+        expect(current.last.startMs, 40000);
+        await service.removeAutomatic(track);
+        expect((await data()).active.map((c) => c.title), [
+          'Real song',
+          'Unrecognized section',
+        ]);
+      },
+    );
 
     test('legacy custom chapters infer origin and edits from downloads', () {
       final parsed = ChapterData.fromJson({

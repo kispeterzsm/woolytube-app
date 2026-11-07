@@ -32,6 +32,35 @@ void main() {
     expect(const SilenceDetector().threshold, 327);
   });
 
+  test('chunks give the same intervals as one pass, across edges', () {
+    final whole = synthetic();
+    const detector = SilenceDetector();
+    final expected = detector.detect(whole, offset: const Duration(seconds: 5));
+    // Edges inside the 0.5 s gap, inside the too-short 0.1 s gap, and
+    // inside the quiet tail.
+    for (final edges in [
+      [3.2, 6.05, 9.0],
+      [1.0, 3.45, 6.02, 6.08, 8.5],
+    ]) {
+      final scan = SilenceScan(detector);
+      var from = 0;
+      for (final edge in [...edges, 10.0]) {
+        final to = (edge * 16000).round();
+        scan.add(
+          Int16List.sublistView(whole, from, to),
+          offset: Duration(microseconds: 5000000 + from * 1000000 ~/ 16000),
+        );
+        from = to;
+      }
+      final chunked = scan.close();
+      expect(chunked.length, expected.length);
+      for (var i = 0; i < expected.length; i++) {
+        expect(chunked[i].$1, closeTo(expected[i].$1, 1e-9));
+        expect(chunked[i].$2, closeTo(expected[i].$2, 1e-9));
+      }
+    }
+  });
+
   test('reports runs from first quiet to first loud sample, and a tail', () {
     final silences = const SilenceDetector().detect(synthetic());
     expect(silences.length, 2);

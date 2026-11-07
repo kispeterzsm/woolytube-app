@@ -811,17 +811,33 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         val path = args["path"] as? String
         val startMs = (args["startMs"] as? Number)?.toLong() ?: 0L
         val durationMs = (args["durationMs"] as? Number)?.toLong() ?: 0L
-        if (path == null || durationMs <= 0) {
+        if (path == null || durationMs <= 0 || startMs < 0) {
             result.error("INVALID_ARGS", "path and durationMs are required", null)
+            return
+        }
+        // The whole window is held in memory (32 KB per second); Dart asks
+        // for at most about a minute at a time.
+        if (durationMs > AudioWindowDecoder.MAX_WINDOW_MS) {
+            result.error(
+                "INVALID_ARGS",
+                "durationMs $durationMs exceeds ${AudioWindowDecoder.MAX_WINDOW_MS}",
+                null
+            )
             return
         }
         scope.launch {
             try {
                 val pcm = AudioWindowDecoder.decodeWindow(path, startMs, durationMs)
                 withContext(Dispatchers.Main) { result.success(pcm) }
-            } catch (e: Exception) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                // Also an OutOfMemoryError or a codec Error: Dart gets an
+                // error instead of the whole process going down.
                 Log.w(TAG, "Audio window decode failed", e)
-                withContext(Dispatchers.Main) { result.error("DECODE_ERROR", e.message, null) }
+                withContext(Dispatchers.Main) {
+                    result.error("DECODE_ERROR", e.message ?: e.javaClass.simpleName, null)
+                }
             }
         }
     }
@@ -836,7 +852,9 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             try {
                 val duration = AudioWindowDecoder.probeDurationMs(path)
                 withContext(Dispatchers.Main) { result.success(duration) }
-            } catch (e: Exception) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
                 Log.w(TAG, "Duration probe failed", e)
                 withContext(Dispatchers.Main) { result.error("PROBE_ERROR", e.message, null) }
             }

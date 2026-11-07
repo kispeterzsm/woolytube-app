@@ -43,6 +43,10 @@ class ChapterProposal {
   final int firstSampleMs;
   final int lastSampleMs;
 
+  /// The user renamed or merged this proposal on the review page. Applied,
+  /// it counts as their own work, which later scans never replace.
+  final bool edited;
+
   const ChapterProposal({
     required this.id,
     required this.title,
@@ -62,31 +66,46 @@ class ChapterProposal {
     required this.notes,
     required this.firstSampleMs,
     required this.lastSampleMs,
+    this.edited = false,
   });
 
   bool get recognized => trackKey != null;
 
-  ChapterProposal copyWith({String? title, int? startMs, int? endMs}) =>
-      ChapterProposal(
-        id: id,
-        title: title ?? this.title,
-        startMs: startMs ?? this.startMs,
-        endMs: endMs ?? this.endMs,
-        trackKey: trackKey,
-        referenceId: referenceId,
-        sampleCount: sampleCount,
-        referenceSampleCount: referenceSampleCount,
-        referenceStartMs: referenceStartMs,
-        referenceSpreadMs: referenceSpreadMs,
-        boundaryMethod: boundaryMethod,
-        selectedQuietIntervalMs: selectedQuietIntervalMs,
-        nearestSilenceMs: nearestSilenceMs,
-        distanceFromSilenceEndMs: distanceFromSilenceEndMs,
-        consistentReference: consistentReference,
-        notes: notes,
-        firstSampleMs: firstSampleMs,
-        lastSampleMs: lastSampleMs,
-      );
+  ChapterProposal copyWith({
+    String? title,
+    int? startMs,
+    int? endMs,
+    List<String>? notes,
+    bool? edited,
+  }) => ChapterProposal(
+    id: id,
+    title: title ?? this.title,
+    startMs: startMs ?? this.startMs,
+    endMs: endMs ?? this.endMs,
+    trackKey: trackKey,
+    referenceId: referenceId,
+    sampleCount: sampleCount,
+    referenceSampleCount: referenceSampleCount,
+    referenceStartMs: referenceStartMs,
+    referenceSpreadMs: referenceSpreadMs,
+    boundaryMethod: boundaryMethod,
+    selectedQuietIntervalMs: selectedQuietIntervalMs,
+    nearestSilenceMs: nearestSilenceMs,
+    distanceFromSilenceEndMs: distanceFromSilenceEndMs,
+    consistentReference: consistentReference,
+    notes: notes ?? this.notes,
+    firstSampleMs: firstSampleMs,
+    lastSampleMs: lastSampleMs,
+    edited: edited ?? this.edited,
+  );
+
+  /// This proposal with a title the user typed: it counts as edited, and the
+  /// notes that doubted the recognised name no longer apply.
+  ChapterProposal renamed(String title) => copyWith(
+    title: title,
+    edited: true,
+    notes: notes.where((note) => !_nameNotes.contains(note)).toList(),
+  );
 
   /// The chapter this proposal becomes when applied. Review reasons keep the
   /// prefixes the chapter service uses to clear them on rename or retiming.
@@ -96,6 +115,7 @@ class ChapterProposal {
     startMs: startMs,
     endMs: endMs,
     origin: ChapterOrigin.auto,
+    manuallyEdited: edited,
     reviewReasons: reviewReasons,
   );
 
@@ -144,6 +164,7 @@ class ChapterProposal {
     'notes': notes,
     'firstSampleMs': firstSampleMs,
     'lastSampleMs': lastSampleMs,
+    'edited': edited,
   };
 
   static (int, int)? _pair(Object? value) =>
@@ -171,6 +192,7 @@ class ChapterProposal {
         notes: (json['notes'] as List? ?? const []).cast<String>(),
         firstSampleMs: json['firstSampleMs'] as int,
         lastSampleMs: json['lastSampleMs'] as int,
+        edited: json['edited'] == true,
       );
 }
 
@@ -335,10 +357,43 @@ class ChapterEstimator {
         ),
       );
     }
-    for (var i = 0; i + 1 < chapters.length; i++) {
-      chapters[i] = chapters[i].copyWith(endMs: chapters[i + 1].startMs);
+    final kept = _withIncreasingStarts(chapters, durationMs);
+    for (var i = 0; i + 1 < kept.length; i++) {
+      kept[i] = kept[i].copyWith(endMs: kept[i + 1].startMs);
     }
-    return chapters;
+    return kept;
+  }
+
+  /// Two neighbouring groups can snap to the same quiet gap, or the later
+  /// one to an earlier gap, which would give an empty or backwards chapter
+  /// and two proposals with the same ID. Of such a pair the one with less
+  /// evidence is dropped (the earlier one on a tie), so every proposal has a
+  /// positive length and a unique start, and therefore a unique ID. The
+  /// first proposal always starts the file and is never dropped.
+  static List<ChapterProposal> _withIncreasingStarts(
+    List<ChapterProposal> chapters,
+    int durationMs,
+  ) {
+    int strength(ChapterProposal c) =>
+        (c.recognized ? 1 << 20 : 0) + c.sampleCount;
+    final kept = <ChapterProposal>[];
+    for (final chapter in chapters) {
+      if (kept.isEmpty) {
+        kept.add(chapter);
+        continue;
+      }
+      if (chapter.startMs >= durationMs) continue;
+      var dropped = false;
+      while (kept.isNotEmpty && chapter.startMs <= kept.last.startMs) {
+        if (kept.length == 1 || strength(kept.last) > strength(chapter)) {
+          dropped = true;
+          break;
+        }
+        kept.removeLast();
+      }
+      if (!dropped) kept.add(chapter);
+    }
+    return kept;
   }
 
   static (int, int) _toMs(QuietInterval s) => (

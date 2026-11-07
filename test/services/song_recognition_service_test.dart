@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/services/chapter_service.dart';
 import 'package:woolytube/services/chapters.dart';
@@ -181,6 +183,7 @@ void main() {
           track,
           runId: again.runId,
           epoch: again.epoch,
+          fileKey: again.fileKey,
           durationMs: again.durationMs,
           proposals: again.proposals.map((c) => c.toChapter()).toList(),
         ),
@@ -235,6 +238,172 @@ void main() {
     },
   );
 
+  test('a second scan is refused before the first one awaits', () async {
+    final first = service.scan(track);
+    // Claimed synchronously, before the duration probe answers.
+    expect(service.isScanning, isTrue);
+    expect(service.scanningTrackId, track.id);
+    await expectLater(service.scan(track), throwsA(isA<StateError>()));
+    final run = await first;
+    expect(run.proposals.length, 2);
+    // Every window was looked up once, by the first scan only.
+    expect(recognizer.calls.length, 6);
+    expect(service.isScanning, isFalse);
+    expect(service.scanningTrackId, isNull);
+    // The claim is released, so a new scan can start.
+    await service.scan(track);
+  });
+
+  test('cancel right after starting stops before any lookup', () async {
+    final future = service.scan(track);
+    service.cancel();
+    await expectLater(future, throwsA(isA<RecognitionCancelled>()));
+    expect(recognizer.calls, isEmpty);
+    expect(service.isScanning, isFalse);
+  });
+
+  test('the silence pass decodes long stretches in bounded chunks', () async {
+    // 600 s where every sample finds a different song than the one before,
+    // so all change brackets merge into one 574 s stretch. A 0.3 s gap
+    // straddles the edge between the second and third chunk (146 s); each
+    // side alone is shorter than the detector's 0.2 s minimum.
+    final gapDecoder = _GapDecoder(
+      durationMs: 600000,
+      gaps: const [(145850, 146150)],
+    );
+    final starts = service.sampleStartsMs(600000);
+    final gapService = SongRecognitionService(
+      db,
+      decoder: gapDecoder,
+      recognizer: FakeRecognizer(gapDecoder, {
+        for (var i = 0; i < starts.length; i++)
+          starts[i]: song(i.isEven ? 'A' : 'B', 'Song $i', 10),
+      }),
+      rootDirectory: () async => dir,
+    );
+    addTearDown(gapService.dispose);
+
+    await gapService.scan(track);
+
+    final silenceCalls = gapDecoder.calls.where((c) => c.$2 != 12000).toList();
+    expect(silenceCalls, isNotEmpty);
+    for (final (_, durationMs) in gapDecoder.calls) {
+      expect(
+        durationMs,
+        lessThanOrEqualTo(
+          SongRecognitionService.silenceChunkMs +
+              SongRecognitionService.silencePrerollMs,
+        ),
+      );
+    }
+    // 26 s .. 600 s in 60 s chunks; later chunks start a second early.
+    expect(silenceCalls.length, 10);
+    expect(silenceCalls.first, (26000, 60000));
+    expect(silenceCalls[1], (85000, 61000));
+    expect(silenceCalls.last, (565000, 35000));
+
+    final cached = File(
+      p.join(
+        (await _runDirs(dir)).single.path,
+        'silences',
+        '26000-600000.json',
+      ),
+    );
+    final intervals = [
+      for (final s in jsonDecode(await cached.readAsString()) as List)
+        ((s[0] as num).toDouble(), (s[1] as num).toDouble()),
+    ];
+    expect(intervals.length, 1);
+    expect(intervals.single.$1, closeTo(145.85, 0.001));
+    expect(intervals.single.$2, closeTo(146.15, 0.001));
+  });
+
+  test('a scan removes lookups of deleted tracks and replaced files', () async {
+    final other = await insertTestTrack(
+      db,
+      playlistId: track.playlistId,
+      index: 2,
+      videoId: 'video-2',
+      filePath: track.filePath,
+      status: 'complete',
+    );
+    final root = Directory(p.join(dir.path, 'recognition'));
+    Future<Directory> folder(String name) async {
+      final d = Directory(p.join(root.path, name));
+      await File(
+        p.join(d.path, 'samples', '30000.json'),
+      ).create(recursive: true);
+      return d;
+    }
+
+    final deletedTrack = await folder('9999-4096-0123456789abcdef');
+    final oldContent = await folder('${track.id}-10-0123456789abcdef');
+    final otherTrack = await folder('${other.id}-10-0123456789abcdef');
+    final foreign = await folder('notes');
+    final looseFile = File(p.join(root.path, '9999-1-0123456789abcdef'));
+    await looseFile.writeAsString('x');
+
+    await service.scan(track);
+
+    expect(await deletedTrack.exists(), isFalse);
+    expect(await oldContent.exists(), isFalse);
+    expect(await otherTrack.exists(), isTrue);
+    expect(await foreign.exists(), isTrue);
+    expect(await looseFile.exists(), isTrue);
+    expect(await File(track.filePath!).exists(), isTrue);
+    expect(await service.loadRun(track), isNotNull);
+  });
+
+  test('a run is never stored for or loaded from a replaced file', () async {
+    final run = await service.scan(track);
+    expect(await SongRecognitionService.currentFileKey(track), run.fileKey);
+    await File(track.filePath!).writeAsBytes(List.filled(4096, 9));
+    expect(
+      await SongRecognitionService.currentFileKey(track),
+      isNot(run.fileKey),
+    );
+    // Review edits saved after the replacement must not land in the new
+    // file's cache, where they would be offered as its own.
+    await service.saveRun(run.copyWith(proposals: const []), track);
+    expect(await service.loadRun(track), isNull);
+    // A run file that names other content is ignored, too.
+    final newKey = (await SongRecognitionService.currentFileKey(track))!;
+    final misplaced = File(p.join(dir.path, 'recognition', newKey, 'run.json'));
+    await misplaced.parent.create(recursive: true);
+    await misplaced.writeAsString(jsonEncode(run.toJson()));
+    expect(await service.loadRun(track), isNull);
+  });
+
+  test('the epoch is read when the scan starts', () async {
+    recognizer.gate = Completer<void>();
+    final future = service.scan(track);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    // An undo while the scan runs bumps the epoch.
+    await db.writeTrackChapters(
+      track.id,
+      const ChapterData(custom: [], recognitionEpoch: 1),
+    );
+    recognizer.gate!.complete();
+    final run = await future;
+    expect(run.epoch, 0);
+    final chapters = ChapterService(db, YtDlpService());
+    expect(
+      await chapters.applyRecognition(
+        track,
+        runId: run.runId,
+        epoch: run.epoch,
+        fileKey: run.fileKey,
+        durationMs: run.durationMs,
+        proposals: run.proposals.map((c) => c.toChapter()).toList(),
+      ),
+      isFalse,
+    );
+    expect(
+      ChapterData.decode((await db.getTrack(track.id))!.chaptersJson).custom,
+      isEmpty,
+    );
+  });
+
   group('YtDlpScanForegroundNotifier', () {
     test('never stops the service while a download owns it', () async {
       final ytdlp = _ServiceRecorder();
@@ -283,6 +452,44 @@ void main() {
       expect(ytdlp.events, isEmpty);
     });
   });
+}
+
+/// The recognition cache folders under [root].
+Future<List<Directory>> _runDirs(Directory root) async => [
+  await for (final e in Directory(p.join(root.path, 'recognition')).list())
+    if (e is Directory) e,
+];
+
+/// A tone with silent [gaps] (in ms) that records every decode request as
+/// (startMs, durationMs).
+class _GapDecoder extends FakeDecoder {
+  _GapDecoder({required this.durationMs, required this.gaps});
+  final int durationMs;
+  final List<(int, int)> gaps;
+  final calls = <(int, int)>[];
+
+  @override
+  Future<Int16List> decode(
+    String path, {
+    required Duration start,
+    required Duration duration,
+  }) async {
+    decodeCalls++;
+    lastStartMs = start.inMilliseconds;
+    calls.add((start.inMilliseconds, duration.inMilliseconds));
+    final startSample = start.inMilliseconds * 16;
+    return pcmFromGenerator(duration.inMilliseconds * 16, (i) {
+      final ms = (startSample + i) / 16;
+      for (final (from, to) in gaps) {
+        if (ms >= from && ms < to) return 0;
+      }
+      return (8000 * sin(2 * pi * 440 * (startSample + i) / 16000)).round();
+    });
+  }
+
+  @override
+  Future<Duration?> probeDuration(String path) async =>
+      Duration(milliseconds: durationMs);
 }
 
 class _ServiceRecorder extends YtDlpService {

@@ -210,14 +210,28 @@ class SongRecognitionService {
   final int firstStartSeconds;
   final int silenceMarginSeconds;
 
+  /// Longest stretch the silence pass decodes in one platform call. Quiet
+  /// gaps are measured around song changes, and back-to-back changes merge
+  /// into one stretch that can cover most of a long mix; decoding that in
+  /// one piece would hold hundreds of MB of PCM at once.
+  static const silenceChunkMs = 60000;
+
+  /// Decoded ahead of every later chunk and dropped, so the decoder's
+  /// start-up output never lands inside the stretch.
+  static const silencePrerollMs = 1000;
+
   final _progress = StreamController<RecognitionProgress>.broadcast();
   RecognitionProgress? _current;
   bool _cancelRequested = false;
 
+  /// The track of the scan in progress. Set before scan() first awaits, so a
+  /// second call can never start alongside it.
+  int? _activeTrackId;
+
   Stream<RecognitionProgress> get progressStream => _progress.stream;
   RecognitionProgress? get currentProgress => _current;
-  bool get isScanning => _current?.running ?? false;
-  int? get scanningTrackId => isScanning ? _current!.trackId : null;
+  bool get isScanning => _activeTrackId != null;
+  int? get scanningTrackId => _activeTrackId;
 
   void cancel() {
     if (isScanning) _cancelRequested = true;
@@ -231,21 +245,28 @@ class SongRecognitionService {
   Future<RecognitionRun?> loadRun(Track track) async {
     final path = _filePath(track);
     if (path == null) return null;
-    final file = File(p.join(await _runDirectory(track, path), 'run.json'));
+    final dir = await _runDirectory(track, path);
+    final file = File(p.join(dir, 'run.json'));
     if (!await file.exists()) return null;
     try {
-      return RecognitionRun.fromJson(
+      final run = RecognitionRun.fromJson(
         jsonDecode(await file.readAsString()) as Map<String, dynamic>,
       );
+      // Only a run made from exactly this file content belongs here.
+      return run.fileKey == p.basename(dir) ? run : null;
     } catch (_) {
       return null;
     }
   }
 
+  /// Stores review edits of [run]. Does nothing when [track]'s file is no
+  /// longer the one the run was made from, so a run never lands in the
+  /// cache of a replacement file.
   Future<void> saveRun(RecognitionRun run, Track track) async {
     final path = _filePath(track);
     if (path == null) return;
     final dir = Directory(await _runDirectory(track, path));
+    if (run.fileKey != p.basename(dir.path)) return;
     await dir.create(recursive: true);
     await File(
       p.join(dir.path, 'run.json'),
@@ -282,6 +303,7 @@ class SongRecognitionService {
   }
 
   Future<RecognitionRun> scan(Track track) async {
+    // Checked and claimed synchronously: nothing may await between the two.
     if (isScanning) {
       throw StateError('Another recognition scan is running.');
     }
@@ -289,10 +311,27 @@ class SongRecognitionService {
     if (path == null) {
       throw StateError('The file for "${track.title}" was not found.');
     }
+    _activeTrackId = track.id;
     _cancelRequested = false;
+    try {
+      return await _scan(track, path);
+    } finally {
+      _activeTrackId = null;
+      _cancelRequested = false;
+    }
+  }
+
+  Future<RecognitionRun> _scan(Track track, String path) async {
     final label = 'songs in ${track.title}';
+    // Read before sampling: an undo, reset or file replacement while the
+    // scan runs bumps it, and the run is then not applied.
+    final epoch =
+        ChapterData.decode(
+          (await _db.getTrack(track.id))?.chaptersJson,
+        ).recognitionEpoch;
     final durationMs = await _durationMs(track, path);
     final dir = Directory(await _runDirectory(track, path));
+    await _pruneStaleCaches(track, dir);
     await dir.create(recursive: true);
     final starts = sampleStartsMs(durationMs);
     _emit(
@@ -388,8 +427,6 @@ class SongRecognitionService {
         samples: samples,
         quietIntervals: quiet,
       );
-      final fresh = await _db.getTrack(track.id);
-      final epoch = ChapterData.decode(fresh?.chaptersJson).recognitionEpoch;
       final run = RecognitionRun(
         runId: runId,
         trackId: track.id,
@@ -504,12 +541,7 @@ class SongRecognitionService {
         }
       }
       if (intervals == null) {
-        final pcm = await _decoder.decode(
-          path,
-          start: Duration(milliseconds: from),
-          duration: Duration(milliseconds: to - from),
-        );
-        intervals = _silence.detect(pcm, offset: Duration(milliseconds: from));
+        intervals = await _detectSilence(path, from, to);
         await cached.writeAsString(
           jsonEncode([
             for (final s in intervals) [s.$1, s.$2],
@@ -530,6 +562,65 @@ class SongRecognitionService {
     return result;
   }
 
+  /// Quiet intervals in [fromMs, toMs), decoded in chunks of at most
+  /// [silenceChunkMs] (plus the pre-roll) with the detector's open run
+  /// carried across chunk edges.
+  Future<List<QuietInterval>> _detectSilence(
+    String path,
+    int fromMs,
+    int toMs,
+  ) async {
+    final scan = SilenceScan(_silence);
+    for (var start = fromMs; start < toMs; start += silenceChunkMs) {
+      _checkCancelled();
+      final end = math.min(toMs, start + silenceChunkMs);
+      final preroll = start == fromMs ? 0 : math.min(silencePrerollMs, start);
+      var pcm = await _decoder.decode(
+        path,
+        start: Duration(milliseconds: start - preroll),
+        duration: Duration(milliseconds: end - start + preroll),
+      );
+      if (preroll > 0) {
+        final skip = math.min(
+          pcm.length,
+          preroll * _silence.sampleRate ~/ 1000,
+        );
+        pcm = Int16List.sublistView(pcm, skip);
+      }
+      scan.add(pcm, offset: Duration(milliseconds: start));
+    }
+    return scan.close();
+  }
+
+  /// Folders of this service's cache are named `<trackId>-<fileKey>`.
+  static final _cacheFolderName = RegExp(r'^(\d+)-\d+-[0-9a-f]{16}$');
+
+  /// Removes cached lookups nobody can use any more: those of tracks that
+  /// are no longer in the library, and those of earlier content of
+  /// [track]'s file. Only folders directly inside the recognition cache
+  /// whose names this service makes are touched. A failure never stops the
+  /// scan.
+  Future<void> _pruneStaleCaches(Track track, Directory current) async {
+    try {
+      final root = current.parent;
+      if (!await root.exists()) return;
+      final liveIds = {for (final t in await _db.getAllTracks()) t.id};
+      final keep = p.basename(current.path);
+      await for (final entity in root.list(followLinks: false)) {
+        if (entity is! Directory) continue;
+        final name = p.basename(entity.path);
+        final match = _cacheFolderName.firstMatch(name);
+        if (match == null || name == keep) continue;
+        final id = int.parse(match.group(1)!);
+        if (id == track.id || !liveIds.contains(id)) {
+          await entity.delete(recursive: true);
+        }
+      }
+    } catch (_) {
+      // Stale lookups only take space.
+    }
+  }
+
   Future<int> _durationMs(Track track, String path) async {
     final probed = await _decoder.probeDuration(path);
     if (probed != null && probed > Duration.zero) return probed.inMilliseconds;
@@ -546,11 +637,26 @@ class SongRecognitionService {
 
   Future<String> _runDirectory(Track track, String path) async {
     final root = await _rootDirectory();
-    return p.join(
-      root.path,
-      'recognition',
-      '${track.id}-${await fileKey(path)}',
-    );
+    return p.join(root.path, 'recognition', await _runKey(track.id, path));
+  }
+
+  /// The [RecognitionRun.fileKey] a run made from [path] gets.
+  static Future<String> _runKey(int trackId, String path) async =>
+      '$trackId-${await fileKey(path)}';
+
+  /// The [RecognitionRun.fileKey] a scan of [track]'s file as it is now
+  /// would get, or null when the file is missing or unreadable. A run whose
+  /// key differs was made from other content and must not be applied.
+  static Future<String?> currentFileKey(Track track) async {
+    final stored = track.filePath;
+    if (stored == null) return null;
+    try {
+      final path = MetadataService.resolveStoredFilePath(stored);
+      if (path == null || !await File(path).exists()) return null;
+      return await _runKey(track.id, path);
+    } on FileSystemException {
+      return null;
+    }
   }
 
   /// Cheap content key: size plus a hash of the first and last 256 KiB, so a

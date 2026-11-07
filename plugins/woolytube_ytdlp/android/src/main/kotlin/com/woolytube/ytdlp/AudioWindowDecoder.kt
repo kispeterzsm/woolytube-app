@@ -17,6 +17,13 @@ object AudioWindowDecoder {
     private const val TARGET_RATE = 16000
     private const val TIMEOUT_US = 10_000L
 
+    /**
+     * Longest window one call decodes. The PCM is held in memory (32 KB per
+     * second); the Dart side asks for 12 s fingerprint windows and silence
+     * chunks of about a minute.
+     */
+    const val MAX_WINDOW_MS = 5 * 60 * 1000L
+
     fun probeDurationMs(path: String): Long {
         val retriever = MediaMetadataRetriever()
         try {
@@ -29,6 +36,7 @@ object AudioWindowDecoder {
     }
 
     fun decodeWindow(path: String, startMs: Long, durationMs: Long): ByteArray {
+        require(durationMs in 1..MAX_WINDOW_MS) { "durationMs $durationMs out of range" }
         val extractor = MediaExtractor()
         try {
             extractor.setDataSource(path)
@@ -55,16 +63,22 @@ object AudioWindowDecoder {
             try {
                 codec.configure(format, null, null, 0)
                 codec.start()
-                return drain(codec, extractor, startUs, endUs, format)
+                return drain(codec, extractor, startUs, endUs, durationMs, format)
             } finally {
                 try {
                     codec.stop()
-                } catch (_: Exception) {
+                } catch (ignored: Exception) {
                 }
-                codec.release()
+                try {
+                    codec.release()
+                } catch (ignored: Exception) {
+                }
             }
         } finally {
-            extractor.release()
+            try {
+                extractor.release()
+            } catch (ignored: Exception) {
+            }
         }
     }
 
@@ -73,9 +87,12 @@ object AudioWindowDecoder {
         extractor: MediaExtractor,
         startUs: Long,
         endUs: Long,
+        durationMs: Long,
         inputFormat: MediaFormat
     ): ByteArray {
-        val output = ByteArrayOutputStream()
+        // Sized for the whole window up front (2 bytes per 16 kHz sample),
+        // so the buffer does not grow by doubling.
+        val output = ByteArrayOutputStream((durationMs * TARGET_RATE / 1000 * 2).toInt() + 1024)
         val info = MediaCodec.BufferInfo()
         var sampleRate = inputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
         var channels = inputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)

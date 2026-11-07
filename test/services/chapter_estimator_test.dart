@@ -66,6 +66,62 @@ void main() {
     });
   }
 
+  group('neighbours snapping to one quiet gap', () {
+    RecognitionSample sample(int startMs, String? key, [double offset = 0]) =>
+        RecognitionSample(
+          sampleStartMs: startMs,
+          sampleDurationMs: 12000,
+          result: ShazamResult.fromJson({
+            if (key != null) ...{
+              'track': {'key': key, 'title': 'Song $key', 'subtitle': 'Artist'},
+              'matches': [
+                {'id': 'ref-$key', 'offset': offset},
+              ],
+            },
+          }),
+        );
+
+    // Song A, then one unrecognized sample straddling the change to B. B's
+    // catalog offsets put its start at 152 s.
+    final samples = [
+      sample(30000, 'A', 30),
+      sample(90000, 'A', 90),
+      sample(150000, null),
+      sample(210000, 'B', 58),
+      sample(270000, 'B', 118),
+    ];
+
+    for (final (name, silences) in [
+      // Both groups pick the same gap: the unrecognized one would be empty.
+      ('same gap', <QuietInterval>[(155, 160)]),
+      // The unrecognized group takes the longer, later gap and B an earlier
+      // one: the unrecognized one would run backwards.
+      ('crossing gaps', <QuietInterval>[(152, 152.5), (159, 161)]),
+    ]) {
+      test('$name gives no empty proposals and unique IDs', () {
+        final proposals = ChapterEstimator.estimate(
+          runName: 'r1',
+          durationMs: 300000,
+          samples: samples,
+          quietIntervals: silences,
+        );
+        expect(proposals.map((p) => p.title), [
+          'Artist — Song A',
+          'Artist — Song B',
+        ]);
+        expect(proposals.every((p) => p.endMs > p.startMs), isTrue);
+        expect(proposals.map((p) => p.id).toSet(), hasLength(2));
+        expect(proposals.first.startMs, 0);
+        expect(proposals.last.endMs, 300000);
+        expect(proposals.first.endMs, proposals.last.startMs);
+        validateChapters(
+          proposals.map((p) => p.toChapter()).toList(),
+          durationMs: 300000,
+        );
+      });
+    }
+  });
+
   test('review reasons carry the prefixes the chapter service clears', () {
     const proposal = ChapterProposal(
       id: 'x',

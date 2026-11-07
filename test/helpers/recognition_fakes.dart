@@ -67,10 +67,11 @@ RecognitionRun fakeRun(
   int trackId,
   List<ChapterProposal> proposals, {
   int durationMs = 180000,
+  String fileKey = 'key',
 }) => RecognitionRun(
   runId: 'run1',
   trackId: trackId,
-  fileKey: 'key',
+  fileKey: fileKey,
   epoch: 0,
   durationMs: durationMs,
   completedAt: DateTime(2026),

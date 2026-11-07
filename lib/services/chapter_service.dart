@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import '../database/database.dart';
 import 'chapters.dart';
 import 'metadata_service.dart';
+import 'recognition/song_recognition_service.dart';
 import 'ytdlp_service.dart';
 import 'playlist_service.dart';
 
@@ -225,25 +226,60 @@ class ChapterService {
     );
   }
 
+  /// Runs [action] on the stored chapters in one transaction. [verify], when
+  /// given, runs first inside the same transaction and can refuse by
+  /// throwing.
   Future<bool> _change(
     Track track,
-    ChapterData Function(ChapterData, Track) action,
-  ) async {
+    ChapterData Function(ChapterData, Track) action, {
+    Future<void> Function(Track fresh)? verify,
+  }) async {
     var changed = false;
     await db.transaction(() async {
       final fresh = await db.getTrack(track.id);
       if (fresh == null || fresh.filePath != track.filePath) {
         throw StateError('The media changed. Reopen its chapters.');
       }
+      if (verify != null) await verify(fresh);
       final old = ChapterData.decode(fresh.chaptersJson);
       final next = action(old, fresh);
       if (identical(old, next)) return;
-      validateChapters(next.active, durationMs: next.durationMs);
+      _validateEdit(old, next);
       await db.writeTrackChapters(track.id, next);
       changed = true;
     });
     if (changed) await persist(track.playlistId);
     return changed;
+  }
+
+  /// Checks the chapters an edit leaves behind.
+  ///
+  /// Order, overlaps, titles and IDs are always checked. The media length is
+  /// only checked for chapter ends the edit introduces: an end that is
+  /// already stored (or in the undo snapshot) was accepted before, and a
+  /// later, shorter length estimate (a YouTube refresh rounds to whole
+  /// seconds) must never stop the user from deleting, undoing or removing
+  /// chapters.
+  static void _validateEdit(ChapterData old, ChapterData next) {
+    validateChapters(next.active);
+    final durationMs = next.durationMs;
+    if (durationMs == null || durationMs <= 0) return;
+    final knownEnds = <int>{
+      if (old.valid)
+        for (final c in [
+          ...old.downloaded,
+          ...?old.custom,
+          ...?old.undoChapters,
+        ])
+          c.endMs,
+    };
+    for (final chapter in next.active) {
+      if (chapter.endMs > durationMs && !knownEnds.contains(chapter.endMs)) {
+        throw const FormatException(
+          'Chapters must stay within the media duration.',
+        );
+      }
+    }
   }
 
   ChapterData _edited(
@@ -492,17 +528,25 @@ class ChapterService {
 
   /// Rebases a completed scan onto the current edits.
   ///
-  /// Chapters the user created or edited are never moved; proposals are cut
-  /// around them. Earlier untouched recognition results are replaced wherever
-  /// a new proposal covers them. Proposals that overlap each other or run past
-  /// the file are clipped rather than rejected, so one odd match cannot throw
-  /// away a whole run. A run is applied once per [epoch], which edits bump.
+  /// Chapters the user created or edited are never moved or clipped;
+  /// proposals are cut around them. Earlier untouched recognition results
+  /// are replaced wherever a new proposal covers them. Proposals that overlap
+  /// each other or run past the file are clipped rather than rejected, so one
+  /// odd match cannot throw away a whole run. A run is applied once per
+  /// [epoch], which undo, reset and file replacement bump; a stale epoch or
+  /// a repeated run returns false.
+  ///
+  /// [fileKey] is the run's [RecognitionRun.fileKey]. When given, the
+  /// track's current file must still have that content key, checked inside
+  /// the transaction; otherwise [StaleRecognitionRun] is thrown and nothing
+  /// changes. The review page always passes it.
   Future<bool> applyRecognition(
     Track track, {
     required String runId,
     required int epoch,
     required int durationMs,
     required List<MediaChapter> proposals,
+    required String? fileKey,
   }) => _change(track, (old, _) {
     if (old.recognitionEpoch != epoch ||
         old.lastRecognitionRunId == runId ||
@@ -530,13 +574,20 @@ class ChapterService {
             startMs: range.$1,
             endMs: range.$2,
             origin: ChapterOrigin.auto,
-            manuallyEdited: false,
+            // Titles typed or merges made on the review page are the user's
+            // work and stay protected from later scans.
+            manuallyEdited: proposal.manuallyEdited,
           ),
         );
       }
     }
 
-    final addedRanges = added.map((c) => (c.startMs, c.endMs)).toList();
+    // Earlier automatic results also stay inside the file; protected
+    // chapters are kept exactly as they are, even past the probed length.
+    final addedRanges = [
+      ...added.map((c) => (c.startMs, c.endMs)),
+      (durationMs, 1 << 40),
+    ];
     final retained = <MediaChapter>[...protected];
     for (final previous in old.active.where(
       (c) => !c.protectedFromRecognition,
@@ -556,11 +607,26 @@ class ChapterService {
         );
       }
     }
+    // A YouTube chapter ends at a whole-second length and a user chapter at
+    // the player's length; either can be a little past the probed length.
+    // The stored length covers them, so later edits are not refused.
+    final storedDurationMs = protected.fold<int>(
+      durationMs,
+      (longest, c) => math.max(longest, c.endMs),
+    );
     return _edited(old, [
       ...retained,
       ...added,
-    ], durationMs: durationMs).copyWith(lastRecognitionRunId: runId);
-  });
+    ], durationMs: storedDurationMs).copyWith(lastRecognitionRunId: runId);
+  }, verify: fileKey == null ? null : (fresh) => _checkRunFile(fresh, fileKey));
+
+  /// Refuses a run made from other content than [track]'s file has now.
+  static Future<void> _checkRunFile(Track track, String fileKey) async {
+    final current = await SongRecognitionService.currentFileKey(track);
+    if (current == null || current != fileKey) {
+      throw const StaleRecognitionRun();
+    }
+  }
 
   static List<(int, int)> _subtractAll(
     (int, int) range,
@@ -581,6 +647,20 @@ List<(int, int)> subtractChapterRange((int, int) range, (int, int) removed) {
     if (removed.$1 > range.$1) (range.$1, removed.$1),
     if (removed.$2 < range.$2) (removed.$2, range.$2),
   ];
+}
+
+/// A recognition run that no longer fits the track: its file was replaced,
+/// or its chapters were undone or reset since the scan.
+class StaleRecognitionRun implements Exception {
+  final String message;
+  const StaleRecognitionRun([
+    this.message =
+        'This scan was made for an earlier version of this file or its '
+            'chapters, so nothing was changed. Scan the file again to get '
+            'suggestions for it as it is now.',
+  ]);
+  @override
+  String toString() => message;
 }
 
 class _MediaChanged implements Exception {
