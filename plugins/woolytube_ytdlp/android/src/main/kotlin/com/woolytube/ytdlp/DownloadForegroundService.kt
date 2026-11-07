@@ -90,6 +90,22 @@ class DownloadForegroundService : Service() {
                 instance?.onStateChanged(previous, next)
             }
         }
+
+        /** The Cancel button appears or goes; main thread only. */
+        fun cancelAvailabilityChanged() {
+            instance?.redrawProgress()
+        }
+
+        /**
+         * A Cancel that no engine handled while a run still goes on: show
+         * its progress again instead of "Stopping download…". Main thread.
+         */
+        fun cancelNotHandled() {
+            instance?.let {
+                it.cancelling = false
+                it.redrawProgress()
+            }
+        }
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
@@ -218,6 +234,12 @@ class DownloadForegroundService : Service() {
         notifyNow(buildProgressNotification(next))
     }
 
+    private fun redrawProgress() {
+        if (!startedForeground || cancelling) return
+        lastNotifyAtMs = SystemClock.elapsedRealtime()
+        notifyNow(buildProgressNotification(state))
+    }
+
     override fun onDestroy() {
         if (instance === this) instance = null
         try {
@@ -284,17 +306,21 @@ class DownloadForegroundService : Service() {
             null
         }
         val text = current.trackTitle ?: position ?: "Preparing…"
-        return baseBuilder()
+        val builder = baseBuilder()
             .setContentTitle("Downloading ${current.playlistName}")
             .setContentText(text)
             .setSubText(if (current.trackTitle != null) position else null)
             .setProgress(100, current.progress, current.totalTracks <= 0)
-            .addAction(
+        // Only when the running engine stops cleanly on Cancel (see
+        // YtDlpPlugin.isCancelAvailable).
+        if (YtDlpPlugin.isCancelAvailable()) {
+            builder.addAction(
                 android.R.drawable.ic_menu_close_clear_cancel,
                 "Cancel",
                 cancelIntent
             )
-            .build()
+        }
+        return builder.build()
     }
 
     private fun buildCancellingNotification(): Notification {

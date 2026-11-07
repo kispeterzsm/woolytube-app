@@ -67,6 +67,9 @@ class AutoUpdateWorker(
         private const val APP_ENGINE_POLL_MS = 2_000L
         private const val PING_TIMEOUT_MS = 2_000L
 
+        /** How often a delegated run checks that the app engine still exists. */
+        private const val ENGINE_ALIVE_POLL_MS = 5_000L
+
         private const val LOCK_FILE_NAME = "download.lock"
         private const val BACKGROUND_LOCK_OWNER = "background"
 
@@ -181,15 +184,25 @@ class AutoUpdateWorker(
         Log.i(TAG, "Running auto-update in the app engine")
         var answered = false
         try {
-            val reply = withTimeoutOrNull(budget) {
-                callDart(engine, AUTO_UPDATE_CHANNEL, "runAutoUpdate", mapOf("budgetMs" to budget))
-                    .await()
-            }
+            val pending = callDart(
+                engine,
+                AUTO_UPDATE_CHANNEL,
+                "runAutoUpdate",
+                mapOf("budgetMs" to budget)
+            )
+            val reply = awaitWhileEngineAlive(engine, pending, deadline)
             answered = reply != null
             return when (reply) {
                 null -> {
-                    Log.w(TAG, "App engine did not finish in time; stopping it")
-                    stopAppEngineRun(engine)
+                    if (withContext(Dispatchers.Main) { appEngine() !== engine }) {
+                        // The engine went away (audio_service disposed it).
+                        // Its reply will never come; unfinished tracks are
+                        // still pending for the next run.
+                        Log.w(TAG, "App engine went away during the update")
+                    } else {
+                        Log.w(TAG, "App engine did not finish in time; stopping it")
+                        stopAppEngineRun(engine)
+                    }
                     answered = true
                     Delegation.DONE
                 }
@@ -212,7 +225,28 @@ class AutoUpdateWorker(
         }
     }
 
+    /**
+     * Waits for [pending] until [deadline], checking every few seconds that
+     * [engine] still runs. Null when the time ran out or the engine is gone:
+     * a destroyed engine never answers, and waiting the whole budget would
+     * hold WorkManager's wake lock for nothing.
+     */
+    private suspend fun awaitWhileEngineAlive(
+        engine: FlutterEngine,
+        pending: CompletableDeferred<Reply>,
+        deadline: Long
+    ): Reply? {
+        while (true) {
+            val left = remaining(deadline)
+            if (left <= 0) return null
+            val reply = withTimeoutOrNull(minOf(left, ENGINE_ALIVE_POLL_MS)) { pending.await() }
+            if (reply != null) return reply
+            if (withContext(Dispatchers.Main) { appEngine() !== engine }) return null
+        }
+    }
+
     private suspend fun stopAppEngineRun(engine: FlutterEngine) {
+        if (withContext(Dispatchers.Main) { appEngine() !== engine }) return
         withTimeoutOrNull(STOP_GRACE_MS) {
             callDart(engine, AUTO_UPDATE_CHANNEL, "stopAutoUpdate", null).await()
         }
@@ -221,18 +255,26 @@ class AutoUpdateWorker(
     private suspend fun runHeadless(deadline: Long): Result {
         val done = CompletableDeferred<Result>()
         var handOver = false
-        val engine = withContext(Dispatchers.Main) {
-            if (headlessEngine != null) {
-                Log.w(TAG, "A previous background run is still active; skipping")
-                return@withContext null
-            }
-            Log.i(TAG, "Starting headless auto-update engine")
-            // The process-wide loader; `new FlutterLoader()` re-initialised
-            // the engine's global settings on every run.
-            val loader = FlutterInjector.instance().flutterLoader()
-            loader.startInitialization(applicationContext)
-            loader.ensureInitializationComplete(applicationContext, null)
-            FlutterEngine(applicationContext).also { created ->
+        // Assigned inside the Main block. withContext may throw a
+        // cancellation after that block has run (WorkManager stopped the
+        // worker during the slow cold start), so the clean-up below must
+        // cover the creation too, or the engine and its lock would leak and
+        // every later run in this process would be skipped.
+        var engine: FlutterEngine? = null
+        try {
+            val started = withContext(Dispatchers.Main) {
+                if (headlessEngine != null) {
+                    Log.w(TAG, "A previous background run is still active; skipping")
+                    return@withContext false
+                }
+                Log.i(TAG, "Starting headless auto-update engine")
+                // The process-wide loader; `new FlutterLoader()` re-initialised
+                // the engine's global settings on every run.
+                val loader = FlutterInjector.instance().flutterLoader()
+                loader.startInitialization(applicationContext)
+                loader.ensureInitializationComplete(applicationContext, null)
+                val created = FlutterEngine(applicationContext)
+                engine = created
                 headlessEngine = created
                 MethodChannel(created.dartExecutor.binaryMessenger, CONTROL_CHANNEL)
                     .setMethodCallHandler { call, result ->
@@ -253,10 +295,10 @@ class AutoUpdateWorker(
                 created.dartExecutor.executeDartEntrypoint(
                     DartExecutor.DartEntrypoint(loader.findAppBundlePath(), "backgroundMain")
                 )
+                true
             }
-        } ?: return Result.success()
+            if (!started) return Result.success()
 
-        try {
             val result = withTimeoutOrNull(remaining(deadline)) {
                 var finished: Result? = null
                 while (finished == null && !handOver) {
@@ -273,7 +315,7 @@ class AutoUpdateWorker(
             if (result != null) return result
         } finally {
             withContext(NonCancellable + Dispatchers.Main) {
-                shutDownHeadless(engine, done)
+                engine?.let { shutDownHeadless(it, done) }
             }
         }
         if (handOver && remaining(deadline) > STOP_GRACE_MS) {
@@ -282,27 +324,32 @@ class AutoUpdateWorker(
                 else -> Result.success()
             }
         }
+        // Out of time without a report. Tracks that were not reached are
+        // still pending, so the next hourly run picks them up; a retry
+        // would only add a backoff run on top of it.
         return Result.success()
     }
 
     /** Stops the headless run if it is still going, then destroys the engine. */
     private suspend fun shutDownHeadless(engine: FlutterEngine, done: CompletableDeferred<Result>) {
-        if (!done.isCompleted) {
-            try {
-                MethodChannel(engine.dartExecutor.binaryMessenger, CONTROL_CHANNEL)
-                    .invokeMethod("stop", null)
-            } catch (e: Exception) {
-                Log.w(TAG, "Could not ask the background run to stop", e)
-            }
-            withTimeoutOrNull(STOP_GRACE_MS) { done.await() }
-        }
-        val finishedCleanly = done.isCompleted
+        var finishedCleanly = done.isCompleted
         try {
+            if (!finishedCleanly && engine.dartExecutor.isExecutingDart) {
+                try {
+                    MethodChannel(engine.dartExecutor.binaryMessenger, CONTROL_CHANNEL)
+                        .invokeMethod("stop", null)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not ask the background run to stop", e)
+                }
+                withTimeoutOrNull(STOP_GRACE_MS) { done.await() }
+            }
+            finishedCleanly = done.isCompleted
             engine.destroy()
         } catch (e: Exception) {
             Log.w(TAG, "Destroying the background engine failed", e)
+        } finally {
+            if (headlessEngine === engine) headlessEngine = null
         }
-        if (headlessEngine === engine) headlessEngine = null
         if (!finishedCleanly) releaseAbandonedBackgroundLock()
         // The app engine (if any) holds its own database connection; tell it
         // to re-read what this run wrote.

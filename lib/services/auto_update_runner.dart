@@ -267,11 +267,24 @@ class AutoUpdateRunner {
 
   /// Stops the run: the current download is cancelled (its track goes back
   /// to the queue) and nothing new starts.
+  ///
+  /// The flag is set before the first await, so a caller that does not wait
+  /// for the clean-up still stops the loop.
   Future<void> requestStop() async {
     if (_stopRequested) return;
     _stopRequested = true;
     log.info('Scheduled update: stop requested');
     await _cancelQuietly();
+  }
+
+  /// Someone else stopped the download this run started (the app's Stop
+  /// button, or the app closing). That means "stop", not "skip this
+  /// playlist": nothing new starts.
+  void stopAfterOutsideCancel() {
+    // The runner's own cancels (stop, time budget) are already accounted for.
+    if (_stopRequested || _outOfTime) return;
+    _stopRequested = true;
+    log.info('Scheduled update: the download was stopped in the app');
   }
 
   Future<AutoUpdateReport> run(List<Playlist> due) async {
@@ -475,14 +488,23 @@ class ForegroundAutoUpdateBridge {
   }
 
   /// Calls from the native download notification.
+  ///
+  /// The reply only says that this engine took the request; native shows
+  /// "Stopping download…" until the run ends. Waiting for the clean-up (it
+  /// rewrites the playlist's metadata) could outlast native's fallback, which
+  /// then tore the notification down while Dart was still working.
   Future<Object?> handleControlCall(MethodCall call) async {
     switch (call.method) {
+      case 'ping':
+        // Native shows the notification's Cancel button only for engines
+        // that answer this.
+        return true;
       case 'cancelRequestedByUser':
         final runner = _runner;
         if (runner != null) {
-          await runner.requestStop();
+          unawaited(runner.requestStop());
         } else {
-          await _downloads.cancelActiveDownloads();
+          unawaited(_downloads.cancelActiveDownloads());
         }
         return true;
       default:
@@ -501,10 +523,13 @@ class ForegroundAutoUpdateBridge {
       return const AutoUpdateReport(AutoUpdateStatus.busy);
     }
     final hard = _hardBudgetFor(budget);
-    final runner = AutoUpdateRunner(
+    late final AutoUpdateRunner runner;
+    runner = AutoUpdateRunner(
       syncPlaylist: _playlists.syncPlaylist,
       reloadPlaylist: _db.getPlaylist,
-      downloadPlaylist: _downloads.downloadPlaylist,
+      downloadPlaylist:
+          (playlist, {required sourceChecked}) =>
+              _downloadPlaylist(runner, playlist, sourceChecked: sourceChecked),
       cancelDownload: _downloads.cancelActiveDownloads,
       activeTrackId: () => _downloads.activeTrackId,
       blockedReason: () async {
@@ -537,6 +562,30 @@ class ForegroundAutoUpdateBridge {
     } finally {
       _runner = null;
     }
+  }
+
+  /// Downloads [playlist] with the app's own service. The app's Stop button
+  /// (and the app closing) cancel that service directly, which only ends
+  /// this one playlist; the run must end too, or the next due playlist
+  /// starts right after the user pressed Stop.
+  Future<void> _downloadPlaylist(
+    AutoUpdateRunner runner,
+    Playlist playlist, {
+    required bool sourceChecked,
+  }) async {
+    // DownloadService emits `idle` from downloadPlaylist only when the run
+    // was cancelled. Events are delivered in microtasks queued before the
+    // service's own clean-up awaits, so they arrive before it returns.
+    var cancelled = false;
+    final subscription = _downloads.progressStream.listen((progress) {
+      if (progress.status == DownloadProgress.idle.status) cancelled = true;
+    });
+    try {
+      await _downloads.downloadPlaylist(playlist, sourceChecked: sourceChecked);
+    } finally {
+      await subscription.cancel();
+    }
+    if (cancelled) runner.stopAfterOutsideCancel();
   }
 
   static Duration _hardBudgetFor(Duration? budget) {

@@ -74,6 +74,14 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
         fun hasActiveDownloads(): Boolean = activeProcessIds.isNotEmpty()
 
+        /**
+         * Whether an engine with a run in progress can stop it cleanly. The
+         * notification shows its Cancel button only then; otherwise Cancel
+         * could only kill the process, and Dart would record a failed track
+         * and carry on with the next one.
+         */
+        fun isCancelAvailable(): Boolean = serviceRequesters.any { it.cancelSupported }
+
         fun cancelAllActiveDownloads(): Int {
             val ids = activeProcessIds.toList()
             for (processId in ids) {
@@ -118,8 +126,15 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                         }
                     }
                     if (!handled.get()) {
-                        serviceRequesters.clear()
-                        stopDownloadService(appContext)
+                        // Nobody stopped a run. Keep the notification and its
+                        // wake lock for an engine that still has one going
+                        // (its stopDownloadService ends it); stop the service
+                        // only when no run is left.
+                        if (serviceRequesters.isEmpty()) {
+                            stopDownloadService(appContext)
+                        } else {
+                            DownloadForegroundService.cancelNotHandled()
+                        }
                     }
                 }, delay)
             }
@@ -148,6 +163,10 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
     /** Info calls of this engine; killed when the engine goes away. */
     private val ownedInfoProcessIds = ConcurrentHashMap.newKeySet<String>()
+
+    /** This engine's Dart side answers "cancelRequestedByUser". */
+    @Volatile
+    private var cancelSupported = false
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         context = binding.applicationContext
@@ -211,6 +230,33 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "updateDownloadServiceProgress" -> handleUpdateDownloadServiceProgress(call.arguments as Map<*, *>, result)
             "stopDownloadService" -> handleStopDownloadService(result)
             else -> result.notImplemented()
+        }
+    }
+
+    /**
+     * Asks this engine's Dart side whether it handles the notification's
+     * Cancel ("ping" on the control channel), and shows the button once it
+     * does. Called on the main thread.
+     */
+    private fun probeCancelSupport() {
+        if (cancelSupported) return
+        try {
+            controlChannel.invokeMethod(
+                "ping",
+                null,
+                object : MethodChannel.Result {
+                    override fun success(result: Any?) {
+                        cancelSupported = true
+                        DownloadForegroundService.cancelAvailabilityChanged()
+                    }
+
+                    override fun error(code: String, message: String?, details: Any?) {}
+
+                    override fun notImplemented() {}
+                }
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not ask whether downloads can be cancelled", e)
         }
     }
 
@@ -722,6 +768,7 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private fun handleStartDownloadService(args: Map<*, *>, result: MethodChannel.Result) {
         val playlistName = args["playlistName"] as? String ?: "playlist"
         serviceRequesters.add(this)
+        probeCancelSupport()
         DownloadForegroundService.publishState(
             playlistName = playlistName,
             currentTrack = 0,
@@ -765,6 +812,7 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         // a run in progress.
         if (hasActiveDownloads() || serviceRequesters.isNotEmpty()) {
             Log.i(TAG, "Not stopping download service: another run is active")
+            DownloadForegroundService.cancelAvailabilityChanged()
             result.success(null)
             return
         }

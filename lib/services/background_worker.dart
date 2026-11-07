@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import '../database/database.dart';
@@ -29,9 +31,13 @@ Future<void> backgroundMain() async {
 
   AutoUpdateRunner? runner;
   var stopRequested = false;
-  Future<Object?> stop() async {
+  // Answers at once: the reply only acknowledges the request, and native
+  // treats a late reply as unhandled. The run reports its end through
+  // taskComplete.
+  Object? stop() {
     stopRequested = true;
-    await runner?.requestStop();
+    final active = runner;
+    if (active != null) unawaited(active.requestStop());
     return true;
   }
 
@@ -42,7 +48,14 @@ Future<void> backgroundMain() async {
   // The Cancel button of the download notification, or the app being
   // swiped away.
   ytdlpControlChannel.setMethodCallHandler((call) async {
-    if (call.method == 'cancelRequestedByUser') return stop();
+    switch (call.method) {
+      case 'ping':
+        // Native shows the notification's Cancel button only for engines
+        // that answer this.
+        return true;
+      case 'cancelRequestedByUser':
+        return stop();
+    }
     throw MissingPluginException('No handler for ${call.method}');
   });
 

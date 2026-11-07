@@ -33,6 +33,9 @@ class MainActivity : AudioServiceFragmentActivity() {
         private const val SKIP_NEXT_REQUEST_CODE = 503
         private const val TAG = "WoolyTube"
 
+        /** How long after an ended PiP animation the mode must have changed. */
+        private const val ABORTED_PIP_CHECK_MS = 500L
+
         private var currentRef: WeakReference<MainActivity>? = null
 
         /** The live activity, if any. Main thread only. */
@@ -42,6 +45,9 @@ class MainActivity : AudioServiceFragmentActivity() {
 
     /** The engine-scoped plugin that owns the app's channels. */
     private var appPlugin: WoolyTubeAppPlugin? = null
+
+    /** Flutter was told about PiP when its animation began (API 35+). */
+    private var pipAnnouncedEarly = false
     private var pipReceiverRegistered = false
 
     private val playbackChannel: MethodChannel?
@@ -121,6 +127,7 @@ class MainActivity : AudioServiceFragmentActivity() {
     }
 
     override fun onDestroy() {
+        window.decorView.removeCallbacks(abortedPipCheck)
         if (pipReceiverRegistered) {
             unregisterReceiver(pipActionReceiver)
             pipReceiverRegistered = false
@@ -154,10 +161,26 @@ class MainActivity : AudioServiceFragmentActivity() {
      */
     override fun onPictureInPictureUiStateChanged(pipState: PictureInPictureUiState) {
         super.onPictureInPictureUiStateChanged(pipState)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM &&
-            pipState.isTransitioningToPip && !isInPictureInPictureMode
-        ) {
-            notifyPictureInPictureMode(true)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) return
+        if (pipState.isTransitioningToPip) {
+            if (!isInPictureInPictureMode && !pipAnnouncedEarly) {
+                pipAnnouncedEarly = true
+                notifyPictureInPictureMode(true)
+            }
+        } else if (pipAnnouncedEarly && !isInPictureInPictureMode) {
+            // The transition ended without PiP mode, or the mode change has
+            // not arrived yet. Check again shortly; if PiP never started (the
+            // entry was aborted), Flutter must leave the video-only layout,
+            // because no onPictureInPictureModeChanged(false) will follow.
+            window.decorView.removeCallbacks(abortedPipCheck)
+            window.decorView.postDelayed(abortedPipCheck, ABORTED_PIP_CHECK_MS)
+        }
+    }
+
+    private val abortedPipCheck = Runnable {
+        if (pipAnnouncedEarly && !isDestroyed && !isInPictureInPictureMode) {
+            pipAnnouncedEarly = false
+            notifyPictureInPictureMode(false)
         }
     }
 
@@ -166,6 +189,8 @@ class MainActivity : AudioServiceFragmentActivity() {
         newConfig: Configuration
     ) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        pipAnnouncedEarly = false
+        window.decorView.removeCallbacks(abortedPipCheck)
         notifyPictureInPictureMode(isInPictureInPictureMode)
         if (!isInPictureInPictureMode && PipState.videoActive &&
             lifecycle.currentState == Lifecycle.State.CREATED
@@ -209,7 +234,14 @@ class MainActivity : AudioServiceFragmentActivity() {
                 }
             )
 
-        sourceRectHint(safeAspect)?.let { builder.setSourceRectHint(it) }
+        // Where the video is on screen, as measured by Flutter. Without it no
+        // hint at all: the whole window (used before) never matches a 16:9
+        // video on a portrait screen and made the entire app shrink and jump,
+        // and a guessed rect can be wrong for the first animation frames
+        // because Flutter learns about PiP asynchronously.
+        PipState.sourceRect?.takeUnless { it.isEmpty }?.let {
+            builder.setSourceRectHint(Rect(it))
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             builder
@@ -220,42 +252,6 @@ class MainActivity : AudioServiceFragmentActivity() {
         }
 
         return builder.build()
-    }
-
-    /**
-     * Where the video is when PiP starts, so the system animates the video
-     * itself into the window. The whole window was passed before, which
-     * never matches a 16:9 window on a portrait screen and made the entire
-     * app shrink and then jump.
-     */
-    private fun sourceRectHint(aspect: Double): Rect? {
-        PipState.sourceRect?.let { return Rect(it) }
-        // Without a rect from Dart, the only known position is the PiP
-        // layout itself (the video fitted and centred in the window). Flutter
-        // switches to it before the animation on API 26-30 (onUserLeaveHint)
-        // and on 35+ (onPictureInPictureUiStateChanged). On 31-34 the app
-        // still shows its normal page when the animation starts, so no hint
-        // is better than a wrong one.
-        val earlySwitch = Build.VERSION.SDK_INT <= Build.VERSION_CODES.R ||
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM
-        if (!earlySwitch) return null
-        val bounds = Rect()
-        if (!window.decorView.getGlobalVisibleRect(bounds) || bounds.isEmpty) return null
-        val width = bounds.width()
-        val height = bounds.height()
-        val fittedWidth: Int
-        val fittedHeight: Int
-        if (width.toDouble() / height > aspect) {
-            fittedHeight = height
-            fittedWidth = (height * aspect).toInt()
-        } else {
-            fittedWidth = width
-            fittedHeight = (width / aspect).toInt()
-        }
-        if (fittedWidth <= 0 || fittedHeight <= 0) return null
-        val left = bounds.left + (width - fittedWidth) / 2
-        val top = bounds.top + (height - fittedHeight) / 2
-        return Rect(left, top, left + fittedWidth, top + fittedHeight)
     }
 
     private fun audioOnlyAction(): RemoteAction {

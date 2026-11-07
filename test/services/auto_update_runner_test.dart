@@ -488,6 +488,70 @@ void main() {
       );
       expect(reply, isTrue);
     });
+
+    test('answers the native Cancel-button probe', () async {
+      expect(await bridge.handleControlCall(const MethodCall('ping')), isTrue);
+    });
+
+    test('the app\'s Stop button ends the whole scheduled run', () async {
+      final first = await insertTestPlaylist(
+        db,
+        url: 'https://www.youtube.com/playlist?list=one',
+        name: 'One',
+        outputPath: folder,
+      );
+      final second = await insertTestPlaylist(
+        db,
+        url: 'https://www.youtube.com/playlist?list=two',
+        name: 'Two',
+        outputPath: p.join(tempDir.path, 'Music', 'Two'),
+      );
+      ytdlp.playlistInfo = {
+        'title': 'Playlist',
+        'entries': [
+          {'id': 'abc', 'title': 'Song', 'playlist_index': 1},
+        ],
+      };
+      ytdlp.downloadCompleter = Completer<void>();
+      ytdlp.downloadStarted = Completer<void>();
+
+      final run = bridge.runScheduledUpdate();
+      await ytdlp.downloadStarted!.future;
+      // What home_page/playlist_detail_page do on Stop.
+      await downloads.cancelActiveDownloads();
+      final report = await run;
+
+      expect(report.status, AutoUpdateStatus.stopped);
+      expect(report.handled, 1);
+      expect(ytdlp.requestedPlaylistUrls, [first.url]);
+      expect(ytdlp.requestedPlaylistUrls, isNot(contains(second.url)));
+      final tracks = await db.getTracksForPlaylist(first.id);
+      expect(tracks.single.status, 'pending');
+    });
+
+    test('Cancel is acknowledged before the clean-up finishes', () async {
+      await insertTestPlaylist(db, outputPath: folder);
+      ytdlp.playlistInfo = {
+        'title': 'Playlist',
+        'entries': [
+          {'id': 'abc', 'title': 'Song', 'playlist_index': 1},
+        ],
+      };
+      ytdlp.downloadCompleter = Completer<void>();
+      ytdlp.downloadStarted = Completer<void>();
+
+      final run = bridge.runScheduledUpdate();
+      await ytdlp.downloadStarted!.future;
+      final runner = bridge.activeRun!;
+
+      final reply = bridge.handleControlCall(
+        const MethodCall('cancelRequestedByUser'),
+      );
+      // The stop flag is set synchronously, before any clean-up await.
+      expect(runner.stopRequested, isTrue);
+      expect(await reply, isTrue);
+      expect((await run).status, AutoUpdateStatus.stopped);
+    });
   });
 
   group('headless worker body', () {
