@@ -17,7 +17,27 @@ import 'shazam_client.dart';
 import 'shazam_signature.dart';
 import 'silence_detector.dart';
 
-enum RecognitionPhase { sampling, silence, estimating, done, cancelled, failed }
+enum RecognitionPhase {
+  sampling,
+
+  /// Sampling is paused before retrying a lookup; see
+  /// [RecognitionProgress.resumeAt].
+  waiting,
+  silence,
+  estimating,
+  done,
+  cancelled,
+  failed,
+}
+
+/// Why a scan is [RecognitionPhase.waiting].
+enum RecognitionWaitReason {
+  /// Shazam asked us to slow down.
+  rateLimited,
+
+  /// A lookup failed on the network or server side.
+  network,
+}
 
 class RecognitionProgress {
   final int trackId;
@@ -26,16 +46,23 @@ class RecognitionProgress {
   final int total;
   final String? message;
 
+  /// While [RecognitionPhase.waiting]: when the lookup is retried.
+  final DateTime? resumeAt;
+  final RecognitionWaitReason? waitReason;
+
   const RecognitionProgress({
     required this.trackId,
     required this.phase,
     this.completed = 0,
     this.total = 0,
     this.message,
+    this.resumeAt,
+    this.waitReason,
   });
 
   bool get running =>
       phase == RecognitionPhase.sampling ||
+      phase == RecognitionPhase.waiting ||
       phase == RecognitionPhase.silence ||
       phase == RecognitionPhase.estimating;
 }
@@ -111,10 +138,26 @@ class RecognitionCancelled implements Exception {
   String toString() => 'Recognition cancelled';
 }
 
+/// Shazam kept rate-limiting lookups for longer than the scan waits. The
+/// lookups made so far stay cached, so a later scan resumes from there.
+class RecognitionRateLimited implements Exception {
+  const RecognitionRateLimited();
+  static const message =
+      'Shazam is limiting requests right now. Progress is saved; '
+      'try again later.';
+  @override
+  String toString() => message;
+}
+
 /// Keeps the process alive and visible while a scan runs.
 abstract interface class ScanForegroundNotifier {
   Future<void> start(String label);
-  Future<void> update(String label, int current, int total);
+
+  /// [detail], when given, replaces the "n of total" line, for example
+  /// while the scan waits before retrying a lookup. The Android side keeps
+  /// showing the last detail while [current] stays the same, so an update
+  /// without one does not clear it; send a new detail to replace it.
+  Future<void> update(String label, int current, int total, {String? detail});
   Future<void> stop();
 }
 
@@ -148,7 +191,12 @@ class YtDlpScanForegroundNotifier implements ScanForegroundNotifier {
   }
 
   @override
-  Future<void> update(String label, int current, int total) async {
+  Future<void> update(
+    String label,
+    int current,
+    int total, {
+    String? detail,
+  }) async {
     if (_downloadActive()) {
       _owned = false;
       return;
@@ -162,6 +210,7 @@ class YtDlpScanForegroundNotifier implements ScanForegroundNotifier {
       currentTrack: current,
       totalTracks: total,
       progress: total == 0 ? 0 : (current * 100 ~/ total),
+      trackTitle: detail,
     );
   }
 
@@ -181,6 +230,13 @@ class YtDlpScanForegroundNotifier implements ScanForegroundNotifier {
 /// failed scan resumes where it stopped and a finished scan can be re-run
 /// without network use. Quiet gaps are only measured where the recognized
 /// song changes, which is the only place the estimator uses them.
+///
+/// When Shazam rate-limits a lookup, the scan waits (a growing backoff, or
+/// longer when Retry-After asks for it) and retries the same sample, giving
+/// up once [rateLimitBudget] has passed since the first rate limit without
+/// a single success. Network and server hiccups are retried a few times.
+/// Every wait, the recognizer's own pacing included, ends at once on
+/// [cancel].
 class SongRecognitionService {
   SongRecognitionService(
     this._db, {
@@ -193,11 +249,28 @@ class SongRecognitionService {
     this.stepSeconds = 60,
     this.firstStartSeconds = 30,
     this.silenceMarginSeconds = 4,
+    this.rateLimitBackoff = const [
+      Duration(seconds: 30),
+      Duration(seconds: 60),
+      Duration(seconds: 120),
+      Duration(seconds: 240),
+      Duration(seconds: 300),
+    ],
+    this.rateLimitBudget = const Duration(minutes: 20),
+    this.transientRetryDelays = const [
+      Duration(seconds: 10),
+      Duration(seconds: 30),
+      Duration(seconds: 60),
+    ],
+    Future<void> Function(Duration)? delay,
+    DateTime Function()? clock,
   }) : _decoder = decoder,
        _recognizer = recognizer,
        _rootDirectory = rootDirectory,
        _notifier = notifier,
-       _silence = silenceDetector;
+       _silence = silenceDetector,
+       _delay = delay ?? Future<void>.delayed,
+       _clock = clock ?? DateTime.now;
 
   final AppDatabase _db;
   final AudioWindowDecoder _decoder;
@@ -209,6 +282,23 @@ class SongRecognitionService {
   final int stepSeconds;
   final int firstStartSeconds;
   final int silenceMarginSeconds;
+
+  /// Waits after consecutive rate-limit responses; the last one repeats.
+  /// A longer Retry-After is used instead. Restarts after a successful
+  /// lookup.
+  final List<Duration> rateLimitBackoff;
+
+  /// The scan gives up once the next retry would come later than this
+  /// after the first rate-limit response since the last successful lookup.
+  /// Measured on the clock, so pacing and request time count too.
+  final Duration rateLimitBudget;
+
+  /// Waits before each retry of a lookup that failed on the network or
+  /// server side; when they are used up, the scan fails.
+  final List<Duration> transientRetryDelays;
+
+  final Future<void> Function(Duration) _delay;
+  final DateTime Function() _clock;
 
   /// Longest stretch the silence pass decodes in one platform call. Quiet
   /// gaps are measured around song changes, and back-to-back changes merge
@@ -224,6 +314,9 @@ class SongRecognitionService {
   RecognitionProgress? _current;
   bool _cancelRequested = false;
 
+  /// Completed by [cancel], so a wait between retries ends at once.
+  Completer<void> _cancelSignal = Completer<void>();
+
   /// The track of the scan in progress. Set before scan() first awaits, so a
   /// second call can never start alongside it.
   int? _activeTrackId;
@@ -234,7 +327,9 @@ class SongRecognitionService {
   int? get scanningTrackId => _activeTrackId;
 
   void cancel() {
-    if (isScanning) _cancelRequested = true;
+    if (!isScanning) return;
+    _cancelRequested = true;
+    if (!_cancelSignal.isCompleted) _cancelSignal.complete();
   }
 
   void dispose() {
@@ -313,6 +408,7 @@ class SongRecognitionService {
     }
     _activeTrackId = track.id;
     _cancelRequested = false;
+    _cancelSignal = Completer<void>();
     try {
       return await _scan(track, path);
     } finally {
@@ -344,6 +440,7 @@ class SongRecognitionService {
     try {
       await _notifier?.start(label);
       final samples = <RecognitionSample>[];
+      final retry = _RetryState();
       final sampleDir = Directory(p.join(dir.path, 'samples'));
       await sampleDir.create(recursive: true);
       for (var i = 0; i < starts.length; i++) {
@@ -370,8 +467,13 @@ class SongRecognitionService {
           if (pcm.length < 128) {
             result = ShazamResult.fromJson(const {});
           } else {
-            result = await _recognizer.recognize(
+            result = await _lookUp(
               ShazamSignatureGenerator.fromSamples(pcm),
+              retry,
+              trackId: track.id,
+              label: label,
+              completed: i,
+              total: starts.length,
             );
           }
           raw = {
@@ -470,6 +572,134 @@ class SongRecognitionService {
     } finally {
       await _notifier?.stop().catchError((_) {});
     }
+  }
+
+  /// Looks [signature] up, waiting and retrying the same lookup while Shazam
+  /// rate-limits or the network hiccups. [retry] carries the backoff state
+  /// across samples; a success resets it.
+  Future<ShazamResult> _lookUp(
+    ShazamSignature signature,
+    _RetryState retry, {
+    required int trackId,
+    required String label,
+    required int completed,
+    required int total,
+  }) async {
+    while (true) {
+      _checkCancelled();
+      final Duration wait;
+      final RecognitionWaitReason reason;
+      try {
+        final result = await _recognizer.recognize(
+          signature,
+          cancelled: _cancelSignal.future,
+        );
+        retry.succeeded();
+        return result;
+      } catch (error) {
+        // A lookup that fails after Cancel was pressed ends as cancelled.
+        _checkCancelled();
+        switch (classifyShazamFailure(error)) {
+          case ShazamFailureKind.rateLimited:
+            // Retry-After is the least the endpoint wants us to wait, so a
+            // short one never undercuts the backoff: a server that keeps
+            // answering "retry now" is backed off like one that says nothing.
+            final asked = (error as ShazamHttpException).retryAfter;
+            final step =
+                rateLimitBackoff[math.min(
+                  retry.rateLimits++,
+                  rateLimitBackoff.length - 1,
+                )];
+            wait = asked != null && asked > step ? asked : step;
+            final now = _clock();
+            final since = retry.rateLimitedSince ??= now;
+            if (now.add(wait).difference(since) > rateLimitBudget) {
+              throw const RecognitionRateLimited();
+            }
+            reason = RecognitionWaitReason.rateLimited;
+          case ShazamFailureKind.transient:
+            if (retry.transientFailures >= transientRetryDelays.length) {
+              rethrow;
+            }
+            wait = transientRetryDelays[retry.transientFailures++];
+            reason = RecognitionWaitReason.network;
+          case ShazamFailureKind.permanent:
+            rethrow;
+        }
+      }
+      await _waitBeforeRetry(
+        wait,
+        reason,
+        trackId: trackId,
+        label: label,
+        completed: completed,
+        total: total,
+      );
+    }
+  }
+
+  /// Shows the wait, then sleeps for [wait] unless the scan is cancelled
+  /// first, in which case it throws [RecognitionCancelled] right away.
+  Future<void> _waitBeforeRetry(
+    Duration wait,
+    RecognitionWaitReason reason, {
+    required int trackId,
+    required String label,
+    required int completed,
+    required int total,
+  }) async {
+    final resumeAt = _clock().add(wait);
+    _emit(
+      RecognitionProgress(
+        trackId: trackId,
+        phase: RecognitionPhase.waiting,
+        completed: completed,
+        total: total,
+        resumeAt: resumeAt,
+        waitReason: reason,
+      ),
+    );
+    final at = resumeAt.toLocal();
+    final time =
+        '${at.hour.toString().padLeft(2, '0')}:'
+        '${at.minute.toString().padLeft(2, '0')}';
+    unawaited(
+      _notifier
+          ?.update(
+            label,
+            completed,
+            total,
+            detail: switch (reason) {
+              RecognitionWaitReason.rateLimited =>
+                'Shazam asked us to slow down. Retrying at $time',
+              RecognitionWaitReason.network =>
+                'Connection problem. Retrying at $time',
+            },
+          )
+          .catchError((_) {}),
+    );
+    await Future.any([_delay(wait), _cancelSignal.future]);
+    _checkCancelled();
+    _emit(
+      RecognitionProgress(
+        trackId: trackId,
+        phase: RecognitionPhase.sampling,
+        completed: completed,
+        total: total,
+      ),
+    );
+    // A detail of its own: the notification would otherwise keep showing
+    // the retry time, which has now passed, until the sample is done.
+    unawaited(
+      _notifier
+          ?.update(
+            label,
+            completed,
+            total,
+            detail: 'Retrying sample ${completed + 1} of $total…',
+          )
+          .catchError((_) {}),
+    );
   }
 
   /// Sample window starts: every [stepSeconds] from [firstStartSeconds], plus
@@ -685,6 +915,24 @@ class SongRecognitionService {
   void _emit(RecognitionProgress progress) {
     _current = progress;
     if (!_progress.isClosed) _progress.add(progress);
+  }
+}
+
+/// Retry bookkeeping of one scan's lookups.
+class _RetryState {
+  /// Rate-limit responses since the last success.
+  int rateLimits = 0;
+
+  /// Transient failures since the last success.
+  int transientFailures = 0;
+
+  /// When the first rate-limit response since the last success came.
+  DateTime? rateLimitedSince;
+
+  void succeeded() {
+    rateLimits = 0;
+    transientFailures = 0;
+    rateLimitedSince = null;
   }
 }
 

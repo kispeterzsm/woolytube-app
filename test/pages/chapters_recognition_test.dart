@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -8,6 +9,8 @@ import 'package:woolytube/providers/playback_providers.dart';
 import 'package:woolytube/providers/providers.dart';
 import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/playback_service.dart';
+import 'package:woolytube/services/recognition/shazam_client.dart';
+import 'package:woolytube/services/recognition/shazam_signature.dart';
 import 'package:woolytube/services/recognition/song_recognition_service.dart';
 
 import '../helpers/recognition_fakes.dart';
@@ -20,6 +23,19 @@ Future<void> settle(WidgetTester tester) async {
   for (var i = 0; i < 20; i++) {
     await tester.pump(const Duration(milliseconds: 50));
     await Future<void>.delayed(const Duration(milliseconds: 5));
+  }
+}
+
+/// Shazam answering every lookup with "slow down".
+class _RateLimitedRecognizer implements ShazamRecognizer {
+  int calls = 0;
+  @override
+  Future<ShazamResult> recognize(
+    ShazamSignature signature, {
+    Future<void>? cancelled,
+  }) async {
+    calls++;
+    throw const ShazamHttpException(429, '');
   }
 }
 
@@ -121,6 +137,146 @@ void main() {
       await settle(tester);
       expect(find.text('Recognized songs'), findsOneWidget);
       expect(find.text('Apply (2)'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 10));
+    });
+  });
+
+  testWidgets('a rate-limited scan shows its wait and can be cancelled', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 3200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.runAsync(() async {
+      final db = openTestDatabase();
+      addTearDown(db.close);
+      final dir = await Directory.systemTemp.createTemp('woolytube-chapters-');
+      addTearDown(() => dir.delete(recursive: true));
+      final media = await File(
+        '${dir.path}/00001_mix.m4a',
+      ).writeAsBytes([1, 2, 3]);
+      final playlist = await insertTestPlaylist(db, outputPath: dir.path);
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        status: 'complete',
+        filePath: media.path,
+        durationSeconds: 180,
+      );
+      final playback = PlaybackService(db, player: FakePlayer());
+      addTearDown(playback.dispose);
+      final recognizer = _RateLimitedRecognizer();
+      final never = Completer<void>();
+      final recognition = SongRecognitionService(
+        db,
+        decoder: SilentDecoder(),
+        recognizer: recognizer,
+        rootDirectory: () async => dir,
+        delay: (_) => never.future,
+      );
+      addTearDown(recognition.dispose);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            databaseProvider.overrideWithValue(db),
+            playbackServiceProvider.overrideWithValue(playback),
+            songRecognitionServiceProvider.overrideWithValue(recognition),
+          ],
+          child: MaterialApp(home: ChaptersPage(track: track)),
+        ),
+      );
+      await settle(tester);
+
+      final outcome = recognition
+          .scan(track)
+          .then<Object?>((_) => null, onError: (Object e) => e);
+      await settle(tester);
+
+      expect(recognizer.calls, 1);
+      expect(
+        find.textContaining(
+          RegExp(r'^Shazam asked us to slow down\. Retrying in 0:[23]\d…'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('(0 of 4 done)'), findsOneWidget);
+      expect(find.byKey(const ValueKey('recognize-songs')), findsNothing);
+
+      await tester.tap(find.byKey(const ValueKey('cancel-recognition')));
+      expect(await outcome, isA<RecognitionCancelled>());
+      expect(never.isCompleted, isFalse);
+      await settle(tester);
+      expect(find.byKey(const ValueKey('recognition-waiting')), findsNothing);
+      expect(find.byKey(const ValueKey('recognize-songs')), findsOneWidget);
+      expect(recognizer.calls, 1);
+
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 10));
+    });
+  });
+
+  testWidgets('a scan that gave up while the page was closed says so when '
+      'it opens', (tester) async {
+    tester.view.physicalSize = const Size(1200, 3200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.runAsync(() async {
+      final db = openTestDatabase();
+      addTearDown(db.close);
+      final dir = await Directory.systemTemp.createTemp('woolytube-chapters-');
+      addTearDown(() => dir.delete(recursive: true));
+      final media = await File(
+        '${dir.path}/00001_mix.m4a',
+      ).writeAsBytes([1, 2, 3]);
+      final playlist = await insertTestPlaylist(db, outputPath: dir.path);
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        status: 'complete',
+        filePath: media.path,
+        durationSeconds: 180,
+      );
+      final playback = PlaybackService(db, player: FakePlayer());
+      addTearDown(playback.dispose);
+      final recognition = SongRecognitionService(
+        db,
+        decoder: SilentDecoder(),
+        recognizer: _RateLimitedRecognizer(),
+        rootDirectory: () async => dir,
+        // No room for even one wait: the first 429 gives up.
+        rateLimitBudget: Duration.zero,
+      );
+      addTearDown(recognition.dispose);
+
+      // Nobody is watching the progress while the scan gives up.
+      await expectLater(
+        recognition.scan(track),
+        throwsA(isA<RecognitionRateLimited>()),
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            databaseProvider.overrideWithValue(db),
+            playbackServiceProvider.overrideWithValue(playback),
+            songRecognitionServiceProvider.overrideWithValue(recognition),
+          ],
+          child: MaterialApp(home: ChaptersPage(track: track)),
+        ),
+      );
+      await settle(tester);
+
+      final failed = find.byKey(const ValueKey('recognition-failed'));
+      expect(failed, findsOneWidget);
+      expect(
+        tester.widget<Text>(failed).data,
+        'Shazam is limiting requests right now. Progress is saved; '
+        'try again later.',
+      );
+      expect(find.byKey(const ValueKey('recognize-songs')), findsOneWidget);
+
       await tester.pumpWidget(const SizedBox());
       await tester.pump(const Duration(seconds: 10));
     });

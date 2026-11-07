@@ -435,7 +435,11 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
           })
           .catchError((Object error) {
             if (error is RecognitionCancelled) return;
-            _showMessage('Recognition failed: $error');
+            _showMessage(
+              error is RecognitionRateLimited
+                  ? error.toString()
+                  : 'Recognition failed: $error',
+            );
           }),
     );
   }
@@ -833,6 +837,57 @@ class _SourceChip extends StatelessWidget {
   }
 }
 
+/// "Retrying in m:ss…" for a scan that waits before its next lookup,
+/// ticking down once a second.
+class _RetryCountdown extends StatefulWidget {
+  const _RetryCountdown({required this.progress});
+
+  final RecognitionProgress progress;
+
+  @override
+  State<_RetryCountdown> createState() => _RetryCountdownState();
+}
+
+class _RetryCountdownState extends State<_RetryCountdown> {
+  Timer? _ticker;
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final resumeAt = widget.progress.resumeAt;
+    var remaining =
+        resumeAt == null ? Duration.zero : resumeAt.difference(DateTime.now());
+    if (remaining.isNegative) remaining = Duration.zero;
+    // Rounded up, so the countdown reaches 0:00 only when the retry is due.
+    final seconds = (remaining.inMilliseconds + 999) ~/ 1000;
+    final time =
+        '${seconds ~/ 60}:${(seconds % 60).toString().padLeft(2, '0')}';
+    final reason = switch (widget.progress.waitReason) {
+      RecognitionWaitReason.network => 'Connection problem.',
+      _ => 'Shazam asked us to slow down.',
+    };
+    return Text(
+      '$reason Retrying in $time… '
+      '(${widget.progress.completed} of ${widget.progress.total} done)',
+      key: const ValueKey('recognition-waiting'),
+      style: const TextStyle(color: Color(0xFF999999), fontSize: 12),
+    );
+  }
+}
+
 /// Song recognition for long mixes. Only this section follows the scan's
 /// progress, so the rest of the page does not rebuild with every sample.
 class _RecognitionSection extends ConsumerWidget {
@@ -860,11 +915,21 @@ class _RecognitionSection extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final progress = ref.watch(recognitionProgressProvider).valueOrNull;
+    final progress =
+        ref.watch(recognitionProgressProvider).valueOrNull ??
+        ref.read(songRecognitionServiceProvider).currentProgress;
     // The running scan of this file, if any.
     final scan =
         progress != null && progress.running && progress.trackId == track.id
             ? progress
+            : null;
+    // Why the last scan of this file stopped, until the next one starts. A
+    // scan runs unattended, so the message must outlast its snack bar.
+    final failure =
+        progress != null &&
+                progress.phase == RecognitionPhase.failed &&
+                progress.trackId == track.id
+            ? progress.message
             : null;
     final scanningOther = progress?.running == true && scan == null;
     final run = this.run;
@@ -892,25 +957,41 @@ class _RecognitionSection extends ConsumerWidget {
               children: [
                 LinearProgressIndicator(
                   value:
-                      scan.total > 0 && scan.phase == RecognitionPhase.sampling
+                      scan.total > 0 &&
+                              (scan.phase == RecognitionPhase.sampling ||
+                                  scan.phase == RecognitionPhase.waiting)
                           ? scan.completed / scan.total
                           : null,
                 ),
                 const SizedBox(height: 4),
-                Text(
-                  switch (scan.phase) {
-                    RecognitionPhase.sampling =>
-                      'Recognizing samples ${scan.completed} of '
-                          '${scan.total}…',
-                    RecognitionPhase.silence => 'Finding quiet transitions…',
-                    _ => 'Estimating chapters…',
-                  },
-                  style: const TextStyle(
-                    color: Color(0xFF999999),
-                    fontSize: 12,
+                if (scan.phase == RecognitionPhase.waiting)
+                  _RetryCountdown(progress: scan)
+                else
+                  Text(
+                    switch (scan.phase) {
+                      RecognitionPhase.sampling =>
+                        'Recognizing samples ${scan.completed} of '
+                            '${scan.total}…',
+                      RecognitionPhase.silence => 'Finding quiet transitions…',
+                      _ => 'Estimating chapters…',
+                    },
+                    style: const TextStyle(
+                      color: Color(0xFF999999),
+                      fontSize: 12,
+                    ),
                   ),
-                ),
               ],
+            ),
+          ),
+        if (failure != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: Text(
+              failure == RecognitionRateLimited.message
+                  ? failure
+                  : 'The last scan failed: $failure',
+              key: const ValueKey('recognition-failed'),
+              style: const TextStyle(color: Color(0xFFE57373), fontSize: 12),
             ),
           ),
         Padding(

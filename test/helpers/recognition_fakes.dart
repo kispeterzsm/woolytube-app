@@ -23,8 +23,10 @@ class SilentDecoder implements AudioWindowDecoder {
 
 class NoMatchRecognizer implements ShazamRecognizer {
   @override
-  Future<ShazamResult> recognize(ShazamSignature signature) async =>
-      ShazamResult.fromJson(const {});
+  Future<ShazamResult> recognize(
+    ShazamSignature signature, {
+    Future<void>? cancelled,
+  }) async => ShazamResult.fromJson(const {});
 }
 
 SongRecognitionService fakeRecognitionService(AppDatabase db, Directory root) =>

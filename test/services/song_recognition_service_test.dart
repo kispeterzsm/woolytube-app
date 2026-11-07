@@ -47,17 +47,35 @@ class FakeRecognizer implements ShazamRecognizer {
   final FakeDecoder decoder;
   final Map<int, Map<String, dynamic>> byStartMs;
   final List<int> calls = [];
+
+  /// Every lookup, failed ones included, by sample start.
+  final List<int> attempts = [];
   int? failAtCall;
+
+  /// Errors thrown by the lookup with that sequence number.
+  final Map<int, Object> failures = {};
+
+  /// Decides per sequence number whether the lookup fails, after
+  /// [failures].
+  Object? Function(int index)? failWhen;
   Completer<void>? gate;
   int _sequence = 0;
 
   @override
-  Future<ShazamResult> recognize(ShazamSignature signature) async {
+  Future<ShazamResult> recognize(
+    ShazamSignature signature, {
+    Future<void>? cancelled,
+  }) async {
     final index = _sequence++;
     if (gate != null) await gate!.future;
-    if (failAtCall == index) throw const SocketException('offline');
     // The service decodes a window right before recognizing it.
     final start = decoder.lastStartMs;
+    attempts.add(start);
+    if (failAtCall == index) {
+      throw const ShazamHttpException(400, 'bad request');
+    }
+    final failure = failures[index] ?? failWhen?.call(index);
+    if (failure != null) throw failure;
     calls.add(start);
     return ShazamResult.fromJson(byStartMs[start]!);
   }
@@ -68,10 +86,47 @@ class FakeNotifier implements ScanForegroundNotifier {
   @override
   Future<void> start(String label) async => events.add('start');
   @override
-  Future<void> update(String label, int current, int total) async =>
-      events.add('update $current/$total');
+  Future<void> update(
+    String label,
+    int current,
+    int total, {
+    String? detail,
+  }) async => events.add(
+    detail == null
+        ? 'update $current/$total'
+        : 'update $current/$total $detail',
+  );
   @override
   Future<void> stop() async => events.add('stop');
+}
+
+/// Answers like Shazam behind the real [ShazamPacer], so the time the
+/// client spends pacing passes on the test clock too.
+class PacedRecognizer implements ShazamRecognizer {
+  PacedRecognizer(this.pacer, this.clock, this.respond);
+  final ShazamPacer pacer;
+  final DateTime Function() clock;
+
+  /// The answer to the request with that sequence number; may throw.
+  final Map<String, dynamic> Function(int index) respond;
+
+  /// When each request went out.
+  final List<DateTime> sentAt = [];
+
+  @override
+  Future<ShazamResult> recognize(
+    ShazamSignature signature, {
+    Future<void>? cancelled,
+  }) async {
+    await pacer.waitTurn(cancelled: cancelled);
+    sentAt.add(clock());
+    try {
+      return ShazamResult.fromJson(respond(sentAt.length - 1));
+    } on ShazamHttpException catch (e) {
+      if (e.isRateLimited) pacer.slowDown();
+      rethrow;
+    }
+  }
 }
 
 Map<String, dynamic> song(String key, String title, double offset) => {
@@ -89,6 +144,44 @@ void main() {
   late FakeRecognizer recognizer;
   late FakeNotifier notifier;
   late SongRecognitionService service;
+
+  /// Every wait the service asked for; none of them really sleeps unless a
+  /// test swaps [delayImpl].
+  late List<Duration> waits;
+  late Future<void> Function(Duration) delayImpl;
+  final now = DateTime.utc(2026, 11, 7, 12);
+
+  /// The test clock: starts at [now] and moves on with every wait, the
+  /// service's and a [PacedRecognizer]'s alike.
+  late DateTime clockNow;
+
+  SongRecognitionService serviceWith(
+    ShazamRecognizer recognizer, {
+    List<Duration>? rateLimitBackoff,
+    Duration? rateLimitBudget,
+  }) => SongRecognitionService(
+    db,
+    decoder: decoder,
+    recognizer: recognizer,
+    rootDirectory: () async => dir,
+    notifier: notifier,
+    rateLimitBackoff:
+        rateLimitBackoff ??
+        const [
+          Duration(seconds: 30),
+          Duration(seconds: 60),
+          Duration(seconds: 120),
+          Duration(seconds: 240),
+          Duration(seconds: 300),
+        ],
+    rateLimitBudget: rateLimitBudget ?? const Duration(minutes: 20),
+    delay: (d) {
+      waits.add(d);
+      clockNow = clockNow.add(d);
+      return delayImpl(d);
+    },
+    clock: () => clockNow,
+  );
 
   setUp(() async {
     db = openTestDatabase();
@@ -115,13 +208,10 @@ void main() {
       288000: song('B', 'Second song', 157.5),
     });
     notifier = FakeNotifier();
-    service = SongRecognitionService(
-      db,
-      decoder: decoder,
-      recognizer: recognizer,
-      rootDirectory: () async => dir,
-      notifier: notifier,
-    );
+    waits = [];
+    delayImpl = (_) async {};
+    clockNow = now;
+    service = serviceWith(recognizer);
   });
 
   tearDown(() async {
@@ -202,10 +292,12 @@ void main() {
 
   test('a failed lookup keeps earlier results and resumes later', () async {
     recognizer.failAtCall = 3;
-    await expectLater(service.scan(track), throwsA(isA<SocketException>()));
+    await expectLater(service.scan(track), throwsA(isA<ShazamHttpException>()));
     expect(service.currentProgress!.phase, RecognitionPhase.failed);
     expect(notifier.events.last, 'stop');
     expect(recognizer.calls.length, 3);
+    // An error retrying cannot fix is not retried.
+    expect(waits, isEmpty);
 
     recognizer.failAtCall = null;
     final run = await service.scan(track);
@@ -225,6 +317,309 @@ void main() {
     expect(service.currentProgress!.phase, RecognitionPhase.cancelled);
     expect(service.isScanning, isFalse);
     expect(await service.loadRun(track), isNull);
+  });
+
+  group('rate limits and network errors', () {
+    const tooMany = ShazamHttpException(429, '');
+
+    test('a 429 waits, then retries the same sample and finishes', () async {
+      recognizer.failures[2] = tooMany;
+      final progress = <RecognitionProgress>[];
+      final sub = service.progressStream.listen(progress.add);
+      final run = await service.scan(track);
+      await sub.cancel();
+
+      expect(run.proposals.length, 2);
+      expect(run.sampleCount, 6);
+      expect(recognizer.attempts, [
+        30000,
+        90000,
+        150000,
+        150000,
+        210000,
+        270000,
+        288000,
+      ]);
+      expect(waits, [const Duration(seconds: 30)]);
+      final waiting = progress.singleWhere(
+        (e) => e.phase == RecognitionPhase.waiting,
+      );
+      expect(waiting.running, isTrue);
+      expect(waiting.completed, 2);
+      expect(waiting.total, 6);
+      expect(waiting.waitReason, RecognitionWaitReason.rateLimited);
+      expect(waiting.resumeAt, now.add(const Duration(seconds: 30)));
+      // Back to sampling once the wait is over.
+      final after = progress[progress.indexOf(waiting) + 1];
+      expect(after.phase, RecognitionPhase.sampling);
+      expect(after.completed, 2);
+      expect(progress.last.phase, RecognitionPhase.done);
+      final waitEvent = notifier.events.indexWhere(
+        (e) => e.startsWith('update 2/6 Shazam asked us to slow down.'),
+      );
+      expect(waitEvent, isNot(-1));
+      // Android keeps the last detail while the sample number stays, so the
+      // retry replaces the stale "Retrying at" with a detail of its own.
+      expect(
+        notifier.events[waitEvent + 1],
+        'update 2/6 Retrying sample 3 of 6…',
+      );
+      expect(notifier.events.sublist(waitEvent), isNot(contains('update 2/6')));
+      expect(notifier.events[waitEvent + 2], 'update 3/6');
+    });
+
+    test('a Retry-After longer than the backoff is honoured', () async {
+      recognizer.failures[1] = const ShazamHttpException(
+        429,
+        '',
+        retryAfter: Duration(seconds: 45),
+      );
+      recognizer.failures[3] = const ShazamHttpException(
+        503,
+        '',
+        retryAfter: Duration(seconds: 90),
+      );
+      // A shorter one never undercuts the backoff, which keeps growing:
+      // "retry now" is backed off like a 429 without a header.
+      recognizer.failures[5] = const ShazamHttpException(
+        429,
+        '',
+        retryAfter: Duration.zero,
+      );
+      recognizer.failures[6] = const ShazamHttpException(
+        429,
+        '',
+        retryAfter: Duration(seconds: 10),
+      );
+      recognizer.failures[7] = tooMany;
+      final run = await service.scan(track);
+      expect(run.sampleCount, 6);
+      expect(waits, const [
+        Duration(seconds: 45),
+        Duration(seconds: 90),
+        Duration(seconds: 30),
+        Duration(seconds: 60),
+        Duration(seconds: 120),
+      ]);
+    });
+
+    test('the backoff grows, repeats its last step, and resets after a '
+        'success', () async {
+      // Six 429s in a row on the second sample, then one on the third.
+      for (var i = 1; i <= 6; i++) {
+        recognizer.failures[i] = tooMany;
+      }
+      recognizer.failures[8] = tooMany;
+      final run = await service.scan(track);
+      expect(run.sampleCount, 6);
+      expect(waits, const [
+        Duration(seconds: 30),
+        Duration(seconds: 60),
+        Duration(seconds: 120),
+        Duration(seconds: 240),
+        Duration(seconds: 300),
+        Duration(seconds: 300),
+        Duration(seconds: 30),
+      ]);
+      expect(recognizer.calls.length, 6);
+    });
+
+    test('gives up after the waiting budget, keeping the lookups so a '
+        'rescan resumes', () async {
+      recognizer.failWhen = (index) => index >= 2 ? tooMany : null;
+      await expectLater(
+        service.scan(track),
+        throwsA(isA<RecognitionRateLimited>()),
+      );
+      // 30 + 60 + 120 + 240 + 300 + 300 s; another 300 s would pass 20 min.
+      expect(waits.length, 6);
+      expect(
+        waits.fold<Duration>(Duration.zero, (a, b) => a + b),
+        const Duration(seconds: 1050),
+      );
+      expect(service.currentProgress!.phase, RecognitionPhase.failed);
+      expect(
+        service.currentProgress!.message,
+        'Shazam is limiting requests right now. Progress is saved; '
+        'try again later.',
+      );
+      expect(notifier.events.last, 'stop');
+      expect(service.isScanning, isFalse);
+      expect(recognizer.calls, [30000, 90000]);
+      expect(await service.loadRun(track), isNull);
+
+      recognizer.failWhen = null;
+      final run = await service.scan(track);
+      expect(run.sampleCount, 6);
+      // Only the four missing samples were looked up again.
+      expect(recognizer.calls.length, 6);
+      expect(recognizer.calls.sublist(2), [150000, 210000, 270000, 288000]);
+    });
+
+    test('sustained "retry now" answers give up like plain 429s', () async {
+      final pacer = ShazamPacer(
+        minimumInterval: const Duration(seconds: 4),
+        clock: () => clockNow,
+        delay: (d) async => clockNow = clockNow.add(d),
+      );
+      final paced = PacedRecognizer(
+        pacer,
+        () => clockNow,
+        (index) =>
+            index < 2
+                ? song('A', 'First song', 30)
+                : throw const ShazamHttpException(
+                  429,
+                  '',
+                  retryAfter: Duration.zero,
+                ),
+      );
+      final service = serviceWith(paced);
+      addTearDown(service.dispose);
+      await expectLater(
+        service.scan(track),
+        throwsA(isA<RecognitionRateLimited>()),
+      );
+      // Seven tries in 17.5 min, not one every few seconds.
+      final limited = paced.sentAt.sublist(2);
+      expect(limited.length, 7);
+      expect(
+        limited.last.difference(limited.first),
+        const Duration(seconds: 1050),
+      );
+      expect(pacer.interval, const Duration(seconds: 20));
+    });
+
+    test('the budget counts pacing time, not just the service waits', () async {
+      // A pace slower than the backoff: most of the time goes to pacing.
+      final pacer = ShazamPacer(
+        minimumInterval: const Duration(seconds: 30),
+        clock: () => clockNow,
+        delay: (d) async => clockNow = clockNow.add(d),
+      );
+      final paced = PacedRecognizer(
+        pacer,
+        () => clockNow,
+        (index) =>
+            index < 1
+                ? song('A', 'First song', 30)
+                : throw const ShazamHttpException(429, ''),
+      );
+      final service = serviceWith(
+        paced,
+        rateLimitBackoff: const [Duration(seconds: 1)],
+        rateLimitBudget: const Duration(minutes: 2),
+      );
+      addTearDown(service.dispose);
+      await expectLater(
+        service.scan(track),
+        throwsA(isA<RecognitionRateLimited>()),
+      );
+      // One try every 30 s: 0, 30, 60, 90, 120 s after the first 429;
+      // counting the 1 s waits alone would allow 120 tries.
+      expect(paced.sentAt.length - 1, 5);
+      expect(waits.length, 4);
+    });
+
+    test('cancel during the pacing wait ends the scan before another '
+        'request', () async {
+      final blocked = Completer<void>();
+      final pacer = ShazamPacer(
+        minimumInterval: const Duration(seconds: 20),
+        clock: () => clockNow,
+        delay: (d) {
+          if (!blocked.isCompleted) blocked.complete();
+          return Completer<void>().future;
+        },
+      );
+      final paced = PacedRecognizer(
+        pacer,
+        () => clockNow,
+        (_) => song('A', 'First song', 30),
+      );
+      final service = serviceWith(paced);
+      addTearDown(service.dispose);
+      final future = service.scan(track);
+      await blocked.future;
+      expect(paced.sentAt.length, 1);
+      service.cancel();
+      await expectLater(future, throwsA(isA<RecognitionCancelled>()));
+      expect(service.currentProgress!.phase, RecognitionPhase.cancelled);
+      expect(service.isScanning, isFalse);
+      expect(paced.sentAt.length, 1);
+      expect(notifier.events.last, 'stop');
+    });
+
+    test('network errors are retried three times, then fail', () async {
+      recognizer.failures[2] = const SocketException('offline');
+      recognizer.failures[3] = TimeoutException('slow');
+      recognizer.failures[4] = const ShazamHttpException(502, '');
+      final run = await service.scan(track);
+      expect(run.sampleCount, 6);
+      expect(waits, const [
+        Duration(seconds: 10),
+        Duration(seconds: 30),
+        Duration(seconds: 60),
+      ]);
+      expect(recognizer.attempts.where((s) => s == 150000).length, 4);
+
+      // A fresh file whose third sample never gets through.
+      await File(track.filePath!).writeAsBytes(List.filled(4096, 3));
+      waits.clear();
+      recognizer.failures.clear();
+      final base = recognizer.attempts.length;
+      recognizer.failWhen =
+          (index) =>
+              index >= base + 2 ? const ShazamHttpException(500, '') : null;
+      final progress = <RecognitionProgress>[];
+      final sub = service.progressStream.listen(progress.add);
+      await expectLater(
+        service.scan(track),
+        throwsA(
+          isA<ShazamHttpException>().having((e) => e.statusCode, 'status', 500),
+        ),
+      );
+      await sub.cancel();
+      expect(waits, const [
+        Duration(seconds: 10),
+        Duration(seconds: 30),
+        Duration(seconds: 60),
+      ]);
+      expect(
+        progress
+            .where((e) => e.phase == RecognitionPhase.waiting)
+            .map((e) => e.waitReason)
+            .toSet(),
+        {RecognitionWaitReason.network},
+      );
+      expect(service.currentProgress!.phase, RecognitionPhase.failed);
+      expect(service.currentProgress!.message, 'Shazam returned HTTP 500');
+    });
+
+    test('cancel during a wait ends the scan at once as cancelled', () async {
+      final never = Completer<void>();
+      delayImpl = (_) => never.future;
+      recognizer.failures[2] = tooMany;
+      final waiting = service.progressStream.firstWhere(
+        (e) => e.phase == RecognitionPhase.waiting,
+      );
+      final future = service.scan(track);
+      await waiting;
+      expect(service.isScanning, isTrue);
+      service.cancel();
+      await expectLater(future, throwsA(isA<RecognitionCancelled>()));
+      expect(never.isCompleted, isFalse);
+      expect(service.currentProgress!.phase, RecognitionPhase.cancelled);
+      expect(service.isScanning, isFalse);
+      expect(notifier.events.last, 'stop');
+      expect(recognizer.attempts, [30000, 90000, 150000]);
+
+      // The next scan starts with a fresh cancel signal and resumes.
+      delayImpl = (_) async {};
+      final run = await service.scan(track);
+      expect(run.sampleCount, 6);
+      expect(recognizer.calls.length, 6);
+    });
   });
 
   test(
@@ -440,6 +835,23 @@ void main() {
       expect(ytdlp.events, ['start scan', 'update 2/4', 'stop']);
     });
 
+    test('a wait shows its detail in the notification', () async {
+      final ytdlp = _ServiceRecorder();
+      final notifier = YtDlpScanForegroundNotifier(ytdlp);
+      await notifier.start('scan');
+      await notifier.update('scan', 2, 4, detail: 'Retrying at 12:05');
+      await notifier.update('scan', 2, 4, detail: 'Retrying sample 3 of 4…');
+      await notifier.update('scan', 3, 4);
+      await notifier.stop();
+      expect(ytdlp.events, [
+        'start scan',
+        'update 2/4 Retrying at 12:05',
+        'update 2/4 Retrying sample 3 of 4…',
+        'update 3/4',
+        'stop',
+      ]);
+    });
+
     test('a scan started during a download never touches it', () async {
       final ytdlp = _ServiceRecorder();
       final notifier = YtDlpScanForegroundNotifier(
@@ -505,7 +917,12 @@ class _ServiceRecorder extends YtDlpService {
     required int currentTrack,
     required int totalTracks,
     required int progress,
-  }) async => events.add('update $currentTrack/$totalTracks');
+    String? trackTitle,
+  }) async => events.add(
+    trackTitle == null
+        ? 'update $currentTrack/$totalTracks'
+        : 'update $currentTrack/$totalTracks $trackTitle',
+  );
 
   @override
   Future<void> stopDownloadService() async => events.add('stop');
