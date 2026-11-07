@@ -4,6 +4,10 @@
 /// matches so the user still sees something meaningful.
 String friendlyDownloadError(String raw) {
   final lower = raw.toLowerCase();
+  // The Wayback Machine has no saved copy of this video.
+  if (lower.contains('not archived or indexed')) {
+    return 'No archived copy was found';
+  }
   if (isRemovedFromYouTubeError(raw)) return 'Removed from YouTube';
   // "Sign in to confirm you're not a bot" is YouTube blocking the
   // downloader, not an age check. It usually passes after a while or with

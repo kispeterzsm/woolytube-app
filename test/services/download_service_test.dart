@@ -1703,6 +1703,38 @@ void main() {
       );
     });
 
+    test('the archived copy is read from the Wayback Machine', () async {
+      final playlist = await insertTestPlaylist(
+        db,
+        outputPath: folder,
+        audioOnly: true,
+      );
+      final track = await removedTrack(playlist);
+      final url = PlaylistService.archivedCopyUrl(track.videoId);
+      expect(url, endsWith('wayback-fakeurl.archive.org/yt/gone-1'));
+
+      await service.downloadReupload(
+        playlist,
+        track,
+        url,
+        adopt:
+            (media) => playlistService().replaceWithReuploadFile(
+              trackId: track.id,
+              downloadedPath: media.path,
+            ),
+      );
+
+      expect(ytdlp.calls.single.url, url);
+      expect((await db.getTrack(track.id))!.isLocalReplacement, isTrue);
+      expect(
+        friendlyDownloadError(
+          'ERROR: [web.archive:youtube] gone-1: The requested video is not '
+          'archived or indexed',
+        ),
+        'No archived copy was found',
+      );
+    });
+
     test('only links to one video are accepted', () {
       for (final ok in [
         'https://www.youtube.com/watch?v=abc&list=PL1',

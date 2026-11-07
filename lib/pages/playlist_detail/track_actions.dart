@@ -312,6 +312,21 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
             unawaited(_replaceWithReupload(track));
           },
         ),
+      if ((!isDownloaded || track.unavailableReason != null) &&
+          !isDownloading &&
+          isYouTubeVideo)
+        tile(
+          key: const ValueKey('track-actions-replace-archived'),
+          icon: Icons.history,
+          title: 'Download archived copy',
+          subtitle:
+              'Get the copy the Wayback Machine saved, the one '
+              'quiteaplaylist.com offers',
+          onTap: () {
+            close();
+            unawaited(_replaceWithArchivedCopy(track));
+          },
+        ),
       if (isDownloaded && canRedownload)
         tile(
           key: const ValueKey('track-actions-redownload'),
@@ -577,8 +592,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
   /// uses it as this track's file, like [_pickLocalReplacement] does with a
   /// file from the phone.
   Future<void> _replaceWithReupload(Track track) async {
-    final playlist = _playlist;
-    if (playlist == null) return;
+    if (_playlist == null) return;
 
     String? clipboard;
     try {
@@ -606,7 +620,63 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
           ),
     );
     if (url == null || !mounted) return;
+    await _downloadReplacement(track, url, source: 'the reupload');
+  }
 
+  /// Downloads the Wayback Machine's saved copy of the video and uses it as
+  /// this track's file.
+  Future<void> _replaceWithArchivedCopy(Track track) async {
+    final hasFile =
+        track.filePath != null && await File(track.filePath!).exists();
+    if (!mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder:
+          (ctx) => AlertDialog(
+            backgroundColor: const Color(0xFF2A2A2A),
+            title: const Text(
+              'Download archived copy?',
+              style: TextStyle(color: Colors.white),
+            ),
+            content: Text(
+              'The copy of this video saved by the Wayback Machine '
+              '(web.archive.org) becomes the file of "${track.title}". '
+              'The track keeps its place and title.'
+              '${hasFile ? "\n\nThe current file is not deleted: it is kept "
+                      "in this playlist's replaced-files folder "
+                      "(.woolytube_replaced)." : ""}',
+              style: const TextStyle(color: Color(0xFFCCCCCC)),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                key: const ValueKey('archived-copy-confirm'),
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Download'),
+              ),
+            ],
+          ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _downloadReplacement(
+      track,
+      PlaylistService.archivedCopyUrl(track.videoId),
+      source: 'the archived copy',
+    );
+  }
+
+  /// Downloads [url] and makes it [track]'s file, like a file picked with
+  /// [_pickLocalReplacement]. [source] names it in messages.
+  Future<void> _downloadReplacement(
+    Track track,
+    String url, {
+    required String source,
+  }) async {
+    final playlist = _playlist;
+    if (playlist == null) return;
     final downloadService = ref.read(downloadServiceProvider);
     void showMessage(String message) {
       if (!mounted) return;
@@ -631,7 +701,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
       return;
     }
 
-    showMessage('Downloading the reupload of "${track.title}"');
+    showMessage('Downloading $source of "${track.title}"');
     final playlistService = ref.read(playlistServiceProvider);
     unawaited(
       downloadService
@@ -648,12 +718,12 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
           .then(
             (done) => showMessage(
               done
-                  ? 'Replaced "${track.title}" with the reupload'
+                  ? 'Replaced "${track.title}" with $source'
                   : 'Stopped; nothing was changed',
             ),
             onError:
                 (Object e, StackTrace _) => showMessage(
-                  'Could not download the reupload: '
+                  'Could not download $source: '
                   '${friendlyDownloadError(_errorText(e))}',
                 ),
           ),

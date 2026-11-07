@@ -1579,6 +1579,14 @@ class PlaylistService {
     );
   }
 
+  /// The Wayback Machine's saved copy of a YouTube video, the same copy
+  /// quiteaplaylist.com offers for download. yt-dlp reads it with its
+  /// web-archive extractor; a video that was never saved fails with "not
+  /// archived or indexed".
+  static String archivedCopyUrl(String videoId) =>
+      'https://web.archive.org/web/2oe_/http://wayback-fakeurl.archive.org/'
+      'yt/$videoId';
+
   /// Whether [input] is a link yt-dlp can be given as a reupload: a web
   /// address that is not a whole playlist or channel.
   static Uri? parseReuploadUrl(String input) {
