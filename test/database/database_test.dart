@@ -753,6 +753,20 @@ void main() {
     expect(byVideoId['adopter']!.thumbnailPath, isNull);
   });
 
+  test('an upgraded library keeps its data and counts changes', () async {
+    final migrated = _openSchema10([
+      _v10Track(40, 1, 'kept', 'complete', '/tmp/list/00001_Kept.m4a'),
+    ]);
+    addTearDown(migrated.close);
+
+    final track = (await migrated.getTracksForPlaylist(1)).single;
+    expect(track.filePath, '/tmp/list/00001_Kept.m4a');
+    expect((await migrated.getPlaylist(1)).lastUpdateAttempt, isNull);
+    final before = await migrated.playlistRevision(1);
+    await migrated.updateTrackAlwaysSkip(track.id, true);
+    expect(await migrated.playlistRevision(1), greaterThan(before));
+  });
+
   test('the duplicate-index repair lets the title decide a tie', () async {
     final migrated = _openSchema10([
       _v10Track(

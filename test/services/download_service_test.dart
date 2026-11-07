@@ -10,6 +10,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/services/chapters.dart';
+import 'package:woolytube/services/download_errors.dart';
 import 'package:woolytube/services/download_service.dart';
 import 'package:woolytube/services/log_service.dart';
 import 'package:woolytube/services/metadata_service.dart';
@@ -23,16 +24,32 @@ class FakeDownloadNotificationService extends DownloadNotificationService {
   final playlistNames = <String>[];
   final downloadedCounts = <int>[];
   final notificationIds = <int>[];
+  final trackTitles = <String?>[];
+  final failures = <(String, int, String)>[];
 
   @override
   Future<void> showDownloadComplete(
     String playlistName, {
     int downloadedCount = 1,
     int notificationId = 1001,
+    String? trackTitle,
+    bool audioOnly = false,
+    int failedCount = 0,
   }) async {
     playlistNames.add(playlistName);
     downloadedCounts.add(downloadedCount);
     notificationIds.add(notificationId);
+    trackTitles.add(trackTitle);
+  }
+
+  @override
+  Future<void> showDownloadsFailed(
+    String playlistName, {
+    required int failedCount,
+    required String reason,
+    int notificationId = 1001,
+  }) async {
+    failures.add((playlistName, failedCount, reason));
   }
 }
 
@@ -1158,6 +1175,266 @@ void main() {
         await service.downloadPlaylist(playlist, sourceChecked: false);
         expect((await db.getPlaylist(playlist.id)).lastUpdated, isNull);
       },
+    );
+  });
+
+  group('videos removed from YouTube', () {
+    const guidelines =
+        "ERROR: [youtube] gone-1: Video unavailable. This video has been "
+        "removed for violating YouTube's Community Guidelines";
+    const copyright =
+        'ERROR: [youtube] gone-2: Video unavailable. It was removed '
+        'following a copyright removal request';
+
+    test(
+      'are marked, not retried, and do not block the update stamp',
+      () async {
+        final playlist = await insertTestPlaylist(db, outputPath: folder);
+        final first = await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: 1,
+          videoId: 'gone-1',
+        );
+        final second = await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: 2,
+          videoId: 'gone-2',
+        );
+        ytdlp.errorFor =
+            (call) => PlatformException(
+              code: 'DOWNLOAD_ERROR',
+              message: call.videoId == 'gone-1' ? guidelines : copyright,
+            );
+        final events = <DownloadProgress>[];
+        final sub = service.progressStream.listen(events.add);
+
+        await service.downloadPlaylist(playlist);
+        await Future<void>.delayed(Duration.zero);
+        await sub.cancel();
+
+        for (final id in [first.id, second.id]) {
+          final track = (await db.getTrack(id))!;
+          expect(track.status, 'unavailable');
+          expect(track.unavailableReason, removedFromYouTubeReason);
+        }
+        expect((await db.getPlaylist(playlist.id)).lastUpdated, isNotNull);
+        expect(events.last.status, 'complete');
+        expect(events.last.removedCount, 2);
+        expect(friendlyDownloadError(guidelines), 'Removed from YouTube');
+
+        // The next update does not ask YouTube for them again.
+        await service.downloadPlaylist(playlist);
+        expect(ytdlp.calls, hasLength(2));
+      },
+    );
+
+    test('a manual retry that works makes the track normal again', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        videoId: 'gone-1',
+        status: 'unavailable',
+        unavailableReason: removedFromYouTubeReason,
+      );
+
+      expect(await service.downloadTrack(playlist, track), isTrue);
+
+      final updated = (await db.getTrack(track.id))!;
+      expect(updated.status, 'complete');
+      expect(updated.unavailableReason, isNull);
+      // A single track is not a playlist update.
+      expect((await db.getPlaylist(playlist.id)).lastUpdated, isNull);
+    });
+
+    test('a bot check is not mistaken for a removal', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final track = await insertTestTrack(db, playlistId: playlist.id);
+      ytdlp.downloadError = PlatformException(
+        code: 'DOWNLOAD_ERROR',
+        message:
+            "ERROR: [youtube] video-1: Sign in to confirm you're not a bot. "
+            'This helps protect our community.',
+      );
+      final events = <DownloadProgress>[];
+      final sub = service.progressStream.listen(events.add);
+
+      await service.downloadPlaylist(playlist);
+      await Future<void>.delayed(Duration.zero);
+      await sub.cancel();
+
+      expect((await db.getTrack(track.id))!.status, 'error');
+      expect((await db.getPlaylist(playlist.id)).lastUpdated, isNull);
+      // A run in which everything failed is reported, not "complete".
+      expect(events.last.status, 'error');
+      expect(events.last.failedCount, 1);
+      expect(friendlyDownloadError(events.last.error!), contains('not a bot'));
+      expect(isAgeGateDownloadError(events.last.error!), isFalse);
+      expect(isPermanentDownloadError('Video unavailable'), isFalse);
+    });
+  });
+
+  group('progress', () {
+    test('reports count the tracks of this run and compare by value', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      for (var i = 1; i <= 5; i++) {
+        await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: i,
+          videoId: 'v$i',
+          status: i <= 3 ? 'complete' : 'pending',
+          filePath: i <= 3 ? p.join(folder, '0000${i}_x.mp4') : null,
+        );
+        if (i <= 3) {
+          await File(p.join(folder, '0000${i}_x.mp4')).writeAsString('x');
+        }
+      }
+      final events = <DownloadProgress>[];
+      final sub = service.progressStream.listen(events.add);
+
+      await service.downloadPlaylist(playlist);
+      await Future<void>.delayed(Duration.zero);
+      await sub.cancel();
+
+      final downloading = events.where(
+        (e) => e.phase == DownloadPhase.downloading,
+      );
+      expect(downloading.map((e) => e.totalTracks).toSet(), {2});
+      expect(downloading.map((e) => e.currentTrackIndex).toSet(), {1, 2});
+      expect(downloading.first.currentTitle, isNotNull);
+      expect(events.first.phase, DownloadPhase.preparing);
+      expect(events.any((e) => e.phase == DownloadPhase.finishing), isTrue);
+      // No two reports in a row are the same.
+      for (var i = 1; i < events.length; i++) {
+        expect(events[i], isNot(events[i - 1]));
+      }
+      expect(
+        const DownloadProgress(
+          playlistId: 1,
+          currentTrackIndex: 1,
+          totalTracks: 2,
+          trackProgress: 50,
+          status: 'downloading',
+          phase: DownloadPhase.downloading,
+        ).overallFraction,
+        0.25,
+      );
+    });
+  });
+
+  group('busy service', () {
+    test('a second playlist waits in the queue and then runs', () async {
+      final first = await insertTestPlaylist(db, outputPath: folder);
+      await insertTestTrack(db, playlistId: first.id, videoId: 'a');
+      final secondFolder = p.join(libraryDir, 'Second');
+      await Directory(secondFolder).create(recursive: true);
+      final second = await insertTestPlaylist(
+        db,
+        url: 'https://www.youtube.com/playlist?list=second',
+        name: 'Second',
+        outputPath: secondFolder,
+      );
+      await insertTestTrack(db, playlistId: second.id, videoId: 'b');
+      ytdlp.downloadCompleter = Completer<void>();
+      ytdlp.downloadStarted = Completer<void>();
+
+      final running = service.downloadPlaylist(first);
+      await ytdlp.downloadStarted!.future;
+      expect(await service.downloadPlaylist(second), DownloadStart.queued);
+      expect(
+        await service.downloadPlaylist(second),
+        DownloadStart.alreadyQueued,
+      );
+      expect(service.queuedPlaylistIds, [second.id]);
+
+      ytdlp.downloadCompleter!.complete();
+      await running;
+      await service.runFinished;
+      for (var i = 0; i < 50 && ytdlp.calls.length < 2; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      await service.runFinished;
+      expect(ytdlp.calls.map((c) => c.videoId), ['a', 'b']);
+      expect(service.queuedPlaylistIds, isEmpty);
+    });
+
+    test('a playlist deleted during its download stops it', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      await insertTestTrack(db, playlistId: playlist.id, index: 1);
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 2,
+        videoId: 'video-2',
+      );
+      ytdlp.downloadCompleter = Completer<void>();
+      ytdlp.downloadStarted = Completer<void>();
+
+      final running = service.downloadPlaylist(playlist);
+      await ytdlp.downloadStarted!.future;
+      await db.deletePlaylist(playlist.id);
+      ytdlp.downloadCompleter!.complete();
+      await running;
+
+      expect(ytdlp.calls, hasLength(1));
+      expect(notifications.playlistNames, isEmpty);
+      expect(service.isDownloading, isFalse);
+    });
+
+    test('stop ends a retry wait at once', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      await insertTestTrack(db, playlistId: playlist.id);
+      ytdlp.downloadError = StateError('Connection reset by peer');
+
+      final watch = Stopwatch()..start();
+      final running = service.downloadPlaylist(playlist);
+      while (ytdlp.calls.isEmpty) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      await service.cancelActiveDownloads();
+      await running;
+
+      expect(watch.elapsed, lessThan(const Duration(seconds: 4)));
+      expect(service.isDownloading, isFalse);
+    });
+  });
+
+  group('lock', () {
+    test('only one of two simultaneous owners gets a free lock', () async {
+      final results = await Future.wait([
+        lock.acquire(DownloadLock.foregroundOwner),
+        lock.acquire(DownloadLock.backgroundOwner),
+      ]);
+      expect(results.where((r) => r), hasLength(1));
+    });
+  });
+
+  test('SponsorBlock rechecks are spread over two days', () {
+    final now = DateTime(2024, 6, 10);
+    Track track(int id, DateTime checkedAt) => Track(
+      id: id,
+      playlistId: 1,
+      index: id,
+      videoId: 'v$id',
+      title: 't',
+      status: 'complete',
+      isLocalReplacement: false,
+      alwaysSkip: false,
+      replaceRequested: false,
+      sponsorBlockCheckedAt: checkedAt,
+    );
+    final weekAgo = now.subtract(const Duration(days: 7));
+    expect(
+      DownloadService.shouldRecheckSponsorBlock(track(48, weekAgo), now),
+      isTrue,
+    );
+    expect(
+      DownloadService.shouldRecheckSponsorBlock(track(47, weekAgo), now),
+      isFalse,
     );
   });
 }

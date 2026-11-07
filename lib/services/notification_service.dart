@@ -16,6 +16,10 @@ class DownloadNotificationService {
   static const _channelName = 'WoolyTube Downloads';
   static const _completeNotificationId = 1001;
 
+  /// Failure notifications use ids above this, so a playlist's failure
+  /// does not replace its own completion notification.
+  static const _failureIdOffset = 1 << 20;
+
   final FlutterLocalNotificationsPlugin _plugin;
   final NotificationPresenter? _presenter;
 
@@ -34,17 +38,8 @@ class DownloadNotificationService {
     );
   }
 
-  /// Posts a completion notification. Pass the playlist id as
-  /// [notificationId] so several playlists finishing close together each keep
-  /// their own notification instead of overwriting one shared entry.
-  Future<void> showDownloadComplete(
-    String playlistName, {
-    int downloadedCount = 1,
-    int notificationId = _completeNotificationId,
-  }) async {
-    if (downloadedCount < 1) return;
-
-    final androidDetails = AndroidNotificationDetails(
+  static NotificationDetails get _details => const NotificationDetails(
+    android: AndroidNotificationDetails(
       _channelId,
       _channelName,
       channelDescription: 'Download completion notifications',
@@ -54,17 +49,68 @@ class DownloadNotificationService {
       enableVibration: false,
       silent: true,
       onlyAlertOnce: true,
-    );
-    final plural = downloadedCount == 1 ? 'video' : 'videos';
-    final title =
-        downloadedCount == 1 ? 'New video downloaded' : 'New videos downloaded';
-    final body = '$downloadedCount new $plural downloaded to $playlistName';
-    final details = NotificationDetails(android: androidDetails);
+    ),
+  );
+
+  Future<void> _show(int id, String title, String body) async {
     final presenter = _presenter;
     if (presenter != null) {
-      await presenter(notificationId, title, body, details);
+      await presenter(id, title, body, _details);
     } else {
-      await _plugin.show(notificationId, title, body, details);
+      await _plugin.show(id, title, body, _details);
     }
+  }
+
+  /// Posts a completion notification. Pass the playlist id as
+  /// [notificationId] so several playlists finishing close together each keep
+  /// their own notification instead of overwriting one shared entry.
+  ///
+  /// With [trackTitle], the notification is about that one track. Audio
+  /// playlists ([audioOnly]) say "song" instead of "video". [failedCount]
+  /// adds how many downloads of the run failed.
+  Future<void> showDownloadComplete(
+    String playlistName, {
+    int downloadedCount = 1,
+    int notificationId = _completeNotificationId,
+    String? trackTitle,
+    bool audioOnly = false,
+    int failedCount = 0,
+  }) async {
+    if (downloadedCount < 1) return;
+
+    final noun = audioOnly ? 'song' : 'video';
+    final String title;
+    final String body;
+    if (trackTitle != null) {
+      title = 'Downloaded "$trackTitle"';
+      body = 'Saved to $playlistName';
+    } else {
+      final plural = downloadedCount == 1 ? noun : '${noun}s';
+      title =
+          downloadedCount == 1
+              ? 'New $noun downloaded'
+              : 'New ${noun}s downloaded';
+      body =
+          '$downloadedCount new $plural downloaded to $playlistName'
+          '${failedCount > 0 ? ' · $failedCount failed' : ''}';
+    }
+    await _show(notificationId, title, body);
+  }
+
+  /// Tells that a playlist's downloads all failed, for runs nobody watched
+  /// (the scheduled background update).
+  Future<void> showDownloadsFailed(
+    String playlistName, {
+    required int failedCount,
+    required String reason,
+    int notificationId = _completeNotificationId,
+  }) async {
+    if (failedCount < 1) return;
+    final plural = failedCount == 1 ? 'download' : 'downloads';
+    await _show(
+      notificationId + _failureIdOffset,
+      'Could not update $playlistName',
+      '$failedCount $plural failed: $reason',
+    );
   }
 }
