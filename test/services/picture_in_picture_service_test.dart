@@ -68,6 +68,30 @@ void main() {
     expect(playback.audioOnlyCalls, [true, false]);
   });
 
+  test('a closed PiP window stops video until the app is opened', () async {
+    await service.handlePlatformCall(const MethodCall('pipDismissed'));
+    expect(playback.audioOnlyCalls, [true]);
+    await service.handleAppResumed();
+    expect(playback.audioOnlyCalls, [true, false]);
+  });
+
+  test('hiding the app during a video keeps only its audio', () async {
+    await service.handleAppBackgrounded();
+    expect(playback.audioOnlyCalls, isEmpty, reason: 'no video playing');
+
+    playback.setVideo(true);
+    await service.handleAppBackgrounded();
+    expect(playback.audioOnlyCalls, [true]);
+    await service.handleAppResumed();
+    expect(playback.audioOnlyCalls, [true, false]);
+
+    await service.handlePlatformCall(
+      const MethodCall('pictureInPictureChanged', true),
+    );
+    await service.handleAppBackgrounded();
+    expect(playback.audioOnlyCalls, [true, false], reason: 'PiP shows it');
+  });
+
   test('routes play-pause and next callbacks', () async {
     await service.handlePlatformCall(const MethodCall('togglePlayPause'));
     await service.handlePlatformCall(const MethodCall('skipNext'));
@@ -139,7 +163,25 @@ class _FakePipPlayback implements PictureInPicturePlaybackController {
 
   @override
   Future<void> setAudioOnlyMode(bool enabled) async {
+    _temporary = false;
     audioOnlyCalls.add(enabled);
+  }
+
+  bool _temporary = false;
+
+  // Mirrors PlaybackService: only a mode this switched on is undone.
+  @override
+  Future<void> enableTemporaryAudioOnly() async {
+    if (audioOnlyMode) return;
+    audioOnlyCalls.add(true);
+    _temporary = true;
+  }
+
+  @override
+  Future<void> restoreTemporaryAudioOnly() async {
+    if (!_temporary) return;
+    _temporary = false;
+    audioOnlyCalls.add(false);
   }
 
   Future<void> dispose() async {

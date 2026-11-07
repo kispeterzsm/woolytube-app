@@ -116,6 +116,81 @@ void main() {
     },
   );
 
+  test('fetching missing chapters reports progress and can stop', () async {
+    final others = <Track>[];
+    for (var i = 2; i <= 4; i++) {
+      final file = await File(
+        '${dir.path}/0000${i}_song.m4a',
+      ).writeAsBytes([i]);
+      others.add(
+        await insertTestTrack(
+          db,
+          playlistId: track.playlistId,
+          index: i,
+          videoId: 'video-$i',
+          status: 'complete',
+          filePath: file.path,
+        ),
+      );
+    }
+    expect(await service.countMissing(track.playlistId), 4);
+
+    final progress = <(int, int)>[];
+    final cancellation = ChapterFetchCancellation();
+    final partial = await service.fetchMissingChapters(
+      track.playlistId,
+      cancellation: cancellation,
+      onProgress: (done, total) {
+        progress.add((done, total));
+        if (done == 2) cancellation.cancel();
+      },
+    );
+    expect(progress, [(0, 4), (1, 4), (2, 4)]);
+    expect(partial.cancelled, isTrue);
+    expect(partial.updated, 2);
+    expect(ytdlp.calls, 2);
+    // Stopping early still brings the sidecar up to date once.
+    expect(await File('${dir.path}/woolytube_meta.json').exists(), isTrue);
+
+    ytdlp.fail = true;
+    final rest = await service.fetchMissingChapters(track.playlistId);
+    expect(rest.eligible, 2);
+    expect(rest.failed, 2);
+    expect(rest.cancelled, isFalse);
+
+    ytdlp.fail = false;
+    final done = await service.fetchMissingChapters(track.playlistId);
+    expect(done.updated, 2);
+    expect(await service.countMissing(track.playlistId), 0);
+    expect((await service.fetchMissingChapters(track.playlistId)).eligible, 0);
+  });
+
+  test('a sidecar changed by another writer is rewritten', () async {
+    final sidecar = File('${dir.path}/woolytube_meta.json');
+    await service.persist(track.playlistId);
+    final written = await sidecar.readAsString();
+    // Downloads or sync (another MetadataService) rewrote it meanwhile.
+    await sidecar.writeAsString('{}');
+    await service.persist(track.playlistId);
+    expect(await sidecar.readAsString(), written);
+  });
+
+  test('a deleted chapter can be put back', () async {
+    await service.refresh(track);
+    track = (await db.getTrack(track.id))!;
+    final first = ChapterData.decode(track.chaptersJson).active.first;
+    final before = await service.delete(track, first.id);
+    expect(
+      ChapterData.decode((await db.getTrack(track.id))!.chaptersJson).active,
+      hasLength(1),
+    );
+    await service.replaceChapters(track, before!);
+    expect(
+      ChapterData.decode((await db.getTrack(track.id))!.chaptersJson).active,
+      hasLength(2),
+    );
+  });
+
   test(
     'chapter shuffle preference survives refresh, edit, and restore',
     () async {
