@@ -30,6 +30,31 @@ void main() {
     expect(actions['music_offtopic'], SponsorBlockCategoryAction.disabled);
   });
 
+  test('a highlight can be shown but never set to skip', () {
+    final highlight = sponsorBlockCategoryDefinition('poi_highlight');
+    expect(
+      highlight.allowedActions,
+      isNot(contains(SponsorBlockCategoryAction.autoSkip)),
+    );
+    final actions = decodeSponsorBlockCategoryActions(
+      '{"poi_highlight":"autoSkip"}',
+    );
+    expect(actions['poi_highlight'], SponsorBlockCategoryAction.showInSeekbar);
+    expect(
+      encodeSponsorBlockCategoryActions({
+        'poi_highlight': SponsorBlockCategoryAction.autoSkip,
+      }),
+      contains('"poi_highlight":"showInSeekbar"'),
+    );
+  });
+
+  test('every category explains itself in plain words', () {
+    for (final definition in sponsorBlockCategoryDefinitions) {
+      expect(definition.description, isNotEmpty, reason: definition.id);
+      expect(definition.label, isNot(contains('/')), reason: definition.id);
+    }
+  });
+
   test('action map decoder fills missing categories with defaults', () {
     final actions = decodeSponsorBlockCategoryActions(
       '{"sponsor":"disabled","hook":"showInSeekbar"}',

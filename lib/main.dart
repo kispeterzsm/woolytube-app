@@ -17,8 +17,8 @@ import 'services/app_settings_service.dart';
 import 'services/download_errors.dart';
 import 'services/download_service.dart';
 import 'pages/home_page.dart';
-import 'pages/player_page.dart';
-import 'widgets/mini_player.dart';
+import 'player/player_shell.dart';
+import 'services/auto_update_runner.dart';
 
 @pragma('vm:entry-point')
 void backgroundMain() {
@@ -104,6 +104,14 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Once the library is ready, scheduled updates run inside this engine (no
+    // second engine on the UI thread) and the download notification's Cancel
+    // reaches Dart. Until then the worker uses its own engine.
+    ref.listenManual<AsyncValue<bool>>(initProvider, (_, next) {
+      if (next.valueOrNull == true) {
+        ref.read(foregroundAutoUpdateBridgeProvider).attach();
+      }
+    }, fireImmediately: true);
   }
 
   @override
@@ -117,11 +125,20 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
     ref.read(appLifecycleProvider.notifier).state = state;
     switch (state) {
       case AppLifecycleState.inactive:
-      case AppLifecycleState.paused:
+        break;
       case AppLifecycleState.hidden:
+        // An invisible video without a PiP window only needs its audio.
+        unawaited(
+          ref.read(pictureInPictureServiceProvider).handleAppBackgrounded(),
+        );
+        ref.read(libraryStartupProvider).onAppPaused();
+        break;
+      case AppLifecycleState.paused:
+        ref.read(libraryStartupProvider).onAppPaused();
         break;
       case AppLifecycleState.resumed:
         unawaited(ref.read(pictureInPictureServiceProvider).handleAppResumed());
+        unawaited(ref.read(libraryStartupProvider).onAppResumed());
         break;
       case AppLifecycleState.detached:
         // Detached means the UI engine is being torn down, not merely covered
@@ -134,20 +151,6 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
 
   @override
   Widget build(BuildContext context) {
-    final inPictureInPicture =
-        ref.watch(isInPictureInPictureProvider).valueOrNull ?? false;
-
-    // Auto-open the full-screen player when a video track starts.
-    ref.listen<AsyncValue<Track?>>(currentTrackProvider, (prev, next) {
-      final track = next.valueOrNull;
-      if (track == null) return;
-      if (prev?.valueOrNull?.id == track.id) return;
-      final svc = ref.read(playbackServiceProvider);
-      if (!svc.isVideoContent) return;
-      if (videoFullscreenNotifier.value) return;
-      _navigatorKey.currentState?.push(playerPageRoute());
-    });
-
     // Surface download failures from anywhere in the app, including
     // background-started downloads whose page is no longer open.
     ref.listen<AsyncValue<DownloadProgress>>(downloadProgressProvider, (
@@ -216,46 +219,10 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
           hintStyle: const TextStyle(color: Color(0xFF888888)),
         ),
       ),
-      builder: (context, child) {
-        return Stack(
-          fit: StackFit.expand,
-          children: [
-            Offstage(
-              offstage: inPictureInPicture,
-              child: Column(
-                children: [
-                  Expanded(
-                    child: MediaQuery.removePadding(
-                      context: context,
-                      removeBottom: true,
-                      child: child!,
-                    ),
-                  ),
-                  MiniPlayerBar(
-                    onOpenPlayer: () {
-                      _navigatorKey.currentState?.push(playerPageRoute());
-                    },
-                  ),
-                ],
-              ),
-            ),
-            if (inPictureInPicture)
-              Positioned.fill(
-                child: ColoredBox(
-                  color: Colors.black,
-                  child: Video(
-                    controller:
-                        ref.read(playbackServiceProvider).videoController,
-                    controls: _noPictureInPictureControls,
-                    pauseUponEnteringBackgroundMode: false,
-                    fit: BoxFit.contain,
-                  ),
-                ),
-              ),
-          ],
-        );
-      },
-      home: const InitWrapper(),
+      // The root navigator holds the shell (pages + player) and every popup.
+      // In picture-in-picture only the video is drawn.
+      builder: (context, child) => _PictureInPictureFrame(child: child!),
+      home: const PlayerShell(home: InitWrapper()),
     );
   }
 
@@ -330,6 +297,38 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
 
 Widget _noPictureInPictureControls(VideoState state) => const SizedBox.shrink();
 
+/// Shows only the video while the app is in picture-in-picture mode. The app
+/// stays mounted (offstage) so playback state and pages are kept.
+class _PictureInPictureFrame extends ConsumerWidget {
+  final Widget child;
+
+  const _PictureInPictureFrame({required this.child});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final inPictureInPicture =
+        ref.watch(isInPictureInPictureProvider).valueOrNull ?? false;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Offstage(offstage: inPictureInPicture, child: child),
+        if (inPictureInPicture)
+          Positioned.fill(
+            child: ColoredBox(
+              color: Colors.black,
+              child: Video(
+                controller: ref.read(playbackServiceProvider).videoController,
+                controls: _noPictureInPictureControls,
+                pauseUponEnteringBackgroundMode: false,
+                fit: BoxFit.contain,
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
 class InitWrapper extends ConsumerStatefulWidget {
   const InitWrapper({super.key});
 
@@ -352,7 +351,7 @@ class _InitWrapperState extends ConsumerState<InitWrapper> {
                   CircularProgressIndicator(color: Color(0xFF2196F3)),
                   SizedBox(height: 16),
                   Text(
-                    'Initializing yt-dlp...',
+                    'Opening library…',
                     style: TextStyle(color: Color(0xFF888888)),
                   ),
                 ],

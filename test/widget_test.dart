@@ -9,6 +9,7 @@ import 'package:woolytube/main.dart';
 import 'package:woolytube/providers/playback_providers.dart';
 import 'package:woolytube/providers/playlist_counts_provider.dart';
 import 'package:woolytube/providers/providers.dart';
+import 'package:woolytube/services/auto_update_runner.dart';
 import 'package:woolytube/services/download_errors.dart';
 import 'package:woolytube/services/download_service.dart';
 import 'package:woolytube/services/update_service.dart';
@@ -130,6 +131,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          foregroundAutoUpdateBridgeProvider.overrideWithValue(_NoBridge()),
           initProvider.overrideWith((ref) async => true),
           updateServiceProvider.overrideWithValue(_Updates()),
           playlistsProvider.overrideWith(
@@ -186,6 +188,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          foregroundAutoUpdateBridgeProvider.overrideWithValue(_NoBridge()),
           initProvider.overrideWith((ref) async {
             inits++;
             return true;
@@ -369,4 +372,17 @@ class _Updates implements UpdateService {
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// The app attaches the scheduled-update bridge once the library is ready;
+/// these tests have no platform channels for it.
+class _NoBridge implements ForegroundAutoUpdateBridge {
+  @override
+  void attach() {}
+
+  @override
+  void detach() {}
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => null;
 }

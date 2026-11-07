@@ -6,7 +6,6 @@ import '../database/database.dart';
 import 'playback_notification_controller.dart';
 import 'media_thumbnail_service.dart';
 import 'chapter_playback.dart';
-import 'chapters.dart';
 
 Uri? resolveNotificationArtwork({
   String? localPath,
@@ -18,7 +17,25 @@ Uri? resolveNotificationArtwork({
       File(localPath).existsSync()) {
     return Uri.file(localPath);
   }
+  return _remoteArtwork(remoteUrl, youtubeVideoId);
+}
 
+/// [resolveNotificationArtwork] without blocking the UI isolate on a file
+/// check; for building many items at once.
+Future<Uri?> resolveNotificationArtworkAsync({
+  String? localPath,
+  String? remoteUrl,
+  String? youtubeVideoId,
+}) async {
+  if (localPath != null && localPath.isNotEmpty) {
+    try {
+      if (await File(localPath).exists()) return Uri.file(localPath);
+    } catch (_) {}
+  }
+  return _remoteArtwork(remoteUrl, youtubeVideoId);
+}
+
+Uri? _remoteArtwork(String? remoteUrl, String? youtubeVideoId) {
   if (remoteUrl != null && remoteUrl.isNotEmpty) {
     final uri = Uri.tryParse(remoteUrl);
     if (uri != null && (uri.scheme == 'https' || uri.scheme == 'http')) {
@@ -93,7 +110,9 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
     _subscriptions.add(
       _playbackService.durationStream.listen((duration) {
         final current = mediaItem.value;
-        if (current != null && duration > Duration.zero) {
+        if (current != null &&
+            duration > Duration.zero &&
+            current.duration != duration) {
           mediaItem.add(current.copyWith(duration: duration));
         }
       }),
@@ -136,8 +155,8 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
           MediaControl.skipToPrevious,
           playing ? MediaControl.pause : MediaControl.play,
           MediaControl.skipToNext,
-          if (ChapterData.decode(currentTrack?.chaptersJson).active.isNotEmpty)
-            _nextFileControl,
+          // Only a chapter of a longer file has a "rest of the file" to skip.
+          if (_playbackService.currentItemIsChapter) _nextFileControl,
           shuffleOn ? _shuffleOnControl : _shuffleOffControl,
         ],
         systemActions: const {
@@ -182,25 +201,40 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
       ];
     }
     if (parentMediaId.startsWith('playlist:')) {
-      final playlistId = int.parse(parentMediaId.substring('playlist:'.length));
-      final tracks = await _db.getTracksForPlaylist(playlistId);
-      final playlist = await _db.getPlaylist(playlistId);
-      return [
+      final playlistId = int.tryParse(
+        parentMediaId.substring('playlist:'.length),
+      );
+      if (playlistId == null) return const [];
+      final Playlist playlist;
+      try {
+        playlist = await _db.getPlaylist(playlistId);
+      } catch (_) {
+        return const [];
+      }
+      final tracks = [
+        for (final t in await _db.getTracksForPlaylist(playlistId))
+          if (t.status == 'complete' && t.filePath != null) t,
+      ];
+      // Check the artwork files in parallel, off the UI isolate.
+      final artwork = await Future.wait([
         for (final t in tracks)
-          if (t.status == 'complete' && t.filePath != null)
-            for (final item in chapterPlaybackItems(t, playlist))
-              MediaItem(
-                id: item.id,
-                title: item.displayTrack.title,
-                album: item.chapter == null ? null : t.title,
-                duration: item.duration,
-                playable: true,
-                artUri: resolveNotificationArtwork(
-                  localPath: t.thumbnailPath,
-                  remoteUrl: t.thumbnailUrl,
-                  youtubeVideoId: t.videoId,
-                ),
-              ),
+          resolveNotificationArtworkAsync(
+            localPath: t.thumbnailPath,
+            remoteUrl: t.thumbnailUrl,
+            youtubeVideoId: t.videoId,
+          ),
+      ]);
+      return [
+        for (var i = 0; i < tracks.length; i++)
+          for (final item in chapterPlaybackItems(tracks[i], playlist))
+            MediaItem(
+              id: item.id,
+              title: item.displayTrack.title,
+              album: item.chapter == null ? null : tracks[i].title,
+              duration: item.duration,
+              playable: true,
+              artUri: artwork[i],
+            ),
       ];
     }
     return const [];
@@ -216,19 +250,25 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
     }
     final parts = mediaId.split(':');
     if (parts.length < 3) return;
+    if (parts.first == 'chapter' && parts.length < 4) return;
     final trackId = int.tryParse(parts[1]);
     final playlistId = int.tryParse(parts[2]);
     if (trackId == null || playlistId == null) return;
 
-    final playlist = await _db.getPlaylist(playlistId);
+    final Playlist playlist;
+    try {
+      playlist = await _db.getPlaylist(playlistId);
+    } catch (_) {
+      return;
+    }
     final tracks = await _db.getTracksForPlaylist(playlistId);
     final track = tracks.where((t) => t.id == trackId).firstOrNull;
     if (track == null) return;
 
-    // Force audio-only when launched from the car so libmpv doesn't allocate
-    // a video surface that has no rendering target.
-    await _playbackService.setAudioOnlyMode(true);
-    if (parts.first == 'chapter' && parts.length < 4) return;
+    // Audio only while in the car, so libmpv doesn't allocate a video
+    // surface that has no rendering target. Video comes back when the app
+    // is next opened on the phone, unless the user chose audio-only.
+    await _playbackService.enableTemporaryAudioOnly();
     await _playbackService.playTrack(
       track,
       tracks,

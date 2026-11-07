@@ -23,6 +23,7 @@ final chapterServiceProvider = Provider<ChapterService>(
   (ref) => ChapterService(
     ref.watch(databaseProvider),
     ref.watch(ytdlpServiceProvider),
+    metadata: ref.watch(metadataServiceProvider),
   ),
 );
 
