@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../player/player_widgets.dart';
 import '../providers/playback_providers.dart';
 import '../services/sponsorblock_service.dart';
 
@@ -8,6 +9,7 @@ class SegmentMarkButton extends ConsumerWidget {
   final Color activeColor;
   final Color inactiveColor;
   final double iconSize;
+  final bool showLabel;
   final VoidCallback? onAction;
 
   const SegmentMarkButton({
@@ -15,6 +17,7 @@ class SegmentMarkButton extends ConsumerWidget {
     this.activeColor = const Color(0xFF2196F3),
     this.inactiveColor = const Color(0xFF888888),
     this.iconSize = 22,
+    this.showLabel = false,
     this.onAction,
   });
 
@@ -22,13 +25,18 @@ class SegmentMarkButton extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final pending =
         ref.watch(pendingSegmentMarkStartProvider).valueOrNull != null;
-    return IconButton(
-      icon: Icon(
-        pending ? Icons.bookmark : Icons.bookmark_add_outlined,
-        color: pending ? activeColor : inactiveColor,
-        size: iconSize,
-      ),
-      tooltip: pending ? 'Finish segment' : 'Mark segment start',
+    return PlayerActionButton(
+      icon: pending ? Icons.bookmark : Icons.bookmark_add_outlined,
+      label: pending ? 'End part' : 'Mark part',
+      tooltip:
+          pending
+              ? 'Mark where the part to skip ends'
+              : 'Mark the start of a part to skip',
+      toggled: pending,
+      showLabel: showLabel,
+      activeColor: activeColor,
+      inactiveColor: inactiveColor,
+      iconSize: iconSize,
       onPressed: () => _handlePressed(context, ref, pending),
     );
   }

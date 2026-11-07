@@ -210,4 +210,51 @@ void main() {
     expect(await lockFile().exists(), isTrue);
     expect(await lock.isHeldByOther(DownloadLock.foregroundOwner), isTrue);
   });
+
+  test('an action waits for a short check instead of failing', () async {
+    final gate = LibraryGate.unlocked();
+    expect(await gate.tryEnter('playlist check'), isNull);
+    // Without waiting, it is refused at once.
+    expect(await gate.tryEnter('rename'), isNotNull);
+
+    unawaited(
+      Future<void>.delayed(
+        const Duration(milliseconds: 100),
+      ).then((_) => gate.exit()),
+    );
+    expect(
+      await gate.tryEnter('rename', wait: const Duration(seconds: 2)),
+      isNull,
+    );
+    await gate.exit();
+
+    // A long operation is not waited for.
+    expect(await gate.tryEnter('download'), isNull);
+    final watch = Stopwatch()..start();
+    expect(
+      await gate.tryEnter('rename', wait: const Duration(seconds: 2)),
+      isNotNull,
+    );
+    expect(watch.elapsed, lessThan(const Duration(seconds: 1)));
+  });
+
+  test('an unstamped lock left by a dead engine is taken over after a '
+      'moment', () async {
+    final file = lockFile();
+    await file.writeAsString('');
+    expect(await lock.isHeldByOther(DownloadLock.foregroundOwner), isTrue);
+    expect(await lock.acquire(DownloadLock.foregroundOwner), isFalse);
+
+    await file.setLastModified(
+      DateTime.now().subtract(
+        DownloadLock.unknownHolderStaleAfter + const Duration(seconds: 1),
+      ),
+    );
+    expect(await lock.isHeldByOther(DownloadLock.foregroundOwner), isFalse);
+    expect(await lock.acquire(DownloadLock.foregroundOwner), isTrue);
+    expect(
+      (await file.readAsString()).startsWith(DownloadLock.foregroundOwner),
+      isTrue,
+    );
+  });
 }

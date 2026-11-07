@@ -371,6 +371,23 @@ void main() {
       await database.customStatement(
         'ALTER TABLE tracks DROP COLUMN replace_requested',
       );
+      // Added in schema 13: the change counters and the update-attempt
+      // stamp (the triggers read that column, so they go first).
+      final triggers =
+          await database
+              .customSelect(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger'",
+              )
+              .get();
+      for (final trigger in triggers) {
+        await database.customStatement(
+          'DROP TRIGGER ${trigger.read<String>('name')}',
+        );
+      }
+      await database.customStatement('DROP TABLE playlist_revisions');
+      await database.customStatement(
+        'ALTER TABLE playlists DROP COLUMN last_update_attempt',
+      );
       await database.customStatement('PRAGMA user_version = 9');
       await database.close();
       database = AppDatabase.forTesting(NativeDatabase(file));

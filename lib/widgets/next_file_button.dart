@@ -1,32 +1,42 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../providers/playback_providers.dart';
-import '../services/chapters.dart';
 
+import '../player/player_widgets.dart';
+import '../providers/playback_providers.dart';
+
+/// 'Next file': skips the remaining chapters of the current file.
+///
+/// Only shown while chapters are played as separate tracks; otherwise the
+/// current item already is the whole file and 'Next' does the same thing.
 class NextFileButton extends ConsumerWidget {
   final double iconSize;
+  final bool showLabel;
+  final Color inactiveColor;
   final VoidCallback? onAction;
-  const NextFileButton({super.key, this.iconSize = 32, this.onAction});
+
+  const NextFileButton({
+    super.key,
+    this.iconSize = 24,
+    this.showLabel = true,
+    this.inactiveColor = Colors.white70,
+    this.onAction,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final track = ref.watch(currentTrackProvider).valueOrNull;
-    if (ChapterData.decode(track?.chaptersJson).active.isEmpty) {
-      return const SizedBox.shrink();
-    }
-    // The global mini-player sits outside the Navigator's tooltip overlay.
-    final hasOverlay = Overlay.maybeOf(context) != null;
-    return Semantics(
-      label: hasOverlay ? null : 'Next file',
-      child: IconButton(
-        tooltip: hasOverlay ? 'Next file' : null,
-        icon: Icon(Icons.fast_forward, size: iconSize),
-        color: Colors.white,
-        onPressed: () {
-          ref.read(playbackServiceProvider).nextFile();
-          onAction?.call();
-        },
-      ),
+    if (!ref.watch(isChapterItemProvider)) return const SizedBox.shrink();
+    return PlayerActionButton(
+      key: const ValueKey('next-file-button'),
+      icon: Icons.last_page_rounded,
+      label: 'Next file',
+      tooltip: 'Next file (skip the remaining chapters)',
+      showLabel: showLabel,
+      inactiveColor: inactiveColor,
+      iconSize: iconSize,
+      onPressed: () {
+        ref.read(playbackServiceProvider).nextFile();
+        onAction?.call();
+      },
     );
   }
 }

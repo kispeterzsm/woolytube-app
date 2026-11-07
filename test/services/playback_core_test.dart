@@ -371,6 +371,54 @@ void main() {
       ]);
     });
 
+    test('Play next puts the song at the front of Up next', () async {
+      final tracks = await addTracks(4);
+      await playback.playTrack(tracks[0], [tracks[0]]);
+      await playback.addToUpNextQueue(tracks[1]);
+      await playback.addToUpNextQueue(tracks[2]);
+      expect(await playback.playNext(tracks[3]), isTrue);
+      expect(playback.upNextQueue.map((t) => t.id), [
+        tracks[3].id,
+        tracks[1].id,
+        tracks[2].id,
+      ]);
+    });
+
+    test('Up next entries can be reordered', () async {
+      final tracks = await addTracks(4);
+      await playback.playTrack(tracks[0], [tracks[0]]);
+      for (final t in tracks.skip(1)) {
+        await playback.addToUpNextQueue(t);
+      }
+      playback.moveUpNextQueue(2, 0);
+      expect(playback.upNextQueue.map((t) => t.id), [
+        tracks[3].id,
+        tracks[1].id,
+        tracks[2].id,
+      ]);
+      playback.moveUpNextQueue(0, 2);
+      expect(playback.upNextQueue.map((t) => t.id), [
+        tracks[1].id,
+        tracks[2].id,
+        tracks[3].id,
+      ]);
+    });
+
+    test('an Up next entry can be played right away', () async {
+      final tracks = await addTracks(4);
+      await playback.playTrack(tracks[0], [tracks[0]]);
+      for (final t in tracks.skip(1)) {
+        await playback.addToUpNextQueue(t);
+      }
+      await playback.playUpNextAt(1);
+      await settle();
+      expect(playback.currentTrack!.id, tracks[2].id);
+      expect(playback.upNextQueue.map((t) => t.id), [
+        tracks[1].id,
+        tracks[3].id,
+      ]);
+    });
+
     test('playlist settings apply to songs that have not started', () async {
       final album = await addTrack('album', chapters: _threeChapters);
       final first = await addTrack('first');

@@ -1,6 +1,21 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:isolate';
+
 import 'package:flutter/services.dart';
+
+/// Answers at least this long are decoded on a worker isolate. The flat
+/// listing of a 600-video playlist is several hundred kilobytes, and
+/// decoding it on the UI isolate drops frames.
+const backgroundJsonDecodeThreshold = 64 * 1024;
+
+/// Decodes a yt-dlp JSON answer, off the UI isolate when it is large.
+Future<Map<String, dynamic>> decodeYtDlpJson(String raw) {
+  if (raw.length < backgroundJsonDecodeThreshold) {
+    return Future.value(jsonDecode(raw) as Map<String, dynamic>);
+  }
+  return Isolate.run(() => jsonDecode(raw) as Map<String, dynamic>);
+}
 
 class YtDlpService {
   static const _methodChannel = MethodChannel('com.woolytube/ytdlp');
@@ -74,7 +89,7 @@ class YtDlpService {
     final result = await _methodChannel.invokeMethod<String>('getVideoInfo', {
       'url': url,
     });
-    return jsonDecode(result!) as Map<String, dynamic>;
+    return decodeYtDlpJson(result!);
   }
 
   Future<Map<String, dynamic>> getPlaylistInfo(String url) async {
@@ -82,7 +97,7 @@ class YtDlpService {
       'getPlaylistInfo',
       {'url': url},
     );
-    return jsonDecode(result!) as Map<String, dynamic>;
+    return decodeYtDlpJson(result!);
   }
 
   Future<void> cancelDownloads() async {
