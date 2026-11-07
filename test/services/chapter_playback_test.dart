@@ -257,6 +257,146 @@ void main() {
     expect(q.nextFile()!.track.id, albums.first.trackId);
   });
 
+  group('playlist order', () {
+    late List<PlaybackAlbum> list;
+    setUp(() async => list = await _singleTrackPlaylist(db, 10));
+    List<int> ids(Iterable<PlaybackAlbum> albums) =>
+        albums.map((a) => a.trackId).toList();
+
+    test('the queue shows the whole playlist at the tapped position', () {
+      final q = AlbumPlaybackQueue(random: Random(1));
+      final first = q.start(list, trackId: list[7].trackId, shuffled: false)!;
+      expect(first.track.id, list[7].trackId);
+      expect(q.items.map((i) => i.track.id), ids(list));
+      expect(q.index, 7);
+      expect(_drain(q), ids(list.skip(8)));
+    });
+
+    test('Previous at the tapped song plays the song above it', () {
+      final q = AlbumPlaybackQueue(random: Random(1));
+      q.start(list, trackId: list[5].trackId, shuffled: false);
+      expect(q.previous()!.track.id, list[4].trackId);
+      expect(q.previous()!.track.id, list[3].trackId);
+      expect(q.index, 3);
+      // Forward again walks the same songs, then continues after the tap.
+      expect(q.next()!.track.id, list[4].trackId);
+      expect(q.next()!.track.id, list[5].trackId);
+      expect(q.next()!.track.id, list[6].trackId);
+    });
+
+    test('shuffle on mid-play covers the songs above the current one', () {
+      for (var seed = 0; seed < 20; seed++) {
+        final q = AlbumPlaybackQueue(random: Random(seed));
+        final current = q.start(
+          list,
+          trackId: list[8].trackId,
+          shuffled: false,
+        );
+        q.setShuffle(true);
+        expect(q.current!.id, current!.id, reason: 'the song keeps playing');
+        final rest = _drain(q);
+        expect(
+          rest.toSet(),
+          ids(list).toSet()..remove(list[8].trackId),
+          reason: 'all other songs, including those above, still play',
+        );
+        expect(rest, hasLength(9));
+      }
+    });
+
+    test('shuffle off continues in playlist order after the current song', () {
+      for (var seed = 0; seed < 20; seed++) {
+        final q = AlbumPlaybackQueue(random: Random(seed));
+        q.start(list, shuffled: true);
+        final played = {q.current!.track.id};
+        for (var i = 0; i < 3; i++) {
+          played.add(q.next()!.track.id);
+        }
+        final current = q.current!.track.id;
+        q.setShuffle(false);
+        final position = ids(list).indexOf(current);
+        expect(
+          _drain(q),
+          ids(list.skip(position + 1)).where((id) => !played.contains(id)),
+        );
+      }
+    });
+
+    test('toggling shuffle never replays a song already played', () {
+      final q = AlbumPlaybackQueue(random: Random(3));
+      q.start(list, trackId: list[2].trackId, shuffled: false);
+      final played = {q.current!.track.id, q.next()!.track.id};
+      q.setShuffle(true);
+      played.add(q.next()!.track.id);
+      q.setShuffle(false);
+      q.setShuffle(true);
+      final rest = _drain(q);
+      expect(rest.toSet().intersection(played), isEmpty);
+      expect(rest.length + played.length, list.length);
+    });
+
+    test('a queued song comes before the rest of the playlist', () {
+      final q = AlbumPlaybackQueue(random: Random(1));
+      q.start(list, shuffled: false);
+      q.enqueue(list[9]);
+      expect(q.next()!.track.id, list[9].trackId);
+      expect(q.next()!.track.id, list[1].trackId);
+    });
+
+    test('snapshot and restore undo a step', () {
+      final q = AlbumPlaybackQueue(random: Random(1));
+      q.start(list, trackId: list[4].trackId, shuffled: false);
+      final snapshot = q.snapshot();
+      q.previous();
+      q.previous();
+      q.restore(snapshot);
+      expect(q.current!.track.id, list[4].trackId);
+      expect(q.index, 4);
+      expect(q.next()!.track.id, list[5].trackId);
+    });
+
+    test('playNow plays a song and then continues the queue', () {
+      final q = AlbumPlaybackQueue(random: Random(1));
+      q.start(list, shuffled: false);
+      final extra = list[7].items.single;
+      expect(q.playNow(extra).id, extra.id);
+      expect(q.current!.id, extra.id);
+      expect(q.next()!.track.id, list[1].trackId);
+      expect(q.previous()!.id, extra.id);
+      expect(q.previous()!.track.id, list[0].trackId);
+    });
+
+    test('rebuilt pending albums play with their new items', () {
+      final q = AlbumPlaybackQueue(random: Random(1));
+      q.start(list, shuffled: false);
+      q.rebuildPendingAlbums(
+        (album) =>
+            album.trackId == list[1].trackId
+                ? PlaybackAlbum(const [])
+                : album.trackId == list[2].trackId
+                ? PlaybackAlbum(list[9].items)
+                : null,
+      );
+      expect(q.next()!.track.id, list[9].trackId);
+      expect(q.next()!.track.id, list[3].trackId);
+    });
+  });
+
+  test('peek and the album run show what plays next without moving', () {
+    final q = AlbumPlaybackQueue();
+    final first = q.start([albums.first], shuffled: false)!;
+    expect(q.peekNext()!.id, albums.first.items[1].id);
+    expect(q.upcomingInAlbum().map((i) => i.id), [
+      albums.first.items[1].id,
+      albums.first.items[2].id,
+    ]);
+    expect(first.continuesInto(q.peekNext()), isTrue);
+    expect(q.current!.id, first.id);
+    q.replaceCurrent(PlaybackItem(first.track));
+    expect(q.current!.chapter, isNull);
+    expect(q.peekNext(), isNull, reason: 'the whole file covers its chapters');
+  });
+
   test('chapter timeline and identity differ for ranges of the same file', () {
     final item = albums.first.items[1];
     expect(item.duration, const Duration(seconds: 20));
@@ -276,3 +416,30 @@ void main() {
     expect(item.id, isNot(albums.first.items.first.id));
   });
 }
+
+/// A playlist of [count] single-file tracks, in order.
+Future<List<PlaybackAlbum>> _singleTrackPlaylist(
+  AppDatabase db,
+  int count,
+) async {
+  final playlist = await insertTestPlaylist(db, name: 'Long');
+  return [
+    for (var i = 0; i < count; i++)
+      PlaybackAlbum([
+        PlaybackItem(
+          await insertTestTrack(
+            db,
+            playlistId: playlist.id,
+            index: i + 1,
+            videoId: 'long-$i',
+            status: 'complete',
+            filePath: '/tmp/long-$i.m4a',
+          ),
+        ),
+      ]),
+  ];
+}
+
+List<int> _drain(AlbumPlaybackQueue q) => [
+  for (var next = q.next(); next != null; next = q.next()) next.track.id,
+];
