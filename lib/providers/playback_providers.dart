@@ -109,6 +109,11 @@ final ValueNotifier<bool> videoFullscreenNotifier = ValueNotifier<bool>(false);
 final ValueNotifier<double> audioPlayerOverlayHeightNotifier =
     ValueNotifier<double>(0);
 
+/// True while playback is set to pause when the current song ends.
+final stopAfterCurrentProvider = StreamProvider<bool>((ref) {
+  return ref.watch(playbackServiceProvider).stopAfterCurrentStream;
+});
+
 final shuffleEnabledProvider = StreamProvider<bool>((ref) {
   return ref.watch(playbackServiceProvider).shuffleEnabledStream;
 });

@@ -32,22 +32,27 @@ class SleepTimerButton extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final remaining = ref.watch(sleepTimerRemainingProvider).valueOrNull;
-    final active = remaining != null;
+    final endOfSong = ref.watch(stopAfterCurrentProvider).valueOrNull ?? false;
+    final active = remaining != null || endOfSong;
+    final activeLabel =
+        remaining != null ? formatSleepTimerRemaining(remaining) : 'Song end';
 
     return PlayerActionButton(
       key: const ValueKey('sleep-timer-button'),
       icon: active ? Icons.bedtime : Icons.bedtime_outlined,
-      label: active ? formatSleepTimerRemaining(remaining) : 'Sleep',
+      label: active ? activeLabel : 'Sleep',
       tooltip:
-          active
+          remaining != null
               ? 'Sleep timer: ${formatSleepTimerRemaining(remaining)} remaining'
+              : endOfSong
+              ? 'Sleep timer: pauses when this song ends'
               : 'Sleep timer',
       toggled: active,
       showLabel: showLabel,
       activeColor: activeColor,
       inactiveColor: inactiveColor,
       iconSize: iconSize,
-      onPressed: () => _showOptions(context, ref, remaining),
+      onPressed: () => _showOptions(context, ref, remaining, endOfSong),
     );
   }
 
@@ -55,6 +60,7 @@ class SleepTimerButton extends ConsumerWidget {
     BuildContext context,
     WidgetRef ref,
     Duration? remaining,
+    bool endOfSong,
   ) async {
     final selection = await showModalBottomSheet<Duration>(
       context: context,
@@ -78,10 +84,12 @@ class SleepTimerButton extends ConsumerWidget {
                             fontWeight: FontWeight.w600,
                           ),
                         ),
-                        if (remaining != null) ...[
+                        if (remaining != null || endOfSong) ...[
                           const SizedBox(height: 4),
                           Text(
-                            '${formatSleepTimerRemaining(remaining)} remaining',
+                            remaining != null
+                                ? '${formatSleepTimerRemaining(remaining)} remaining'
+                                : 'Pauses when this song ends',
                             style: const TextStyle(color: Color(0xFFBBBBBB)),
                           ),
                         ],
@@ -102,7 +110,19 @@ class SleepTimerButton extends ConsumerWidget {
                       ),
                       onTap: () => Navigator.pop(context, duration),
                     ),
-                  if (remaining != null) ...[
+                  ListTile(
+                    key: const ValueKey('sleep-timer-end-of-song'),
+                    leading: const Icon(
+                      Icons.music_off_outlined,
+                      color: Color(0xFFBBBBBB),
+                    ),
+                    title: const Text(
+                      'End of this song',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    onTap: () => Navigator.pop(context, Duration.zero),
+                  ),
+                  if (remaining != null || endOfSong) ...[
                     const Divider(height: 1, color: Color(0xFF444444)),
                     ListTile(
                       key: const ValueKey('cancel-sleep-timer'),
@@ -115,7 +135,9 @@ class SleepTimerButton extends ConsumerWidget {
                         style: TextStyle(color: Colors.redAccent),
                       ),
                       onTap: () {
-                        ref.read(playbackServiceProvider).cancelSleepTimer();
+                        final playback = ref.read(playbackServiceProvider);
+                        playback.cancelSleepTimer();
+                        playback.setStopAfterCurrent(false);
                         Navigator.pop(context);
                       },
                     ),
@@ -127,7 +149,15 @@ class SleepTimerButton extends ConsumerWidget {
     );
 
     if (selection != null) {
-      ref.read(playbackServiceProvider).startSleepTimer(selection);
+      final playback = ref.read(playbackServiceProvider);
+      if (selection == Duration.zero) {
+        // 'End of this song' replaces a running countdown.
+        playback.cancelSleepTimer();
+        playback.setStopAfterCurrent(true);
+      } else {
+        playback.setStopAfterCurrent(false);
+        playback.startSleepTimer(selection);
+      }
     }
     onAction?.call();
   }

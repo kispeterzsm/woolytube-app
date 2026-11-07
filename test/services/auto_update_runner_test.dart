@@ -471,15 +471,26 @@ void main() {
     });
 
     test('refreshes live queries after the worker engine wrote', () async {
-      final emitted = <int>[];
-      final sub = db.watchAllPlaylists().listen((l) => emitted.add(l.length));
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final emitted = <String>[];
+      final sub = db.watchAllPlaylists().listen(
+        (l) => emitted.add(l.single.name),
+      );
       await pumpEventQueue();
+      // A write drift is not told about, like one from the worker's engine.
+      await db.customStatement('UPDATE playlists SET name = ? WHERE id = ?', [
+        'Renamed elsewhere',
+        playlist.id,
+      ]);
+      await pumpEventQueue();
+      expect(emitted, ['Test Playlist']);
+
       await bridge.handleWorkerCall(
         const MethodCall('libraryChangedExternally'),
       );
       await pumpEventQueue();
       await sub.cancel();
-      expect(emitted.length, 2);
+      expect(emitted, ['Test Playlist', 'Renamed elsewhere']);
     });
 
     test('the notification Cancel stops a user download', () async {

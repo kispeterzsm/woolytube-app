@@ -18,6 +18,7 @@ import 'services/download_errors.dart';
 import 'services/download_service.dart';
 import 'pages/home_page.dart';
 import 'player/player_shell.dart';
+import 'services/auto_update_runner.dart';
 
 @pragma('vm:entry-point')
 void backgroundMain() {
@@ -103,6 +104,14 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Once the library is ready, scheduled updates run inside this engine (no
+    // second engine on the UI thread) and the download notification's Cancel
+    // reaches Dart. Until then the worker uses its own engine.
+    ref.listenManual<AsyncValue<bool>>(initProvider, (_, next) {
+      if (next.valueOrNull == true) {
+        ref.read(foregroundAutoUpdateBridgeProvider).attach();
+      }
+    }, fireImmediately: true);
   }
 
   @override
@@ -116,11 +125,20 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
     ref.read(appLifecycleProvider.notifier).state = state;
     switch (state) {
       case AppLifecycleState.inactive:
-      case AppLifecycleState.paused:
+        break;
       case AppLifecycleState.hidden:
+        // An invisible video without a PiP window only needs its audio.
+        unawaited(
+          ref.read(pictureInPictureServiceProvider).handleAppBackgrounded(),
+        );
+        ref.read(libraryStartupProvider).onAppPaused();
+        break;
+      case AppLifecycleState.paused:
+        ref.read(libraryStartupProvider).onAppPaused();
         break;
       case AppLifecycleState.resumed:
         unawaited(ref.read(pictureInPictureServiceProvider).handleAppResumed());
+        unawaited(ref.read(libraryStartupProvider).onAppResumed());
         break;
       case AppLifecycleState.detached:
         // Detached means the UI engine is being torn down, not merely covered
@@ -333,7 +351,7 @@ class _InitWrapperState extends ConsumerState<InitWrapper> {
                   CircularProgressIndicator(color: Color(0xFF2196F3)),
                   SizedBox(height: 16),
                   Text(
-                    'Initializing yt-dlp...',
+                    'Opening library…',
                     style: TextStyle(color: Color(0xFF888888)),
                   ),
                 ],
