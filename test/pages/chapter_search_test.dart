@@ -89,6 +89,15 @@ void main() {
               downloadProgressProvider.overrideWith(
                 (ref) => Stream.value(DownloadProgress.idle),
               ),
+              downloadQueueProvider.overrideWith(
+                (ref) => Stream.value(const <int>[]),
+              ),
+              syncingPlaylistsProvider.overrideWith(
+                (ref) => Stream.value(const <int>{}),
+              ),
+              playlistTrackCountsStreamProvider.overrideWith(
+                (ref) => Stream.value(const <int, PlaylistCounts>{}),
+              ),
             ],
             child: MaterialApp(
               home:
