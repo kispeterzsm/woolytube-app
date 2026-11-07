@@ -4,80 +4,47 @@ import 'package:flutter/material.dart';
 
 import '../services/playback_service.dart';
 
-class SegmentedProgressBar extends StatelessWidget {
-  final double progress;
-  final int durationMs;
-  final List<PlaybackSponsorBlockSegment> segments;
-  final double height;
-  final Color backgroundColor;
-  final Color progressColor;
-
-  const SegmentedProgressBar({
-    super.key,
-    required this.progress,
-    required this.durationMs,
-    required this.segments,
-    this.height = 3,
-    this.backgroundColor = const Color(0xFF333333),
-    this.progressColor = const Color(0xFF2196F3),
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: height,
-      child: CustomPaint(
-        painter: _SegmentedProgressPainter(
-          progress: progress.clamp(0.0, 1.0),
-          durationMs: durationMs,
-          segments: segments,
-          backgroundColor: backgroundColor,
-          progressColor: progressColor,
-        ),
-        child: const SizedBox.expand(),
+/// Paints SponsorBlock segments as coloured blocks inside [track].
+///
+/// Shared by the seek bar's track shape and the mini player's progress line,
+/// so markers are always aligned with the bar they sit on.
+void paintSponsorBlockSegments(
+  Canvas canvas,
+  Rect track,
+  List<PlaybackSponsorBlockSegment> segments,
+  int durationMs,
+) {
+  if (durationMs <= 0 || track.width <= 0 || segments.isEmpty) return;
+  final radius = Radius.circular(track.height / 2);
+  final paint = Paint();
+  for (final segment in segments) {
+    final start = segment.startMs.clamp(0, durationMs);
+    final end = segment.endMs.clamp(start + 1, durationMs);
+    final left = track.left + track.width * start / durationMs;
+    final rawRight = track.left + track.width * end / durationMs;
+    final right = min(track.right, max(rawRight, left + 2));
+    if (right <= track.left || left >= track.right) continue;
+    paint.color = Color(segment.colorValue).withValues(alpha: 0.9);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTRB(left, track.top, right, track.bottom),
+        radius,
       ),
+      paint,
     );
   }
 }
 
-class SegmentOverlayBar extends StatelessWidget {
-  final int durationMs;
-  final List<PlaybackSponsorBlockSegment> segments;
-  final double height;
-
-  const SegmentOverlayBar({
-    super.key,
-    required this.durationMs,
-    required this.segments,
-    this.height = 3,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: height,
-      child: CustomPaint(
-        painter: _SegmentedProgressPainter(
-          progress: 0,
-          durationMs: durationMs,
-          segments: segments,
-          backgroundColor: Colors.transparent,
-          progressColor: Colors.transparent,
-        ),
-        child: const SizedBox.expand(),
-      ),
-    );
-  }
-}
-
-class _SegmentedProgressPainter extends CustomPainter {
+/// Paints a rounded track filling its whole canvas: background, progress and
+/// SponsorBlock segments.
+class SegmentedProgressPainter extends CustomPainter {
   final double progress;
   final int durationMs;
   final List<PlaybackSponsorBlockSegment> segments;
   final Color backgroundColor;
   final Color progressColor;
 
-  const _SegmentedProgressPainter({
+  const SegmentedProgressPainter({
     required this.progress,
     required this.durationMs,
     required this.segments,
@@ -87,41 +54,33 @@ class _SegmentedProgressPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    final track = Offset.zero & size;
     final radius = Radius.circular(size.height / 2);
-    final base = RRect.fromRectAndRadius(Offset.zero & size, radius);
     if (backgroundColor.a > 0) {
-      canvas.drawRRect(base, Paint()..color = backgroundColor);
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(track, radius),
+        Paint()..color = backgroundColor,
+      );
     }
     if (progressColor.a > 0 && progress > 0) {
       canvas.drawRRect(
         RRect.fromRectAndRadius(
-          Rect.fromLTWH(0, 0, size.width * progress, size.height),
+          Rect.fromLTWH(
+            0,
+            0,
+            size.width * progress.clamp(0.0, 1.0),
+            size.height,
+          ),
           radius,
         ),
         Paint()..color = progressColor,
       );
     }
-    if (durationMs <= 0 || size.width <= 0) return;
-
-    for (final segment in segments) {
-      final start = segment.startMs.clamp(0, durationMs);
-      final end = segment.endMs.clamp(start + 1, durationMs);
-      final left = size.width * start / durationMs;
-      final rawRight = size.width * end / durationMs;
-      final right = min(size.width, max(rawRight, left + 2));
-      if (right <= 0 || left >= size.width) continue;
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(
-          Rect.fromLTWH(left, 0, right - left, size.height),
-          radius,
-        ),
-        Paint()..color = Color(segment.colorValue).withValues(alpha: 0.9),
-      );
-    }
+    paintSponsorBlockSegments(canvas, track, segments, durationMs);
   }
 
   @override
-  bool shouldRepaint(covariant _SegmentedProgressPainter oldDelegate) =>
+  bool shouldRepaint(covariant SegmentedProgressPainter oldDelegate) =>
       progress != oldDelegate.progress ||
       durationMs != oldDelegate.durationMs ||
       segments != oldDelegate.segments ||

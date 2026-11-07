@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../player/player_widgets.dart';
 import '../providers/playback_providers.dart';
 
 class SleepTimerButton extends ConsumerWidget {
@@ -16,11 +17,15 @@ class SleepTimerButton extends ConsumerWidget {
   final double iconSize;
   final VoidCallback? onAction;
 
+  /// Shows 'Sleep', or the remaining time while a timer runs, under the icon.
+  final bool showLabel;
+
   const SleepTimerButton({
     super.key,
     this.activeColor = const Color(0xFF2196F3),
     this.inactiveColor = const Color(0xFF888888),
     this.iconSize = 22,
+    this.showLabel = false,
     this.onAction,
   });
 
@@ -29,17 +34,19 @@ class SleepTimerButton extends ConsumerWidget {
     final remaining = ref.watch(sleepTimerRemainingProvider).valueOrNull;
     final active = remaining != null;
 
-    return IconButton(
+    return PlayerActionButton(
       key: const ValueKey('sleep-timer-button'),
-      icon: Icon(
-        active ? Icons.bedtime : Icons.bedtime_outlined,
-        color: active ? activeColor : inactiveColor,
-        size: iconSize,
-      ),
+      icon: active ? Icons.bedtime : Icons.bedtime_outlined,
+      label: active ? formatSleepTimerRemaining(remaining) : 'Sleep',
       tooltip:
           active
               ? 'Sleep timer: ${formatSleepTimerRemaining(remaining)} remaining'
               : 'Sleep timer',
+      toggled: active,
+      showLabel: showLabel,
+      activeColor: activeColor,
+      inactiveColor: inactiveColor,
+      iconSize: iconSize,
       onPressed: () => _showOptions(context, ref, remaining),
     );
   }
