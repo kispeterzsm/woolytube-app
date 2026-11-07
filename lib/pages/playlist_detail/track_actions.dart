@@ -112,6 +112,8 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
         !PlaylistService.isForcedInsertVideoId(track.videoId);
     final isYouTubeVideo =
         !PlaylistService.isForcedInsertVideoId(track.videoId);
+    final removedFromYouTube =
+        track.unavailableReason == removedFromYouTubeReason;
 
     void close() => Navigator.pop(sheetContext);
 
@@ -143,8 +145,38 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
     }
 
     return [
+      if (removedFromYouTube && !isDownloading) ...[
+        tile(
+          key: const ValueKey('track-actions-retry-removed-now'),
+          icon: Icons.refresh,
+          iconColor: _accent,
+          title: 'Try again now',
+          subtitle:
+              isDownloaded
+                  ? 'YouTube said it was removed. Your file stays unless a '
+                      'new copy downloads'
+                  : 'YouTube said it was removed. Download it if it is back',
+          onTap: () {
+            close();
+            unawaited(_startTrackDownload(track));
+          },
+        ),
+        tile(
+          key: const ValueKey('track-actions-retry-removed'),
+          icon: Icons.schedule,
+          title: 'Try again on the next update',
+          subtitle: 'Updates skip it until then',
+          onTap: () {
+            close();
+            unawaited(_retryRemovedOnNextUpdate(track));
+          },
+        ),
+      ],
       // Get the track first when it has no file yet.
-      if (!isDownloaded && canRedownload && !isDownloading)
+      if (!isDownloaded &&
+          canRedownload &&
+          !isDownloading &&
+          !removedFromYouTube)
         tile(
           key: const ValueKey('track-actions-download'),
           icon: hasError ? Icons.refresh : Icons.download,
@@ -176,6 +208,24 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
         ),
       if (isDownloaded)
         tile(
+          key: const ValueKey('track-actions-play-next'),
+          icon: Icons.playlist_play,
+          iconColor: const Color(0xFF64B5F6),
+          title: 'Play next',
+          subtitle:
+              alwaysSkip
+                  ? 'Turn off Always skip to play it next'
+                  : 'Plays right after the current song',
+          onTap:
+              alwaysSkip
+                  ? null
+                  : () {
+                    close();
+                    unawaited(_addToQueue(track, next: true));
+                  },
+        ),
+      if (isDownloaded)
+        tile(
           key: const ValueKey('track-actions-add-to-queue'),
           icon: Icons.queue_music,
           iconColor: const Color(0xFF64B5F6),
@@ -183,7 +233,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
           subtitle:
               alwaysSkip
                   ? 'Turn off Always skip to queue this track'
-                  : 'Plays after the current song',
+                  : 'Plays after everything in Up next',
           onTap:
               alwaysSkip
                   ? null
@@ -336,9 +386,12 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
     ];
   }
 
-  Future<void> _addToQueue(Track track) async {
+  Future<void> _addToQueue(Track track, {bool next = false}) async {
     final playbackService = ref.read(playbackServiceProvider);
-    final added = await playbackService.addToUpNextQueue(track);
+    final added =
+        next
+            ? await playbackService.playNext(track)
+            : await playbackService.addToUpNextQueue(track);
     if (!mounted) return;
     if (!added) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -353,10 +406,28 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          started ? 'Added to queue and started playback' : 'Added to queue',
+          started
+              ? 'Playing "${track.title}"'
+              : next
+              ? 'Plays next'
+              : 'Added to Up next',
         ),
       ),
     );
+  }
+
+  Future<void> _retryRemovedOnNextUpdate(Track track) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await ref.read(playlistServiceProvider).retryRemovedTrack(track.id);
+      messenger.showSnackBar(
+        const SnackBar(content: Text('The next update tries it again')),
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('Could not save: ${_errorText(e)}')),
+      );
+    }
   }
 
   Future<void> _shareTrack(Track track) async {

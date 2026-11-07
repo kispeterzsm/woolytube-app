@@ -37,6 +37,16 @@ part 'playlist_detail/track_dialogs.dart';
 const _accent = Color(0xFF2196F3);
 const _muted = Color(0xFF888888);
 
+/// When the open-time folder check and cover backfill last ran, per
+/// playlist. Reopening a playlist within [_openChecksInterval] skips them, so
+/// going back and forth between pages never repeats the disk scan.
+final _openChecksRanAt = <int, DateTime>{};
+const _openChecksInterval = Duration(minutes: 5);
+
+/// Forgets when the open-time checks ran, so the next open runs them.
+@visibleForTesting
+void resetPlaylistOpenChecks() => _openChecksRanAt.clear();
+
 class PlaylistDetailPage extends ConsumerStatefulWidget {
   final int playlistId;
 
@@ -63,7 +73,7 @@ class _TrackListView {
     } else {
       visible = [
         for (final track in tracks)
-          if (matchesTrackSearch(track, query)) track,
+          if (matchesNormalizedTrackSearch(track, query)) track,
       ];
       for (final track in visible) {
         if (track.chaptersJson == null) continue;
@@ -75,11 +85,15 @@ class _TrackListView {
     rowOf = {for (var i = 0; i < visible.length; i++) visible[i].id: i};
 
     var downloaded = 0;
+    var unavailable = 0;
+    var removed = 0;
     var seconds = 0;
     var maxIndex = 0;
     var playable = false;
     for (final track in tracks) {
       if (track.status == 'complete') downloaded++;
+      if (track.status == 'unavailable') unavailable++;
+      if (track.unavailableReason == removedFromYouTubeReason) removed++;
       seconds += track.durationSeconds ?? 0;
       if (track.index > maxIndex) maxIndex = track.index;
       if (!playable && track.status == 'complete' && !track.alwaysSkip) {
@@ -87,12 +101,13 @@ class _TrackListView {
       }
     }
     this.maxIndex = maxIndex;
+    removedFromYouTube = removed;
     hasPlayable = playable;
     visibleHasPlayable =
         identical(visible, tracks)
             ? playable
             : visible.any((t) => t.status == 'complete' && !t.alwaysSkip);
-    summary = _summaryText(tracks.length, downloaded, seconds);
+    summary = _summaryText(tracks.length, downloaded, unavailable, seconds);
   }
 
   final List<Track> tracks;
@@ -101,15 +116,24 @@ class _TrackListView {
   late final Map<int, int> rowOf;
   late final Map<int, MediaChapter> chapterMatches;
   late final int maxIndex;
+
+  /// Tracks a download found removed from YouTube (with or without a file).
+  late final int removedFromYouTube;
   late final bool hasPlayable;
   late final bool visibleHasPlayable;
   late final String summary;
 
-  static String _summaryText(int total, int downloaded, int seconds) {
+  static String _summaryText(
+    int total,
+    int downloaded,
+    int unavailable,
+    int seconds,
+  ) {
     if (total == 0) return 'No tracks';
     final parts = <String>[
       total == 1 ? '1 track' : '$total tracks',
       downloaded == total ? 'all downloaded' : '$downloaded downloaded',
+      if (unavailable > 0) '$unavailable unavailable',
     ];
     if (seconds > 0) parts.add(_formatTotalDuration(seconds));
     return parts.join(' · ');
@@ -131,6 +155,9 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
   /// this long.
   static const _userScrollGrace = Duration(seconds: 4);
 
+  /// How long after Play the next track change always brings the list along.
+  static const _forceFollowWindow = Duration(seconds: 5);
+
   late final Future<Playlist?> _playlistLoad;
   Playlist? _fetchedPlaylist;
   bool _handledRemoval = false;
@@ -143,6 +170,11 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
   double? _offsetBeforeSearch;
   bool _isUpdating = false;
 
+  /// Bumped by every Update and by Stop, so an update that was stopped
+  /// while YouTube was still answering cannot touch the page when it
+  /// finally returns.
+  int _updateGeneration = 0;
+
   _TrackListView? _view;
   ScrollController? _listController;
   double _rowExtent = 0;
@@ -150,8 +182,10 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
   /// True once the list was put on the playing track (or there was none).
   bool _initialFollowDone = false;
 
-  /// Set by an explicit "play" so the next track change always scrolls.
-  bool _forceFollowNext = false;
+  /// Until then, the next track change always scrolls (set by Play, so a
+  /// Play that changes nothing cannot make a much later change yank the
+  /// list).
+  DateTime? _forceFollowUntil;
   DateTime? _lastUserScroll;
   final ValueNotifier<bool> _showJumpToPlaying = ValueNotifier(false);
 
@@ -171,11 +205,8 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
       (previous, next) =>
           _onCurrentTrackChanged(previous?.valueOrNull, next.valueOrNull),
     );
-    // The folder check and the cover backfill read the disk and may write
-    // rows; they wait until the page is on screen and its route has settled.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _whenRouteSettled(_startBackgroundChecks);
-    });
+    _lastOverlay = _overlayHeight;
+    audioPlayerOverlayHeightNotifier.addListener(_onOverlayChanged);
   }
 
   Future<Playlist?> _loadPlaylist() async {
@@ -191,27 +222,17 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
     }
   }
 
-  void _whenRouteSettled(VoidCallback callback) {
-    final animation = ModalRoute.of(context)?.animation;
-    if (animation == null || animation.status == AnimationStatus.completed) {
-      callback();
-      return;
-    }
-    late final AnimationStatusListener listener;
-    listener = (status) {
-      if (status == AnimationStatus.forward ||
-          status == AnimationStatus.reverse) {
-        return;
-      }
-      animation.removeStatusListener(listener);
-      if (status == AnimationStatus.completed && mounted) callback();
-    };
-    animation.addStatusListener(listener);
-  }
-
+  /// The folder check and the cover backfill read the disk and may write
+  /// rows. They start once the page is on screen and its route has settled
+  /// (the list is already on the playing track by then), and at most once
+  /// every few minutes per playlist.
   Future<void> _startBackgroundChecks() async {
     final playlist = _playlist ?? await _playlistLoad;
     if (playlist == null || !mounted) return;
+    final now = DateTime.now();
+    final last = _openChecksRanAt[playlist.id];
+    if (last != null && now.difference(last) < _openChecksInterval) return;
+    _openChecksRanAt[playlist.id] = now;
     unawaited(_linkFiles(playlist));
     unawaited(_backfillThumbnails(playlist));
   }
@@ -248,6 +269,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
 
   @override
   void dispose() {
+    audioPlayerOverlayHeightNotifier.removeListener(_onOverlayChanged);
     _searchController.dispose();
     _listController?.dispose();
     _showJumpToPlaying.dispose();
@@ -269,6 +291,36 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
   // ---------------------------------------------------------------------
 
   double get _overlayHeight => audioPlayerOverlayHeightNotifier.value;
+  double _lastOverlay = 0;
+
+  /// The expanded player opened over the list: if it now covers the playing
+  /// row the list was showing, bring the row into the part left free.
+  void _onOverlayChanged() {
+    final before = _lastOverlay;
+    _lastOverlay = _overlayHeight;
+    if (_overlayHeight <= before) return;
+    final row = _rowOfCurrentTrack();
+    final position = _position;
+    if (row == null || position == null || _rowExtent <= 0) return;
+    final top = row * _rowExtent;
+    final oldBottom = position.pixels + position.viewportDimension - before;
+    final wasShown =
+        top + _rowExtent > position.pixels + 1 && top < oldBottom - 1;
+    final lastScroll = _lastUserScroll;
+    final browsing =
+        lastScroll != null &&
+        DateTime.now().difference(lastScroll) < _userScrollGrace;
+    if (!wasShown || browsing) return;
+    // After the list has been laid out with the new bottom padding.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final current = _rowOfCurrentTrack();
+      if (current != null && !_rowFullyVisible(current)) {
+        _scrollToRow(current, animate: true);
+      }
+      _updateJumpToPlaying();
+    });
+  }
 
   /// The offset that puts row [row] at 40 % of the part of the list that
   /// the expanded player does not cover.
@@ -406,12 +458,13 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
       _updateJumpToPlaying();
       return;
     }
+    final force = _takeForceFollow();
     if (previous?.id == next.id) {
+      // Play restarted the track already playing: still show it.
+      if (force && !_rowFullyVisible(row)) _scrollToRow(row, animate: true);
       _updateJumpToPlaying();
       return;
     }
-    final force = _forceFollowNext;
-    _forceFollowNext = false;
     if (_rowFullyVisible(row)) {
       _updateJumpToPlaying();
       return;
@@ -433,6 +486,12 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
     }
     _scrollToRow(row, animate: true);
     _updateJumpToPlaying();
+  }
+
+  bool _takeForceFollow() {
+    final until = _forceFollowUntil;
+    _forceFollowUntil = null;
+    return until != null && DateTime.now().isBefore(until);
   }
 
   void _updateJumpToPlaying() {
@@ -482,6 +541,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
       _searchQuery = '';
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       final row = _rowOfCurrentTrack();
       final position = _position;
       if (position == null) return;
@@ -497,7 +557,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
   }
 
   void _onSearchChanged(String raw) {
-    final query = raw.trim().toLowerCase();
+    final query = normalizeTrackSearchQuery(raw);
     if (query == _searchQuery) {
       // Keeps the clear button in sync with the text.
       setState(() {});
@@ -540,7 +600,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
   }
 
   void _playAll(List<Track> tracks) {
-    _forceFollowNext = true;
+    _forceFollowUntil = DateTime.now().add(_forceFollowWindow);
     _lastUserScroll = null;
     unawaited(
       ref.read(playbackServiceProvider).playAll(tracks, playlist: _playlist),
@@ -568,8 +628,11 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
     _handledRemoval = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final route = ModalRoute.of(context);
-      if (route != null && route.isCurrent) Navigator.of(context).maybePop();
+      // Only this route's "current" flag is looked up, and only now, so the
+      // page does not rebuild on every route change above it.
+      if (ModalRoute.isCurrentOf(context) ?? false) {
+        Navigator.of(context).maybePop();
+      }
     });
   }
 
@@ -590,14 +653,6 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
         ),
       ),
     );
-    final isDownloadingThis = ref.watch(
-      downloadProgressProvider.select((progress) {
-        final value = progress.valueOrNull;
-        return value != null &&
-            value.status == 'downloading' &&
-            value.playlistId == widget.playlistId;
-      }),
-    );
     final playlist = livePlaylist ?? _fetchedPlaylist;
     final removed =
         playlistsLoaded && livePlaylist == null && _fetchedPlaylist != null;
@@ -605,52 +660,37 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
     final loadedTracks = tracksAsync.valueOrNull;
     final view = loadedTracks == null ? null : _viewFor(loadedTracks);
 
-    return PopScope(
-      canPop: !_showSearch,
-      onPopInvokedWithResult: (didPop, _) {
-        if (!didPop && _showSearch) _closeSearch();
-      },
-      child: Scaffold(
-        appBar: _buildAppBar(playlist, view),
-        body:
-            removed
-                ? const Center(
-                  child: Text(
-                    'This playlist was deleted.',
-                    style: TextStyle(color: _muted),
+    return _AfterRouteSettles(
+      onSettled: _startBackgroundChecks,
+      child: PopScope(
+        canPop: !_showSearch,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop && _showSearch) _closeSearch();
+        },
+        child: Scaffold(
+          appBar: _buildAppBar(playlist, view),
+          body:
+              removed
+                  ? const Center(
+                    child: Text(
+                      'This playlist was deleted.',
+                      style: TextStyle(color: _muted),
+                    ),
+                  )
+                  : tracksAsync.when(
+                    loading:
+                        () => const Center(child: CircularProgressIndicator()),
+                    error: (e, _) => Center(child: Text('Error: $e')),
+                    data:
+                        (tracks) => Column(
+                          children: [
+                            _buildHeader(_viewFor(tracks), playlist),
+                            _RunStatus(playlistId: widget.playlistId),
+                            Expanded(child: _buildTrackList(_viewFor(tracks))),
+                          ],
+                        ),
                   ),
-                )
-                : tracksAsync.when(
-                  loading:
-                      () => const Center(child: CircularProgressIndicator()),
-                  error: (e, _) => Center(child: Text('Error: $e')),
-                  data:
-                      (tracks) => Column(
-                        children: [
-                          _buildHeader(
-                            _viewFor(tracks),
-                            playlist,
-                            isDownloadingThis,
-                          ),
-                          SizedBox(
-                            height: 2,
-                            child:
-                                isDownloadingThis
-                                    ? _DownloadProgressBar(
-                                      playlistId: widget.playlistId,
-                                    )
-                                    : const Align(
-                                      alignment: Alignment.bottomCenter,
-                                      child: Divider(
-                                        height: 1,
-                                        color: Color(0xFF333333),
-                                      ),
-                                    ),
-                          ),
-                          Expanded(child: _buildTrackList(_viewFor(tracks))),
-                        ],
-                      ),
-                ),
+        ),
       ),
     );
   }
@@ -721,6 +761,8 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
             switch (value) {
               case 'settings':
                 _openPlaylistSettings();
+              case 'retry-removed':
+                unawaited(_retryRemovedTracks());
               case 'youtube':
                 final url = playlist?.url;
                 if (url != null) launchUrl(Uri.parse(url));
@@ -737,6 +779,18 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
                     contentPadding: EdgeInsets.zero,
                   ),
                 ),
+                if (view != null && view.removedFromYouTube > 0)
+                  PopupMenuItem(
+                    key: const ValueKey('playlist-detail-retry-removed'),
+                    value: 'retry-removed',
+                    child: ListTile(
+                      leading: const Icon(Icons.refresh),
+                      title: Text(
+                        'Try removed videos again (${view.removedFromYouTube})',
+                      ),
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                  ),
                 if (playlist != null)
                   const PopupMenuItem(
                     value: 'youtube',
@@ -752,11 +806,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
     );
   }
 
-  Widget _buildHeader(
-    _TrackListView view,
-    Playlist? playlist,
-    bool isDownloadingThis,
-  ) {
+  Widget _buildHeader(_TrackListView view, Playlist? playlist) {
     final filtering = _searchQuery.isNotEmpty;
     final playTracks = filtering ? view.visible : view.tracks;
     final canPlay = filtering ? view.visibleHasPlayable : view.hasPlayable;
@@ -777,7 +827,16 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
                 label: Text(filtering ? 'Play results' : 'Play'),
               ),
               const SizedBox(width: 8),
-              Flexible(child: _buildUpdateControl(isDownloadingThis)),
+              Flexible(
+                child: _UpdateControl(
+                  playlistId: widget.playlistId,
+                  starting: _isUpdating,
+                  onUpdate: _startUpdate,
+                  onStopCheck: _stopCheck,
+                  onStopDownload: _confirmCancelDownload,
+                  onLeaveQueue: _leaveQueue,
+                ),
+              ),
             ],
           ),
           SingleChildScrollView(
@@ -852,57 +911,6 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildUpdateControl(bool isDownloadingThis) {
-    if (isDownloadingThis) {
-      return Consumer(
-        builder: (context, ref, _) {
-          final (index, total) = ref.watch(
-            downloadProgressProvider.select(
-              (progress) => (
-                progress.valueOrNull?.currentTrackIndex ?? 0,
-                progress.valueOrNull?.totalTracks ?? 0,
-              ),
-            ),
-          );
-          return TextButton.icon(
-            key: const ValueKey('playlist-detail-cancel'),
-            onPressed: _confirmCancelDownload,
-            icon: const Icon(Icons.stop_circle_outlined),
-            label: Text(
-              total > 0 ? 'Stop ($index/$total)' : 'Stop',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            style: TextButton.styleFrom(
-              foregroundColor: const Color(0xFFE57373),
-            ),
-          );
-        },
-      );
-    }
-    return TextButton.icon(
-      key: const ValueKey('playlist-detail-update'),
-      onPressed: _isUpdating ? null : _startUpdate,
-      icon:
-          _isUpdating
-              ? const SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(strokeWidth: 2, color: _muted),
-              )
-              : const Icon(Icons.sync),
-      label: Text(
-        _isUpdating ? 'Checking…' : 'Update',
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-      ),
-      style: TextButton.styleFrom(
-        foregroundColor: _accent,
-        disabledForegroundColor: _muted,
       ),
     );
   }
@@ -1005,6 +1013,8 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
   }
 
   Future<void> _confirmCancelDownload() async {
+    final downloads = ref.read(downloadServiceProvider);
+    final othersWaiting = downloads.queuedPlaylistIds.isNotEmpty;
     final confirmed = await showDialog<bool>(
       context: context,
       builder:
@@ -1014,10 +1024,11 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
               'Stop downloading?',
               style: TextStyle(color: Colors.white),
             ),
-            content: const Text(
+            content: Text(
               'Finished tracks are kept; the rest stay queued for the next '
-              'update.',
-              style: TextStyle(color: Color(0xFFCCCCCC)),
+              'update.${othersWaiting ? ' Playlists waiting to download are '
+                      'not started either.' : ''}',
+              style: const TextStyle(color: Color(0xFFCCCCCC)),
             ),
             actions: [
               TextButton(
@@ -1032,7 +1043,59 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
           ),
     );
     if (confirmed != true) return;
-    await ref.read(downloadServiceProvider).cancelActiveDownloads();
+    await downloads.cancelActiveDownloads();
+  }
+
+  /// Stops the update while YouTube is still being asked; nothing changes.
+  void _stopCheck() {
+    final stopped = ref
+        .read(playlistServiceProvider)
+        .cancelSync(widget.playlistId);
+    if (stopped) {
+      setState(() {
+        _isUpdating = false;
+        _updateGeneration++;
+      });
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Too late to stop: the changes are being saved'),
+      ),
+    );
+  }
+
+  void _leaveQueue() {
+    if (!ref.read(downloadServiceProvider).removeFromQueue(widget.playlistId)) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Taken out of the download queue')),
+    );
+  }
+
+  Future<void> _retryRemovedTracks() async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final count = await ref
+          .read(playlistServiceProvider)
+          .retryRemovedTracks(widget.playlistId);
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            count == 0
+                ? 'No removed videos to try again'
+                : count == 1
+                ? 'The next update tries 1 removed video again'
+                : 'The next update tries $count removed videos again',
+          ),
+        ),
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('Could not save: ${_errorText(e)}')),
+      );
+    }
   }
 
   Future<void> _startUpdate() async {
@@ -1060,7 +1123,9 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
     }
     if (!mounted) return;
 
+    final generation = ++_updateGeneration;
     setState(() => _isUpdating = true);
+    bool current() => mounted && generation == _updateGeneration;
 
     try {
       final freshPlaylist = await syncAndDownloadPlaylist(
@@ -1074,7 +1139,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
         setState(() => _fetchedPlaylist = freshPlaylist);
       }
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || !current()) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
@@ -1083,13 +1148,288 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
         ),
       );
     } finally {
-      if (mounted) setState(() => _isUpdating = false);
+      if (current()) setState(() => _isUpdating = false);
     }
   }
 }
 
-/// The thin bar under the header; the only widget that rebuilds on every
-/// download progress event.
+/// Runs [onSettled] once, after the first frame and once the route's
+/// entrance animation has finished. The route is looked up here, in a
+/// widget whose rebuild costs nothing, so route changes do not rebuild the
+/// page.
+class _AfterRouteSettles extends StatefulWidget {
+  const _AfterRouteSettles({required this.onSettled, required this.child});
+
+  final VoidCallback onSettled;
+  final Widget child;
+
+  @override
+  State<_AfterRouteSettles> createState() => _AfterRouteSettlesState();
+}
+
+class _AfterRouteSettlesState extends State<_AfterRouteSettles> {
+  bool _done = false;
+  Animation<double>? _animation;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _check());
+  }
+
+  void _check() {
+    if (_done || !mounted) return;
+    final animation = ModalRoute.of(context)?.animation;
+    if (animation == null || animation.status == AnimationStatus.completed) {
+      _finish();
+      return;
+    }
+    if (identical(animation, _animation)) return;
+    _animation?.removeStatusListener(_onStatus);
+    _animation = animation..addStatusListener(_onStatus);
+  }
+
+  void _onStatus(AnimationStatus status) {
+    if (status == AnimationStatus.completed) _finish();
+  }
+
+  void _finish() {
+    if (_done) return;
+    _done = true;
+    _animation?.removeStatusListener(_onStatus);
+    _animation = null;
+    if (mounted) widget.onSettled();
+  }
+
+  @override
+  void dispose() {
+    _animation?.removeStatusListener(_onStatus);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
+/// What this playlist's update or download is doing.
+enum _Run { idle, checking, queued, preparing, downloading, finishing }
+
+_Run _watchRun(WidgetRef ref, int playlistId) {
+  final (status, activePlaylist, phase) = ref.watch(
+    downloadProgressProvider.select((progress) {
+      final value = progress.valueOrNull;
+      return (value?.status, value?.playlistId, value?.phase);
+    }),
+  );
+  if (status == 'downloading' && activePlaylist == playlistId) {
+    return switch (phase) {
+      DownloadPhase.preparing => _Run.preparing,
+      DownloadPhase.finishing => _Run.finishing,
+      _ => _Run.downloading,
+    };
+  }
+  final checking = ref.watch(
+    syncingPlaylistsProvider.select(
+      (ids) => ids.valueOrNull?.contains(playlistId) ?? false,
+    ),
+  );
+  if (checking) return _Run.checking;
+  final queued = ref.watch(
+    downloadQueueProvider.select(
+      (ids) => ids.valueOrNull?.contains(playlistId) ?? false,
+    ),
+  );
+  return queued ? _Run.queued : _Run.idle;
+}
+
+/// The button next to Play: Update, or the way to stop what is running.
+/// Watches only the run state, never the per-percent progress.
+class _UpdateControl extends ConsumerWidget {
+  const _UpdateControl({
+    required this.playlistId,
+    required this.starting,
+    required this.onUpdate,
+    required this.onStopCheck,
+    required this.onStopDownload,
+    required this.onLeaveQueue,
+  });
+
+  final int playlistId;
+
+  /// This page started an update that has not reached YouTube or the
+  /// downloader yet (or is between the two).
+  final bool starting;
+  final VoidCallback onUpdate;
+  final VoidCallback onStopCheck;
+  final VoidCallback onStopDownload;
+  final VoidCallback onLeaveQueue;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final run = _watchRun(ref, playlistId);
+    Widget button({
+      required Key key,
+      required Widget icon,
+      required String label,
+      required VoidCallback? onPressed,
+      Color color = _accent,
+    }) {
+      return TextButton.icon(
+        key: key,
+        onPressed: onPressed,
+        icon: icon,
+        label: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+        style: TextButton.styleFrom(
+          foregroundColor: color,
+          disabledForegroundColor: _muted,
+          minimumSize: const Size(48, 48),
+        ),
+      );
+    }
+
+    switch (run) {
+      case _Run.preparing || _Run.downloading || _Run.finishing:
+        return button(
+          key: const ValueKey('playlist-detail-cancel'),
+          icon: const Icon(Icons.stop_circle_outlined),
+          label: 'Stop download',
+          onPressed: onStopDownload,
+          color: const Color(0xFFE57373),
+        );
+      case _Run.checking:
+        return button(
+          key: const ValueKey('playlist-detail-stop-check'),
+          icon: const Icon(Icons.stop_circle_outlined),
+          label: 'Stop update',
+          onPressed: onStopCheck,
+          color: const Color(0xFFE57373),
+        );
+      case _Run.queued:
+        return button(
+          key: const ValueKey('playlist-detail-leave-queue'),
+          icon: const Icon(Icons.remove_circle_outline),
+          label: 'Remove from queue',
+          onPressed: onLeaveQueue,
+        );
+      case _Run.idle:
+        return button(
+          key: const ValueKey('playlist-detail-update'),
+          icon:
+              starting
+                  ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: _muted,
+                    ),
+                  )
+                  : const Icon(Icons.sync),
+          label: starting ? 'Updating…' : 'Update',
+          onPressed: starting ? null : onUpdate,
+        );
+    }
+  }
+}
+
+/// The line under the header: a divider when nothing runs, otherwise what
+/// the update is doing and a thin progress bar.
+class _RunStatus extends ConsumerWidget {
+  const _RunStatus({required this.playlistId});
+
+  final int playlistId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final run = _watchRun(ref, playlistId);
+    if (run == _Run.idle) {
+      return const SizedBox(
+        height: 2,
+        child: Align(
+          alignment: Alignment.bottomCenter,
+          child: Divider(height: 1, color: Color(0xFF333333)),
+        ),
+      );
+    }
+    final Widget label = switch (run) {
+      _Run.checking => const _RunText('Checking for new videos…'),
+      _Run.queued => const _RunText(
+        'Queued — starts after the current download',
+      ),
+      _Run.preparing => const _RunText('Getting ready to download…'),
+      _Run.finishing => const _RunText('Finishing up…'),
+      _ => _DownloadingText(playlistId: playlistId),
+    };
+    return Column(
+      key: const ValueKey('playlist-run-status'),
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Padding(padding: const EdgeInsets.fromLTRB(16, 2, 16, 6), child: label),
+        SizedBox(
+          height: 2,
+          child:
+              run == _Run.downloading
+                  ? _DownloadProgressBar(playlistId: playlistId)
+                  : run == _Run.queued
+                  ? const ColoredBox(color: Color(0xFF333333))
+                  : const LinearProgressIndicator(
+                    backgroundColor: Color(0xFF333333),
+                    valueColor: AlwaysStoppedAnimation<Color>(_accent),
+                    minHeight: 2,
+                  ),
+        ),
+      ],
+    );
+  }
+}
+
+class _RunText extends StatelessWidget {
+  const _RunText(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Text(
+        text,
+        key: const ValueKey('playlist-run-text'),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(color: Color(0xFFCCCCCC), fontSize: 13),
+      ),
+    );
+  }
+}
+
+/// "Downloading 2 of 5 · Title"; rebuilds only when the track changes.
+class _DownloadingText extends ConsumerWidget {
+  const _DownloadingText({required this.playlistId});
+
+  final int playlistId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final (index, total, title) = ref.watch(
+      downloadProgressProvider.select((progress) {
+        final value = progress.valueOrNull;
+        if (value == null || value.playlistId != playlistId) {
+          return (0, 0, null);
+        }
+        return (value.currentTrackIndex, value.totalTracks, value.currentTitle);
+      }),
+    );
+    final parts = [
+      total > 0 ? 'Downloading $index of $total' : 'Downloading',
+      if (title != null && title.isNotEmpty) title,
+    ];
+    return _RunText(parts.join(' · '));
+  }
+}
+
+/// The thin bar under the run status; the only widget that rebuilds on
+/// every download progress event.
 class _DownloadProgressBar extends ConsumerWidget {
   const _DownloadProgressBar({required this.playlistId});
 
@@ -1097,16 +1437,17 @@ class _DownloadProgressBar extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final percent = ref.watch(
+    final fraction = ref.watch(
       downloadProgressProvider.select((progress) {
         final value = progress.valueOrNull;
         return value != null && value.playlistId == playlistId
-            ? value.trackProgress
+            ? value.overallFraction
             : 0.0;
       }),
     );
     return LinearProgressIndicator(
-      value: (percent / 100).clamp(0.0, 1.0),
+      key: const ValueKey('playlist-download-progress'),
+      value: fraction,
       backgroundColor: const Color(0xFF333333),
       valueColor: const AlwaysStoppedAnimation<Color>(_accent),
       minHeight: 2,
@@ -1199,7 +1540,8 @@ class _UpNextButton extends ConsumerWidget {
   }
 }
 
-/// Shows the tracks queued to play after the current song.
+/// Shows the tracks queued to play after the current song. Tap an entry
+/// to play it now, drag the handle to reorder.
 Future<void> showUpNextSheet(BuildContext context) {
   return showModalBottomSheet<void>(
     context: context,
@@ -1207,118 +1549,159 @@ Future<void> showUpNextSheet(BuildContext context) {
     isScrollControlled: true,
     showDragHandle: true,
     useSafeArea: true,
-    builder:
-        (sheetContext) => Consumer(
-          builder: (context, ref, _) {
-            final queue =
-                ref.watch(upNextQueueProvider).valueOrNull ?? const <Track>[];
-            final playlists =
-                ref.watch(playlistsProvider).valueOrNull ?? const <Playlist>[];
-            final playlistNames = {
-              for (final playlist in playlists) playlist.id: playlist.name,
-            };
-            final playbackService = ref.read(playbackServiceProvider);
+    builder: (_) => const _UpNextSheet(),
+  );
+}
 
-            return Column(
-              mainAxisSize: MainAxisSize.min,
+class _UpNextSheet extends ConsumerStatefulWidget {
+  const _UpNextSheet();
+
+  @override
+  ConsumerState<_UpNextSheet> createState() => _UpNextSheetState();
+}
+
+class _UpNextSheetState extends ConsumerState<_UpNextSheet> {
+  /// The order just dropped, shown until the service publishes it, so a
+  /// dragged entry never jumps back for a frame.
+  List<Track>? _pendingOrder;
+  List<Track>? _orderBeforeDrop;
+
+  @override
+  Widget build(BuildContext context) {
+    final published =
+        ref.watch(upNextQueueProvider).valueOrNull ?? const <Track>[];
+    if (_pendingOrder != null && !identical(published, _orderBeforeDrop)) {
+      _pendingOrder = null;
+      _orderBeforeDrop = null;
+    }
+    final queue = _pendingOrder ?? published;
+    final playlistNames = ref.watch(
+      playlistsProvider.select(
+        (playlists) => {
+          for (final playlist in playlists.valueOrNull ?? const <Playlist>[])
+            playlist.id: playlist.name,
+        },
+      ),
+    );
+    final playback = ref.read(playbackServiceProvider);
+
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.sizeOf(context).height * 0.85,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 12, 8),
+            child: Row(
               children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 0, 12, 8),
-                  child: Row(
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Up next',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 18,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            Text(
-                              'These play after the current song',
-                              style: TextStyle(color: _muted, fontSize: 12),
-                            ),
-                          ],
+                      const Text(
+                        'Up next',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
-                      TextButton(
-                        onPressed:
-                            queue.isEmpty
-                                ? null
-                                : playbackService.clearUpNextQueue,
-                        child: const Text('Clear all'),
+                      Text(
+                        queue.isEmpty
+                            ? 'These play after the current song'
+                            : 'Tap to play now · drag ≡ to reorder',
+                        style: const TextStyle(color: _muted, fontSize: 12),
                       ),
                     ],
                   ),
                 ),
-                if (queue.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.fromLTRB(24, 16, 24, 28),
-                    child: Text(
-                      'Nothing queued. Open a downloaded track’s ⋮ menu and '
-                      'choose Add to queue.',
-                      style: TextStyle(color: _muted),
-                      textAlign: TextAlign.center,
-                    ),
-                  )
-                else
-                  Flexible(
-                    child: ListView.separated(
-                      shrinkWrap: true,
-                      itemCount: queue.length,
-                      separatorBuilder:
-                          (_, __) => const Divider(
-                            height: 1,
-                            color: Color(0xFF383838),
-                          ),
-                      itemBuilder: (context, index) {
-                        final track = queue[index];
-                        final playlistName =
-                            playlistNames[track.playlistId] ??
-                            'Playlist #${track.playlistId}';
-                        return ListTile(
-                          key: ValueKey('up-next-$index-${track.id}'),
-                          leading: Text(
-                            '${index + 1}',
-                            style: const TextStyle(color: _muted),
-                          ),
-                          minLeadingWidth: 24,
-                          title: Text(
-                            track.title,
-                            style: const TextStyle(color: Colors.white),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          subtitle: Text(
-                            '$playlistName · #${track.index}',
-                            style: const TextStyle(color: _muted),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          trailing: IconButton(
-                            icon: const Icon(
-                              Icons.close,
-                              color: Colors.white70,
-                            ),
-                            tooltip: 'Remove from Up next',
-                            onPressed:
-                                () =>
-                                    playbackService.removeUpNextQueueAt(index),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-                const SizedBox(height: 8),
+                TextButton(
+                  onPressed: queue.isEmpty ? null : playback.clearUpNextQueue,
+                  child: const Text('Clear all'),
+                ),
               ],
-            );
-          },
-        ),
-  );
+            ),
+          ),
+          if (queue.isEmpty)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(24, 16, 24, 28),
+              child: Text(
+                'Nothing queued. Open a downloaded track’s ⋮ menu and '
+                'choose Play next or Add to queue.',
+                style: TextStyle(color: _muted),
+                textAlign: TextAlign.center,
+              ),
+            )
+          else
+            Flexible(
+              child: ReorderableListView.builder(
+                key: const ValueKey('up-next-list'),
+                shrinkWrap: true,
+                buildDefaultDragHandles: false,
+                itemCount: queue.length,
+                onReorder: (from, to) {
+                  // ReorderableListView reports the slot before removal.
+                  if (to > from) to -= 1;
+                  if (to == from) return;
+                  final reordered = [...queue];
+                  reordered.insert(to, reordered.removeAt(from));
+                  setState(() {
+                    _orderBeforeDrop = published;
+                    _pendingOrder = reordered;
+                  });
+                  playback.moveUpNextQueue(from, to);
+                },
+                itemBuilder: (context, index) {
+                  final track = queue[index];
+                  final playlistName =
+                      playlistNames[track.playlistId] ??
+                      'Playlist #${track.playlistId}';
+                  return Material(
+                    key: ValueKey('up-next-$index-${track.id}'),
+                    color: Colors.transparent,
+                    child: ListTile(
+                      contentPadding: const EdgeInsets.only(left: 4, right: 4),
+                      leading: ReorderableDragStartListener(
+                        index: index,
+                        child: const SizedBox(
+                          width: 48,
+                          height: 48,
+                          child: Icon(Icons.drag_handle, color: _muted),
+                        ),
+                      ),
+                      title: Text(
+                        track.title,
+                        style: const TextStyle(color: Colors.white),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: Text(
+                        '${index + 1}. $playlistName · #${track.index}',
+                        style: const TextStyle(color: _muted),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      onTap: () {
+                        Navigator.pop(context);
+                        unawaited(playback.playUpNextAt(index));
+                      },
+                      trailing: IconButton(
+                        icon: const Icon(Icons.close, color: Colors.white70),
+                        tooltip: 'Remove from Up next',
+                        onPressed: () => playback.removeUpNextQueueAt(index),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          const SizedBox(height: 8),
+        ],
+      ),
+    );
+  }
 }
 
 /// The message of an error meant for the owner, without Dart's "Bad state:"
@@ -1365,6 +1748,10 @@ Future<Playlist?> syncAndDownloadPlaylist({
   SyncResult? result;
   try {
     result = await playlists.syncPlaylist(current);
+  } on SyncCancelledException {
+    // The owner pressed Stop while YouTube was being asked: nothing changed
+    // and nothing is downloaded.
+    return null;
   } on LibraryBusyException catch (e) {
     show(e.message);
     return null;
@@ -1398,8 +1785,24 @@ Future<Playlist?> syncAndDownloadPlaylist({
   }
 
   final fresh = await db.getPlaylist(playlist.id);
-  // A service-level operation: it runs on even if the page was closed.
-  unawaited(downloads.downloadPlaylist(fresh, sourceChecked: result != null));
+  // A service-level operation: it runs on even if the page was closed. A
+  // playlist that has to wait for another download is queued at once.
+  final start = downloads.downloadPlaylist(
+    fresh,
+    sourceChecked: result != null,
+  );
+  unawaited(
+    start.then(
+      (_) {},
+      onError: (Object e, StackTrace _) {
+        show('Download failed: ${friendlyDownloadError(_errorText(e))}');
+      },
+    ),
+  );
+  if (downloads.activePlaylistId != fresh.id &&
+      downloads.queuedPlaylistIds.contains(fresh.id)) {
+    show('Queued — starts after the current download');
+  }
   return fresh;
 }
 
