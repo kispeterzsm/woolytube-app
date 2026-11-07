@@ -275,8 +275,21 @@ class AlbumPlaybackQueue {
     return next();
   }
 
-  void enqueue(PlaybackAlbum album) {
-    if (album.items.isNotEmpty) _queued.add(album);
+  void enqueue(PlaybackAlbum album, {bool first = false}) {
+    if (album.items.isEmpty) return;
+    if (first) {
+      _queued.insert(0, album);
+    } else {
+      _queued.add(album);
+    }
+  }
+
+  /// Moves the waiting [album] (as returned by [queued]) to [newIndex].
+  void moveQueuedAlbum(PlaybackAlbum album, int newIndex) {
+    final index = _queued.indexWhere((a) => identical(a, album));
+    if (index < 0) return;
+    _queued.removeAt(index);
+    _queued.insert(newIndex.clamp(0, _queued.length), album);
   }
 
   /// Removes [album] (as returned by [queued]) when it is still waiting.

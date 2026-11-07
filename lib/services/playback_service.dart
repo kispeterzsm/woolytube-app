@@ -792,7 +792,16 @@ class PlaybackService
     );
   }
 
-  Future<bool> addToUpNextQueue(Track track, {String? chapterId}) async {
+  /// Puts [track] at the front of Up next, so it plays after the current
+  /// song (or file, with chapters).
+  Future<bool> playNext(Track track, {String? chapterId}) =>
+      addToUpNextQueue(track, chapterId: chapterId, first: true);
+
+  Future<bool> addToUpNextQueue(
+    Track track, {
+    String? chapterId,
+    bool first = false,
+  }) async {
     final fresh = await _db.getTrack(track.id);
     if (fresh == null || !isTrackAutomaticallyPlayable(fresh)) return false;
     final playlist = await _db.getPlaylist(fresh.playlistId);
@@ -807,7 +816,7 @@ class PlaybackService
     if (items.isEmpty) return false;
     // A step that is rolled back meanwhile keeps this (see
     // [AlbumPlaybackQueue.restore]).
-    _albumQueue.enqueue(PlaybackAlbum(items));
+    _albumQueue.enqueue(PlaybackAlbum(items), first: first);
     _publishQueue();
     return true;
   }
@@ -830,6 +839,30 @@ class PlaybackService
     if (index < 0 || index >= shown.length) return;
     _albumQueue.removeQueuedAlbum(shown[index]);
     _publishQueue();
+  }
+
+  /// Moves the [from]th entry of the published [upNextQueue] to [to]
+  /// (an index in the list without the moved entry, as ReorderableListView
+  /// reports it after adjusting).
+  void moveUpNextQueue(int from, int to) {
+    final shown = _publishedUpNext;
+    if (from < 0 || from >= shown.length) return;
+    _albumQueue.moveQueuedAlbum(shown[from], to);
+    _publishQueue();
+  }
+
+  /// Plays the [index]th entry of the published [upNextQueue] now: it moves
+  /// to the front and the rest of the current file is skipped.
+  Future<void> playUpNextAt(int index) async {
+    final shown = _publishedUpNext;
+    if (index < 0 || index >= shown.length) return;
+    _albumQueue.moveQueuedAlbum(shown[index], 0);
+    _publishQueue();
+    if (_idle) {
+      await startUpNextQueueIfIdle();
+    } else {
+      await nextFile();
+    }
   }
 
   void clearUpNextQueue() {
