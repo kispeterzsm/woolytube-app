@@ -204,6 +204,9 @@ Future<bool> shouldRunYtDlpSelfUpdate({
   return networkPolicy.allowsAutomaticNetworkUse();
 }
 
+/// Whether the app may use the shared folders; with [ask], asks for it.
+typedef StorageAccessCheck = Future<bool> Function({required bool ask});
+
 /// Everything the app does once at startup besides showing the library, and
 /// what it does when it comes back to the foreground.
 ///
@@ -213,9 +216,12 @@ Future<bool> shouldRunYtDlpSelfUpdate({
 /// in the background, in that order. They need storage access; when it is
 /// granted later (in the system settings), [onAppResumed] starts them.
 class LibraryStartup {
-  LibraryStartup(this._ref);
+  /// [storageAccess] replaces the platform permission check (for tests).
+  LibraryStartup(this._ref, {StorageAccessCheck? storageAccess})
+    : _storageAccess = storageAccess ?? _platformStorageAccess;
 
   final Ref _ref;
+  final StorageAccessCheck _storageAccess;
 
   /// How often the app checks whether the background worker changed the
   /// database (see [AppDatabase.refreshIfChangedExternally]).
@@ -286,23 +292,23 @@ class LibraryStartup {
   Future<bool> checkStorageAccess({bool ask = false}) async {
     var granted = false;
     try {
-      final status = await Permission.manageExternalStorage.status;
-      if (status.isGranted) {
-        granted = true;
-      } else if (status.isRestricted) {
-        // Before Android 11 there is no "All files access".
-        granted = await Permission.storage.isGranted;
-        if (!granted && ask) {
-          granted = (await Permission.storage.request()).isGranted;
-        }
-      } else if (ask) {
-        granted = (await Permission.manageExternalStorage.request()).isGranted;
-      }
+      granted = await _storageAccess(ask: ask);
     } catch (e) {
       _log.warn('storage access check failed: $e');
     }
     if (!_disposed) _ref.read(storageAccessProvider.notifier).state = granted;
     return granted;
+  }
+
+  static Future<bool> _platformStorageAccess({required bool ask}) async {
+    final status = await Permission.manageExternalStorage.status;
+    if (status.isGranted) return true;
+    if (status.isRestricted) {
+      // Before Android 11 there is no "All files access".
+      if (await Permission.storage.isGranted) return true;
+      return ask && (await Permission.storage.request()).isGranted;
+    }
+    return ask && (await Permission.manageExternalStorage.request()).isGranted;
   }
 
   /// Asks for storage access (for a "Grant access" button) and starts the
