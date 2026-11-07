@@ -62,13 +62,26 @@ class AppSettingsService {
     await preferences.setString(subtitleLanguagesKey, normalized);
   }
 
+  /// Checks and tidies a comma-separated list of subtitle language codes
+  /// for yt-dlp. Spaces and empty items (a trailing comma) are dropped. A
+  /// code may end in `.*` to also match its regional variants (`en.*` for
+  /// en-US and en-GB captions). 'all' is refused: it would download
+  /// hundreds of automatic translations.
   static String normalizeSubtitleLanguages(String value) {
-    final languages = value.split(',').map((code) => code.trim()).toSet();
-    if (languages.any(
-      (code) =>
-          code.toLowerCase() == 'all' ||
-          !RegExp(r'^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]+)*$').hasMatch(code),
-    )) {
+    final languages =
+        value
+            .split(',')
+            .map((code) => code.trim())
+            .where((code) => code.isNotEmpty)
+            .toSet();
+    if (languages.isEmpty ||
+        languages.any(
+          (code) =>
+              code.toLowerCase() == 'all' ||
+              !RegExp(
+                r'^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]+)*(?:\.\*)?$',
+              ).hasMatch(code),
+        )) {
       throw const FormatException(
         'Enter language codes separated by commas, such as en, hu, de.',
       );
@@ -146,9 +159,18 @@ class AppSettingsService {
       }
     }
     final languages = values[subtitleLanguagesKey];
-    if (languages is String && languages.trim().isNotEmpty) {
-      await preferences.setString(subtitleLanguagesKey, languages.trim());
-      applied++;
+    if (languages is String) {
+      // A hand-edited backup must not hand yt-dlp something the settings
+      // page would refuse.
+      try {
+        await preferences.setString(
+          subtitleLanguagesKey,
+          normalizeSubtitleLanguages(languages),
+        );
+        applied++;
+      } on FormatException {
+        // Keep the current languages.
+      }
     }
     if (applied > 0) await scheduleAutoUpdate();
     return applied;

@@ -1,19 +1,29 @@
+import 'dart:async';
+
+import 'package:drift/drift.dart' show Value;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
+
 import '../database/database.dart';
+import '../providers/chapter_fetch_jobs.dart';
+import '../providers/playback_providers.dart';
 import '../providers/providers.dart';
 import '../services/download_errors.dart';
 import '../services/library_gate.dart';
+import '../services/playback_service.dart';
 import '../services/playlist_service.dart';
 import '../services/sponsorblock_categories.dart';
-import '../services/sponsorblock_service.dart';
-import 'sponsorblock_settings_page.dart';
 import '../widgets/mobile_data_download_guard.dart';
+import '../widgets/settings_section_header.dart';
 import '../widgets/update_frequency_dropdown.dart';
+import 'sponsorblock_settings_page.dart';
 
+/// One playlist's settings. Every change is saved at once (the name when
+/// editing it finishes); only switching between audio and video asks
+/// first, because it moves the playlist's files.
 class PlaylistSettingsPage extends ConsumerStatefulWidget {
   final int playlistId;
 
@@ -25,42 +35,52 @@ class PlaylistSettingsPage extends ConsumerStatefulWidget {
 }
 
 class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
+  static const _red = Color(0xFFEF5350);
+
   Playlist? _playlist;
-  late TextEditingController _nameController;
-  bool _audioOnly = false;
-  bool _playChapters = true;
-  bool _fetchingChapters = false;
-  bool _autoUpdate = true;
-  int _updateFrequencyHours = 24;
-  bool _includeThumbnails = true;
-  bool _sponsorBlockEnabled = true;
-  Map<String, SponsorBlockCategoryAction> _sponsorBlockCategoryActions =
-      defaultSponsorBlockCategoryActions();
-  Map<String, SponsorBlockCategoryAction> _loadedSponsorBlockCategoryActions =
-      defaultSponsorBlockCategoryActions();
-  bool _loaded = false;
-  bool _isForceInserting = false;
-  bool _saving = false;
+  final _nameController = TextEditingController();
+  final _nameFocus = FocusNode();
+  late final PlaylistService _playlists;
+  PlaybackService? _player;
+
+  /// Writes run one after another, so a quick second change can never be
+  /// overtaken by an earlier one.
+  Future<void> _saves = Future<void>.value();
+  bool _switchingFormat = false;
   bool _deleting = false;
+  bool _isForceInserting = false;
+
+  bool get _busy => _switchingFormat || _deleting;
 
   @override
   void initState() {
     super.initState();
-    _nameController = TextEditingController();
+    _playlists = ref.read(playlistServiceProvider);
+    try {
+      _player = ref.read(playbackServiceProvider);
+    } catch (_) {
+      // No player (widget tests); live updates are skipped.
+    }
     _nameController.addListener(_onNameChanged);
-    _loadPlaylist();
+    _nameFocus.addListener(_onNameFocusChanged);
+    unawaited(_loadPlaylist());
   }
 
   void _onNameChanged() {
-    // Save enablement and the dirty check depend on the name text.
+    // The error text depends on the name.
     if (mounted) setState(() {});
   }
 
+  void _onNameFocusChanged() {
+    if (!_nameFocus.hasFocus) _commitName();
+  }
+
   Future<void> _loadPlaylist() async {
-    final db = ref.read(databaseProvider);
     final Playlist playlist;
     try {
-      playlist = await db.getPlaylist(widget.playlistId);
+      playlist = await ref
+          .read(databaseProvider)
+          .getPlaylist(widget.playlistId);
     } catch (e) {
       if (!mounted) return;
       _showMessage('Could not load playlist: $e');
@@ -68,132 +88,190 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
       return;
     }
     if (!mounted) return;
-    final actions = decodeSponsorBlockCategoryActions(
-      playlist.sponsorBlockCategoryActions,
-      legacyCategories: playlist.sponsorBlockCategories,
-    );
     setState(() {
       _playlist = playlist;
       _nameController.text = playlist.name;
-      _audioOnly = playlist.audioOnly;
-      _playChapters = playlist.playChapters ?? true;
-      _autoUpdate = playlist.autoUpdate;
-      _updateFrequencyHours = nearestUpdateFrequency(
-        playlist.updateFrequencyHours,
-      );
-      _includeThumbnails = playlist.includeThumbnails;
-      _sponsorBlockEnabled = playlist.sponsorBlockEnabled;
-      _sponsorBlockCategoryActions = actions;
-      _loadedSponsorBlockCategoryActions = {...actions};
-      _loaded = true;
     });
   }
 
-  bool get _nameValid => _nameController.text.trim().isNotEmpty;
-
-  bool get _isDirty {
-    final playlist = _playlist;
-    if (playlist == null) return false;
-    if (_nameController.text.trim() != playlist.name) return true;
-    if (_audioOnly != playlist.audioOnly) return true;
-    if (_playChapters != (playlist.playChapters ?? true)) return true;
-    if (_autoUpdate != playlist.autoUpdate) return true;
-    if (_updateFrequencyHours !=
-        nearestUpdateFrequency(playlist.updateFrequencyHours)) {
-      return true;
-    }
-    if (_includeThumbnails != playlist.includeThumbnails) return true;
-    if (_sponsorBlockEnabled != playlist.sponsorBlockEnabled) return true;
-    for (final definition in sponsorBlockCategoryDefinitions) {
-      final loaded =
-          _loadedSponsorBlockCategoryActions[definition.id] ??
-          definition.defaultAction;
-      final current =
-          _sponsorBlockCategoryActions[definition.id] ??
-          definition.defaultAction;
-      if (loaded != current) return true;
-    }
-    return false;
-  }
-
-  Future<void> _onPopInvoked(bool didPop, Object? result) async {
-    if (didPop) return;
-    final discard = await showDiscardChangesDialog(context);
-    if (discard && mounted) Navigator.of(context).pop();
-  }
-
-  Future<void> _save() async {
-    if (_saving || !_nameValid) return;
-    setState(() => _saving = true);
+  /// Re-reads the row after another page changed it.
+  Future<void> _reload() async {
     try {
-      final service = ref.read(playlistServiceProvider);
-      await service.updatePlaylistSettings(
-        id: widget.playlistId,
-        name: _nameController.text.trim(),
-        audioOnly: _audioOnly,
-        playChapters: _playChapters,
-        autoUpdate: _autoUpdate,
-        updateFrequencyHours: _updateFrequencyHours,
-        includeThumbnails: _includeThumbnails,
-        sponsorBlockEnabled: _sponsorBlockEnabled,
-        sponsorBlockCategoryActions: _sponsorBlockCategoryActions,
-      );
-      if (!mounted) return;
-      Navigator.of(context).pop();
-    } on LibraryBusyException catch (e) {
-      // A format switch moves files, so it waits for downloads and updates.
-      if (!mounted) return;
-      setState(() => _saving = false);
-      _showMessage(e.message);
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _saving = false);
-      _showMessage('Could not save settings: ${_errorText(e)}');
+      final playlist = await ref
+          .read(databaseProvider)
+          .getPlaylist(widget.playlistId);
+      if (mounted) setState(() => _playlist = playlist);
+    } catch (_) {}
+  }
+
+  @override
+  void dispose() {
+    _nameFocus.removeListener(_onNameFocusChanged);
+    _nameController.removeListener(_onNameChanged);
+    // Leaving by any other way than Back (which already saved) still keeps
+    // a finished edit.
+    _commitName(disposing: true);
+    _nameFocus.dispose();
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _tellPlayer() async {
+    try {
+      await _player?.playlistSettingsChanged(widget.playlistId);
+    } catch (_) {
+      // Live update is a nicety; the next song reads the new settings.
     }
+  }
+
+  /// Shows [updated] at once, then saves it with [write]. On failure the
+  /// page goes back to [_playlist] as it was and says why.
+  Future<bool> _update(
+    Playlist updated,
+    Future<void> Function(PlaylistService playlists) write,
+  ) {
+    final previous = _playlist;
+    setState(() => _playlist = updated);
+    final saved = Completer<bool>();
+    _saves = _saves.then((_) async {
+      try {
+        await write(_playlists);
+        await _tellPlayer();
+        saved.complete(true);
+      } on LibraryBusyException catch (e) {
+        _undo(previous, e.message);
+        saved.complete(false);
+      } catch (e) {
+        _undo(previous, 'Could not save: ${_errorText(e)}');
+        saved.complete(false);
+      }
+    });
+    return saved.future;
+  }
+
+  void _undo(Playlist? previous, String message) {
+    if (!mounted) return;
+    setState(() => _playlist = previous);
+    _showMessage(message);
+  }
+
+  void _commitName({bool disposing = false}) {
+    final playlist = _playlist;
+    if (playlist == null || _deleting) return;
+    final name = _nameController.text.trim();
+    if (name == playlist.name) return;
+    if (name.isEmpty) {
+      if (disposing) return;
+      _nameController.text = playlist.name;
+      _showMessage('A playlist needs a name, so it stays "${playlist.name}".');
+      return;
+    }
+    if (disposing) {
+      final player = _player;
+      final id = widget.playlistId;
+      unawaited(
+        _saves.then((_) async {
+          try {
+            await _playlists.updatePlaylistSettings(id: id, name: name);
+            await player?.playlistSettingsChanged(id);
+          } catch (_) {}
+        }),
+      );
+      return;
+    }
+    unawaited(
+      _update(
+        playlist.copyWith(name: name),
+        (playlists) =>
+            playlists.updatePlaylistSettings(id: playlist.id, name: name),
+      ),
+    );
   }
 
   Future<void> _setAudioOnly(bool value) async {
     final playlist = _playlist;
-    // Ask only when moving away from the saved format; switching back to it
-    // just undoes the change.
-    if (playlist != null && value != playlist.audioOnly) {
-      final format = value ? 'audio' : 'video';
-      final confirmed = await showDialog<bool>(
-        context: context,
-        builder:
-            (ctx) => AlertDialog(
-              backgroundColor: const Color(0xFF2A2A2A),
-              title: Text(
-                value ? 'Switch to audio only?' : 'Switch to video?',
-                style: const TextStyle(color: Colors.white),
-              ),
-              content: Text(
-                'When you save, this playlist moves to a new $format folder. '
-                'Tracks YouTube can no longer provide, and local files, move '
-                'along with their current file. Every other track keeps '
-                'playing its current file until its $format version has '
-                'downloaded on the next update. No file is deleted.',
-                style: const TextStyle(color: Color(0xFFCCCCCC)),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx, false),
-                  child: const Text('Cancel'),
-                ),
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx, true),
-                  child: const Text('Switch'),
-                ),
-              ],
+    if (playlist == null || value == playlist.audioOnly || _busy) return;
+    final format = value ? 'audio' : 'video';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder:
+          (ctx) => AlertDialog(
+            backgroundColor: const Color(0xFF2A2A2A),
+            title: Text(
+              value ? 'Switch to audio only?' : 'Switch to video?',
+              style: const TextStyle(color: Colors.white),
             ),
-      );
-      if (confirmed != true || !mounted) return;
+            content: Text(
+              'The playlist moves to a new $format folder now. Each song '
+              'keeps playing its current file until its $format version is '
+              'downloaded at the next update. Local files and songs YouTube '
+              'no longer has move along as they are. No file is deleted.',
+              style: const TextStyle(color: Color(0xFFCCCCCC)),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Switch'),
+              ),
+            ],
+          ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _switchingFormat = true);
+    final saved = await _update(
+      playlist.copyWith(audioOnly: value),
+      (playlists) =>
+          playlists.updatePlaylistSettings(id: playlist.id, audioOnly: value),
+    );
+    if (!mounted) return;
+    setState(() => _switchingFormat = false);
+    if (saved) {
+      await _reload();
+      if (mounted) {
+        _showMessage(value ? 'Switched to audio only.' : 'Switched to video.');
+      }
     }
-    setState(() => _audioOnly = value);
+  }
+
+  Future<void> _chooseUpdateFrequency() async {
+    final playlist = _playlist;
+    if (playlist == null) return;
+    final hours = await showUpdateFrequencyPicker(
+      context,
+      playlist.updateFrequencyHours,
+    );
+    if (hours == null || !mounted || hours == playlist.updateFrequencyHours) {
+      return;
+    }
+    await _update(
+      playlist.copyWith(updateFrequencyHours: hours),
+      (playlists) => playlists.updatePlaylistSettings(
+        id: playlist.id,
+        updateFrequencyHours: hours,
+      ),
+    );
+  }
+
+  Future<void> _openSkipSegments() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => SponsorBlockSettingsPage(playlistId: widget.playlistId),
+      ),
+    );
+    if (mounted) await _reload();
   }
 
   Future<void> _delete() async {
     if (_deleting) return;
+    final downloads = ref.read(downloadServiceProvider);
+    final downloading =
+        downloads.isDownloading &&
+        ref.read(downloadProgressProvider).valueOrNull?.playlistId ==
+            widget.playlistId;
     var deleteFiles = false;
     final confirmed = await showDialog<bool>(
       context: context,
@@ -220,6 +298,14 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
                                 'Downloaded files are kept on the device.',
                         style: const TextStyle(color: Color(0xFF888888)),
                       ),
+                      if (downloading)
+                        const Padding(
+                          padding: EdgeInsets.only(top: 8),
+                          child: Text(
+                            'Its running download will be stopped.',
+                            style: TextStyle(color: Color(0xFF888888)),
+                          ),
+                        ),
                       const SizedBox(height: 8),
                       CheckboxListTile(
                         key: const ValueKey('delete-files-checkbox'),
@@ -247,7 +333,7 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
                       onPressed: () => Navigator.pop(context, true),
                       child: const Text(
                         'Delete',
-                        style: TextStyle(color: Colors.red),
+                        style: TextStyle(color: _red),
                       ),
                     ),
                   ],
@@ -257,12 +343,17 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
 
     if (confirmed != true || !mounted) return;
     setState(() => _deleting = true);
+    ref.read(chapterFetchJobsProvider.notifier).cancel(widget.playlistId);
     try {
-      final service = ref.read(playlistServiceProvider);
-      await service.deletePlaylist(widget.playlistId, deleteFiles: deleteFiles);
+      await _stopDownloadOfThisPlaylist();
+      await _saves;
+      await _playlists.deletePlaylist(
+        widget.playlistId,
+        deleteFiles: deleteFiles,
+      );
       if (!mounted) return;
-      // The detail page underneath refers to a playlist that no longer
-      // exists, so return all the way to the home page.
+      // Pages under this one (the playlist itself) refer to a playlist that
+      // no longer exists, so return all the way to the home page.
       Navigator.of(context).popUntil((route) => route.isFirst);
     } on LibraryBusyException catch (e) {
       // Deleting files waits for downloads and updates to finish.
@@ -276,75 +367,87 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
     }
   }
 
+  /// A download of this playlist would hold the library and keep writing
+  /// into a playlist that is going away, so stop it first.
+  Future<void> _stopDownloadOfThisPlaylist() async {
+    final downloads = ref.read(downloadServiceProvider);
+    if (!downloads.isDownloading ||
+        ref.read(downloadProgressProvider).valueOrNull?.playlistId !=
+            widget.playlistId) {
+      return;
+    }
+    await downloads.cancelActiveDownloads();
+    final deadline = DateTime.now().add(const Duration(seconds: 30));
+    while (downloads.isDownloading && DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    }
+  }
+
   Future<void> _openPlaylistOnYouTube() async {
     final url = _playlist?.url;
     if (url == null) return;
-
-    final launched = await launchUrl(
-      Uri.parse(url),
-      mode: LaunchMode.externalApplication,
-    );
-    if (!launched && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Could not open this playlist.')),
+    var launched = false;
+    try {
+      launched = await launchUrl(
+        Uri.parse(url),
+        mode: LaunchMode.externalApplication,
       );
+    } catch (_) {}
+    if (!launched && mounted) {
+      _showMessage('Could not open this playlist.');
     }
   }
 
-  Future<void> _openSponsorBlockSettings() async {
-    final actions = await Navigator.of(
-      context,
-    ).push<Map<String, SponsorBlockCategoryAction>>(
-      MaterialPageRoute(
-        builder:
-            (_) => SponsorBlockSettingsPage(
-              categoryActions: _sponsorBlockCategoryActions,
-            ),
-      ),
-    );
-    if (actions != null && mounted) {
-      setState(() => _sponsorBlockCategoryActions = actions);
-    }
+  Future<void> _copyLink() async {
+    final url = _playlist?.url;
+    if (url == null) return;
+    await Clipboard.setData(ClipboardData(text: url));
+    if (mounted) _showMessage('Link copied');
   }
 
   Future<void> _fetchMissingChapters() async {
-    if (_fetchingChapters) return;
-    if (!await confirmManualDownload(
-      context,
-      ref.read(downloadNetworkPolicyProvider),
-    )) {
-      return;
-    }
-    if (!mounted) return;
-    setState(() => _fetchingChapters = true);
+    final jobs = ref.read(chapterFetchJobsProvider.notifier);
+    if (jobs.isRunning(widget.playlistId)) return;
+    final messenger = ScaffoldMessenger.of(context);
     try {
-      final result = await ref
+      final missing = await ref
           .read(chapterServiceProvider)
-          .fetchMissing(widget.playlistId);
-      if (mounted) {
-        _showMessage('Checked ${result.$1} files; ${result.$2} failed.');
+          .countMissing(widget.playlistId);
+      if (!mounted) return;
+      if (missing == 0) {
+        _showMessage('All downloaded videos already have chapter info.');
+        return;
       }
+      if (!await confirmManualDownload(
+        context,
+        ref.read(downloadNetworkPolicyProvider),
+      )) {
+        return;
+      }
+      // The job keeps running if the page is closed; the result is still
+      // reported.
+      final result = await jobs.start(widget.playlistId);
+      messenger.showSnackBar(
+        SnackBar(content: Text(chapterFetchSummary(result))),
+      );
     } catch (e) {
-      if (mounted) {
-        _showMessage(
-          'Could not fetch chapters: ${friendlyDownloadError('$e')}',
-        );
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _fetchingChapters = false);
-      }
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            'Could not fetch chapters: ${friendlyDownloadError(_errorText(e))}',
+          ),
+        ),
+      );
     }
   }
 
   Future<void> _forceInsert() async {
     final playlist = _playlist;
-    if (playlist == null || _isForceInserting) return;
+    if (playlist == null || _isForceInserting || _busy) return;
 
     setState(() => _isForceInserting = true);
     try {
-      final service = ref.read(playlistServiceProvider);
-      final tracks = await service.getTracksForPlaylist(playlist.id);
+      final tracks = await _playlists.getTracksForPlaylist(playlist.id);
       var highestIndex = 0;
       for (final track in tracks) {
         if (track.index > highestIndex) highestIndex = track.index;
@@ -352,7 +455,14 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
       final maximumIndex = tracks.isEmpty ? 1 : highestIndex + 1;
       if (!mounted) return;
 
-      final index = await _askForceInsertIndex(maximumIndex);
+      final index = await showDialog<int>(
+        context: context,
+        builder:
+            (_) => _ForceInsertIndexDialog(
+              maximumIndex: maximumIndex,
+              audioOnly: playlist.audioOnly,
+            ),
+      );
       if (index == null || !mounted) return;
 
       final allowedExtensions =
@@ -383,279 +493,346 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
         return;
       }
 
-      final inserted = await service.forceInsert(
+      final inserted = await _playlists.forceInsert(
         playlistId: playlist.id,
         index: index,
         sourcePath: sourcePath,
         sourceFileName: picked.name,
       );
       if (mounted) {
-        _showMessage('Inserted "${inserted.title}" at #$index.');
+        _showMessage('Added "${inserted.title}" at position $index.');
       }
     } on ForceInsertException catch (error) {
       if (mounted) _showMessage(error.message);
     } on LibraryBusyException catch (error) {
       if (mounted) _showMessage(error.message);
     } catch (error) {
-      if (mounted) _showMessage('Could not insert the selected file: $error');
+      if (mounted) {
+        _showMessage('Could not add the selected file: ${_errorText(error)}');
+      }
     } finally {
       if (mounted) setState(() => _isForceInserting = false);
     }
   }
 
-  Future<int?> _askForceInsertIndex(int maximumIndex) async {
-    return showDialog<int>(
-      context: context,
-      builder: (_) => _ForceInsertIndexDialog(maximumIndex: maximumIndex),
-    );
-  }
-
   void _showMessage(String message) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
-  }
-
-  @override
-  void dispose() {
-    _nameController.removeListener(_onNameChanged);
-    _nameController.dispose();
-    super.dispose();
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
   Widget build(BuildContext context) {
-    if (!_loaded) {
+    final playlist = _playlist;
+    if (playlist == null) {
       return Scaffold(
-        appBar: AppBar(title: const Text('Settings')),
+        appBar: AppBar(title: const Text('Playlist settings')),
         body: const Center(child: CircularProgressIndicator()),
       );
     }
 
-    final busy = _saving || _deleting;
+    final busy = _busy;
+    final sponsorBlockActions = decodeSponsorBlockCategoryActions(
+      playlist.sponsorBlockCategoryActions,
+      legacyCategories: playlist.sponsorBlockCategories,
+    );
+    final nameValid = _nameController.text.trim().isNotEmpty;
     return PopScope(
-      canPop: !_isDirty || busy,
-      onPopInvokedWithResult: _onPopInvoked,
+      // Back saves a name that is still being edited.
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) _commitName();
+      },
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('Playlist Settings'),
-          actions: [
-            TextButton(
-              key: const ValueKey('playlist-settings-save'),
-              onPressed: busy || !_nameValid ? null : _save,
-              child:
-                  _saving
-                      ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                      : Text(
-                        'Save',
-                        style: TextStyle(
-                          color:
-                              _nameValid
-                                  ? const Color(0xFF2196F3)
-                                  : const Color(0xFF666666),
-                          fontSize: 16,
-                        ),
-                      ),
-            ),
-          ],
+          title: const Text('Playlist settings'),
+          bottom:
+              busy
+                  ? const PreferredSize(
+                    preferredSize: Size.fromHeight(2),
+                    child: LinearProgressIndicator(minHeight: 2),
+                  )
+                  : null,
         ),
-        body: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              TextField(
-                key: const ValueKey('playlist-name-field'),
-                controller: _nameController,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w600,
-                ),
-                decoration: InputDecoration(
-                  labelText: 'Playlist name',
-                  labelStyle: const TextStyle(color: Color(0xFF888888)),
-                  errorText: _nameValid ? null : 'Enter a name',
-                ),
-              ),
-              if (_playlist != null) ...[
-                const SizedBox(height: 16),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Expanded(
-                      child: TextFormField(
-                        initialValue: _playlist!.url,
-                        readOnly: true,
-                        maxLines: null,
-                        style: const TextStyle(color: Color(0xFFBBBBBB)),
-                        decoration: const InputDecoration(
-                          labelText: 'Playlist link',
-                          labelStyle: TextStyle(color: Color(0xFF888888)),
-                        ),
+        body: ValueListenableBuilder<double>(
+          valueListenable: audioPlayerOverlayHeightNotifier,
+          builder:
+              (context, overlay, _) => ListView(
+                padding: EdgeInsets.only(bottom: 24 + overlay),
+                children: [
+                  const SettingsSectionHeader('Playlist'),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                    child: TextField(
+                      key: const ValueKey('playlist-name-field'),
+                      controller: _nameController,
+                      focusNode: _nameFocus,
+                      enabled: !busy,
+                      textInputAction: TextInputAction.done,
+                      textCapitalization: TextCapitalization.sentences,
+                      style: const TextStyle(color: Colors.white, fontSize: 16),
+                      decoration: InputDecoration(
+                        labelText: 'Name',
+                        labelStyle: const TextStyle(color: Color(0xFF888888)),
+                        border: const OutlineInputBorder(),
+                        errorText: nameValid ? null : 'Enter a name',
                       ),
+                      onSubmitted: (_) => _commitName(),
+                      onTapOutside: (_) => _nameFocus.unfocus(),
                     ),
-                    const SizedBox(width: 12),
-                    OutlinedButton.icon(
-                      onPressed: _openPlaylistOnYouTube,
-                      icon: const Icon(Icons.open_in_new, size: 18),
-                      label: const Text('YouTube'),
-                    ),
-                  ],
-                ),
-              ],
-              const SizedBox(height: 32),
-              _settingsToggle(
-                'Audio only',
-                'Download audio tracks only (m4a)',
-                _audioOnly,
-                _setAudioOnly,
-              ),
-              _settingsToggle(
-                'Auto-update',
-                'Automatically check for new videos',
-                _autoUpdate,
-                (v) => setState(() => _autoUpdate = v),
-              ),
-              const SizedBox(height: 8),
-              UpdateFrequencyDropdown(
-                value: _updateFrequencyHours,
-                enabled: _autoUpdate,
-                onChanged:
-                    (hours) => setState(() => _updateFrequencyHours = hours),
-              ),
-              const SizedBox(height: 12),
-              _settingsToggle(
-                'Include thumbnails',
-                'Embed thumbnails in downloaded files',
-                _includeThumbnails,
-                (v) => setState(() => _includeThumbnails = v),
-              ),
-              const SizedBox(height: 24),
-              _settingsToggle(
-                'Play chapters as tracks',
-                'Use chapter titles, progress, and next/previous controls',
-                _playChapters,
-                (v) => setState(() => _playChapters = v),
-              ),
-              TextButton.icon(
-                icon: const Icon(Icons.download),
-                label: Text(
-                  _fetchingChapters
-                      ? 'Fetching chapters…'
-                      : 'Fetch missing chapters for downloaded files',
-                ),
-                onPressed: _fetchingChapters ? null : _fetchMissingChapters,
-              ),
-              _settingsToggle(
-                'SponsorBlock',
-                'Skip configured segments during playback',
-                _sponsorBlockEnabled,
-                (v) => setState(() => _sponsorBlockEnabled = v),
-              ),
-              const SizedBox(height: 8),
-              OutlinedButton.icon(
-                onPressed: _openSponsorBlockSettings,
-                icon: const Icon(Icons.tune),
-                label: const Text('SponsorBlock settings'),
-                style: OutlinedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                ),
-              ),
-              const SizedBox(height: 32),
-              Text(
-                playlistForceInsertDescription(_playlist!.audioOnly),
-                style: const TextStyle(color: Color(0xFF888888), fontSize: 12),
-              ),
-              const SizedBox(height: 10),
-              OutlinedButton.icon(
-                key: const ValueKey('force-insert-button'),
-                onPressed: _isForceInserting ? null : _forceInsert,
-                icon:
-                    _isForceInserting
-                        ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                        : const Icon(Icons.playlist_add),
-                label: const Text('Force Insert'),
-                style: OutlinedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                ),
-              ),
-              const SizedBox(height: 48),
-              OutlinedButton(
-                key: const ValueKey('delete-playlist-button'),
-                onPressed: busy ? null : _delete,
-                style: OutlinedButton.styleFrom(
-                  side: const BorderSide(color: Colors.red),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
                   ),
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                ),
-                child:
-                    _deleting
-                        ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.red,
-                          ),
-                        )
-                        : const Text(
-                          'Delete Playlist',
-                          style: TextStyle(color: Colors.red, fontSize: 16),
-                        ),
+                  ListTile(
+                    key: const ValueKey('playlist-open-youtube'),
+                    leading: const Icon(Icons.open_in_new),
+                    title: const Text('Open on YouTube'),
+                    subtitle: Text(
+                      playlist.url,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    onTap: _openPlaylistOnYouTube,
+                    trailing: IconButton(
+                      tooltip: 'Copy link',
+                      icon: const Icon(Icons.copy, size: 20),
+                      onPressed: _copyLink,
+                    ),
+                  ),
+                  const SettingsSectionHeader('Downloads'),
+                  ListTile(
+                    key: const ValueKey('playlist-audio-only'),
+                    leading: const Icon(Icons.music_note_outlined),
+                    title: const Text('Audio only'),
+                    subtitle: Text(
+                      playlist.audioOnly
+                          ? 'Downloads sound only (m4a)'
+                          : 'Off: downloads videos',
+                    ),
+                    enabled: !busy,
+                    onTap: () => _setAudioOnly(!playlist.audioOnly),
+                    trailing:
+                        _switchingFormat
+                            ? const SizedBox(
+                              width: 24,
+                              height: 24,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                            : Switch(
+                              value: playlist.audioOnly,
+                              onChanged: busy ? null : _setAudioOnly,
+                            ),
+                  ),
+                  SwitchListTile(
+                    key: const ValueKey('playlist-include-thumbnails'),
+                    secondary: const Icon(Icons.image_outlined),
+                    title: const Text('Add cover art to files'),
+                    subtitle: const Text('Applies to new downloads'),
+                    value: playlist.includeThumbnails,
+                    onChanged:
+                        busy
+                            ? null
+                            : (value) => _update(
+                              playlist.copyWith(includeThumbnails: value),
+                              (playlists) => playlists.updatePlaylistSettings(
+                                id: playlist.id,
+                                includeThumbnails: value,
+                              ),
+                            ),
+                  ),
+                  const SettingsSectionHeader('Updates'),
+                  SwitchListTile(
+                    key: const ValueKey('playlist-auto-update'),
+                    secondary: const Icon(Icons.update),
+                    title: const Text('Check for new videos automatically'),
+                    subtitle: const Text(
+                      'New videos in the YouTube playlist download in the '
+                      'background',
+                    ),
+                    value: playlist.autoUpdate,
+                    onChanged:
+                        busy
+                            ? null
+                            : (value) => _update(
+                              playlist.copyWith(autoUpdate: value),
+                              (playlists) => playlists.updatePlaylistSettings(
+                                id: playlist.id,
+                                autoUpdate: value,
+                              ),
+                            ),
+                  ),
+                  ListTile(
+                    key: const ValueKey('playlist-update-frequency'),
+                    leading: const SizedBox(width: 24),
+                    title: const Text('How often'),
+                    subtitle: Text(
+                      updateFrequencyLabel(playlist.updateFrequencyHours),
+                    ),
+                    enabled: playlist.autoUpdate && !busy,
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: _chooseUpdateFrequency,
+                  ),
+                  const SettingsSectionHeader('Playback'),
+                  SwitchListTile(
+                    key: const ValueKey('playlist-play-chapters'),
+                    secondary: const Icon(Icons.bookmarks_outlined),
+                    title: const Text('Play chapters as tracks'),
+                    subtitle: const Text(
+                      'Videos with chapters play each chapter as its own '
+                      'track, with next and previous',
+                    ),
+                    value: playlist.playChapters ?? true,
+                    onChanged:
+                        busy
+                            ? null
+                            : (value) => _update(
+                              playlist.copyWith(
+                                playChapters: Value<bool?>(value),
+                              ),
+                              (playlists) => playlists.updatePlaylistSettings(
+                                id: playlist.id,
+                                playChapters: value,
+                              ),
+                            ),
+                  ),
+                  SwitchListTile(
+                    key: const ValueKey('playlist-sponsorblock'),
+                    secondary: const Icon(Icons.fast_forward_outlined),
+                    title: const Text('SponsorBlock'),
+                    subtitle: const Text(
+                      'Skip sponsors and other parts that viewers marked',
+                    ),
+                    value: playlist.sponsorBlockEnabled,
+                    onChanged:
+                        busy
+                            ? null
+                            : (value) => _update(
+                              playlist.copyWith(sponsorBlockEnabled: value),
+                              (playlists) => playlists.updatePlaylistSettings(
+                                id: playlist.id,
+                                sponsorBlockEnabled: value,
+                              ),
+                            ),
+                  ),
+                  ListTile(
+                    key: const ValueKey('playlist-skip-segments'),
+                    leading: const SizedBox(width: 24),
+                    title: const Text('Choose what to skip'),
+                    subtitle: Text(sponsorBlockSummary(sponsorBlockActions)),
+                    enabled: playlist.sponsorBlockEnabled && !busy,
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: _openSkipSegments,
+                  ),
+                  const SettingsSectionHeader('Tools'),
+                  _FetchChaptersTile(
+                    playlistId: playlist.id,
+                    enabled: !busy,
+                    onStart: _fetchMissingChapters,
+                  ),
+                  ListTile(
+                    key: const ValueKey('force-insert-button'),
+                    leading:
+                        _isForceInserting
+                            ? const SizedBox(
+                              width: 24,
+                              height: 24,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                            : const Icon(Icons.playlist_add),
+                    title: const Text('Add a file from this phone'),
+                    subtitle: Text(
+                      playlistForceInsertDescription(playlist.audioOnly),
+                    ),
+                    enabled: !busy && !_isForceInserting,
+                    onTap: _forceInsert,
+                  ),
+                  const SettingsSectionHeader('Danger zone', color: _red),
+                  ListTile(
+                    key: const ValueKey('delete-playlist-button'),
+                    leading:
+                        _deleting
+                            ? const SizedBox(
+                              width: 24,
+                              height: 24,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: _red,
+                              ),
+                            )
+                            : const Icon(Icons.delete_outline, color: _red),
+                    title: const Text(
+                      'Delete playlist',
+                      style: TextStyle(color: _red),
+                    ),
+                    subtitle: const Text('You can choose to keep the files'),
+                    enabled: !busy && !_isForceInserting,
+                    onTap: _delete,
+                  ),
+                ],
               ),
-            ],
-          ),
         ),
       ),
     );
   }
+}
 
-  Widget _settingsToggle(
-    String title,
-    String subtitle,
-    bool value,
-    ValueChanged<bool> onChanged,
-  ) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
+/// "Fetch missing chapters", with the running job's progress and Stop.
+class _FetchChaptersTile extends ConsumerWidget {
+  const _FetchChaptersTile({
+    required this.playlistId,
+    required this.enabled,
+    required this.onStart,
+  });
+
+  final int playlistId;
+  final bool enabled;
+  final VoidCallback onStart;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final progress = ref.watch(
+      chapterFetchJobsProvider.select((jobs) => jobs[playlistId]),
+    );
+    if (progress == null) {
+      return ListTile(
+        key: const ValueKey('fetch-missing-chapters'),
+        leading: const Icon(Icons.download_outlined),
+        title: const Text('Fetch missing chapters'),
+        subtitle: const Text(
+          'Look up YouTube chapters for downloaded videos that have none yet',
+        ),
+        enabled: enabled,
+        onTap: onStart,
+      );
+    }
+    final status =
+        progress.cancelling
+            ? 'Stopping after this video…'
+            : progress.total == 0
+            ? 'Getting ready…'
+            : 'Checking ${progress.done} of ${progress.total}…';
+    return ListTile(
+      key: const ValueKey('fetch-missing-chapters'),
+      leading: const SizedBox(
+        width: 24,
+        height: 24,
+        child: CircularProgressIndicator(strokeWidth: 2),
+      ),
+      title: const Text('Fetching missing chapters'),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(color: Colors.white, fontSize: 14),
-                ),
-                Text(
-                  subtitle,
-                  style: const TextStyle(
-                    color: Color(0xFF888888),
-                    fontSize: 12,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Switch(
-            value: value,
-            onChanged: onChanged,
-            activeColor: const Color(0xFF2196F3),
-            inactiveTrackColor: const Color(0xFF333333),
-          ),
+          Text(status),
+          const SizedBox(height: 6),
+          LinearProgressIndicator(value: progress.fraction),
         ],
+      ),
+      trailing: TextButton(
+        key: const ValueKey('fetch-missing-chapters-stop'),
+        onPressed:
+            progress.cancelling
+                ? null
+                : () => ref
+                    .read(chapterFetchJobsProvider.notifier)
+                    .cancel(playlistId),
+        child: const Text('Stop'),
       ),
     );
   }
@@ -667,15 +844,19 @@ String _errorText(Object error) =>
     error is StateError ? error.message : '$error';
 
 String playlistForceInsertDescription(bool audioOnly) {
-  final kind = audioOnly ? 'audio' : 'video';
-  return 'Insert a local $kind file at an exact playlist index. Later items '
-      'will be moved forward.';
+  final kind = audioOnly ? 'an audio' : 'a video';
+  return 'Put $kind file from your phone into this playlist at a position '
+      'you choose. Songs from there on move down one place.';
 }
 
 class _ForceInsertIndexDialog extends StatefulWidget {
   final int maximumIndex;
+  final bool audioOnly;
 
-  const _ForceInsertIndexDialog({required this.maximumIndex});
+  const _ForceInsertIndexDialog({
+    required this.maximumIndex,
+    required this.audioOnly,
+  });
 
   @override
   State<_ForceInsertIndexDialog> createState() =>
@@ -705,16 +886,25 @@ class _ForceInsertIndexDialogState extends State<_ForceInsertIndexDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final last = widget.maximumIndex;
     return AlertDialog(
       backgroundColor: const Color(0xFF2A2A2A),
-      title: const Text('Force Insert', style: TextStyle(color: Colors.white)),
+      title: const Text(
+        'Add a file from this phone',
+        style: TextStyle(color: Colors.white),
+      ),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'Choose an index from 1 to ${widget.maximumIndex}. Items at '
-            'that index and later will move forward.',
+            last == 1
+                ? 'The file becomes song 1. Next, choose the '
+                    '${widget.audioOnly ? 'audio' : 'video'} file.'
+                : 'Where should it go? 1 puts it first, $last puts it last. '
+                    'The song at that position and the ones after it move '
+                    'down one place. Next, choose the '
+                    '${widget.audioOnly ? 'audio' : 'video'} file.',
             style: const TextStyle(color: Color(0xFFBBBBBB)),
           ),
           const SizedBox(height: 16),
@@ -725,7 +915,7 @@ class _ForceInsertIndexDialogState extends State<_ForceInsertIndexDialog> {
             keyboardType: TextInputType.number,
             inputFormatters: [FilteringTextInputFormatter.digitsOnly],
             decoration: InputDecoration(
-              labelText: 'Index',
+              labelText: 'Position',
               errorText: _errorText,
               border: const OutlineInputBorder(),
             ),
@@ -741,7 +931,7 @@ class _ForceInsertIndexDialogState extends State<_ForceInsertIndexDialog> {
         FilledButton(
           key: const ValueKey('force-insert-select-file'),
           onPressed: _submit,
-          child: const Text('Select file'),
+          child: const Text('Choose file'),
         ),
       ],
     );

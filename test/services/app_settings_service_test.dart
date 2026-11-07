@@ -36,13 +36,40 @@ void main() {
   test('invalid subtitle languages do not replace saved languages', () async {
     final settings = AppSettingsService();
     await settings.setSubtitleLanguages('hu');
-    for (final invalid in ['', 'en,', 'all', 'en.*', 'live_chat', '--help']) {
+    for (final invalid in ['', ' , ', 'all', 'en.+', 'live_chat', '--help']) {
       await expectLater(
         settings.setSubtitleLanguages(invalid),
         throwsFormatException,
       );
     }
     expect(await settings.getSubtitleLanguages(), 'hu');
+  });
+
+  test('subtitle languages forgive a trailing comma and accept en.*', () {
+    expect(AppSettingsService.normalizeSubtitleLanguages('en, hu,'), 'en,hu');
+    expect(
+      AppSettingsService.normalizeSubtitleLanguages('en.*, pt-BR'),
+      'en.*,pt-BR',
+    );
+  });
+
+  test('restoring settings skips invalid subtitle languages', () async {
+    final settings = AppSettingsService();
+    await settings.setSubtitleLanguages('hu');
+
+    final applied = await settings.importSettings({
+      AppSettingsService.subtitleLanguagesKey: 'all',
+      AppSettingsService.downloadSubtitlesKey: true,
+    });
+
+    expect(applied, 1);
+    expect(await settings.getSubtitleLanguages(), 'hu');
+    expect(await settings.getDownloadSubtitles(), isTrue);
+
+    await settings.importSettings({
+      AppSettingsService.subtitleLanguagesKey: ' de, en ,',
+    });
+    expect(await settings.getSubtitleLanguages(), 'de,en');
   });
 
   test('mobile-data auto download is off by default', () async {
