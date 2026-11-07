@@ -103,19 +103,40 @@ void main() {
   test(
     'Previous traverses real history and toggle does not replay consumed songs',
     () {
-      final q = AlbumPlaybackQueue(random: Random(5));
-      final first = q.start(albums, shuffled: true)!;
-      final second = q.next()!;
-      expect(q.previous()!.id, first.id);
-      q.setShuffle(false);
-      expect(q.next()!.id, second.id);
-      final remaining = <String>[];
-      for (var next = q.next(); next != null; next = q.next()) {
-        remaining.add(next.id);
+      for (var seed = 0; seed < 20; seed++) {
+        final q = AlbumPlaybackQueue(random: Random(seed));
+        final first = q.start(albums, shuffled: true)!;
+        final second = q.next()!;
+        expect(q.previous()!.id, first.id);
+        q.setShuffle(false);
+        expect(q.next()!.id, second.id);
+        final played = <String>{first.id, second.id};
+        final remaining = <String>[];
+        for (var next = q.next(); next != null; next = q.next()) {
+          remaining.add(next.id);
+        }
+        expect(remaining.toSet().intersection(played), isEmpty);
+        // In playlist order, everything after the current album follows;
+        // what lies above it stays reachable through Previous.
+        final order = albums.map((a) => a.trackId).toList();
+        final anchor = order.indexOf(second.track.id);
+        for (final id in remaining) {
+          final trackId = int.parse(id.split(':')[1]);
+          expect(
+            trackId == second.track.id || order.indexOf(trackId) > anchor,
+            isTrue,
+          );
+        }
+        final above = <String>[];
+        for (var prev = q.previous(); prev != null; prev = q.previous()) {
+          above.add(prev.id);
+        }
+        expect({
+          ...played,
+          ...remaining,
+          ...above,
+        }, albums.expand((a) => a.items).map((i) => i.id).toSet());
       }
-      expect(remaining, hasLength(5));
-      expect(remaining, isNot(contains(first.id)));
-      expect(remaining, isNot(contains(second.id)));
     },
   );
 

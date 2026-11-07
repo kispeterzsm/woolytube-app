@@ -322,6 +322,18 @@ class _FakePlaybackController implements PlaybackNotificationController {
     audioOnlyMode = enabled;
   }
 
+  bool currentIsChapter = false;
+  int temporaryAudioOnlyCalls = 0;
+
+  @override
+  bool get currentItemIsChapter => currentIsChapter;
+
+  @override
+  Future<void> enableTemporaryAudioOnly() async {
+    temporaryAudioOnlyCalls++;
+    if (!audioOnlyMode) audioOnlyMode = true;
+  }
+
   @override
   Future<void> playTrack(
     Track track,

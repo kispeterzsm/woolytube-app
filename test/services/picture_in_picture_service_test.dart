@@ -139,7 +139,25 @@ class _FakePipPlayback implements PictureInPicturePlaybackController {
 
   @override
   Future<void> setAudioOnlyMode(bool enabled) async {
+    _temporary = false;
     audioOnlyCalls.add(enabled);
+  }
+
+  bool _temporary = false;
+
+  // Mirrors PlaybackService: only a mode this switched on is undone.
+  @override
+  Future<void> enableTemporaryAudioOnly() async {
+    if (audioOnlyMode) return;
+    audioOnlyCalls.add(true);
+    _temporary = true;
+  }
+
+  @override
+  Future<void> restoreTemporaryAudioOnly() async {
+    if (!_temporary) return;
+    _temporary = false;
+    audioOnlyCalls.add(false);
   }
 
   Future<void> dispose() async {
