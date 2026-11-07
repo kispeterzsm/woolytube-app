@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../player/player_layout.dart';
@@ -13,6 +14,9 @@ import '../providers/playback_providers.dart';
 /// dragging up expands it, dragging down dismisses it (stops playback).
 class MiniPlayerBar extends StatelessWidget {
   final VoidCallback onOpen;
+
+  /// Stops playback; offered to screen readers in place of the swipe.
+  final VoidCallback onStop;
   final GestureDragStartCallback onDragStart;
   final GestureDragUpdateCallback onDragUpdate;
   final GestureDragEndCallback onDragEnd;
@@ -20,6 +24,7 @@ class MiniPlayerBar extends StatelessWidget {
   const MiniPlayerBar({
     super.key,
     required this.onOpen,
+    required this.onStop,
     required this.onDragStart,
     required this.onDragUpdate,
     required this.onDragEnd,
@@ -33,6 +38,9 @@ class MiniPlayerBar extends StatelessWidget {
       label: 'Open player',
       hint: 'Swipe down to stop playback',
       onTap: onOpen,
+      customSemanticsActions: {
+        const CustomSemanticsAction(label: 'Stop playback'): onStop,
+      },
       explicitChildNodes: true,
       child: GestureDetector(
         key: const ValueKey('mini-player-bar'),

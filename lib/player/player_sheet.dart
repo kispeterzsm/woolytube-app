@@ -59,6 +59,7 @@ class _PlayerSheetState extends ConsumerState<PlayerSheet> {
 
   late final Widget _mini = MiniPlayerBar(
     onOpen: _shell.expand,
+    onStop: _shell.stopPlayback,
     onDragStart: _onDragStart,
     onDragUpdate: _onDragUpdate,
     onDragEnd: _onDragEnd,

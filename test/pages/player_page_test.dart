@@ -415,6 +415,35 @@ void main() {
     await tester.pumpAndSettle(const Duration(seconds: 2));
   });
 
+  testWidgets('pages see the keyboard and system insets minus the bar', (
+    tester,
+  ) async {
+    tester.view.padding = const FakeViewPadding(bottom: 48);
+    tester.view.viewPadding = const FakeViewPadding(bottom: 48);
+    addTearDown(tester.view.resetPadding);
+    addTearDown(tester.view.resetViewPadding);
+    final harness = await pumpPlayerShell(tester);
+    final shell = harness.shellState(tester);
+    final dpr = tester.view.devicePixelRatio;
+    // The bar sits above the system navigation bar.
+    expect(shell.geometry.bottomInset, closeTo(48 / dpr, 0.01));
+    expect(
+      tester.getRect(_background).height,
+      closeTo(PlayerLayout.miniHeight + 48 / dpr, 0.01),
+    );
+    final page = find.byKey(const ValueKey('test-page'));
+    expect(MediaQuery.paddingOf(tester.element(page)).bottom, 0);
+
+    tester.view.viewInsets = FakeViewPadding(bottom: 300 * dpr);
+    addTearDown(tester.view.resetViewInsets);
+    await tester.pumpAndSettle();
+    // The page already ends above the bar: it only needs the rest.
+    expect(
+      MediaQuery.viewInsetsOf(tester.element(page)).bottom,
+      closeTo(300 - shell.geometry.miniHeight, 0.01),
+    );
+  });
+
   test('clock format is consistent', () {
     expect(formatClock(const Duration(seconds: 5)), '0:05');
     expect(formatClock(const Duration(minutes: 59, seconds: 59)), '59:59');
