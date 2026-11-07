@@ -19,6 +19,22 @@ import '../services/playback_service.dart';
 import '../widgets/settings_section_header.dart';
 import 'debug_log_page.dart';
 
+/// Gives the player the audio setting a restore just stored. Runs also when
+/// the page that started the restore is already closed.
+Future<void> _applyRestoredSettings(
+  AppSettingsService settings,
+  PlaybackService? player,
+) async {
+  if (player == null) return;
+  try {
+    await player.setPauseOnAudioInterruption(
+      await settings.getPauseOnAudioInterruption(),
+    );
+  } catch (_) {
+    // Applies at the next start.
+  }
+}
+
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key, this.initialUpdate, this.onUpdateChanged});
 
@@ -94,8 +110,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   }
 
   /// Saves one setting. The control moves at once and goes back if saving
-  /// fails.
-  Future<void> _save({
+  /// fails. Returns whether it was saved.
+  Future<bool> _save({
     required VoidCallback apply,
     required VoidCallback revert,
     required Future<void> Function() write,
@@ -106,37 +122,54 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     });
     try {
       await write();
+      return true;
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted) return false;
       setState(revert);
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('Could not save setting: $error')));
+      return false;
     } finally {
       if (mounted) setState(() => _isSavingSettings = false);
     }
   }
 
-  Future<void> _setPauseOnAudioInterruption(bool enabled) => _save(
-    apply: () => _pauseOnAudioInterruption = enabled,
-    revert: () => _pauseOnAudioInterruption = !enabled,
-    write: () async {
-      await ref
-          .read(appSettingsServiceProvider)
-          .setPauseOnAudioInterruption(enabled);
-      await _applyPauseOnAudioInterruption(enabled);
-    },
-  );
-
-  /// Tells the player; there is none in some tests.
-  Future<void> _applyPauseOnAudioInterruption(bool enabled) async {
-    PlaybackService player;
+  Future<void> _setPauseOnAudioInterruption(bool enabled) async {
+    final player = _playerOrNull();
+    final saved = await _save(
+      apply: () => _pauseOnAudioInterruption = enabled,
+      revert: () => _pauseOnAudioInterruption = !enabled,
+      write:
+          () => ref
+              .read(appSettingsServiceProvider)
+              .setPauseOnAudioInterruption(enabled),
+    );
+    if (!saved) return;
+    // The choice is stored either way; the player picks it up at the
+    // latest at the next start.
     try {
-      player = ref.read(playbackServiceProvider);
-    } catch (_) {
-      return;
+      await player?.setPauseOnAudioInterruption(enabled);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Saved. The player could not use it yet, so it applies after '
+            'the app restarts ($error).',
+          ),
+        ),
+      );
     }
-    await player.setPauseOnAudioInterruption(enabled);
+  }
+
+  /// The player; there is none in some tests.
+  PlaybackService? _playerOrNull() {
+    try {
+      return ref.read(playbackServiceProvider);
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void> _setAutoDownloadWithMobileData(bool enabled) => _save(
@@ -176,15 +209,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     );
   }
 
-  /// Shows what is stored now and applies the audio setting to the player,
-  /// after a restore changed the settings behind this page.
-  Future<void> _reloadAfterRestore() async {
-    await _loadSettings();
-    try {
-      await _applyPauseOnAudioInterruption(_pauseOnAudioInterruption);
-    } catch (_) {}
-  }
-
   Future<void> _restoreSettings() async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -210,16 +234,23 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     );
     if (confirmed != true || !mounted) return;
     final messenger = ScaffoldMessenger.of(context);
+    // Read now: the restore may end after the page is closed.
+    final exporter = ref.read(libraryExportServiceProvider);
+    final settings = ref.read(appSettingsServiceProvider);
+    final player = _playerOrNull();
     setState(() => _isRestoringSettings = true);
     String message;
     try {
-      final applied =
-          await ref.read(libraryExportServiceProvider).restoreSettings();
+      final applied = await exporter.restoreSettings();
       message =
           applied == null
               ? 'No settings backup found. Back up the library first.'
               : 'Restored ${_count(applied, 'setting')}.';
-      if (applied != null && mounted) await _reloadAfterRestore();
+      if (applied != null) {
+        await _applyRestoredSettings(settings, player);
+        // Shows what is stored now.
+        if (mounted) await _loadSettings();
+      }
     } catch (e) {
       message = 'Could not restore settings: $e';
     } finally {
@@ -470,7 +501,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       MaterialPageRoute<void>(builder: (_) => const _RestorePlaylistsPage()),
     );
     // Settings may have been restored from a chosen folder.
-    if (mounted) await _reloadAfterRestore();
+    if (mounted) await _loadSettings();
   }
 
   String get _updateStatusText {
@@ -774,15 +805,21 @@ class _RestorePlaylistsPageState extends ConsumerState<_RestorePlaylistsPage> {
 
   Future<void> _restoreSettings() async {
     final messenger = ScaffoldMessenger.of(context);
+    // Read now: the restore may end after the page is closed.
+    final exporter = ref.read(libraryExportServiceProvider);
+    final settings = ref.read(appSettingsServiceProvider);
+    PlaybackService? player;
+    try {
+      player = ref.read(playbackServiceProvider);
+    } catch (_) {}
     String message;
     try {
-      final applied = await ref
-          .read(libraryExportServiceProvider)
-          .restoreSettings(folder: _source);
+      final applied = await exporter.restoreSettings(folder: _source);
       message =
           applied == null
               ? 'No settings backup found in this folder.'
               : 'Restored ${_count(applied, 'setting')}.';
+      if (applied != null) await _applyRestoredSettings(settings, player);
     } catch (e) {
       message = 'Could not restore settings: $e';
     }

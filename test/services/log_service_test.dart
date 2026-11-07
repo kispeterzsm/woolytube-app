@@ -15,9 +15,13 @@ void main() {
     if (await dir.exists()) await dir.delete(recursive: true);
   });
 
-  File logFile() => File(p.join(dir.path, 'logs', 'woolytube.log'));
-  LogFileSink sink({int maxBytes = 512 * 1024}) =>
-      LogFileSink(() async => logFile(), maxBytes: maxBytes);
+  Directory logs() => Directory(p.join(dir.path, 'logs'));
+  File logFile([String name = LogService.appSource]) =>
+      File(p.join(logs().path, 'woolytube-$name.log'));
+  LogFileSink sink({
+    String name = LogService.appSource,
+    int maxBytes = 256 * 1024,
+  }) => LogFileSink(() async => logs(), name: name, maxBytes: maxBytes);
 
   test('a line survives the trip to the file and back', () {
     final entry = LogEntry(
@@ -42,7 +46,7 @@ void main() {
   test('the app and the background worker share one saved log', () async {
     final app = LogService(sink: sink());
     final background = LogService(
-      sink: sink(),
+      sink: sink(name: LogService.backgroundSource),
       source: LogService.backgroundSource,
     );
     background.info('Background update started');
@@ -64,6 +68,7 @@ void main() {
     await later.clear();
     expect(await later.history(), isEmpty);
     expect(await logFile().exists(), isFalse);
+    expect(await logFile(LogService.backgroundSource).exists(), isFalse);
     app.dispose();
     background.dispose();
     later.dispose();
@@ -92,6 +97,50 @@ void main() {
       next.dispose();
     },
   );
+
+  test('two engines writing at the same time keep every line and rotate '
+      'only their own file', () async {
+    final app = LogService(sink: sink(maxBytes: 2000));
+    final background = LogService(
+      sink: sink(name: LogService.backgroundSource, maxBytes: 2000),
+      source: LogService.backgroundSource,
+    );
+    // Interleaved batches from both, flushed concurrently, with enough
+    // writes for both to check their size and rotate.
+    for (var batch = 0; batch < 50; batch++) {
+      app.info('app $batch ${'a' * 30}');
+      background.info('background $batch ${'b' * 30}');
+      await Future.wait([app.flush(), background.flush()]);
+    }
+
+    expect(await File('${logFile().path}.1').exists(), isTrue);
+    expect(
+      await File('${logFile(LogService.backgroundSource).path}.1').exists(),
+      isTrue,
+    );
+    final history = await app.history();
+    // Nothing that is still kept was overwritten by the other engine.
+    for (final entry in history) {
+      expect(entry.message, matches(RegExp(r'^(app|background) \d+ ')));
+      expect(
+        entry.source,
+        entry.message.startsWith('app')
+            ? LogService.appSource
+            : LogService.backgroundSource,
+      );
+    }
+    // Both engines' latest lines are there, merged by time.
+    final messages = history.map((e) => e.message).toList();
+    expect(messages, hasLength(100));
+    expect(
+      messages.sublist(98).map((m) => m.split(' ').take(2).join(' ')).toSet(),
+      {'app 49', 'background 49'},
+    );
+    final times = history.map((e) => e.timestamp).toList();
+    expect(times, orderedEquals([...times]..sort()));
+    app.dispose();
+    background.dispose();
+  });
 
   test('without a file the log keeps this run in memory', () async {
     final log = LogService.memoryOnly();

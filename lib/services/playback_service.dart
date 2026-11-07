@@ -1535,6 +1535,37 @@ class PlaybackService
 
   void endChapterEditing() => _chapterEditing = false;
 
+  /// Jumps to chapter [chapterId] of the file that is playing now (track
+  /// [trackId], played as chapters), keeping the queue: its order, history
+  /// and "Up next" stay. Returns false, changing nothing, when the current
+  /// item is not a chapter of that file or the chapter is not in the queue.
+  Future<bool> playChapterOfCurrentFile(int trackId, String chapterId) async {
+    var played = false;
+    await _transition(() async {
+      final item = currentItem;
+      if (item == null || item.track.id != trackId || item.chapter == null) {
+        return;
+      }
+      final snapshot = _albumQueue.snapshot();
+      final target = _albumQueue.jumpToChapter(trackId, chapterId);
+      final fresh = target == null ? null : await _freshPlaybackItem(target);
+      final path = fresh == null ? null : _resolveTrackFile(fresh.track);
+      if (fresh == null || path == null) {
+        _restoreQueue(snapshot);
+        return;
+      }
+      _publishQueue();
+      final result = await _loadAndPlay(fresh, filePath: path);
+      if (result == _LoadResult.focusDenied) {
+        _restoreQueue(snapshot);
+        _publishQueue();
+        return;
+      }
+      played = result == _LoadResult.opened;
+    });
+    return played;
+  }
+
   // ---------------------------------------------------------------------
   // Live settings changes.
 
@@ -2060,7 +2091,9 @@ class PlaybackService
   void cancelSleepTimer() => _sleepTimer.cancel();
 
   @override
-  Future<void> stop() => _transition(() async {
+  Future<void> stop() => _transition(_stopNow);
+
+  Future<void> _stopNow() async {
     _generation++;
     _loadedTrackId = null;
     _currentFilePath = null;
@@ -2094,6 +2127,24 @@ class PlaybackService
     if (_detectedVideo.value != null) _detectedVideo.add(null);
     _lastSavedSession = null;
     _remember((store) => store.saveSession(null));
+  }
+
+  /// Call before playlist [playlistId] is deleted: its songs leave the
+  /// queue and "Up next", and when one of them is the current song,
+  /// playback stops (its file may be deleted with it).
+  Future<void> playlistRemoved(int playlistId) => _transition(() async {
+    bool fromPlaylist(Track track) => track.playlistId == playlistId;
+    final item = currentItem;
+    if (item != null && fromPlaylist(item.track)) {
+      await _stopNow();
+      return;
+    }
+    _albumQueue.removeTracksWhere(fromPlaylist);
+    final pending = _pendingSkipTarget;
+    if (pending != null && fromPlaylist(pending.item.track)) {
+      _pendingSkipTarget = null;
+    }
+    _publishQueue();
   });
 
   // ---------------------------------------------------------------------

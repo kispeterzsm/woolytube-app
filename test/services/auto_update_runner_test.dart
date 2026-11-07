@@ -589,6 +589,64 @@ void main() {
       );
       expect(report.status, AutoUpdateStatus.busy);
       expect(opened, isFalse);
+      expect(
+        log.entries.map((e) => e.message),
+        contains('Scheduled update skipped: the app is downloading'),
+      );
+    });
+
+    test('the log is saved before the run is reported, and marked as from '
+        'the background', () async {
+      final logs = Directory(p.join(tempDir.path, 'logs'));
+      final background = LogService(
+        sink: LogFileSink(() async => logs, name: LogService.backgroundSource),
+        source: LogService.backgroundSource,
+      );
+      addTearDown(background.dispose);
+      background.info('Scheduled update ended: 1 updated');
+      final calls = <String>[];
+      var closed = false;
+      var savedWhenReported = '';
+
+      await finishBackgroundRun(
+        const AutoUpdateReport(AutoUpdateStatus.finished),
+        log: background,
+        closeDatabase: () async => closed = true,
+        reportToNative: (method, arguments) async {
+          calls.add(method);
+          // The worker destroys the engine right after this reply.
+          savedWhenReported =
+              await File(
+                p.join(logs.path, 'woolytube-background.log'),
+              ).readAsString();
+          return null;
+        },
+      );
+
+      expect(closed, isTrue);
+      expect(calls, ['taskComplete']);
+      expect(savedWhenReported, contains('Scheduled update ended'));
+      expect(
+        LogEntry.parseLine(savedWhenReported.trim())!.formattedWithDate,
+        contains('(background)'),
+      );
+
+      background.error('Scheduled update failed: boom');
+      await finishBackgroundRun(
+        const AutoUpdateReport(AutoUpdateStatus.failed, error: 'boom'),
+        log: background,
+        closeDatabase: () async => throw StateError('already closed'),
+        reportToNative: (method, arguments) async {
+          calls.add('$method $arguments');
+          savedWhenReported =
+              await File(
+                p.join(logs.path, 'woolytube-background.log'),
+              ).readAsString();
+          return null;
+        },
+      );
+      expect(calls.last, 'taskFailed {error: boom}');
+      expect(savedWhenReported, contains('Scheduled update failed: boom'));
     });
 
     test('with nothing due it does not start yt-dlp', () async {

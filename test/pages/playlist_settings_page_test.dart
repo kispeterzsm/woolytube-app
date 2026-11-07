@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -6,8 +7,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/pages/playlist_settings_page.dart';
 import 'package:woolytube/pages/sponsorblock_settings_page.dart';
+import 'package:woolytube/providers/chapter_fetch_jobs.dart';
 import 'package:woolytube/providers/playback_providers.dart';
 import 'package:woolytube/providers/providers.dart';
+import 'package:woolytube/services/chapter_service.dart';
 import 'package:woolytube/services/download_service.dart';
 import 'package:woolytube/services/library_gate.dart';
 import 'package:woolytube/services/playback_service.dart';
@@ -21,14 +24,18 @@ void main() {
   late Directory tempDir;
   late _Playlists playlists;
   late _Player player;
+  late _Downloads downloads;
+  late List<String> events;
 
   setUp(() async {
     db = openTestDatabase();
     tempDir = await Directory.systemTemp.createTemp(
       'woolytube_playlist_settings_test_',
     );
-    playlists = _Playlists(db);
-    player = _Player();
+    events = [];
+    playlists = _Playlists(db, events);
+    player = _Player(events);
+    downloads = _Downloads(events);
   });
 
   tearDown(() async {
@@ -38,7 +45,11 @@ void main() {
 
   /// Pumps a home marker route, a detail marker route, and the settings page
   /// on top, mirroring the real navigation stack.
-  Future<void> pumpStack(WidgetTester tester, int playlistId) async {
+  Future<void> pumpStack(
+    WidgetTester tester,
+    int playlistId, {
+    List<Override> overrides = const [],
+  }) async {
     // Tall enough that every row of the page is built.
     tester.view.physicalSize = const Size(800, 2400);
     tester.view.devicePixelRatio = 1;
@@ -50,7 +61,8 @@ void main() {
           databaseProvider.overrideWithValue(db),
           playlistServiceProvider.overrideWithValue(playlists),
           playbackServiceProvider.overrideWithValue(player),
-          downloadServiceProvider.overrideWithValue(_Downloads()),
+          downloadServiceProvider.overrideWithValue(downloads),
+          ...overrides,
         ],
         child: MaterialApp(
           navigatorKey: navigatorKey,
@@ -339,15 +351,217 @@ void main() {
     expect(playlists.deleteFilesFlags, [true]);
     expect(find.text('home marker'), findsOneWidget);
     expect(find.text('detail marker'), findsNothing);
+    // Its songs left the player first.
+    expect(events, ['playlistRemoved ${playlist.id}', 'delete ${playlist.id}']);
   });
+
+  testWidgets('deleting a playlist that is downloading stops the download '
+      'first', (tester) async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    downloads
+      ..downloading = true
+      ..activePlaylistId = playlist.id;
+    await pumpStack(tester, playlist.id);
+
+    await tapRow(tester, 'delete-playlist-button');
+    expect(find.text('Its running download will be stopped.'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('delete-playlist-confirm')));
+    await tester.pump();
+    expect(events, ['cancel downloads']);
+    expect(playlists.deletedIds, isEmpty, reason: 'waits for the run to end');
+
+    downloads.finishRun();
+    await tester.pumpAndSettle();
+    expect(events, [
+      'cancel downloads',
+      'playlistRemoved ${playlist.id}',
+      'delete ${playlist.id}',
+    ]);
+    expect(find.text('home marker'), findsOneWidget);
+  });
+
+  testWidgets('a download that does not stop keeps the playlist', (
+    tester,
+  ) async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    downloads
+      ..downloading = true
+      ..activePlaylistId = playlist.id;
+    await pumpStack(tester, playlist.id);
+
+    await tapRow(tester, 'delete-playlist-button');
+    await tester.tap(find.byKey(const ValueKey('delete-playlist-confirm')));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 31));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Could not stop the download. Try again.'),
+      findsOneWidget,
+    );
+    expect(playlists.deletedIds, isEmpty);
+    expect(events, ['cancel downloads']);
+    expect(find.text('Playlist settings'), findsOneWidget);
+    expect(
+      tester
+          .widget<ListTile>(
+            find.byKey(const ValueKey('delete-playlist-button')),
+          )
+          .enabled,
+      isTrue,
+    );
+  });
+
+  testWidgets('a queued download of the playlist is dropped before deleting', (
+    tester,
+  ) async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    downloads.queued.add(playlist.id);
+    await pumpStack(tester, playlist.id);
+
+    await tapRow(tester, 'delete-playlist-button');
+    expect(
+      find.text('Its waiting download will be cancelled.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const ValueKey('delete-playlist-confirm')));
+    await tester.pumpAndSettle();
+    expect(downloads.queued, isEmpty);
+    expect(playlists.deletedIds, [playlist.id]);
+  });
+
+  testWidgets('delete waits for a running chapter fetch to stop', (
+    tester,
+  ) async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    final chapters = _SlowChapters(events);
+    await pumpStack(
+      tester,
+      playlist.id,
+      overrides: [chapterServiceProvider.overrideWithValue(chapters)],
+    );
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlaylistSettingsPage)),
+    );
+    final job = container
+        .read(chapterFetchJobsProvider.notifier)
+        .start(playlist.id);
+    await tester.pump();
+    expect(find.text('Fetching missing chapters'), findsOneWidget);
+
+    // The job's spinner never settles, so pump by hand.
+    await tester.tap(find.byKey(const ValueKey('delete-playlist-button')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.tap(find.byKey(const ValueKey('delete-playlist-confirm')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(chapters.cancellation!.isCancelled, isTrue);
+    expect(playlists.deletedIds, isEmpty, reason: 'one video is still checked');
+
+    chapters.finishCurrentVideo();
+    await tester.pumpAndSettle();
+    expect(events, [
+      'chapter job ended',
+      'playlistRemoved ${playlist.id}',
+      'delete ${playlist.id}',
+    ]);
+    // Quietly: no result for a deleted playlist.
+    expect(await job, isNull);
+    expect(find.textContaining('chapters'), findsNothing);
+  });
+
+  testWidgets('a failed save shows what is stored without losing a change '
+      'queued after it', (tester) async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    await pumpStack(tester, playlist.id);
+    final firstWrite = Completer<void>();
+    playlists.beforeWrite = (call) async {
+      if (call.containsKey('sponsorBlockEnabled')) {
+        await firstWrite.future;
+        throw StateError('Disk full');
+      }
+    };
+
+    await tester.tap(find.text('SponsorBlock'));
+    await tester.pump();
+    await tester.tap(find.text('Add cover art to files'));
+    await tester.pump();
+    firstWrite.complete();
+    await tester.pumpAndSettle();
+
+    expect(find.text('Could not save: Disk full'), findsOneWidget);
+    SwitchListTile tile(String key) =>
+        tester.widget<SwitchListTile>(find.byKey(ValueKey(key)));
+    expect(tile('playlist-sponsorblock').value, isTrue);
+    expect(tile('playlist-include-thumbnails').value, isFalse);
+    final stored = await db.getPlaylist(playlist.id);
+    expect(stored.sponsorBlockEnabled, isTrue);
+    expect(stored.includeThumbnails, isFalse);
+  });
+
+  testWidgets('a name that cannot be saved after leaving is reported', (
+    tester,
+  ) async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    await pumpStack(tester, playlist.id);
+    playlists.failWith = Exception('disk full');
+
+    await tester.enterText(
+      find.byKey(const ValueKey('playlist-name-field')),
+      'Road trip',
+    );
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+
+    expect(find.text('detail marker'), findsOneWidget);
+    expect(
+      find.textContaining('Could not rename the playlist to "Road trip"'),
+      findsOneWidget,
+    );
+    expect((await db.getPlaylist(playlist.id)).name, 'Test Playlist');
+  });
+}
+
+/// Fetches chapters until cancelled, then finishes the video it is on when
+/// told to and fails like a job whose playlist was deleted.
+class _SlowChapters implements ChapterService {
+  _SlowChapters(this.events);
+
+  final List<String> events;
+  ChapterFetchCancellation? cancellation;
+  final _videoDone = Completer<void>();
+
+  void finishCurrentVideo() => _videoDone.complete();
+
+  @override
+  Future<ChapterFetchResult> fetchMissingChapters(
+    int playlistId, {
+    void Function(int done, int total)? onProgress,
+    ChapterFetchCancellation? cancellation,
+    int persistEvery = 25,
+  }) async {
+    this.cancellation = cancellation;
+    onProgress?.call(0, 5);
+    await _videoDone.future;
+    events.add('chapter job ended');
+    throw StateError('No element');
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// Records settings writes and applies them to the test database, like the
 /// real service minus the file work.
 class _Playlists implements PlaylistService {
-  _Playlists(this.db);
+  _Playlists(this.db, this.events);
 
   final AppDatabase db;
+  final List<String> events;
+
+  /// Runs before each settings write with the changed fields; may throw.
+  Future<void> Function(Map<String, Object?> call)? beforeWrite;
   final calls = <Map<String, Object?>>[];
   final deletedIds = <int>[];
   final deleteFilesFlags = <bool>[];
@@ -368,7 +582,7 @@ class _Playlists implements PlaylistService {
   }) async {
     final failure = failWith;
     if (failure != null) throw failure;
-    calls.add({
+    final call = {
       if (name != null) 'name': name,
       if (audioOnly != null) 'audioOnly': audioOnly,
       if (autoUpdate != null) 'autoUpdate': autoUpdate,
@@ -380,7 +594,9 @@ class _Playlists implements PlaylistService {
         'sponsorBlockEnabled': sponsorBlockEnabled,
       if (sponsorBlockCategoryActions != null)
         'sponsorBlockCategoryActions': sponsorBlockCategoryActions,
-    });
+    };
+    await beforeWrite?.call(call);
+    calls.add(call);
     final current = await db.getPlaylist(id);
     await db.updatePlaylist(
       current
@@ -408,6 +624,7 @@ class _Playlists implements PlaylistService {
 
   @override
   Future<void> deletePlaylist(int id, {bool deleteFiles = false}) async {
+    events.add('delete $id');
     deletedIds.add(id);
     deleteFilesFlags.add(deleteFiles);
   }
@@ -417,7 +634,15 @@ class _Playlists implements PlaylistService {
 }
 
 class _Player implements PlaybackService {
+  _Player(this.events);
+
+  final List<String> events;
   final settingsChanged = <int>[];
+
+  @override
+  Future<void> playlistRemoved(int playlistId) async {
+    events.add('playlistRemoved $playlistId');
+  }
 
   @override
   Future<void> playlistSettingsChanged(int playlistId) async {
@@ -429,8 +654,41 @@ class _Player implements PlaybackService {
 }
 
 class _Downloads implements DownloadService {
+  _Downloads(this.events);
+
+  final List<String> events;
+  bool downloading = false;
+  final queued = <int>[];
+  Completer<void>? _run;
+
   @override
-  bool get isDownloading => false;
+  int? activePlaylistId;
+
+  @override
+  bool get isDownloading => downloading;
+
+  @override
+  List<int> get queuedPlaylistIds => List.of(queued);
+
+  @override
+  bool removeFromQueue(int playlistId) => queued.remove(playlistId);
+
+  @override
+  Future<void> cancelActiveDownloads() async {
+    events.add('cancel downloads');
+    queued.clear();
+    _run ??= Completer<void>();
+  }
+
+  @override
+  Future<void> get runFinished =>
+      downloading ? (_run ??= Completer<void>()).future : Future.value();
+
+  void finishRun() {
+    downloading = false;
+    activePlaylistId = null;
+    _run?.complete();
+  }
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -118,15 +120,82 @@ void main() {
     expect(find.byKey(const ValueKey('subtitle-languages')), findsOneWidget);
     expect(player.pauseOnInterruption, [false]);
   });
+
+  testWidgets('a restore that ends after Settings closed still reaches the '
+      'player', (tester) async {
+    final player = _Player();
+    final exporter = _Exporter()..gate = Completer<void>();
+    tester.view.physicalSize = const Size(800, 2400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final navigatorKey = GlobalKey<NavigatorState>();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          libraryExportServiceProvider.overrideWithValue(exporter),
+          playbackServiceProvider.overrideWithValue(player),
+        ],
+        child: MaterialApp(
+          navigatorKey: navigatorKey,
+          home: const Scaffold(body: Text('home marker')),
+        ),
+      ),
+    );
+    navigatorKey.currentState!.push(
+      MaterialPageRoute<void>(builder: (_) => const SettingsPage()),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('restore-settings')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Restore'));
+    await tester.pump();
+
+    navigatorKey.currentState!.pop();
+    await tester.pumpAndSettle();
+    expect(find.text('home marker'), findsOneWidget);
+    exporter.gate!.complete();
+    await tester.pumpAndSettle();
+
+    expect(player.pauseOnInterruption, [false]);
+    expect(find.text('Restored 2 settings.'), findsOneWidget);
+  });
+
+  testWidgets('the audio setting stays saved when the player cannot take it '
+      'right away', (tester) async {
+    final player = _Player()..fail = true;
+    await pumpSettings(
+      tester,
+      overrides: [playbackServiceProvider.overrideWithValue(player)],
+    );
+    final row = find.widgetWithText(
+      SwitchListTile,
+      'Pause when other apps play sound',
+    );
+
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<SwitchListTile>(row).value, isFalse);
+    expect(await AppSettingsService().getPauseOnAudioInterruption(), isFalse);
+    expect(
+      find.textContaining('applies after the app restarts'),
+      findsOneWidget,
+    );
+  });
 }
 
 class _Exporter implements LibraryExportService {
+  /// When set, the restore waits for it.
+  Completer<void>? gate;
+
   @override
-  Future<int?> restoreSettings({String? folder}) =>
-      AppSettingsService().importSettings({
-        AppSettingsService.pauseOnAudioInterruptionKey: false,
-        AppSettingsService.downloadSubtitlesKey: true,
-      });
+  Future<int?> restoreSettings({String? folder}) async {
+    await gate?.future;
+    return AppSettingsService().importSettings({
+      AppSettingsService.pauseOnAudioInterruptionKey: false,
+      AppSettingsService.downloadSubtitlesKey: true,
+    });
+  }
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -134,9 +203,11 @@ class _Exporter implements LibraryExportService {
 
 class _Player implements PlaybackService {
   final pauseOnInterruption = <bool>[];
+  bool fail = false;
 
   @override
   Future<void> setPauseOnAudioInterruption(bool enabled) async {
+    if (fail) throw StateError('audio session not ready');
     pauseOnInterruption.add(enabled);
   }
 

@@ -31,7 +31,7 @@ void main() {
       jobs.cancel(7);
       expect(container.read(chapterFetchJobsProvider)[7]!.cancelling, isTrue);
       service.step();
-      final result = await run;
+      final result = (await run)!;
 
       expect(service.cancellation!.isCancelled, isTrue);
       expect(result.cancelled, isTrue);
@@ -39,6 +39,31 @@ void main() {
       expect(chapterFetchSummary(result), 'Stopped. Updated 2 of 3');
     },
   );
+
+  test('stop cancels the job, waits for it to end and drops its result, '
+      'also when it fails on the way out', () async {
+    final service = _Chapters()..failWhenStopped = true;
+    final container = ProviderContainer(
+      overrides: [chapterServiceProvider.overrideWithValue(service)],
+    );
+    addTearDown(container.dispose);
+    final jobs = container.read(chapterFetchJobsProvider.notifier);
+
+    final run = jobs.start(7);
+    await pumpEventQueue();
+    var stopped = false;
+    final stopping = jobs.stop(7).then((_) => stopped = true);
+    await pumpEventQueue();
+    expect(service.cancellation!.isCancelled, isTrue);
+    expect(stopped, isFalse, reason: 'the current video is still checked');
+
+    service.step();
+    await stopping;
+    expect(await run, isNull);
+    expect(jobs.isRunning(7), isFalse);
+    // Nothing to stop.
+    await jobs.stop(7);
+  });
 
   test('summary wording', () {
     expect(
@@ -73,6 +98,9 @@ class _Chapters implements ChapterService {
   ChapterFetchCancellation? cancellation;
   final _steps = StreamController<void>();
 
+  /// Like a playlist deleted under the job: the end fails.
+  bool failWhenStopped = false;
+
   void step() => _steps.add(null);
 
   @override
@@ -90,6 +118,9 @@ class _Chapters implements ChapterService {
       done++;
       onProgress?.call(done, total);
       if (done == total || (cancellation?.isCancelled ?? false)) break;
+    }
+    if (failWhenStopped && (cancellation?.isCancelled ?? false)) {
+      throw StateError('No element');
     }
     return ChapterFetchResult(
       eligible: total,

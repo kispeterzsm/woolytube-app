@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../services/chapter_service.dart';
@@ -24,6 +26,10 @@ class ChapterFetchProgress {
 /// shows its progress again when they come back.
 class ChapterFetchJobs extends Notifier<Map<int, ChapterFetchProgress>> {
   final _cancellations = <int, ChapterFetchCancellation>{};
+  final _runs = <int, Future<void>>{};
+
+  /// Playlists whose job was ended with [stop]; their result is dropped.
+  final _discarded = <int>{};
 
   @override
   Map<int, ChapterFetchProgress> build() => const {};
@@ -32,13 +38,18 @@ class ChapterFetchJobs extends Notifier<Map<int, ChapterFetchProgress>> {
 
   /// Fetches chapter info for the playlist's downloaded videos that never
   /// had it. Throws [StateError] when a job for the playlist is running.
-  Future<ChapterFetchResult> start(int playlistId) async {
+  /// Returns null when the job was ended with [stop] (its playlist is being
+  /// deleted), whatever happened to it after that.
+  Future<ChapterFetchResult?> start(int playlistId) async {
     if (isRunning(playlistId)) {
       throw StateError('Chapters are already being fetched.');
     }
     final service = ref.read(chapterServiceProvider);
     final cancellation = ChapterFetchCancellation();
+    final finished = Completer<void>();
     _cancellations[playlistId] = cancellation;
+    _runs[playlistId] = finished.future;
+    _discarded.remove(playlistId);
     _set(playlistId, const ChapterFetchProgress(done: 0, total: 0));
     try {
       final result = await service.fetchMissingChapters(
@@ -54,12 +65,31 @@ class ChapterFetchJobs extends Notifier<Map<int, ChapterFetchProgress>> {
               ),
             ),
       );
+      if (_discarded.contains(playlistId)) return null;
       if (result.updated > 0) await _tellPlayer(playlistId);
       return result;
+    } catch (_) {
+      // A job stopped for a deleted playlist may fail on the way out.
+      if (_discarded.contains(playlistId)) return null;
+      rethrow;
     } finally {
+      _discarded.remove(playlistId);
       _cancellations.remove(playlistId);
+      _runs.remove(playlistId);
       state = {...state}..remove(playlistId);
+      finished.complete();
     }
+  }
+
+  /// Cancels the playlist's job and waits until it has ended (after the
+  /// video it is working on). Its caller gets null instead of a result.
+  /// Use it before deleting the playlist.
+  Future<void> stop(int playlistId) async {
+    final run = _runs[playlistId];
+    if (run == null) return;
+    _discarded.add(playlistId);
+    cancel(playlistId);
+    await run;
   }
 
   /// Stops the job after the video it is working on.

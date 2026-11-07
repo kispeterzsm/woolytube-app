@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,8 +13,12 @@ import '../helpers/test_database.dart';
 
 void main() {
   late AppDatabase db;
+  late _Playlists playlists;
 
-  setUp(() => db = openTestDatabase());
+  setUp(() {
+    db = openTestDatabase();
+    playlists = _Playlists(db);
+  });
   tearDown(() => db.close());
 
   Future<void> pumpPage(WidgetTester tester, int playlistId) async {
@@ -23,7 +29,7 @@ void main() {
       ProviderScope(
         overrides: [
           databaseProvider.overrideWithValue(db),
-          playlistServiceProvider.overrideWithValue(_Playlists(db)),
+          playlistServiceProvider.overrideWithValue(playlists),
         ],
         child: MaterialApp(
           theme: ThemeData.dark(),
@@ -101,6 +107,45 @@ void main() {
     );
   });
 
+  testWidgets('after a failed save the screen shows what is stored, '
+      'including a choice saved after it', (tester) async {
+    final playlist = await insertTestPlaylist(db);
+    await pumpPage(tester, playlist.id);
+    final firstWrite = Completer<void>();
+    var writes = 0;
+    playlists.beforeWrite = () async {
+      if (++writes == 1) {
+        await firstWrite.future;
+        throw StateError('disk full');
+      }
+    };
+
+    await tester.tap(choice('sponsor', 'Ignore'));
+    await tester.pump();
+    await tester.tap(choice('selfpromo', 'Ignore'));
+    await tester.pump();
+    firstWrite.complete();
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Could not save'), findsOneWidget);
+    final saved = await stored(playlist.id);
+    SponsorBlockCategoryAction shown(String category) =>
+        tester
+            .widget<SegmentedButton<SponsorBlockCategoryAction>>(
+              find.descendant(
+                of: find.byKey(ValueKey('sponsorblock-category-$category')),
+                matching: find.byType(
+                  SegmentedButton<SponsorBlockCategoryAction>,
+                ),
+              ),
+            )
+            .selected
+            .single;
+    expect(saved['selfpromo'], SponsorBlockCategoryAction.disabled);
+    expect(shown('selfpromo'), saved['selfpromo']);
+    expect(shown('sponsor'), saved['sponsor']);
+  });
+
   test('summary counts skipped and shown categories', () {
     expect(
       sponsorBlockSummary(defaultSponsorBlockCategoryActions()),
@@ -128,6 +173,7 @@ class _Playlists implements PlaylistService {
   _Playlists(this.db);
 
   final AppDatabase db;
+  Future<void> Function()? beforeWrite;
 
   @override
   Future<void> updatePlaylistSettings({
@@ -142,6 +188,7 @@ class _Playlists implements PlaylistService {
     List<String>? sponsorBlockCategories,
     Map<String, SponsorBlockCategoryAction>? sponsorBlockCategoryActions,
   }) async {
+    await beforeWrite?.call();
     final current = await db.getPlaylist(id);
     await db.updatePlaylist(
       current

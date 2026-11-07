@@ -103,6 +103,28 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
     );
   }
 
+  /// A tap on a chapter. When this file is the one playing, the queue is
+  /// kept: a chapter of it is played from the queue, or (when the whole
+  /// file plays) the player jumps there. Otherwise the playlist starts from
+  /// this chapter.
+  Future<void> _playChapter(Track track, MediaChapter chapter) async {
+    final player = _player;
+    final current = player.currentItem;
+    if (current != null && current.track.id == track.id) {
+      if (current.chapter == null) {
+        _stopMarking();
+        await player.seekTo(Duration(milliseconds: chapter.startMs));
+        if (!player.isPlaying) await player.resume();
+        return;
+      }
+      if (await player.playChapterOfCurrentFile(track.id, chapter.id)) {
+        _stopMarking();
+        return;
+      }
+    }
+    await _play(track, chapter: chapter);
+  }
+
   Future<void> _startMarking(Track track) async {
     final player = _player;
     final tracks = await ref
@@ -194,9 +216,20 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
 
   Future<void> _delete(Track track, MediaChapter chapter) async {
     final wasYouTube = ChapterData.decode(track.chaptersJson).custom == null;
-    final before = await _chapters.delete(track, chapter.id);
+    // Read now: Undo can be pressed after the page is closed.
+    final chapters = _chapters;
+    final player = _player;
+    final messenger = ScaffoldMessenger.of(context);
+    final before = await chapters.delete(track, chapter.id);
     await _afterEdit(track);
     if (before == null) return;
+    Future<void> undo() async {
+      await chapters.replaceChapters(track, before);
+      try {
+        await player.trackChaptersChanged(track);
+      } catch (_) {}
+    }
+
     _showMessage(
       wasYouTube
           ? 'Removed "${chapter.title}". This video now uses your own '
@@ -204,13 +237,24 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
           : 'Removed "${chapter.title}".',
       action: SnackBarAction(
         label: 'Undo',
-        onPressed:
-            () => unawaited(
-              _run(() async {
-                await _chapters.replaceChapters(track, before);
-                await _afterEdit(track);
-              }),
-            ),
+        onPressed: () {
+          if (mounted) {
+            unawaited(_run(undo));
+            return;
+          }
+          unawaited(
+            undo().catchError((Object error) {
+              messenger.showSnackBar(
+                SnackBar(
+                  content: Text(
+                    'Could not bring back "${chapter.title}": '
+                    '${error is StateError ? error.message : error}',
+                  ),
+                ),
+              );
+            }),
+          );
+        },
       ),
     );
   }
@@ -304,9 +348,10 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
     if (!mounted) return;
     setState(() => _markStart = null);
     final saved = await _edit(track, startMs: start, endMs: now);
-    if (!mounted || saved == null) return;
-    setState(() => _markStart = saved.endMs);
-    if (wasPlaying) await player.resume();
+    if (!mounted) return;
+    // Cancelled: the start mark stays, so the end can be marked again.
+    setState(() => _markStart = saved?.endMs ?? start);
+    if (wasPlaying && identical(_editingPlayer, player)) await player.resume();
   }
 
   void _showInfo() {
@@ -617,7 +662,7 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                                     Duration(milliseconds: chapter.startMs),
                                   );
                                 } else {
-                                  await _play(track, chapter: chapter);
+                                  await _playChapter(track, chapter);
                                 }
                               }),
                           onEdit: () => _edit(track, chapter: chapter),
@@ -838,6 +883,8 @@ class _MarkingPanelState extends ConsumerState<_MarkingPanel> {
                   );
                 },
               ),
+              // Times on their own line, so the buttons fit on narrow
+              // phones and with large text.
               Row(
                 children: [
                   IconButton(
@@ -849,23 +896,34 @@ class _MarkingPanelState extends ConsumerState<_MarkingPanel> {
                     child: Text(
                       '${chapterTimestamp(shownMs.round())} / '
                       '${chapterTimestamp(duration.inMilliseconds)}'
-                      '${markStart == null ? '' : '\nStarts at ${chapterTimestamp(markStart)}'}',
+                      '${markStart == null ? '' : ' · starts at ${chapterTimestamp(markStart)}'}',
                       style: const TextStyle(fontSize: 13),
-                    ),
-                  ),
-                  if (markStart != null)
-                    TextButton(
-                      onPressed: widget.busy ? null : widget.onDiscard,
-                      child: const Text('Discard'),
-                    ),
-                  FilledButton(
-                    key: const ValueKey('chapters-mark'),
-                    onPressed: widget.busy ? null : widget.onMark,
-                    child: Text(
-                      markStart == null ? 'Mark start' : 'End chapter here',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
                 ],
+              ),
+              Align(
+                alignment: AlignmentDirectional.centerEnd,
+                child: Wrap(
+                  alignment: WrapAlignment.end,
+                  spacing: 8,
+                  children: [
+                    if (markStart != null)
+                      TextButton(
+                        onPressed: widget.busy ? null : widget.onDiscard,
+                        child: const Text('Discard'),
+                      ),
+                    FilledButton(
+                      key: const ValueKey('chapters-mark'),
+                      onPressed: widget.busy ? null : widget.onMark,
+                      child: Text(
+                        markStart == null ? 'Mark start' : 'End chapter here',
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ],
           ),

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:intl/intl.dart';
 import 'package:path/path.dart' as p;
@@ -65,29 +66,50 @@ class LogEntry {
   String get key => '${timestamp.microsecondsSinceEpoch}|$level|$message';
 }
 
-/// Appends log lines to a file that the app and the background update
-/// worker share, so a scheduled run's log can be read in the app later.
+/// Appends one engine's log lines to its own file in a log folder that the
+/// app and the background update worker share, so a scheduled run's log
+/// can be read in the app later.
+///
+/// Each engine writes only its own file (`woolytube-<name>.log`) and is the
+/// only one to rotate it, so two engines running at the same time never
+/// overwrite or rotate each other's lines. [readEntries] merges all files
+/// of the folder by time.
 ///
 /// Lines logged together are written with one append right after (on the
 /// next microtask), so a background engine that is shut down soon after
-/// its last line still saves it. Each write is a single short append, so
-/// two engines writing at once only interleave whole batches. The file is bounded: once it is larger than
-/// [maxBytes] it becomes `<name>.1` (replacing the older one) and a new
-/// file starts, so at most about twice [maxBytes] is kept.
+/// its last line still saves it; [flush] waits for the write. The file is
+/// bounded: once it is larger than [maxBytes] it becomes `<file>.1`
+/// (replacing the older one) and a new file starts, so at most about twice
+/// [maxBytes] is kept per engine.
 class LogFileSink {
-  LogFileSink(this._resolveFile, {this.maxBytes = 512 * 1024});
-
-  /// `<app documents>/logs/woolytube.log`.
-  factory LogFileSink.appDocuments() => LogFileSink(() async {
-    final documents = await getApplicationDocumentsDirectory();
-    return File(p.join(documents.path, 'logs', 'woolytube.log'));
+  LogFileSink(
+    this._resolveDirectory, {
+    this.name = LogService.appSource,
+    this.maxBytes = 256 * 1024,
   });
 
-  final Future<File> Function() _resolveFile;
+  /// `<app documents>/logs/woolytube-<name>.log`.
+  factory LogFileSink.appDocuments({String name = LogService.appSource}) =>
+      LogFileSink(() async {
+        final documents = await getApplicationDocumentsDirectory();
+        return Directory(p.join(documents.path, 'logs'));
+      }, name: name);
+
+  final Future<Directory> Function() _resolveDirectory;
+
+  /// Names this engine's file.
+  final String name;
   final int maxBytes;
 
   static const _writesBetweenSizeChecks = 40;
 
+  /// Log files of any engine, current or rotated. `woolytube.log` is the
+  /// shared file of earlier test builds.
+  static final _logFileName = RegExp(
+    r'^woolytube(-[A-Za-z0-9_]+)?\.log(\.1)?$',
+  );
+
+  Directory? _directory;
   File? _file;
   bool _unavailable = false;
   final _pending = <String>[];
@@ -133,9 +155,11 @@ class LogFileSink {
     final known = _file;
     if (known != null) return known;
     try {
-      final file = await _resolveFile();
-      await file.parent.create(recursive: true);
+      final directory = await _resolveDirectory();
+      await directory.create(recursive: true);
+      final file = File(p.join(directory.path, 'woolytube-$name.log'));
       await _rotateIfLarge(file);
+      _directory = directory;
       return _file = file;
     } catch (_) {
       _unavailable = true;
@@ -149,41 +173,40 @@ class LogFileSink {
       if (await file.exists() && await file.length() > maxBytes) {
         await file.rename('${file.path}.1');
       }
+    } catch (_) {}
+  }
+
+  /// Every engine's log files in the folder.
+  Future<List<File>> _allFiles() async {
+    if (await _open() == null) return const [];
+    final directory = _directory!;
+    try {
+      return [
+        await for (final entity in directory.list())
+          if (entity is File && _logFileName.hasMatch(p.basename(entity.path)))
+            entity,
+      ];
     } catch (_) {
-      // The other engine may have rotated it at the same moment.
+      return const [];
     }
   }
 
-  /// The saved lines, oldest first (the rotated file, then the current one).
-  Future<List<String>> readLines() async {
+  /// The saved lines of every engine, oldest first. The files are read and
+  /// parsed off the UI isolate: together they can hold thousands of lines.
+  Future<List<LogEntry>> readEntries() async {
     await flush();
-    final file = await _open();
-    if (file == null) return const [];
-    final lines = <String>[];
-    for (final path in ['${file.path}.1', file.path]) {
-      try {
-        final part = File(path);
-        if (!await part.exists()) continue;
-        lines.addAll(
-          (await part.readAsString()).split('\n').where((l) => l.isNotEmpty),
-        );
-      } catch (_) {
-        // A half-written or unreadable part is skipped.
-      }
-    }
-    return lines;
+    final paths = [for (final file in await _allFiles()) file.path];
+    if (paths.isEmpty) return const [];
+    return _readLogFilesInBackground(paths);
   }
 
-  /// Deletes the saved log, including the rotated part.
+  /// Deletes the saved log of every engine, including the rotated parts.
   Future<void> clear() async {
     _pending.clear();
     await flush();
-    final file = await _open();
-    if (file == null) return;
-    for (final path in [file.path, '${file.path}.1']) {
+    for (final file in await _allFiles()) {
       try {
-        final part = File(path);
-        if (await part.exists()) await part.delete();
+        await file.delete();
       } catch (_) {}
     }
   }
@@ -191,6 +214,41 @@ class LogFileSink {
   void dispose() {
     unawaited(flush());
   }
+}
+
+/// A top-level function, so the closure sent to the isolate captures
+/// nothing but [paths].
+Future<List<LogEntry>> _readLogFilesInBackground(List<String> paths) =>
+    Isolate.run(() => readLogFiles(paths));
+
+/// Reads log files written by [LogFileSink] and merges their lines by time
+/// (lines with the same time keep their file order). Unreadable files and
+/// lines are skipped.
+List<LogEntry> readLogFiles(List<String> paths) {
+  final entries = <LogEntry>[];
+  // Rotated parts first, so equal times keep their written order.
+  final ordered = [
+    ...paths.where((path) => path.endsWith('.1')),
+    ...paths.where((path) => !path.endsWith('.1')),
+  ];
+  for (final path in ordered) {
+    try {
+      for (final line in File(path).readAsLinesSync()) {
+        if (line.isEmpty) continue;
+        final entry = LogEntry.parseLine(line);
+        if (entry != null) entries.add(entry);
+      }
+    } catch (_) {
+      // A half-written or unreadable part is skipped.
+    }
+  }
+  // A stable sort: the position breaks ties.
+  final order = List<int>.generate(entries.length, (i) => i);
+  order.sort((a, b) {
+    final byTime = entries[a].timestamp.compareTo(entries[b].timestamp);
+    return byTime != 0 ? byTime : a.compareTo(b);
+  });
+  return [for (final i in order) entries[i]];
 }
 
 class LogService {
@@ -202,7 +260,9 @@ class LogService {
   /// [LogFileSink.appDocuments]) and kept in memory only elsewhere, such as
   /// in tests. [source] marks the lines this instance writes.
   LogService({LogFileSink? sink, this.source = appSource})
-    : _sink = sink ?? (Platform.isAndroid ? LogFileSink.appDocuments() : null);
+    : _sink =
+          sink ??
+          (Platform.isAndroid ? LogFileSink.appDocuments(name: source) : null);
 
   /// A log that is kept in memory only.
   LogService.memoryOnly({this.source = appSource}) : _sink = null;
@@ -247,14 +307,8 @@ class LogService {
   Future<List<LogEntry>> history() async {
     final sink = _sink;
     if (sink == null) return entries;
-    final lines = await sink.readLines();
-    final parsed = <LogEntry>[];
-    for (final line in lines) {
-      final entry = LogEntry.parseLine(line);
-      if (entry != null) parsed.add(entry);
-    }
-    if (parsed.isEmpty) return entries;
-    return parsed;
+    final saved = await sink.readEntries();
+    return saved.isEmpty ? entries : saved;
   }
 
   /// Forgets this run's entries and deletes the saved log.

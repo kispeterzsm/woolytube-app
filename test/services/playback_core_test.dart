@@ -419,6 +419,71 @@ void main() {
       ]);
     });
 
+    test('a deleted playlist leaves the queue and Up next', () async {
+      final tracks = await addTracks(3);
+      final other = await insertTestPlaylist(db, name: 'Other');
+      final otherPath = '${dir.path}/other.m4a';
+      await File(otherPath).writeAsString('other');
+      final foreign = await insertTestTrack(
+        db,
+        playlistId: other.id,
+        index: 1,
+        videoId: 'other',
+        title: 'other',
+        status: 'complete',
+        filePath: otherPath,
+        durationSeconds: 60,
+      );
+      await playback.playTrack(tracks[0], tracks);
+      await playback.addToUpNextQueue(foreign);
+      await playback.addToUpNextQueue(tracks[2]);
+
+      await playback.playlistRemoved(other.id);
+      expect(playback.currentTrack!.id, tracks[0].id);
+      expect(playback.upNextQueue.map((t) => t.id), [tracks[2].id]);
+      expect(playback.queue.map((t) => t.playlistId).toSet(), {playlist.id});
+
+      // The current song's playlist: playback stops.
+      await playback.playlistRemoved(playlist.id);
+      expect(playback.currentTrack, isNull);
+      expect(playback.queue, isEmpty);
+      expect(playback.upNextQueue, isEmpty);
+    });
+
+    test('a deleted playlist does not come back with shuffle while a song '
+        'from Up next plays', () async {
+      final tracks = await addTracks(3);
+      final other = await insertTestPlaylist(db, name: 'Other');
+      final otherPath = '${dir.path}/other.m4a';
+      await File(otherPath).writeAsString('other');
+      final foreign = await insertTestTrack(
+        db,
+        playlistId: other.id,
+        index: 1,
+        videoId: 'other',
+        title: 'other',
+        status: 'complete',
+        filePath: otherPath,
+        durationSeconds: 60,
+      );
+      await playback.playTrack(tracks[0], tracks);
+      await playback.addToUpNextQueue(foreign);
+      await playback.next();
+      await settle();
+      expect(playback.currentTrack!.id, foreign.id);
+
+      await playback.playlistRemoved(playlist.id);
+      expect(playback.currentTrack!.id, foreign.id);
+      expect(playback.queue.map((t) => t.id), [foreign.id]);
+      expect(playback.queueIndex, 0);
+      playback.setShuffleEnabled(true);
+      await settle();
+      expect(playback.queue.map((t) => t.id), [foreign.id]);
+      playback.setShuffleEnabled(false);
+      await settle();
+      expect(playback.queue.map((t) => t.id), [foreign.id]);
+    });
+
     test('playlist settings apply to songs that have not started', () async {
       final album = await addTrack('album', chapters: _threeChapters);
       final first = await addTrack('first');
@@ -537,6 +602,46 @@ void main() {
         const PlaylistsCompanion(playChapters: Value(true)),
       );
     });
+
+    test(
+      'a chapter of the playing file plays from the queue, which stays',
+      () async {
+        final album = await addTrack('album', chapters: _threeChapters);
+        final after = await addTrack('after');
+        final upNext = await addTrack('up');
+        await playback.playTrack(album, [album, after]);
+        await playback.addToUpNextQueue(upNext);
+        expect(playback.currentItem!.chapter!.id, 'one');
+
+        expect(
+          await playback.playChapterOfCurrentFile(album.id, 'three'),
+          isTrue,
+        );
+        expect(playback.currentItem!.chapter!.id, 'three');
+        expect(player.opened.last.start, const Duration(seconds: 40));
+        expect(playback.upNextQueue.map((t) => t.id), [upNext.id]);
+        expect(playback.queue.map((t) => t.title), [
+          'First song',
+          'Second song',
+          'Third song',
+          'up',
+          'after',
+        ]);
+
+        // The chapter skipped over counts as played.
+        await playback.previous();
+        await settle();
+        expect(playback.currentItem!.chapter!.id, 'two');
+
+        // Only for the file that is playing.
+        final opened = player.opened.length;
+        expect(
+          await playback.playChapterOfCurrentFile(after.id, 'one'),
+          isFalse,
+        );
+        expect(player.opened, hasLength(opened));
+      },
+    );
 
     test('continuing chapters change without reopening the file', () async {
       final album = await addTrack('album', chapters: _threeChapters);

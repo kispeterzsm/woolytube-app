@@ -3,8 +3,10 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../database/database.dart';
 import '../providers/playback_providers.dart';
 import '../providers/providers.dart';
+import '../services/playback_service.dart';
 import '../services/sponsorblock_categories.dart';
 
 /// '6 skipped · 1 shown' for a playlist's SponsorBlock choices.
@@ -43,6 +45,8 @@ class _SponsorBlockSettingsPageState
   Map<String, SponsorBlockCategoryAction>? _actions;
   bool _audioOnly = false;
   Future<void> _saves = Future<void>.value();
+  int _unsavedChanges = 0;
+  bool _reloadWhenSaved = false;
 
   @override
   void initState() {
@@ -70,12 +74,20 @@ class _SponsorBlockSettingsPageState
     }
   }
 
-  /// Shows [next] at once and saves it; on failure the screen goes back to
-  /// what is stored.
+  /// Shows [next] at once and saves it. After a failed save, once the
+  /// choices made after it are saved too, the screen shows what is stored.
   void _apply(Map<String, SponsorBlockCategoryAction> next) {
-    final previous = _actions;
     setState(() => _actions = next);
     final playlists = ref.read(playlistServiceProvider);
+    final db = ref.read(databaseProvider);
+    // Read now: the save may finish after the page is closed.
+    PlaybackService? player;
+    try {
+      player = ref.read(playbackServiceProvider);
+    } catch (_) {
+      // No player (widget tests).
+    }
+    _unsavedChanges++;
     // Saves run one after another so a quick second tap cannot be
     // overtaken by the first.
     _saves = _saves.then((_) async {
@@ -84,20 +96,36 @@ class _SponsorBlockSettingsPageState
           id: widget.playlistId,
           sponsorBlockCategoryActions: next,
         );
-        await _tellPlayer();
+        await _tellPlayer(player);
       } catch (error) {
-        if (!mounted) return;
-        setState(() => _actions = previous);
-        _showMessage('Could not save: $error');
+        _reloadWhenSaved = true;
+        if (mounted) _showMessage('Could not save: $error');
       }
+      _unsavedChanges--;
+      if (_unsavedChanges == 0 && _reloadWhenSaved) await _showStored(db);
     });
   }
 
-  Future<void> _tellPlayer() async {
+  /// Shows the stored choices, unless a newer choice is waiting to be saved
+  /// (its save does this again).
+  Future<void> _showStored(AppDatabase db) async {
     try {
-      await ref
-          .read(playbackServiceProvider)
-          .playlistSettingsChanged(widget.playlistId);
+      final playlist = await db.getPlaylist(widget.playlistId);
+      if (!mounted || _unsavedChanges > 0) return;
+      _reloadWhenSaved = false;
+      setState(
+        () =>
+            _actions = decodeSponsorBlockCategoryActions(
+              playlist.sponsorBlockCategoryActions,
+              legacyCategories: playlist.sponsorBlockCategories,
+            ),
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _tellPlayer(PlaybackService? player) async {
+    try {
+      await player?.playlistSettingsChanged(widget.playlistId);
     } catch (_) {
       // Nothing from this playlist is playing, or no player (tests).
     }

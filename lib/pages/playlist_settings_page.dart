@@ -12,6 +12,7 @@ import '../providers/chapter_fetch_jobs.dart';
 import '../providers/playback_providers.dart';
 import '../providers/providers.dart';
 import '../services/download_errors.dart';
+import '../services/download_service.dart';
 import '../services/library_gate.dart';
 import '../services/playback_service.dart';
 import '../services/playlist_service.dart';
@@ -37,15 +38,27 @@ class PlaylistSettingsPage extends ConsumerStatefulWidget {
 class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
   static const _red = Color(0xFFEF5350);
 
+  /// How long deleting waits for the playlist's running download to stop.
+  static const _downloadStopTimeout = Duration(seconds: 30);
+
   Playlist? _playlist;
   final _nameController = TextEditingController();
   final _nameFocus = FocusNode();
+  late final AppDatabase _db;
   late final PlaylistService _playlists;
   PlaybackService? _player;
+
+  /// Kept so a save that fails after the page closed can still say so.
+  ScaffoldMessengerState? _messenger;
 
   /// Writes run one after another, so a quick second change can never be
   /// overtaken by an earlier one.
   Future<void> _saves = Future<void>.value();
+  int _unsavedChanges = 0;
+
+  /// A save failed: once every queued change is saved, the page shows what
+  /// is stored.
+  bool _reloadWhenSaved = false;
   bool _switchingFormat = false;
   bool _deleting = false;
   bool _isForceInserting = false;
@@ -55,6 +68,7 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
   @override
   void initState() {
     super.initState();
+    _db = ref.read(databaseProvider);
     _playlists = ref.read(playlistServiceProvider);
     try {
       _player = ref.read(playbackServiceProvider);
@@ -64,6 +78,12 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
     _nameController.addListener(_onNameChanged);
     _nameFocus.addListener(_onNameFocusChanged);
     unawaited(_loadPlaylist());
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _messenger = ScaffoldMessenger.maybeOf(context);
   }
 
   void _onNameChanged() {
@@ -78,9 +98,7 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
   Future<void> _loadPlaylist() async {
     final Playlist playlist;
     try {
-      playlist = await ref
-          .read(databaseProvider)
-          .getPlaylist(widget.playlistId);
+      playlist = await _db.getPlaylist(widget.playlistId);
     } catch (e) {
       if (!mounted) return;
       _showMessage('Could not load playlist: $e');
@@ -97,9 +115,7 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
   /// Re-reads the row after another page changed it.
   Future<void> _reload() async {
     try {
-      final playlist = await ref
-          .read(databaseProvider)
-          .getPlaylist(widget.playlistId);
+      final playlist = await _db.getPlaylist(widget.playlistId);
       if (mounted) setState(() => _playlist = playlist);
     } catch (_) {}
   }
@@ -125,34 +141,59 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
   }
 
   /// Shows [updated] at once, then saves it with [write]. On failure the
-  /// page goes back to [_playlist] as it was and says why.
+  /// page says why ([failure] names what was being saved) and, once the
+  /// changes queued after it are saved too, shows what is stored.
   Future<bool> _update(
     Playlist updated,
-    Future<void> Function(PlaylistService playlists) write,
-  ) {
-    final previous = _playlist;
+    Future<void> Function(PlaylistService playlists) write, {
+    String failure = 'Could not save',
+  }) {
     setState(() => _playlist = updated);
+    return _queueSave(write, failure: failure);
+  }
+
+  Future<bool> _queueSave(
+    Future<void> Function(PlaylistService playlists) write, {
+    required String failure,
+  }) {
+    _unsavedChanges++;
     final saved = Completer<bool>();
     _saves = _saves.then((_) async {
+      String? problem;
       try {
         await write(_playlists);
         await _tellPlayer();
-        saved.complete(true);
       } on LibraryBusyException catch (e) {
-        _undo(previous, e.message);
-        saved.complete(false);
+        problem = e.message;
       } catch (e) {
-        _undo(previous, 'Could not save: ${_errorText(e)}');
-        saved.complete(false);
+        problem = '$failure: ${_errorText(e)}';
       }
+      _unsavedChanges--;
+      if (problem != null) {
+        _reloadWhenSaved = true;
+        _showMessage(problem);
+      }
+      if (_unsavedChanges == 0 && _reloadWhenSaved) await _showStored();
+      saved.complete(problem == null);
     });
     return saved.future;
   }
 
-  void _undo(Playlist? previous, String message) {
-    if (!mounted) return;
-    setState(() => _playlist = previous);
-    _showMessage(message);
+  /// After a failed save: shows the stored playlist, unless a newer change
+  /// is waiting (its save does this again).
+  Future<void> _showStored() async {
+    final Playlist stored;
+    try {
+      stored = await _db.getPlaylist(widget.playlistId);
+    } catch (_) {
+      return;
+    }
+    if (!mounted || _unsavedChanges > 0) return;
+    _reloadWhenSaved = false;
+    setState(() {
+      _playlist = stored;
+      if (!_nameFocus.hasFocus) _nameController.text = stored.name;
+    });
   }
 
   void _commitName({bool disposing = false}) {
@@ -166,26 +207,15 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
       _showMessage('A playlist needs a name, so it stays "${playlist.name}".');
       return;
     }
+    final failure = 'Could not rename the playlist to "$name"';
+    Future<void> write(PlaylistService playlists) =>
+        playlists.updatePlaylistSettings(id: playlist.id, name: name);
     if (disposing) {
-      final player = _player;
-      final id = widget.playlistId;
-      unawaited(
-        _saves.then((_) async {
-          try {
-            await _playlists.updatePlaylistSettings(id: id, name: name);
-            await player?.playlistSettingsChanged(id);
-          } catch (_) {}
-        }),
-      );
+      // No setState now; a failure is still reported.
+      unawaited(_queueSave(write, failure: failure));
       return;
     }
-    unawaited(
-      _update(
-        playlist.copyWith(name: name),
-        (playlists) =>
-            playlists.updatePlaylistSettings(id: playlist.id, name: name),
-      ),
-    );
+    unawaited(_update(playlist.copyWith(name: name), write, failure: failure));
   }
 
   Future<void> _setAudioOnly(bool value) async {
@@ -270,8 +300,8 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
     final downloads = ref.read(downloadServiceProvider);
     final downloading =
         downloads.isDownloading &&
-        ref.read(downloadProgressProvider).valueOrNull?.playlistId ==
-            widget.playlistId;
+        downloads.activePlaylistId == widget.playlistId;
+    final queued = downloads.queuedPlaylistIds.contains(widget.playlistId);
     var deleteFiles = false;
     final confirmed = await showDialog<bool>(
       context: context,
@@ -298,12 +328,14 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
                                 'Downloaded files are kept on the device.',
                         style: const TextStyle(color: Color(0xFF888888)),
                       ),
-                      if (downloading)
-                        const Padding(
-                          padding: EdgeInsets.only(top: 8),
+                      if (downloading || queued)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
                           child: Text(
-                            'Its running download will be stopped.',
-                            style: TextStyle(color: Color(0xFF888888)),
+                            downloading
+                                ? 'Its running download will be stopped.'
+                                : 'Its waiting download will be cancelled.',
+                            style: const TextStyle(color: Color(0xFF888888)),
                           ),
                         ),
                       const SizedBox(height: 8),
@@ -343,10 +375,21 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
 
     if (confirmed != true || !mounted) return;
     setState(() => _deleting = true);
-    ref.read(chapterFetchJobsProvider.notifier).cancel(widget.playlistId);
+    final chapterJobs = ref.read(chapterFetchJobsProvider.notifier);
     try {
-      await _stopDownloadOfThisPlaylist();
+      // Both would keep writing into a playlist that is going away.
+      await chapterJobs.stop(widget.playlistId);
+      if (!await _stopDownloadOfThisPlaylist(downloads)) {
+        if (!mounted) return;
+        setState(() => _deleting = false);
+        _showMessage('Could not stop the download. Try again.');
+        return;
+      }
       await _saves;
+      // Its songs leave the queue; a song of it that is playing stops.
+      try {
+        await _player?.playlistRemoved(widget.playlistId);
+      } catch (_) {}
       await _playlists.deletePlaylist(
         widget.playlistId,
         deleteFiles: deleteFiles,
@@ -368,18 +411,21 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
   }
 
   /// A download of this playlist would hold the library and keep writing
-  /// into a playlist that is going away, so stop it first.
-  Future<void> _stopDownloadOfThisPlaylist() async {
-    final downloads = ref.read(downloadServiceProvider);
+  /// into a playlist that is going away, so it is stopped first (and taken
+  /// out of the queue). False when it did not stop in time.
+  Future<bool> _stopDownloadOfThisPlaylist(DownloadService downloads) async {
+    downloads.removeFromQueue(widget.playlistId);
     if (!downloads.isDownloading ||
-        ref.read(downloadProgressProvider).valueOrNull?.playlistId !=
-            widget.playlistId) {
-      return;
+        downloads.activePlaylistId != widget.playlistId) {
+      return true;
     }
     await downloads.cancelActiveDownloads();
-    final deadline = DateTime.now().add(const Duration(seconds: 30));
-    while (downloads.isDownloading && DateTime.now().isBefore(deadline)) {
-      await Future<void>.delayed(const Duration(milliseconds: 200));
+    try {
+      await downloads.runFinished.timeout(_downloadStopTimeout);
+      return true;
+    } on TimeoutException {
+      return !downloads.isDownloading ||
+          downloads.activePlaylistId != widget.playlistId;
     }
   }
 
@@ -427,6 +473,8 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
       // The job keeps running if the page is closed; the result is still
       // reported.
       final result = await jobs.start(widget.playlistId);
+      // Null: stopped because the playlist is being deleted.
+      if (result == null) return;
       messenger.showSnackBar(
         SnackBar(content: Text(chapterFetchSummary(result))),
       );
@@ -516,8 +564,10 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
   }
 
   void _showMessage(String message) {
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
+    final messenger =
+        mounted ? ScaffoldMessenger.maybeOf(context) ?? _messenger : _messenger;
+    messenger
+      ?..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
