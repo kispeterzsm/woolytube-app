@@ -1,4 +1,6 @@
-import 'package:drift/drift.dart' show Value;
+import 'dart:io';
+
+import 'package:drift/drift.dart' show Value, driftRuntimeOptions;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:woolytube/database/database.dart';
@@ -806,6 +808,41 @@ void main() {
       titleMatchesFileName('Other Song', '/x/00003_Real Song.m4a'),
       isFalse,
     );
+  });
+
+  test('two connections to the library file share it through WAL', () async {
+    final dir = await Directory.systemTemp.createTemp('woolytube_wal');
+    final file = File('${dir.path}/library.sqlite');
+    // Two databases on one file is the point here (app and worker engine).
+    final warned = driftRuntimeOptions.dontWarnAboutMultipleDatabases;
+    driftRuntimeOptions.dontWarnAboutMultipleDatabases = true;
+    addTearDown(
+      () => driftRuntimeOptions.dontWarnAboutMultipleDatabases = warned,
+    );
+    final app = AppDatabase.forTesting(
+      NativeDatabase(file, setup: (raw) => configureConnection(raw.execute)),
+    );
+    final worker = AppDatabase.forTesting(
+      NativeDatabase(file, setup: (raw) => configureConnection(raw.execute)),
+    );
+    try {
+      final mode = await app.customSelect('PRAGMA journal_mode').getSingle();
+      expect(mode.read<String>('journal_mode'), 'wal');
+      final timeout =
+          await worker.customSelect('PRAGMA busy_timeout').getSingle();
+      expect(timeout.data.values.single, 5000);
+
+      expect(await app.refreshIfChangedExternally(), isFalse);
+      expect(await app.refreshIfChangedExternally(), isFalse);
+      await insertTestPlaylist(worker);
+      expect(await app.refreshIfChangedExternally(), isTrue);
+      expect(await app.getAllPlaylists(), hasLength(1));
+      expect(await app.refreshIfChangedExternally(), isFalse);
+    } finally {
+      await app.close();
+      await worker.close();
+      await dir.delete(recursive: true);
+    }
   });
 }
 

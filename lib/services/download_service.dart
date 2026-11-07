@@ -182,6 +182,11 @@ class DownloadLock {
   /// background lock cannot be live for longer than that.
   static const backgroundStaleAfter = Duration(minutes: 10);
 
+  /// A lock without a readable holder is left by an engine that died between
+  /// creating the file and stamping it. Only a moment passes between the two,
+  /// so such a lock is abandoned once it is this old.
+  static const unknownHolderStaleAfter = Duration(seconds: 10);
+
   static Future<String> _defaultDirectory() async =>
       (await getApplicationDocumentsDirectory()).path;
 
@@ -200,12 +205,26 @@ class DownloadLock {
   /// engines start at the same moment only one of them gets it.
   Future<bool> acquire(String owner) async {
     final file = await _file();
+    var created = false;
     try {
       await file.create(exclusive: true);
-      await file.writeAsString(_stamp(owner), flush: true);
-      return true;
+      created = true;
     } on FileSystemException {
       // It exists: see who holds it.
+    }
+    if (created) {
+      try {
+        await file.writeAsString(_stamp(owner), flush: true);
+        return true;
+      } on FileSystemException {
+        // Do not leave an unstamped lock behind.
+        try {
+          await file.delete();
+        } on FileSystemException {
+          // It goes stale on its own.
+        }
+        rethrow;
+      }
     }
     if (await isHeldByOther(owner, file: file)) return false;
     // Ours already, or abandoned: take it over.
@@ -227,8 +246,11 @@ class DownloadLock {
       return false;
     }
     if (holder == owner) return false;
-    final staleAfter =
-        holder == backgroundOwner ? backgroundStaleAfter : foregroundStaleAfter;
+    final staleAfter = switch (holder) {
+      backgroundOwner => backgroundStaleAfter,
+      foregroundOwner => foregroundStaleAfter,
+      _ => unknownHolderStaleAfter,
+    };
     return DateTime.now().difference(modified) < staleAfter;
   }
 

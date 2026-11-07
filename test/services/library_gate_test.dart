@@ -237,4 +237,24 @@ void main() {
     );
     expect(watch.elapsed, lessThan(const Duration(seconds: 1)));
   });
+
+  test('an unstamped lock left by a dead engine is taken over after a '
+      'moment', () async {
+    final file = lockFile();
+    await file.writeAsString('');
+    expect(await lock.isHeldByOther(DownloadLock.foregroundOwner), isTrue);
+    expect(await lock.acquire(DownloadLock.foregroundOwner), isFalse);
+
+    await file.setLastModified(
+      DateTime.now().subtract(
+        DownloadLock.unknownHolderStaleAfter + const Duration(seconds: 1),
+      ),
+    );
+    expect(await lock.isHeldByOther(DownloadLock.foregroundOwner), isFalse);
+    expect(await lock.acquire(DownloadLock.foregroundOwner), isTrue);
+    expect(
+      (await file.readAsString()).startsWith(DownloadLock.foregroundOwner),
+      isTrue,
+    );
+  });
 }

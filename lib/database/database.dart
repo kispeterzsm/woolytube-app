@@ -1105,20 +1105,26 @@ LazyDatabase _openConnection() {
   return LazyDatabase(() async {
     final dbFolder = await getApplicationDocumentsDirectory();
     final file = File(p.join(dbFolder.path, 'woolytube.sqlite'));
-    // The app and the hourly background worker open this file through two
-    // connections. WAL lets one read while the other writes, and the busy
-    // timeout makes a write wait for the other side's transaction instead
-    // of failing at once with "database is locked". The backup copy uses
-    // VACUUM INTO, which works with WAL.
     return NativeDatabase.createInBackground(
       file,
-      setup: (raw) {
-        raw.execute('PRAGMA journal_mode=WAL');
-        raw.execute('PRAGMA busy_timeout=5000');
-        raw.execute('PRAGMA synchronous=NORMAL');
-      },
+      setup: (raw) => configureConnection(raw.execute),
     );
   });
+}
+
+/// Prepares a connection to the library file; [execute] runs one statement.
+///
+/// The app and the hourly background worker open this file through two
+/// connections. WAL lets one read while the other writes, and the busy
+/// timeout makes a write wait for the other side's transaction instead of
+/// failing at once with "database is locked". The busy timeout is set first:
+/// the first switch to WAL needs a moment of exclusive access and would
+/// otherwise fail at once if the other side is writing. The backup copy uses
+/// VACUUM INTO, which works with WAL.
+void configureConnection(void Function(String sql) execute) {
+  execute('PRAGMA busy_timeout=5000');
+  execute('PRAGMA journal_mode=WAL');
+  execute('PRAGMA synchronous=NORMAL');
 }
 
 /// `unavailableReason` of a track whose download failed because YouTube

@@ -9,8 +9,7 @@ String friendlyDownloadError(String raw) {
   // downloader, not an age check. It usually passes after a while or with
   // a newer yt-dlp.
   if (isBotCheckDownloadError(raw)) {
-    return 'YouTube asked to confirm this is not a bot. Try again later, '
-        'or update yt-dlp in Settings';
+    return 'YouTube asked to confirm this is not a bot. Try again later.';
   }
   if (isAgeGateDownloadError(raw)) {
     return 'Age-restricted — needs sign-in';

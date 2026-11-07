@@ -118,7 +118,9 @@ class ThumbnailBackfillService {
   final _noCover = <int, bool>{};
 
   /// Thumbnail paths already seen on disk this session, so opening a large
-  /// playlist again does not check thousands of files.
+  /// playlist again does not check thousands of files. Keyed by track id
+  /// (never reused) and compared with the current path, so a track that was
+  /// moved to another folder or format is checked again.
   final _verified = <int, String>{};
 
   final _runs = <int, Future<void>>{};
@@ -155,15 +157,6 @@ class ThumbnailBackfillService {
     return _backfillAll ??= _runBackfillAll(
       allowNetwork,
     ).whenComplete(() => _backfillAll = null);
-  }
-
-  /// Forgets what this service remembers about [trackIds] (after a
-  /// playlist was deleted or moved to another folder).
-  void forgetTracks(Iterable<int> trackIds) {
-    for (final id in trackIds) {
-      _verified.remove(id);
-      _noCover.remove(id);
-    }
   }
 
   Future<int> _runBackfillAll(bool allowNetwork) async {
