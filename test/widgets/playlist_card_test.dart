@@ -71,10 +71,7 @@ void main() {
     expect(find.byKey(const ValueKey('playlist-card-update')), findsNothing);
 
     await pumpCard(tester, card(PlaylistCardActivity.queued));
-    expect(
-      find.text('Queued – starts after the current download'),
-      findsOneWidget,
-    );
+    expect(find.text('Queued after the current download'), findsOneWidget);
     expect(find.byKey(const ValueKey('playlist-card-progress')), findsNothing);
 
     await pumpCard(tester, card(PlaylistCardActivity.downloading));
@@ -268,6 +265,37 @@ void main() {
     // Both buttons stay reachable.
     expect(find.byTooltip('Update now'), findsOneWidget);
     expect(find.byTooltip('Playlist settings'), findsOneWidget);
+  });
+
+  testWidgets('the status line is not cut short on a narrow phone', (
+    tester,
+  ) async {
+    final db = openTestDatabase();
+    addTearDown(db.close);
+    final playlist = await insertTestPlaylist(db, name: 'Long list');
+    final now = DateTime.now();
+    await pumpCard(
+      tester,
+      PlaylistCard(
+        playlist: playlist.copyWith(
+          lastUpdated: Value(now.subtract(const Duration(days: 3))),
+        ),
+        counts: const PlaylistCounts(total: 600, downloaded: 0),
+        onTap: () {},
+        onUpdate: () {},
+        onSettings: () {},
+      ),
+      width: 360,
+    );
+    final status = find.byKey(const ValueKey('playlist-card-status'));
+    expect(
+      tester.widget<Text>(status).data,
+      '0 of 600 downloaded · updated 3d ago',
+    );
+    // Room for two lines (the test font is too wide to measure the real
+    // wrap), and the card grows for them.
+    expect(tester.widget<Text>(status).maxLines, 2);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('shows the saved cover before the YouTube image', (tester) async {

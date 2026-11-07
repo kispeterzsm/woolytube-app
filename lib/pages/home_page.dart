@@ -249,13 +249,8 @@ class _HomePageState extends ConsumerState<HomePage> {
                   },
           child: Text(retrying ? 'Retrying…' : 'Retry'),
         ),
-        IconButton(
-          icon: const Icon(Icons.close, size: 20),
-          color: const Color(0xFF888888),
-          tooltip: 'Dismiss',
-          onPressed: () => setState(() => _dismissedYtDlpError = reason),
-        ),
       ],
+      onDismiss: () => setState(() => _dismissedYtDlpError = reason),
     );
   }
 
@@ -465,7 +460,8 @@ class _HomePageState extends ConsumerState<HomePage> {
         return;
       }
       if (!mounted) return;
-      setState(() => _startingPlaylistIds.remove(playlist.id));
+      // The card stays "checking" (and Update stays off) until the sync has
+      // handed over to the download; the finally below clears it.
       await syncAndDownloadPlaylist(
         context: context,
         playlist: playlist,
@@ -747,7 +743,9 @@ class _EmptyLibrary extends StatelessWidget {
   }
 }
 
-/// A notice above the playlists: an icon, a line or two of text, buttons.
+/// A notice above the playlists: an icon, a line or two of text, and its
+/// buttons in a row below the text (right-aligned, wrapping when the text is
+/// large), so long text and buttons never squeeze each other.
 class _HomeNotice extends StatelessWidget {
   const _HomeNotice({
     super.key,
@@ -756,6 +754,7 @@ class _HomeNotice extends StatelessWidget {
     required this.title,
     this.subtitle,
     this.actions = const [],
+    this.onDismiss,
   });
 
   final IconData icon;
@@ -764,10 +763,13 @@ class _HomeNotice extends StatelessWidget {
   final String? subtitle;
   final List<Widget> actions;
 
+  /// Shows a close button at the top right.
+  final VoidCallback? onDismiss;
+
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.fromLTRB(14, 6, 6, 6),
+      padding: EdgeInsets.fromLTRB(14, 6, 6, actions.isEmpty ? 6 : 2),
       decoration: BoxDecoration(
         color: Color.alphaBlend(
           color.withValues(alpha: 0.12),
@@ -776,42 +778,70 @@ class _HomeNotice extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: color.withValues(alpha: 0.7), width: 0.5),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, color: color, size: 22),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 6),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    title,
-                    style: const TextStyle(
-                      color: Color(0xFFEEEEEE),
-                      fontSize: 13.5,
-                      fontWeight: FontWeight.w600,
-                    ),
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  if (subtitle != null) ...[
-                    const SizedBox(height: 2),
-                    Text(
-                      subtitle!,
-                      style: const TextStyle(
-                        color: Color(0xFFAAAAAA),
-                        fontSize: 12,
-                      ),
-                    ),
-                  ],
-                ],
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Icon(icon, color: color, size: 22),
               ),
-            ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    0,
+                    8,
+                    onDismiss == null ? 8 : 0,
+                    4,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          color: Color(0xFFEEEEEE),
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                        maxLines: 4,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      if (subtitle != null) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          subtitle!,
+                          style: const TextStyle(
+                            color: Color(0xFFAAAAAA),
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+              if (onDismiss != null)
+                IconButton(
+                  icon: const Icon(Icons.close, size: 20),
+                  color: const Color(0xFF888888),
+                  tooltip: 'Dismiss',
+                  onPressed: onDismiss,
+                ),
+            ],
           ),
-          ...actions,
+          if (actions.isNotEmpty)
+            OverflowBar(
+              alignment: MainAxisAlignment.end,
+              overflowAlignment: OverflowBarAlignment.end,
+              spacing: 8,
+              children: actions,
+            ),
         ],
       ),
     );

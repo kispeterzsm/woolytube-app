@@ -1,14 +1,20 @@
 import 'dart:async';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/pages/home_page.dart';
 import 'package:woolytube/providers/playback_providers.dart';
 import 'package:woolytube/providers/providers.dart';
+import 'package:woolytube/services/app_settings_service.dart';
+import 'package:woolytube/services/download_network_policy.dart';
 import 'package:woolytube/services/download_service.dart';
+import 'package:woolytube/services/metadata_service.dart';
 import 'package:woolytube/services/playback_service.dart';
+import 'package:woolytube/services/playlist_service.dart';
 import 'package:woolytube/services/update_service.dart';
 import 'package:woolytube/widgets/playlist_card.dart';
 
@@ -22,6 +28,7 @@ void main() {
   late _Playback playback;
 
   setUp(() async {
+    SharedPreferences.setMockInitialValues({});
     db = openTestDatabase();
     playlists = [
       for (var i = 1; i <= 6; i++)
@@ -53,7 +60,10 @@ void main() {
     await db.close();
   });
 
-  Future<void> pumpHome(WidgetTester tester) async {
+  Future<void> pumpHome(
+    WidgetTester tester, {
+    List<Override> overrides = const [],
+  }) async {
     tester.view.physicalSize = const Size(411 * 3, 800 * 3);
     tester.view.devicePixelRatio = 3;
     addTearDown(tester.view.reset);
@@ -84,6 +94,7 @@ void main() {
           ),
           isPlayingProvider.overrideWith((ref) => Stream.value(true)),
           playbackServiceProvider.overrideWithValue(playback),
+          ...overrides,
         ],
         child: const MaterialApp(home: HomePage()),
       ),
@@ -127,7 +138,7 @@ void main() {
     expect(
       find.descendant(
         of: card(2),
-        matching: find.text('Queued – starts after the current download'),
+        matching: find.text('Queued after the current download'),
       ),
       findsOneWidget,
     );
@@ -249,6 +260,155 @@ void main() {
     expect(find.byType(TextField), findsNothing);
     expect(card(0), findsOneWidget);
   });
+
+  testWidgets('a double tap on Update starts one update', (tester) async {
+    final settings = AppSettingsService();
+    final sync = Completer<void>();
+    final playlistService = _SyncPlaylists(sync.future);
+    final downloads = _Downloads();
+    await pumpHome(
+      tester,
+      overrides: [
+        databaseProvider.overrideWithValue(db),
+        playlistServiceProvider.overrideWithValue(playlistService),
+        downloadServiceProvider.overrideWithValue(downloads),
+        appSettingsServiceProvider.overrideWithValue(settings),
+        downloadNetworkPolicyProvider.overrideWithValue(
+          DownloadNetworkPolicy(
+            settings,
+            checkConnectivity: () async => [ConnectivityResult.wifi],
+          ),
+        ),
+      ],
+    );
+    final update = find.descendant(
+      of: card(3),
+      matching: find.byTooltip('Update now'),
+    );
+    final spot = tester.getCenter(update);
+    await tester.tapAt(spot);
+    for (var i = 0; i < 5; i++) {
+      await tester.pump();
+    }
+    // Checking for new videos: Update stays off until the download takes
+    // over.
+    expect(playlistService.syncs, 1);
+    expect(
+      find.descendant(
+        of: card(3),
+        matching: find.text('Checking for new videos…'),
+      ),
+      findsOneWidget,
+    );
+    expect(update, findsNothing);
+    // The second tap neither updates again nor opens the playlist.
+    await tester.tapAt(spot);
+    for (var i = 0; i < 5; i++) {
+      await tester.pump();
+    }
+    expect(
+      tester.state<NavigatorState>(find.byType(Navigator)).canPop(),
+      isFalse,
+    );
+
+    sync.complete();
+    await tester.pumpAndSettle();
+    expect(playlistService.syncs, 1);
+    expect(downloads.started, ['Playlist 4']);
+    expect(update, findsOneWidget);
+  });
+
+  testWidgets('import banner: Not now is remembered only once Undo is gone', (
+    tester,
+  ) async {
+    final settings = AppSettingsService();
+    final found = DiscoveredPlaylist(
+      folderPath: '/tmp/old',
+      url: 'https://www.youtube.com/playlist?list=old',
+      name: 'Old list',
+      audioOnly: true,
+      autoUpdate: true,
+      updateFrequencyHours: 24,
+      includeThumbnails: true,
+      sponsorBlockEnabled: true,
+      sponsorBlockCategories: '[]',
+      createdAt: DateTime(2026),
+      tracks: const [],
+    );
+    await pumpHome(
+      tester,
+      overrides: [
+        appSettingsServiceProvider.overrideWithValue(settings),
+        pendingImportsProvider.overrideWith((ref) => [found]),
+      ],
+    );
+    final banner = find.byKey(const ValueKey('import-banner'));
+    expect(banner, findsOneWidget);
+
+    await tester.tap(find.text('Not now'));
+    await tester.pumpAndSettle();
+    expect(banner, findsNothing);
+    expect(await settings.getDismissedImportUrls(), isEmpty);
+
+    // Undo brings the banner back and nothing is remembered.
+    await tester.tap(find.text('Undo'));
+    await tester.pumpAndSettle();
+    expect(banner, findsOneWidget);
+    expect(await settings.getDismissedImportUrls(), isEmpty);
+
+    // Without Undo, it is remembered once the message is gone.
+    await tester.tap(find.text('Not now'));
+    await tester.pumpAndSettle();
+    expect(await settings.getDismissedImportUrls(), isEmpty);
+    await tester.pump(const Duration(seconds: 10));
+    await tester.pumpAndSettle();
+    expect(find.text('Undo'), findsNothing);
+    expect(await settings.getDismissedImportUrls(), {found.url});
+    expect(banner, findsNothing);
+  });
+
+  testWidgets('notice buttons sit under the text and fit large text', (
+    tester,
+  ) async {
+    tester.platformDispatcher.textScaleFactorTestValue = 2;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    await pumpHome(
+      tester,
+      overrides: [
+        ytDlpInitErrorProvider.overrideWith(
+          (ref) => 'The yt-dlp files could not be unpacked',
+        ),
+        pendingImportsProvider.overrideWith(
+          (ref) => [
+            DiscoveredPlaylist(
+              folderPath: '/tmp/old',
+              url: 'u',
+              name: 'Old',
+              audioOnly: true,
+              autoUpdate: true,
+              updateFrequencyHours: 24,
+              includeThumbnails: true,
+              sponsorBlockEnabled: true,
+              sponsorBlockCategories: '[]',
+              createdAt: DateTime(2026),
+              tracks: const [],
+            ),
+          ],
+        ),
+      ],
+    );
+    tester.view.physicalSize = const Size(360 * 3, 800 * 3);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(
+      tester.getTopLeft(find.text('Import all')).dy,
+      greaterThan(
+        tester.getBottomLeft(find.text('From a previous installation')).dy,
+      ),
+    );
+    expect(find.byTooltip('Dismiss'), findsOneWidget);
+    expect(find.text('Retry'), findsOneWidget);
+  });
 }
 
 class _Playback implements PlaybackService {
@@ -272,6 +432,49 @@ class _Playback implements PlaybackService {
 class _Updates implements UpdateService {
   @override
   Future<AppUpdate?> checkForUpdate({String? currentVersion}) async => null;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _SyncPlaylists implements PlaylistService {
+  _SyncPlaylists(this.gate);
+
+  final Future<void> gate;
+  var syncs = 0;
+
+  @override
+  Set<int> get syncingPlaylistIds => const {};
+
+  @override
+  Future<SyncResult> syncPlaylist(Playlist playlist) async {
+    syncs++;
+    await gate;
+    return const SyncResult();
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _Downloads implements DownloadService {
+  final started = <String>[];
+
+  @override
+  bool get isDownloading => false;
+
+  @override
+  int? get activePlaylistId => null;
+
+  @override
+  Future<DownloadStart> downloadPlaylist(
+    Playlist playlist, {
+    bool sourceChecked = true,
+    bool Function()? shouldStop,
+  }) async {
+    started.add(playlist.name);
+    return DownloadStart.started;
+  }
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

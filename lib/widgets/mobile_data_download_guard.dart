@@ -17,6 +17,22 @@ enum DownloadNowChoice {
   offline,
 }
 
+/// [decideDownloadNow] when there is nobody to ask (the page that started
+/// the download is gone): mobile data that needs the owner's consent counts
+/// as [DownloadNowChoice.later].
+Future<DownloadNowChoice> decideDownloadNowWithoutAsking(
+  DownloadNetworkPolicy policy,
+) async {
+  switch (await policy.manualDownloadDecision()) {
+    case ManualDownloadDecision.allow:
+      return DownloadNowChoice.now;
+    case ManualDownloadDecision.offline:
+      return DownloadNowChoice.offline;
+    case ManualDownloadDecision.confirmMobileData:
+      return DownloadNowChoice.later;
+  }
+}
+
 /// Decides whether a download the owner asked for may start now. On mobile
 /// data (when automatic mobile downloads are off) it asks; [laterLabel] is
 /// the button that declines. With [settings], the question also offers

@@ -177,10 +177,13 @@ class PlaylistCard extends StatelessWidget {
         ),
       );
     }
+    // Two lines: "0 of 600 downloaded · updated 3d ago" does not fit one
+    // line next to the cover on a narrow phone.
     return Text(
       statusText(),
+      key: const ValueKey('playlist-card-status'),
       style: TextStyle(color: _isBusy ? _accent : _muted, fontSize: 12.5),
-      maxLines: 1,
+      maxLines: 2,
       overflow: TextOverflow.ellipsis,
     );
   }
@@ -192,7 +195,7 @@ class PlaylistCard extends StatelessWidget {
       case PlaylistCardActivity.syncing:
         return 'Checking for new videos…';
       case PlaylistCardActivity.queued:
-        return 'Queued – starts after the current download';
+        return 'Queued after the current download';
       case PlaylistCardActivity.preparing:
         return 'Getting ready to download…';
       case PlaylistCardActivity.downloading:
@@ -264,10 +267,8 @@ class PlaylistCard extends StatelessWidget {
       );
     }
     if (activity == PlaylistCardActivity.syncing) {
-      return const SizedBox(
-        width: 48,
-        height: 48,
-        child: Tooltip(
+      return _tapAbsorber(
+        const Tooltip(
           message: 'Checking for new videos',
           child: Center(
             child: SizedBox(
@@ -280,10 +281,8 @@ class PlaylistCard extends StatelessWidget {
       );
     }
     if (activity == PlaylistCardActivity.queued) {
-      return const SizedBox(
-        width: 48,
-        height: 48,
-        child: Tooltip(
+      return _tapAbsorber(
+        const Tooltip(
           message: 'Queued',
           child: Icon(Icons.schedule, color: _muted, size: 22),
         ),
@@ -296,6 +295,15 @@ class PlaylistCard extends StatelessWidget {
       onTap: onUpdate,
     );
   }
+
+  /// Holds the Update button's place while it is unavailable. A tap there
+  /// (a quick second tap on Update) must not fall through to the card and
+  /// open the playlist.
+  static Widget _tapAbsorber(Widget child) => GestureDetector(
+    behavior: HitTestBehavior.opaque,
+    onTap: () {},
+    child: SizedBox(width: 48, height: 48, child: child),
+  );
 
   Widget _buildSettingsButton() => _iconButton(
     key: const ValueKey('playlist-card-settings'),

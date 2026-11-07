@@ -30,13 +30,16 @@ void main() {
     WidgetTester tester,
     YtDlpService ytdlp, {
     List<Playlist> playlists = const [],
+    Stream<List<Playlist>>? library,
     List<Override> overrides = const [],
   }) async {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
           ytdlpServiceProvider.overrideWithValue(ytdlp),
-          playlistsProvider.overrideWith((ref) => Stream.value(playlists)),
+          playlistsProvider.overrideWith(
+            (ref) => library ?? Stream.value(playlists),
+          ),
           ...overrides,
         ],
         child: MaterialApp(
@@ -223,13 +226,21 @@ void main() {
       'the options', (tester) async {
     final db = openTestDatabase();
     addTearDown(db.close);
-    final playlists = _Playlists(db);
+    // Restored from a backup in its folder, with the backup's update time.
+    final library = StreamController<List<Playlist>>.broadcast();
+    addTearDown(library.close);
+    final playlists = _Playlists(
+      db,
+      restoredLastUpdated: DateTime.now().subtract(const Duration(hours: 1)),
+      library: library,
+    );
     final downloads = _Downloads();
     final settings = AppSettingsService();
     final ytdlp = _YtDlp(info: {'title': 'Commute', 'count': 2});
     await pumpPage(
       tester,
       ytdlp,
+      library: library.stream,
       overrides: [
         databaseProvider.overrideWithValue(db),
         playlistServiceProvider.overrideWithValue(playlists),
@@ -256,6 +267,9 @@ void main() {
     await _settle(tester);
     expect(playlists.added, 1);
     expect(find.text('Use mobile data?'), findsOneWidget);
+    // The playlist being added is in the library now, but is not reported
+    // as already there.
+    expect(find.byKey(const ValueKey('add-playlist-exists')), findsNothing);
 
     await tester.tap(find.text('Later on Wi-Fi'));
     await tester.pumpAndSettle();
@@ -263,6 +277,8 @@ void main() {
     final saved = await db.getAllPlaylists();
     expect(saved.single.name, 'Commute');
     expect(saved.single.audioOnly, isTrue);
+    // The next automatic update takes it at once.
+    expect(saved.single.lastUpdated, isNull);
     expect(find.byType(AddPlaylistPage), findsNothing);
     expect(
       find.textContaining('next automatic update on Wi-Fi'),
@@ -309,6 +325,172 @@ void main() {
     expect(downloads.started, ['Gym']);
     expect(await settings.getAutoDownloadWithMobileData(), isTrue);
   });
+
+  testWidgets('on Wi-Fi, Add downloads at once', (tester) async {
+    final db = openTestDatabase();
+    addTearDown(db.close);
+    final downloads = _Downloads();
+    await pumpPage(
+      tester,
+      _YtDlp(info: {'title': 'Home', 'count': 2}),
+      overrides: [..._services(db, downloads, ConnectivityResult.wifi)],
+    );
+    await tester.enterText(urlField, 'https://youtube.com/playlist?list=h');
+    await tester.testTextInput.receiveAction(TextInputAction.go);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(addButton));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Use mobile data?'), findsNothing);
+    expect(downloads.started, ['Home']);
+    expect(find.byType(AddPlaylistPage), findsNothing);
+    expect(find.text('Added "Home".'), findsOneWidget);
+  });
+
+  testWidgets('offline, Add keeps the playlist and says when it downloads', (
+    tester,
+  ) async {
+    final db = openTestDatabase();
+    addTearDown(db.close);
+    final downloads = _Downloads();
+    await pumpPage(
+      tester,
+      _YtDlp(info: {'title': 'Away', 'count': 2}),
+      overrides: [..._services(db, downloads, ConnectivityResult.none)],
+    );
+    await tester.enterText(urlField, 'https://youtube.com/playlist?list=o');
+    await tester.testTextInput.receiveAction(TextInputAction.go);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(addButton));
+    await tester.pumpAndSettle();
+
+    expect(downloads.started, isEmpty);
+    expect((await db.getAllPlaylists()).single.name, 'Away');
+    expect(
+      find.textContaining("You're offline; it downloads with the next "),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('leaving the page while adding still downloads on Wi-Fi', (
+    tester,
+  ) async {
+    final db = openTestDatabase();
+    addTearDown(db.close);
+    final downloads = _Downloads();
+    final playlists = _Playlists(db, gate: Completer<void>());
+    await pumpPage(
+      tester,
+      _YtDlp(info: {'title': 'Run', 'count': 2}),
+      overrides: [
+        ..._services(db, downloads, ConnectivityResult.wifi),
+        playlistServiceProvider.overrideWithValue(playlists),
+      ],
+    );
+    await tester.enterText(urlField, 'https://youtube.com/playlist?list=r');
+    await tester.testTextInput.receiveAction(TextInputAction.go);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(addButton));
+    await tester.pump();
+    expect(find.text('Adding…'), findsOneWidget);
+
+    // Back while "Adding…" spins.
+    tester.state<NavigatorState>(find.byType(Navigator)).pop();
+    await tester.pumpAndSettle();
+    expect(find.byType(AddPlaylistPage), findsNothing);
+
+    playlists.gate!.complete();
+    await tester.pumpAndSettle();
+    expect(downloads.started, ['Run']);
+    expect(find.text('Added "Run".'), findsOneWidget);
+  });
+
+  testWidgets('with Keep up to date off, mobile data offers "Not now"', (
+    tester,
+  ) async {
+    final db = openTestDatabase();
+    addTearDown(db.close);
+    final downloads = _Downloads();
+    await pumpPage(
+      tester,
+      _YtDlp(info: {'title': 'Once', 'count': 2}),
+      overrides: [..._services(db, downloads, ConnectivityResult.mobile)],
+    );
+    await tester.enterText(urlField, 'https://youtube.com/playlist?list=n');
+    await tester.testTextInput.receiveAction(TextInputAction.go);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Keep up to date'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(addButton));
+    await _settle(tester);
+
+    expect(find.text('Later on Wi-Fi'), findsNothing);
+    await tester.tap(find.text('Not now'));
+    await tester.pumpAndSettle();
+    expect(downloads.started, isEmpty);
+    expect(find.textContaining('Tap Update on it to download'), findsOneWidget);
+  });
+
+  testWidgets('tapping the link field does not cancel a lookup', (
+    tester,
+  ) async {
+    final ytdlp = _YtDlp(
+      info: {'title': 'Patient', 'count': 9},
+      gate: Completer<void>(),
+    );
+    await pumpPage(tester, ytdlp);
+    await tester.enterText(urlField, 'https://youtube.com/playlist?list=p');
+    await tester.pump();
+    await tester.tap(find.byKey(lookupButton));
+    await tester.pump();
+    expect(find.text('Reading the playlist…'), findsOneWidget);
+
+    // Focus and cursor changes only.
+    await tester.tap(urlField);
+    await tester.pump();
+    final controller = tester.widget<TextField>(urlField).controller!;
+    controller.selection = const TextSelection.collapsed(offset: 3);
+    await tester.pump();
+    expect(find.text('Reading the playlist…'), findsOneWidget);
+
+    ytdlp.gate!.complete();
+    await tester.pumpAndSettle();
+    expect(find.text('Patient'), findsOneWidget);
+    expect(enabled(tester, addButton), isTrue);
+  });
+
+  testWidgets('the Go key does not look up while yt-dlp is unavailable', (
+    tester,
+  ) async {
+    final ytdlp = _YtDlp(info: {'title': 'x', 'count': 1});
+    await pumpPage(
+      tester,
+      ytdlp,
+      overrides: [ytDlpInitErrorProvider.overrideWith((ref) => 'broken')],
+    );
+    await tester.enterText(urlField, 'https://youtube.com/playlist?list=x');
+    await tester.testTextInput.receiveAction(TextInputAction.go);
+    await tester.pumpAndSettle();
+    expect(ytdlp.requestedUrls, isEmpty);
+    expect(enabled(tester, lookupButton), isFalse);
+  });
+}
+
+List<Override> _services(
+  AppDatabase db,
+  _Downloads downloads,
+  ConnectivityResult network,
+) {
+  final settings = AppSettingsService();
+  return [
+    databaseProvider.overrideWithValue(db),
+    playlistServiceProvider.overrideWithValue(_Playlists(db)),
+    downloadServiceProvider.overrideWithValue(downloads),
+    appSettingsServiceProvider.overrideWithValue(settings),
+    downloadNetworkPolicyProvider.overrideWithValue(
+      DownloadNetworkPolicy(settings, checkConnectivity: () async => [network]),
+    ),
+  ];
 }
 
 Future<void> _settle(WidgetTester tester) async {
@@ -338,9 +520,14 @@ class _YtDlp implements YtDlpService {
 }
 
 class _Playlists implements PlaylistService {
-  _Playlists(this.db);
+  _Playlists(this.db, {this.gate, this.restoredLastUpdated, this.library});
 
   final AppDatabase db;
+  final Completer<void>? gate;
+  final DateTime? restoredLastUpdated;
+
+  /// Receives the library after each add, like the app's playlist stream.
+  final StreamController<List<Playlist>>? library;
   var added = 0;
 
   @override
@@ -358,12 +545,15 @@ class _Playlists implements PlaylistService {
     Object? sponsorBlockCategoryActions,
   }) async {
     added++;
+    if (gate != null) await gate!.future;
     final playlist = await insertTestPlaylist(
       db,
       url: url,
       name: name,
       audioOnly: audioOnly,
+      lastUpdated: restoredLastUpdated,
     );
+    library?.add(await db.getAllPlaylists());
     return playlist.id;
   }
 

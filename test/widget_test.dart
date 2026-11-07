@@ -249,6 +249,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          foregroundAutoUpdateBridgeProvider.overrideWithValue(_NoBridge()),
           initProvider.overrideWith((ref) async => true),
           ytdlpServiceProvider.overrideWithValue(ytdlp),
           ytDlpInitErrorProvider.overrideWith((ref) => 'No space left'),

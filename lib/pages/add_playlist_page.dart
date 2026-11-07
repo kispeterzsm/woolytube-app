@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:drift/drift.dart' show Value;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -64,7 +65,15 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
 
   /// Bumped by every lookup, URL edit and Cancel: a lookup whose number is
   /// no longer current is ignored when its answer arrives.
+  ///
+  /// Cancel only stops waiting: yt-dlp has no way to stop a running lookup,
+  /// so it finishes in the background and its answer is dropped.
   int _fetchGeneration = 0;
+
+  /// The URL field's text as last seen by [_onUrlChanged]. The controller
+  /// also notifies for cursor and composing changes (tapping the field,
+  /// unfocusing it), which must not cancel a lookup.
+  String _lastUrlText = '';
 
   // Fetched playlist info
   String? _playlistThumbnail;
@@ -115,10 +124,17 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
   }
 
   void _onUrlChanged() {
-    final text = _urlController.text.trim();
-    if (text == _fetchedUrl) return;
-    // Rebuilds the clear button, and drops a preview or lookup that belongs
-    // to another link.
+    final raw = _urlController.text;
+    if (raw == _lastUrlText) return;
+    final linkChanged = raw.trim() != _lastUrlText.trim();
+    _lastUrlText = raw;
+    final text = raw.trim();
+    if (!linkChanged || text == _fetchedUrl) {
+      // Only the clear button may need to change.
+      setState(() {});
+      return;
+    }
+    // Drops a preview or lookup that belongs to another link.
     setState(() {
       if (_fetching) {
         _fetchGeneration++;
@@ -186,6 +202,8 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
 
   Future<void> _fetchInfo() async {
     if (_fetching || _adding) return;
+    // The keyboard's Go key is not disabled like the Look up button.
+    if (ref.read(ytDlpInitErrorProvider) != null) return;
     final url = _urlController.text.trim();
     if (url.isEmpty) return;
     if (url == _fetchedUrl && _playlistInfo != null) return;
@@ -306,18 +324,42 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
               : 'Added "${playlist.name}".';
 
       // Asked only now: declining must not throw the new playlist away.
-      final choice =
-          mounted
-              ? await decideDownloadNow(
-                context,
-                policy,
-                settings: settings,
-                message:
-                    "You're on mobile data. Download it now, or wait until "
-                    "you're on Wi-Fi?",
-                laterLabel: 'Later on Wi-Fi',
-              )
-              : DownloadNowChoice.later;
+      // Asked even if the owner left the page meanwhile: on Wi-Fi it still
+      // downloads; only the mobile data question needs the page.
+      DownloadNowChoice choice;
+      try {
+        choice =
+            mounted
+                ? await decideDownloadNow(
+                  context,
+                  policy,
+                  settings: settings,
+                  message:
+                      options.autoUpdate
+                          ? "You're on mobile data. Download it now, or wait "
+                              "until you're on Wi-Fi?"
+                          : "You're on mobile data. Download it now?",
+                  laterLabel: options.autoUpdate ? 'Later on Wi-Fi' : 'Not now',
+                )
+                : await decideDownloadNowWithoutAsking(policy);
+      } catch (_) {
+        choice = DownloadNowChoice.later;
+      }
+      if (choice != DownloadNowChoice.now &&
+          options.autoUpdate &&
+          playlist.lastUpdated != null) {
+        // A playlist restored from its folder keeps the backup's last update
+        // time; clear it so the next automatic update takes it at once
+        // instead of after a whole interval.
+        try {
+          await db.updatePlaylistFields(
+            playlistId,
+            const PlaylistsCompanion(lastUpdated: Value(null)),
+          );
+        } catch (_) {
+          // It is then picked up when its interval has passed.
+        }
+      }
       switch (choice) {
         case DownloadNowChoice.now:
           final busy = downloadService.isDownloading;
@@ -365,7 +407,9 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
   Widget build(BuildContext context) {
     final ytDlpError = ref.watch(ytDlpInitErrorProvider);
     final playlists = ref.watch(playlistsProvider).valueOrNull ?? const [];
-    final existing = _existing(playlists);
+    // While adding, the playlist being added shows up in the library and
+    // must not be reported as already there.
+    final existing = _adding ? null : _existing(playlists);
     final hasPreview = _playlistInfo != null;
 
     return Scaffold(
@@ -375,7 +419,14 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
         builder:
             (context, overlayHeight, child) => ListView(
               keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-              padding: EdgeInsets.fromLTRB(16, 16, 16, 24 + overlayHeight),
+              // With a preview, the Add bar below already sits above the
+              // player panel.
+              padding: EdgeInsets.fromLTRB(
+                16,
+                16,
+                16,
+                24 + (hasPreview ? 0 : overlayHeight),
+              ),
               children: [
                 _buildUrlField(),
                 const SizedBox(height: 12),
