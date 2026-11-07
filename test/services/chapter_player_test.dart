@@ -70,7 +70,9 @@ void main() {
     () async {
       await playback.playTrack(track, [track], chapterId: 'two');
       expect(player.opened.single.start, const Duration(seconds: 20));
-      expect(player.opened.single.end, const Duration(seconds: 40));
+      // Chapter three continues it without a gap, so the file is opened up
+      // to the end of that run and the step to it needs no reload.
+      expect(player.opened.single.end, const Duration(seconds: 60));
       expect(playback.currentTrack!.title, 'Second song');
       expect(playback.currentMediaId, contains('two'));
       expect(playback.duration, const Duration(seconds: 20));

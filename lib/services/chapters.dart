@@ -106,7 +106,8 @@ class MediaChapter {
             }).toList()
             ..sort((a, b) => a.startMs.compareTo(b.startMs));
       validateChapters(result);
-      return result;
+      // Decoded chapter data is cached and shared, so it must not change.
+      return List.unmodifiable(result);
     } catch (_) {
       return [];
     }
@@ -199,6 +200,8 @@ class ChapterData {
   ChapterData invalidate() => ChapterData(
     downloaded: downloaded,
     custom: custom,
+    checkedAt: checkedAt,
+    durationMs: durationMs,
     valid: false,
     shuffleChapters: shuffleChapters,
     recognitionEpoch: recognitionEpoch + 1,
@@ -216,13 +219,32 @@ class ChapterData {
     'lastRecognitionRunId': lastRecognitionRunId,
   };
   String encode() => jsonEncode(toJson());
+
+  /// Recently decoded values. Playback, the notification and every list row
+  /// decode the same few chapter blobs again and again; jsonDecode is the
+  /// expensive part, so identical strings share one immutable result.
+  static final Map<String, ChapterData> _decodeCache = {};
+  static const _decodeCacheSize = 256;
+
   static ChapterData decode(String? value) {
-    if (value == null) return const ChapterData();
-    try {
-      return fromJson(jsonDecode(value));
-    } catch (_) {
-      return const ChapterData();
+    if (value == null || value.isEmpty) return const ChapterData();
+    final cached = _decodeCache.remove(value);
+    if (cached != null) {
+      // Re-insert to keep the most recently used entries last.
+      _decodeCache[value] = cached;
+      return cached;
     }
+    ChapterData result;
+    try {
+      result = fromJson(jsonDecode(value));
+    } catch (_) {
+      result = const ChapterData();
+    }
+    if (_decodeCache.length >= _decodeCacheSize) {
+      _decodeCache.remove(_decodeCache.keys.first);
+    }
+    _decodeCache[value] = result;
+    return result;
   }
 
   static ChapterData fromJson(Object? value) {

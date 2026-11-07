@@ -1,4 +1,6 @@
-import 'package:drift/drift.dart' show Value;
+import 'dart:io';
+
+import 'package:drift/drift.dart' show Value, driftRuntimeOptions;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:woolytube/database/database.dart';
@@ -184,12 +186,21 @@ void main() {
       name: 'Fresh',
       lastUpdated: now.subtract(const Duration(hours: 2)),
     );
+    // The worker runs about hourly: a stamp 58 minutes old must not wait
+    // for the run after next.
+    final hourlyAlmost = await insertTestPlaylist(
+      db,
+      url: 'https://example.com/hourly-almost',
+      name: 'Hourly Almost',
+      updateFrequencyHours: 1,
+      lastUpdated: now.subtract(const Duration(minutes: 58)),
+    );
     await insertTestPlaylist(
       db,
       url: 'https://example.com/hourly-fresh',
       name: 'Hourly Fresh',
       updateFrequencyHours: 1,
-      lastUpdated: now.subtract(const Duration(minutes: 59)),
+      lastUpdated: now.subtract(const Duration(minutes: 30)),
     );
     await insertTestPlaylist(
       db,
@@ -199,12 +210,198 @@ void main() {
       lastUpdated: null,
     );
 
-    final due = await db.getPlaylistsDueForUpdate();
+    final due = await db.getPlaylistsDueForUpdate(now: now);
     expect(due.map((playlist) => playlist.id), [
       neverUpdated.id,
       expired.id,
       hourly.id,
+      hourlyAlmost.id,
     ]);
+
+    // The playlist tried longest ago comes first, so one that never
+    // finishes cannot starve the others.
+    await db.markPlaylistUpdateAttempt(neverUpdated.id, now);
+    await db.markPlaylistUpdateAttempt(
+      expired.id,
+      now.subtract(const Duration(hours: 1)),
+    );
+    final rotated = await db.getPlaylistsDueForUpdate(now: now);
+    expect(rotated.map((playlist) => playlist.id), [
+      hourly.id,
+      hourlyAlmost.id,
+      expired.id,
+      neverUpdated.id,
+    ]);
+  });
+
+  test('counts tracks per playlist and only emits changed counts', () async {
+    final playlist = await insertTestPlaylist(db);
+    final complete = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 1,
+      videoId: 'a',
+      status: 'complete',
+      filePath: '/x/00001_a.m4a',
+    );
+    await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 2,
+      videoId: 'b',
+      status: 'unavailable',
+      unavailableReason: removedFromYouTubeReason,
+    );
+    await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 3,
+      videoId: 'c',
+      status: 'error',
+    );
+
+    final emitted = <Map<int, PlaylistCounts>>[];
+    final sub = db.watchPlaylistTrackCounts().listen(emitted.add);
+    addTearDown(sub.cancel);
+    await pumpEventQueue();
+    expect(
+      emitted.single[playlist.id],
+      const PlaylistCounts(total: 3, downloaded: 1, unavailable: 1, failed: 1),
+    );
+
+    // A write that changes no count does not emit.
+    await db.updateTrackAlwaysSkip(complete.id, true);
+    await pumpEventQueue();
+    expect(emitted, hasLength(1));
+  });
+
+  test('track streams skip results identical to the previous one', () async {
+    final playlist = await insertTestPlaylist(db);
+    final other = await insertTestPlaylist(
+      db,
+      url: 'https://www.youtube.com/playlist?list=other',
+      name: 'Other',
+    );
+    await insertTestTrack(db, playlistId: playlist.id);
+    final elsewhere = await insertTestTrack(
+      db,
+      playlistId: other.id,
+      videoId: 'elsewhere',
+    );
+
+    final emitted = <List<Track>>[];
+    final sub = db.watchTracksForPlaylist(playlist.id).listen(emitted.add);
+    addTearDown(sub.cancel);
+    await pumpEventQueue();
+    expect(emitted, hasLength(1));
+
+    await db.updateTrackAlwaysSkip(elsewhere.id, true);
+    await pumpEventQueue();
+    expect(emitted, hasLength(1));
+  });
+
+  test('raises a playlist revision on every change to it', () async {
+    final playlist = await insertTestPlaylist(db);
+    final other = await insertTestPlaylist(
+      db,
+      url: 'https://www.youtube.com/playlist?list=other',
+      name: 'Other',
+    );
+    final start = await db.playlistRevision(playlist.id);
+    final track = await insertTestTrack(db, playlistId: playlist.id);
+    final afterInsert = await db.playlistRevision(playlist.id);
+    expect(afterInsert, greaterThan(start));
+
+    await db.updateTrackAlwaysSkip(track.id, true);
+    final afterUpdate = await db.playlistRevision(playlist.id);
+    expect(afterUpdate, greaterThan(afterInsert));
+
+    await db.insertSegment(
+      SponsorBlockSegmentsCompanion.insert(
+        trackId: track.id,
+        videoId: track.videoId,
+        source: 'local',
+        category: 'sponsor',
+        startMs: 0,
+        endMs: 10,
+        createdAt: DateTime(2024),
+      ),
+    );
+    final afterSegment = await db.playlistRevision(playlist.id);
+    expect(afterSegment, greaterThan(afterUpdate));
+
+    await db.updatePlaylistFields(
+      playlist.id,
+      const PlaylistsCompanion(name: Value('Renamed')),
+    );
+    final afterRename = await db.playlistRevision(playlist.id);
+    expect(afterRename, greaterThan(afterSegment));
+
+    // The update-attempt stamp is not part of the metadata file.
+    await db.markPlaylistUpdateAttempt(playlist.id, DateTime(2024));
+    expect(await db.playlistRevision(playlist.id), afterRename);
+
+    final otherBefore = await db.playlistRevision(other.id);
+    await db.updateTrackAlwaysSkip(track.id, false);
+    expect(await db.playlistRevision(other.id), otherBefore);
+
+    await db.deletePlaylist(playlist.id);
+    expect((await db.playlistRevisions()).containsKey(playlist.id), isFalse);
+  });
+
+  test('a track removed from YouTube leaves the queue until retried', () async {
+    final playlist = await insertTestPlaylist(db);
+    final pending = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 1,
+      videoId: 'gone',
+      status: 'error',
+    );
+    final downloaded = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 2,
+      videoId: 'kept',
+      status: 'complete',
+      filePath: '/x/00002_kept.m4a',
+      downloadedAt: DateTime(2024),
+    );
+
+    await db.markTrackRemovedFromYouTube(pending.id, 'removed');
+    await db.markTrackRemovedFromYouTube(downloaded.id, 'removed');
+    expect(await db.getPendingTracks(playlist.id), isEmpty);
+    final gone = (await db.getTrack(pending.id))!;
+    expect(gone.status, 'unavailable');
+    expect(gone.unavailableReason, removedFromYouTubeReason);
+    final kept = (await db.getTrack(downloaded.id))!;
+    expect(kept.status, 'complete');
+    expect(kept.unavailableReason, removedFromYouTubeReason);
+
+    await db.clearRemovedFromYouTube(pending.id);
+    await db.clearRemovedFromYouTube(downloaded.id);
+    expect((await db.getPendingTracks(playlist.id)).map((t) => t.id), [
+      pending.id,
+    ]);
+    expect((await db.getTrack(downloaded.id))!.status, 'complete');
+    expect((await db.getTrack(downloaded.id))!.unavailableReason, isNull);
+  });
+
+  test('relinking a file keeps its download time', () async {
+    final playlist = await insertTestPlaylist(db);
+    final track = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      status: 'pending',
+      downloadedAt: DateTime(2024, 3, 1),
+    );
+    await db.updateTrackStatus(
+      track.id,
+      'complete',
+      filePath: '/x/a.m4a',
+      keepDownloadedAt: true,
+    );
+    expect((await db.getTrack(track.id))!.downloadedAt, DateTime(2024, 3, 1));
   });
 
   test('deleting a playlist removes its tracks and segments', () async {
@@ -455,83 +652,76 @@ void main() {
     );
   });
 
+  test('upgrading removes tracks left behind by deleted playlists', () async {
+    final migrated = _openSchema10(
+      [_v10Track(10, 1, 'kept', 'pending', null)],
+      orphans: [
+        _v10Track(20, 1, 'orphan-a', 'error', null),
+        _v10Track(21, 2, 'orphan-b', 'complete', '/tmp/gone/00002_B.mp4'),
+      ],
+    );
+    addTearDown(migrated.close);
+
+    final tracks = await migrated.getAllTracks();
+    expect(tracks.map((track) => track.videoId), ['kept']);
+    final segments =
+        await migrated
+            .customSelect('SELECT COUNT(*) AS n FROM sponsor_block_segments')
+            .getSingle();
+    expect(segments.read<int>('n'), 0);
+    final revisions =
+        await migrated
+            .customSelect('SELECT playlist_id FROM playlist_revisions')
+            .get();
+    expect(
+      revisions.map((row) => row.read<int>('playlist_id')),
+      isNot(contains(6)),
+    );
+  });
+
+  // Updated: the repair now keeps the row that owns the file instead of the
+  // lowest id, so the appended rows follow that order too.
   test('upgrading from schema 10 repairs duplicate indices before adding the '
       'unique index', () async {
-    final migrated = AppDatabase.forTesting(
-      NativeDatabase.memory(
-        setup: (raw) {
-          for (final statement in _schemaV10) {
-            raw.execute(statement);
-          }
-          raw.execute(
-            "INSERT INTO playlists (id, url, name, created_at, output_path) "
-            "VALUES (1, 'https://example.com/list', 'List', 0, '/tmp/list')",
-          );
-          void track(
-            int id,
-            int index,
-            String videoId,
-            String status,
-            String? filePath, {
-            bool localReplacement = false,
-          }) {
-            raw.execute(
-              'INSERT INTO tracks (id, playlist_id, "index", video_id, '
-              'title, status, file_path, thumbnail_path, downloaded_at, '
-              'is_local_replacement) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?)',
-              [
-                id,
-                index,
-                videoId,
-                videoId,
-                status,
-                filePath,
-                filePath == null ? null : '/tmp/list/thumb_$id.jpg',
-                filePath == null ? null : 1700000000,
-                localReplacement ? 1 : 0,
-              ],
-            );
-          }
-
-          track(10, 5, 'kept', 'complete', '/tmp/list/00005_Kept.mp4');
-          track(
-            11,
-            5,
-            'shared-file',
-            'complete',
-            '/tmp/list/00005_Kept.mp4',
-            localReplacement: true,
-          );
-          track(12, 5, 'own-file', 'complete', '/tmp/list/00005_Own.mp4');
-          track(13, 9, 'max', 'pending', null);
-          track(14, 2, 'dup2a', 'pending', null);
-          track(15, 2, 'dup2b', 'pending', null);
-          raw.execute('PRAGMA user_version = 10');
-        },
+    final migrated = _openSchema10([
+      _v10Track(10, 5, 'kept', 'complete', '/tmp/list/00005_Kept.mp4'),
+      _v10Track(
+        11,
+        5,
+        'shared-file',
+        'complete',
+        '/tmp/list/00005_Kept.mp4',
+        localReplacement: true,
       ),
-    );
+      _v10Track(12, 5, 'own-file', 'complete', '/tmp/list/00005_Own.mp4'),
+      _v10Track(13, 9, 'max', 'pending', null),
+      _v10Track(14, 2, 'dup2a', 'pending', null),
+      _v10Track(15, 2, 'dup2b', 'pending', null),
+    ]);
     addTearDown(migrated.close);
 
     final tracks = await migrated.getTracksForPlaylist(1);
     final byVideoId = {for (final track in tracks) track.videoId: track};
     expect(tracks.map((track) => track.index).toSet(), hasLength(6));
-    // Lowest id keeps the contested index; the rest are appended after the
-    // playlist's previous maximum in (index, id) order.
+    // Without any sign of ownership the lowest id keeps the index.
     expect(byVideoId['dup2a']!.index, 2);
     expect(byVideoId['dup2b']!.index, 10);
+    // 'kept' and 'own-file' are named like their files, 'shared-file' is
+    // not: it is appended last and gives up the file it shares.
     expect(byVideoId['kept']!.index, 5);
     expect(byVideoId['kept']!.status, 'complete');
     expect(byVideoId['kept']!.filePath, '/tmp/list/00005_Kept.mp4');
-    expect(byVideoId['shared-file']!.index, 11);
+    expect(byVideoId['own-file']!.index, 11);
+    expect(byVideoId['own-file']!.status, 'complete');
+    expect(byVideoId['own-file']!.filePath, '/tmp/list/00005_Own.mp4');
+    expect(byVideoId['shared-file']!.index, 12);
     expect(byVideoId['shared-file']!.status, 'pending');
     expect(byVideoId['shared-file']!.filePath, isNull);
     expect(byVideoId['shared-file']!.thumbnailPath, isNull);
     expect(byVideoId['shared-file']!.downloadedAt, isNull);
     expect(byVideoId['shared-file']!.isLocalReplacement, isFalse);
-    expect(byVideoId['own-file']!.index, 12);
-    expect(byVideoId['own-file']!.status, 'complete');
-    expect(byVideoId['own-file']!.filePath, '/tmp/list/00005_Own.mp4');
     expect(byVideoId['max']!.index, 9);
+    expect(tracks.every((track) => !track.replaceRequested), isTrue);
 
     final indexes =
         await migrated
@@ -549,7 +739,203 @@ void main() {
       throwsA(isA<Exception>()),
     );
   });
+
+  test('the duplicate-index repair keeps the row that got the shared file '
+      'first', () async {
+    // v1.3.0 moved a failing track onto a downloaded track's number and
+    // the next run let it adopt that file. The adopter has the lower id but
+    // was stamped later.
+    final migrated = _openSchema10([
+      _v10Track(
+        20,
+        41,
+        'adopter',
+        'complete',
+        '/tmp/list/00041_Song.m4a',
+        title: 'Adopter',
+        downloadedAt: 1700005000,
+      ),
+      _v10Track(
+        21,
+        41,
+        'owner',
+        'complete',
+        '/tmp/list/00041_Song.m4a',
+        title: 'Owner',
+        downloadedAt: 1700000000,
+      ),
+      _v10Track(22, 50, 'max', 'pending', null),
+    ]);
+    addTearDown(migrated.close);
+
+    final byVideoId = {
+      for (final track in await migrated.getTracksForPlaylist(1))
+        track.videoId: track,
+    };
+    expect(byVideoId['owner']!.index, 41);
+    expect(byVideoId['owner']!.status, 'complete');
+    expect(byVideoId['owner']!.filePath, '/tmp/list/00041_Song.m4a');
+    expect(byVideoId['adopter']!.index, 51);
+    expect(byVideoId['adopter']!.status, 'pending');
+    expect(byVideoId['adopter']!.filePath, isNull);
+    expect(byVideoId['adopter']!.downloadedAt, isNull);
+    expect(byVideoId['adopter']!.thumbnailPath, isNull);
+  });
+
+  test('an upgraded library keeps its data and counts changes', () async {
+    final migrated = _openSchema10([
+      _v10Track(40, 1, 'kept', 'complete', '/tmp/list/00001_Kept.m4a'),
+    ]);
+    addTearDown(migrated.close);
+
+    final track = (await migrated.getTracksForPlaylist(1)).single;
+    expect(track.filePath, '/tmp/list/00001_Kept.m4a');
+    expect((await migrated.getPlaylist(1)).lastUpdateAttempt, isNull);
+    final before = await migrated.playlistRevision(1);
+    await migrated.updateTrackAlwaysSkip(track.id, true);
+    expect(await migrated.playlistRevision(1), greaterThan(before));
+  });
+
+  test('the duplicate-index repair lets the title decide a tie', () async {
+    final migrated = _openSchema10([
+      _v10Track(
+        30,
+        3,
+        'other',
+        'complete',
+        '/tmp/list/00003_Real Song.m4a',
+        title: 'Other Song',
+      ),
+      _v10Track(
+        31,
+        3,
+        'real',
+        'complete',
+        '/tmp/list/00003_Real Song.m4a',
+        title: 'Real Song',
+      ),
+    ]);
+    addTearDown(migrated.close);
+
+    final byVideoId = {
+      for (final track in await migrated.getTracksForPlaylist(1))
+        track.videoId: track,
+    };
+    expect(byVideoId['real']!.index, 3);
+    expect(byVideoId['real']!.filePath, '/tmp/list/00003_Real Song.m4a');
+    expect(byVideoId['other']!.index, 4);
+    expect(byVideoId['other']!.status, 'pending');
+    expect(byVideoId['other']!.filePath, isNull);
+  });
+
+  test('matches titles with the file names they produced', () {
+    expect(titleMatchesFileName('Café Olé', '/x/00001_Cafe Ole.m4a'), isTrue);
+    expect(titleMatchesFileName('Real Song', '/x/00003_Real Song.m4a'), isTrue);
+    expect(
+      titleMatchesFileName('Other Song', '/x/00003_Real Song.m4a'),
+      isFalse,
+    );
+  });
+
+  test('two connections to the library file share it through WAL', () async {
+    final dir = await Directory.systemTemp.createTemp('woolytube_wal');
+    final file = File('${dir.path}/library.sqlite');
+    // Two databases on one file is the point here (app and worker engine).
+    final warned = driftRuntimeOptions.dontWarnAboutMultipleDatabases;
+    driftRuntimeOptions.dontWarnAboutMultipleDatabases = true;
+    addTearDown(
+      () => driftRuntimeOptions.dontWarnAboutMultipleDatabases = warned,
+    );
+    final app = AppDatabase.forTesting(
+      NativeDatabase(file, setup: (raw) => configureConnection(raw.execute)),
+    );
+    final worker = AppDatabase.forTesting(
+      NativeDatabase(file, setup: (raw) => configureConnection(raw.execute)),
+    );
+    try {
+      final mode = await app.customSelect('PRAGMA journal_mode').getSingle();
+      expect(mode.read<String>('journal_mode'), 'wal');
+      final timeout =
+          await worker.customSelect('PRAGMA busy_timeout').getSingle();
+      expect(timeout.data.values.single, 5000);
+
+      expect(await app.refreshIfChangedExternally(), isFalse);
+      expect(await app.refreshIfChangedExternally(), isFalse);
+      await insertTestPlaylist(worker);
+      expect(await app.refreshIfChangedExternally(), isTrue);
+      expect(await app.getAllPlaylists(), hasLength(1));
+      expect(await app.refreshIfChangedExternally(), isFalse);
+    } finally {
+      await app.close();
+      await worker.close();
+      await dir.delete(recursive: true);
+    }
+  });
 }
+
+/// A track row in the schema-10 table.
+typedef _V10Row = List<Object?>;
+
+_V10Row _v10Track(
+  int id,
+  int index,
+  String videoId,
+  String status,
+  String? filePath, {
+  String? title,
+  bool localReplacement = false,
+  int downloadedAt = 1700000000,
+}) => [
+  id,
+  index,
+  videoId,
+  title ?? videoId,
+  status,
+  filePath,
+  filePath == null ? null : '/tmp/list/thumb_$id.jpg',
+  filePath == null ? null : downloadedAt,
+  localReplacement ? 1 : 0,
+];
+
+/// A database as an app with schema 10 left it, opened by the current app.
+/// [orphans] go into playlist 6, which does not exist, as older app
+/// versions left them behind after deleting a playlist.
+AppDatabase _openSchema10(
+  List<_V10Row> tracks, {
+  List<_V10Row> orphans = const [],
+}) => AppDatabase.forTesting(
+  NativeDatabase.memory(
+    setup: (raw) {
+      for (final statement in _schemaV10) {
+        raw.execute(statement);
+      }
+      raw.execute(
+        "INSERT INTO playlists (id, url, name, created_at, output_path) "
+        "VALUES (1, 'https://example.com/list', 'List', 0, '/tmp/list')",
+      );
+      for (final (playlistId, rows) in [(1, tracks), (6, orphans)]) {
+        for (final row in rows) {
+          raw.execute(
+            'INSERT INTO tracks (id, playlist_id, "index", video_id, '
+            'title, status, file_path, thumbnail_path, downloaded_at, '
+            'is_local_replacement) VALUES (?, $playlistId, ?, ?, ?, ?, ?, ?, '
+            '?, ?)',
+            row,
+          );
+        }
+      }
+      for (final row in orphans) {
+        raw.execute(
+          'INSERT INTO sponsor_block_segments (track_id, video_id, source, '
+          "category, start_ms, end_ms, created_at) VALUES (?, ?, 'remote', "
+          "'sponsor', 0, 1000, 0)",
+          [row[0], row[2]],
+        );
+      }
+      raw.execute('PRAGMA user_version = 10');
+    },
+  ),
+);
 
 /// The on-device schema as created by app versions up to schema 10.
 final _schemaV10 = [

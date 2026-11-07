@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 and older. Everything not listed is backed up as before
+     (the library database and settings). -->
+<full-backup-content>
+    <!-- Belong to a process that no longer exists after a restore. -->
+    <exclude domain="root" path="app_flutter/download.lock" />
+    <exclude domain="root" path="app_flutter/auto_update_attempts.json" />
+    <!-- Downloaded app updates, tens of MB each. Above the 25 MB backup
+         quota Android skips the whole backup. -->
+    <exclude domain="external" path="Download/updates/" />
+</full-backup-content>

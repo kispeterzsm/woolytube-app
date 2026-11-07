@@ -1,10 +1,13 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'package:drift/drift.dart';
 import 'package:path/path.dart' as p;
 import '../database/database.dart';
 import 'sponsorblock_categories.dart';
 import 'chapters.dart';
+import 'library_layout.dart';
+import 'media_thumbnail_service.dart';
 
 class DiscoveredTrack {
   final int index;
@@ -20,6 +23,8 @@ class DiscoveredTrack {
   final String? chaptersJson;
   final bool? chaptersEnabled;
   final DateTime? sponsorBlockCheckedAt;
+  final DateTime? downloadedAt;
+  final bool replaceRequested;
   final String? fileName;
   final List<DiscoveredSponsorBlockSegment> sponsorBlockSegments;
 
@@ -37,6 +42,8 @@ class DiscoveredTrack {
     this.chaptersJson,
     this.chaptersEnabled,
     this.sponsorBlockCheckedAt,
+    this.downloadedAt,
+    this.replaceRequested = false,
     this.fileName,
     this.sponsorBlockSegments = const [],
   });
@@ -46,15 +53,25 @@ class DiscoveredSponsorBlockSegment {
   final String source;
   final String? uuid;
   final String category;
+  final String actionType;
   final int startMs;
   final int endMs;
+  final int? votes;
+  final bool? locked;
+  final String? description;
+  final DateTime? createdAt;
 
   const DiscoveredSponsorBlockSegment({
     required this.source,
     this.uuid,
     required this.category,
+    this.actionType = 'skip',
     required this.startMs,
     required this.endMs,
+    this.votes,
+    this.locked,
+    this.description,
+    this.createdAt,
   });
 }
 
@@ -63,6 +80,7 @@ class DiscoveredPlaylist {
   final String url;
   final String name;
   final String? thumbnailUrl;
+  final String? thumbnailFileName;
   final bool audioOnly;
   final bool playChapters;
   final bool autoUpdate;
@@ -80,6 +98,7 @@ class DiscoveredPlaylist {
     required this.url,
     required this.name,
     this.thumbnailUrl,
+    this.thumbnailFileName,
     required this.audioOnly,
     this.playChapters = true,
     required this.autoUpdate,
@@ -96,51 +115,89 @@ class DiscoveredPlaylist {
 
 const _metaFileName = 'woolytube_meta.json';
 
+/// Thrown when a playlist is added or imported that is already in the
+/// library (same folder, or same YouTube playlist in the same mode).
+class PlaylistExistsException implements Exception {
+  final String message;
+
+  const PlaylistExistsException(this.message);
+
+  @override
+  String toString() => message;
+}
+
 /// Index prefix yt-dlp output files and sidecars share, e.g. `00012_`.
 final _indexPrefixPattern = RegExp(r'^(\d+)_');
 
 class _CandidateFile {
-  String digits;
-  String rest;
-  String path;
-  _CandidateFile({
-    required this.digits,
-    required this.rest,
-    required this.path,
-  });
+  final int index;
+  final String path;
+  _CandidateFile({required this.index, required this.path});
 }
+
+/// Keys of yt-dlp's info.json that only describe how to download the video.
+/// They are large and useless once the file exists.
+const _downloadOnlyInfoKeys = {
+  'formats',
+  'requested_formats',
+  'requested_downloads',
+  'requested_subtitles',
+  'automatic_captions',
+  'subtitles',
+  'thumbnails',
+  'heatmap',
+  'http_headers',
+  'fragments',
+  'url',
+  'manifest_url',
+  '_format_sort_fields',
+  '_has_drm',
+  '_version',
+};
 
 class MetadataService {
   final AppDatabase _db;
 
   MetadataService(this._db);
 
-  /// Reconciles a playlist only when it contains transient download state.
+  static String get metaFileName => _metaFileName;
+
+  /// Repairs a playlist only when it contains transient download state.
   /// Normal pending-file reuse remains the download service's responsibility,
-  /// including its SponsorBlock refresh path.
+  /// including its SponsorBlock refresh path. Call only while holding the
+  /// library gate.
   Future<int> recoverInterruptedPlaylist(Playlist playlist) async {
     final tracks = await _db.getTracksForPlaylist(playlist.id);
     if (!tracks.any((track) => track.status == 'downloading')) return 0;
-    return reconcilePlaylist(playlist);
+    return repairPlaylist(playlist);
   }
 
   /// Repairs every playlist after an interrupted app process and rewrites any
   /// sidecar whose database/filesystem state changed. This never starts a
   /// download; recovered tracks remain pending until a later update trigger.
-  Future<int> recoverInterruptedDownloads() async {
+  /// Call only while holding the library gate.
+  ///
+  /// A playlist whose folder cannot be repaired (for example a permission
+  /// problem) is reported through [onProblem] and the others still are.
+  Future<int> recoverInterruptedDownloads({
+    void Function(Playlist playlist, Object error)? onProblem,
+  }) async {
     var fixed = 0;
     for (final playlist in await _db.getAllPlaylists()) {
-      final playlistFixed = await reconcilePlaylist(playlist);
-      fixed += playlistFixed;
-      if (playlistFixed > 0) {
-        final tracks = await _db.getTracksForPlaylist(playlist.id);
-        await writeMetadata(playlist, tracks);
+      try {
+        await discardStaging(playlist.outputPath);
+        final playlistFixed = await repairPlaylist(playlist);
+        fixed += playlistFixed;
+        if (playlistFixed > 0) await writeMetadataFor(playlist.id);
+      } catch (e) {
+        onProblem?.call(playlist, e);
       }
     }
     return fixed;
   }
 
-  /// Consume yt-dlp's metadata without modifying the downloaded media.
+  /// Consumes yt-dlp info files left in the playlist folder by older
+  /// versions, without modifying the downloaded media.
   Future<void> captureChapterMetadata(Track track, String folder) async {
     final dir = Directory(folder);
     if (!await dir.exists() || track.isLocalReplacement) return;
@@ -148,7 +205,7 @@ class MetadataService {
       if (entity is! File || !_isInfoJsonForIndex(entity.path, track.index)) {
         continue;
       }
-      await _captureChapterMetadataFile(track, entity);
+      await _consumeInfoJsonFile(track, entity, folder);
     }
   }
 
@@ -158,196 +215,470 @@ class MetadataService {
     return prefix != null && int.tryParse(prefix[1]!) == index;
   }
 
-  Future<void> _captureChapterMetadataFile(Track track, File infoFile) async {
+  /// Applies the chapters of a matching info file and moves the file, trimmed,
+  /// into the playlist's info folder.
+  Future<void> _consumeInfoJsonFile(
+    Track track,
+    File infoFile,
+    String folder,
+  ) async {
     try {
       final info =
           jsonDecode(await infoFile.readAsString()) as Map<String, dynamic>;
       if (info['id'] != track.videoId) return;
-      final fresh = await _db.getTrack(track.id);
-      if (fresh == null) return;
-      final old = ChapterData.decode(fresh.chaptersJson);
-      final data = ChapterData.fromVideoInfo(info);
-      await _db.writeTrackChapters(
-        track.id,
-        old.copyWith(
-          downloaded: data.downloaded,
-          custom: old.valid ? old.custom : null,
-          valid: true,
-          checkedAt: data.checkedAt,
-          durationMs: data.durationMs,
-        ),
-      );
+      await _applyDownloadedChapters(track.id, info);
+      await keepVideoInfo(folder, track.videoId, info);
       await infoFile.delete();
     } catch (_) {
       // A broken metadata sidecar must not fail a successful media download.
     }
   }
 
+  /// Stores YouTube's chapters for a freshly downloaded copy of a track's own
+  /// video. The owner's custom chapters are never dropped: they were made
+  /// for this video's timeline (a local replacement had only disabled them).
+  Future<void> _applyDownloadedChapters(
+    int trackId,
+    Map<String, dynamic> info, {
+    bool wasLocal = false,
+  }) async {
+    final fresh = await _db.getTrack(trackId);
+    if (fresh == null) return;
+    final old = ChapterData.decode(fresh.chaptersJson);
+    final data = ChapterData.fromVideoInfo(info);
+    // Replacing a local file disables its chapters. Chapters still disabled
+    // were made for this video before the replacement and fit again; ones
+    // the owner made (and so enabled) while the local file played do not.
+    final keepCustom = !wasLocal || !old.valid;
+    await _db.writeTrackChapters(
+      trackId,
+      ChapterData(
+        downloaded: data.downloaded,
+        custom: keepCustom ? old.custom : null,
+        shuffleChapters: old.shuffleChapters,
+        checkedAt: data.checkedAt,
+        durationMs: data.durationMs,
+        // An undo step for dropped chapters no longer applies, and song
+        // recognition results timed to a local file are stale.
+        undoChapters: keepCustom ? old.undoChapters : null,
+        recognitionEpoch:
+            wasLocal ? old.recognitionEpoch + 1 : old.recognitionEpoch,
+        lastRecognitionRunId: old.lastRecognitionRunId,
+      ),
+    );
+  }
+
+  /// Keeps yt-dlp's description of a video (uploader, upload date,
+  /// description, tags, ...) without the download-only parts, because
+  /// YouTube may delete the original.
+  Future<void> keepVideoInfo(
+    String folder,
+    String videoId,
+    Map<String, dynamic> info,
+  ) async {
+    try {
+      final trimmed = {
+        for (final entry in info.entries)
+          if (!_downloadOnlyInfoKeys.contains(entry.key))
+            entry.key: entry.value,
+      };
+      final dir = Directory(LibraryLayout.infoDir(folder));
+      await dir.create(recursive: true);
+      await _ensureNoMedia(dir.path);
+      final target = File(LibraryLayout.infoJsonPath(folder, videoId));
+      final tmp = File('${target.path}.tmp');
+      await tmp.writeAsString(
+        const JsonEncoder.withIndent(' ').convert(trimmed),
+      );
+      await tmp.rename(target.path);
+    } catch (_) {
+      // Extra information only; never fail a download over it.
+    }
+  }
+
+  /// The tail of each playlist's chain of writes.
   final _metadataWrites = <int, Future<void>>{};
+
+  /// A write per playlist that is queued but has not started yet. It reads
+  /// the database when it starts, so later requests can simply join it.
+  final _queuedWrites = <int, Future<void>>{};
+
+  /// A hash of the content last written (or found) at each path, instead of
+  /// the content itself: the sidecar of a big playlist is over a megabyte.
+  final _writtenHashes = <String, int>{};
+
+  /// The playlist revision (see [AppDatabase.playlistRevisions]) each
+  /// playlist's files were last written from.
+  final _writtenRevisions = <int, int>{};
   var _metadataWriteCounter = 0;
 
-  /// Writes playlist metadata as JSON sidecar file in the playlist folder.
+  /// Playlists with at least this many tracks build their files on a
+  /// worker isolate, so the UI never stalls on a big JSON document.
+  static const isolateTrackThreshold = 40;
+
+  /// The revision of [playlistId] its files were last written from, or
+  /// null when this service has not written them yet.
+  int? writtenRevision(int playlistId) => _writtenRevisions[playlistId];
+
+  /// Writes playlist metadata as JSON sidecar file in the playlist folder,
+  /// together with a `.m3u8` playlist other players can open.
+  ///
+  /// The files are always written from the database as it is when the write
+  /// starts; [playlist] and [tracks] only name the playlist (they are kept
+  /// for callers that already hold them).
+  Future<void> writeMetadata(Playlist playlist, List<Track> tracks) =>
+      writeMetadataFor(playlist.id);
+
+  /// Rewrites the sidecar and playlist file of [playlistId] from the
+  /// database. Safe to call after any edit; a playlist that no longer exists
+  /// is ignored.
   ///
   /// Writes for one playlist run strictly one after another. Download
   /// progress, sync and UI edits can all request a write at the same time and
   /// would otherwise race on the temp file or rename a half-written sidecar
-  /// into place.
-  Future<void> writeMetadata(Playlist playlist, List<Track> tracks) {
-    final previous = _metadataWrites[playlist.id] ?? Future<void>.value();
-    final current = previous
-        .catchError((_) {})
-        .then((_) => _writeMetadataNow(playlist, tracks));
-    _metadataWrites[playlist.id] = current;
-    return current.whenComplete(() {
-      if (identical(_metadataWrites[playlist.id], current)) {
-        _metadataWrites.remove(playlist.id);
+  /// into place. Requests that arrive while a write is waiting to start
+  /// share it, since it reads the database only when it starts.
+  Future<void> writeMetadataFor(int playlistId) {
+    final queued = _queuedWrites[playlistId];
+    if (queued != null) return queued;
+    final previous = _metadataWrites[playlistId] ?? Future<void>.value();
+    late final Future<void> current;
+    current = previous.then<void>((_) {}, onError: (_) {}).then((_) {
+      if (identical(_queuedWrites[playlistId], current)) {
+        _queuedWrites.remove(playlistId);
+      }
+      return _writeMetadataNow(playlistId);
+    });
+    _queuedWrites[playlistId] = current;
+    _metadataWrites[playlistId] = current;
+    current.then<void>((_) {}, onError: (_) {}).whenComplete(() {
+      if (identical(_metadataWrites[playlistId], current)) {
+        _metadataWrites.remove(playlistId);
       }
     });
+    return current;
   }
 
-  Future<void> _writeMetadataNow(Playlist playlist, List<Track> tracks) async {
+  Future<void> _writeMetadataNow(int playlistId) async {
+    // Read the revision first: a change made while the files are built
+    // leaves the recorded revision behind, so the mirror writes again.
+    final revision = await _db.playlistRevision(playlistId);
+    final playlist = await _db.getPlaylistOrNull(playlistId);
+    if (playlist == null) return;
     final dir = Directory(playlist.outputPath);
     if (!await dir.exists()) return;
 
-    final tracksJson = <Map<String, dynamic>>[];
-    for (final t in tracks) {
-      final segments = await _db.getSegmentsForTrack(t.id);
-      tracksJson.add({
-        'index': t.index,
-        'videoId': t.videoId,
-        'title': t.title,
-        'thumbnailUrl': t.thumbnailUrl,
-        'thumbnailFileName': _thumbnailFileName(playlist.outputPath, t),
-        'durationSeconds': t.durationSeconds,
-        'status': t.status,
-        'unavailableReason': t.unavailableReason,
-        'isLocalReplacement': t.isLocalReplacement,
-        'alwaysSkip': t.alwaysSkip,
-        'chapters': ChapterData.decode(t.chaptersJson).toJson(),
-        'chaptersEnabled': t.chaptersEnabled,
-        'sponsorBlockCheckedAt':
-            t.sponsorBlockCheckedAt?.toUtc().toIso8601String(),
-        'fileName': t.filePath != null ? p.basename(t.filePath!) : null,
-        'sponsorBlockSegments':
-            segments
-                .map(
-                  (s) => {
-                    'source': s.source,
-                    'uuid': s.uuid,
-                    'category': s.category,
-                    'startMs': s.startMs,
-                    'endMs': s.endMs,
-                  },
-                )
-                .toList(),
-      });
-    }
-
-    final data = {
-      'version': 1,
-      'playlist': {
-        'url': playlist.url,
-        'name': playlist.name,
-        'thumbnailUrl': playlist.thumbnailUrl,
-        'audioOnly': playlist.audioOnly,
-        'playChapters': playlist.playChapters ?? true,
-        'autoUpdate': playlist.autoUpdate,
-        'updateFrequencyHours': playlist.updateFrequencyHours,
-        'includeThumbnails': playlist.includeThumbnails,
-        'sponsorBlockEnabled': playlist.sponsorBlockEnabled,
-        'sponsorBlockCategories': playlist.sponsorBlockCategories,
-        'sponsorBlockCategoryActions': playlist.sponsorBlockCategoryActions,
-        'lastUpdated': playlist.lastUpdated?.toUtc().toIso8601String(),
-        'createdAt': playlist.createdAt.toUtc().toIso8601String(),
+    final tracks = await _db.getTracksForPlaylist(playlistId);
+    final segmentsByTrack = await _segmentsByTrack(tracks);
+    final metaPath = p.join(playlist.outputPath, _metaFileName);
+    final m3uPath = playlistFilePath(playlist.outputPath);
+    final job = SidecarJob(
+      playlist: playlist,
+      tracks: tracks,
+      segmentsByTrack: segmentsByTrack,
+      metaPath: metaPath,
+      playlistFilePath: m3uPath,
+      knownHashes: {
+        metaPath: _writtenHashes[metaPath],
+        m3uPath: _writtenHashes[m3uPath],
       },
-      'tracks': tracksJson,
-    };
-
-    final jsonStr = const JsonEncoder.withIndent('  ').convert(data);
-    final targetFile = File(p.join(playlist.outputPath, _metaFileName));
-    final tmpFile = File(
-      '${targetFile.path}.tmp.'
-      '${DateTime.now().microsecondsSinceEpoch}.${_metadataWriteCounter++}',
+      tempSuffix:
+          '${DateTime.now().microsecondsSinceEpoch}.${_metadataWriteCounter++}',
     );
-
-    try {
-      await tmpFile.writeAsString(jsonStr);
-      await tmpFile.rename(targetFile.path);
-    } catch (_) {
-      try {
-        if (await tmpFile.exists()) await tmpFile.delete();
-      } catch (_) {
-        // The folder cleanup removes leftover temp files later.
-      }
-      rethrow;
-    }
+    final hashes =
+        tracks.length >= isolateTrackThreshold
+            ? await Isolate.run(() => writeSidecarFiles(job))
+            : await writeSidecarFiles(job);
+    _writtenHashes.addAll(hashes);
+    _writtenRevisions[playlistId] = revision;
+    await _writeLibraryReadme(p.dirname(playlist.outputPath));
   }
 
-  String? _thumbnailFileName(String playlistPath, Track track) {
-    final thumbnailPath = track.thumbnailPath;
-    if (thumbnailPath == null || !File(thumbnailPath).existsSync()) return null;
-    final normalizedPlaylist = p.normalize(p.absolute(playlistPath));
-    final normalizedThumbnail = p.normalize(p.absolute(thumbnailPath));
-    if (!p.isWithin(normalizedPlaylist, normalizedThumbnail)) return null;
-    return p.relative(normalizedThumbnail, from: normalizedPlaylist);
+  Future<Map<int, List<SponsorBlockSegment>>> _segmentsByTrack(
+    List<Track> tracks,
+  ) async {
+    if (tracks.isEmpty) return const {};
+    final ids = tracks.map((t) => t.id).toList();
+    final result = <int, List<SponsorBlockSegment>>{};
+    // SQLite limits the number of bound variables per statement.
+    for (var start = 0; start < ids.length; start += 500) {
+      final chunk = ids.sublist(
+        start,
+        start + 500 > ids.length ? ids.length : start + 500,
+      );
+      final rows =
+          await (_db.select(_db.sponsorBlockSegments)
+                ..where((s) => s.trackId.isIn(chunk))
+                ..orderBy([(s) => OrderingTerm.asc(s.startMs)]))
+              .get();
+      for (final row in rows) {
+        result.putIfAbsent(row.trackId, () => []).add(row);
+      }
+    }
+    return result;
+  }
+
+  /// `<folder name>.m3u8` in the playlist folder. The folder name never
+  /// changes after creation, so neither does this file's name.
+  static String playlistFilePath(String folder) =>
+      p.join(folder, '${p.basename(folder)}.m3u8');
+
+  /// An extended M3U playlist of the downloaded tracks in the app's order,
+  /// with the app's titles. Paths are relative so the folder can be copied
+  /// anywhere. Tracks set to "Always skip" are left out, as in the app.
+  static String buildPlaylistFile(Playlist playlist, List<Track> tracks) {
+    final buffer =
+        StringBuffer()
+          ..writeln('#EXTM3U')
+          ..writeln('#PLAYLIST:${_singleLine(playlist.name)}');
+    final ordered = [...tracks]..sort((a, b) => a.index.compareTo(b.index));
+    for (final track in ordered) {
+      final path = track.filePath;
+      if (track.status != 'complete' || path == null || track.alwaysSkip) {
+        continue;
+      }
+      final relative = _fileNameRelativeTo(playlist.outputPath, path);
+      if (relative == null) continue;
+      buffer
+        ..writeln(
+          '#EXTINF:${track.durationSeconds ?? -1},${_singleLine(track.title)}',
+        )
+        ..writeln(relative.replaceAll(r'\', '/'));
+    }
+    return buffer.toString();
+  }
+
+  static String _singleLine(String text) =>
+      text.replaceAll(RegExp(r'[\r\n]+'), ' ').trim();
+
+  /// [path] relative to [folder]: just the name for files inside it, a
+  /// `../` path for files elsewhere (for example in the other format's
+  /// folder while a mode switch is still downloading).
+  static String? fileNameRelativeTo(String folder, String? path) =>
+      _fileNameRelativeTo(folder, path);
+
+  static String? _fileNameRelativeTo(String folder, String? path) {
+    if (path == null || path.isEmpty) return null;
+    final normalizedFolder = p.normalize(p.absolute(folder));
+    final normalizedPath = p.normalize(p.absolute(path));
+    return p.relative(normalizedPath, from: normalizedFolder);
+  }
+
+  static const _readmeName = 'README - WoolyTube library.txt';
+  static const _readmeText = '''
+WoolyTube library
+=================
+
+Everything here plays without WoolyTube.
+
+Each folder is one playlist:
+  - Media files are named "<number>_<title>". The number is the track's
+    position in the playlist, so sorting by name gives the playlist order.
+  - "<folder>.m3u8" is a playlist file most music and video players can
+    open. It lists the tracks in order with their full titles.
+  - Files carry title, artist, album (= playlist name), track number
+    (= position), date and the YouTube link as tags, plus cover art.
+  - woolytube_meta.json holds everything WoolyTube knows about the
+    playlist: order, titles, chapters, skip segments and settings.
+    WoolyTube restores a playlist from it after a reinstall.
+  - .woolytube_thumbnails holds the cover images, .woolytube_info the
+    original YouTube descriptions (uploader, upload date, description) and
+    .woolytube_replaced earlier files that were replaced.
+
+Copy the whole WoolyTube folder (Music/WoolyTube for audio, Movies/WoolyTube
+for video) to keep a complete backup.
+''';
+
+  Future<void> _writeLibraryReadme(String basePath) async {
+    try {
+      final file = File(p.join(basePath, _readmeName));
+      if (await file.exists()) return;
+      await file.writeAsString(_readmeText);
+    } catch (_) {
+      // Informational only.
+    }
   }
 
   /// Scans public WoolyTube folders for playlist metadata files.
-  Future<List<DiscoveredPlaylist>> scanForPlaylists() async {
+  ///
+  /// Folders in [skipFolders] (folder paths of playlists already in the
+  /// library) are neither read nor searched.
+  Future<List<DiscoveredPlaylist>> scanForPlaylists({
+    Iterable<String> skipFolders = const [],
+  }) async {
     final discovered = <DiscoveredPlaylist>[];
-    final scanDirs = [
-      '/storage/emulated/0/Music/WoolyTube',
-      '/storage/emulated/0/Movies/WoolyTube',
-    ];
-
-    for (final scanPath in scanDirs) {
-      final dir = Directory(scanPath);
-      if (!await dir.exists()) continue;
-
-      await for (final entity in dir.list()) {
-        if (entity is! Directory) continue;
-        final metaFile = File(p.join(entity.path, _metaFileName));
-        if (!await metaFile.exists()) continue;
-
-        try {
-          final json =
-              jsonDecode(await metaFile.readAsString()) as Map<String, dynamic>;
-          final parsed = _parseMetadata(entity.path, json);
-          if (parsed != null) discovered.add(parsed);
-        } catch (_) {
-          // Skip malformed JSON
-        }
-      }
+    for (final scanPath in [
+      LibraryLayout.audioBasePath,
+      LibraryLayout.videoBasePath,
+    ]) {
+      discovered.addAll(
+        await scanDirectory(scanPath, maxDepth: 1, skipFolders: skipFolders),
+      );
     }
-
     return discovered;
   }
 
-  /// Returns only playlists not already in the database (matched by URL).
+  /// Finds playlist folders (folders with a `woolytube_meta.json`) at or
+  /// below [rootPath], for restoring a copied backup from anywhere. Folders
+  /// in [skipFolders] are neither read nor searched.
+  Future<List<DiscoveredPlaylist>> scanDirectory(
+    String rootPath, {
+    int maxDepth = 3,
+    Iterable<String> skipFolders = const [],
+  }) async {
+    final discovered = <DiscoveredPlaylist>[];
+    final skip = {for (final folder in skipFolders) _folderKey(folder)};
+    Future<void> visit(Directory dir, int depth) async {
+      if (skip.isNotEmpty && skip.contains(_folderKey(dir.path))) return;
+      final metaFile = File(p.join(dir.path, _metaFileName));
+      if (await metaFile.exists()) {
+        final parsed = await _readSidecar(dir.path, metaFile);
+        if (parsed != null) {
+          discovered.add(parsed);
+          return;
+        }
+      }
+      if (depth >= maxDepth) return;
+      try {
+        await for (final entity in dir.list(followLinks: false)) {
+          if (entity is! Directory) continue;
+          final name = p.basename(entity.path);
+          if (name.startsWith('.')) continue;
+          await visit(entity, depth + 1);
+        }
+      } on FileSystemException {
+        // Unreadable folder; skip it.
+      }
+    }
+
+    final root = Directory(rootPath);
+    if (await root.exists()) await visit(root, 0);
+    return discovered;
+  }
+
+  /// Sidecars at least this big are read on a worker isolate.
+  static const _isolateSidecarBytes = 64 * 1024;
+
+  Future<DiscoveredPlaylist?> _readSidecar(String folder, File metaFile) async {
+    try {
+      final path = metaFile.path;
+      if (await metaFile.length() >= _isolateSidecarBytes) {
+        return await Isolate.run(() => _readSidecarFile(folder, path));
+      }
+      return await _readSidecarFile(folder, path);
+    } catch (_) {
+      return null; // Unreadable or malformed
+    }
+  }
+
+  static Future<DiscoveredPlaylist?> _readSidecarFile(
+    String folder,
+    String path,
+  ) async {
+    try {
+      final json =
+          jsonDecode(await File(path).readAsString()) as Map<String, dynamic>;
+      return _parseMetadata(folder, json);
+    } catch (_) {
+      return null; // Malformed JSON
+    }
+  }
+
+  /// Reads the sidecar of one folder, if it has a valid one.
+  Future<DiscoveredPlaylist?> readFolder(String folder) {
+    return _readSidecar(folder, File(p.join(folder, _metaFileName)));
+  }
+
+  /// Reads the sidecar a format switch set aside in [folder]
+  /// (`woolytube_meta.json.superseded`), if any.
+  Future<DiscoveredPlaylist?> readSupersededFolder(String folder) {
+    return _readSidecar(
+      folder,
+      File(p.join(folder, '$_metaFileName.superseded')),
+    );
+  }
+
+  /// Returns only playlists not already in the database. A folder counts as
+  /// imported when a playlist uses it, or when a playlist of the same mode
+  /// already has its URL.
+  ///
+  /// With [skipOtherModeCopies] (the startup banner), a folder of a playlist
+  /// that is already in the library in the other mode is not offered: it is
+  /// almost always what an older version left behind after a format switch.
+  /// The Restore screen still lists it, for a copy kept on purpose.
   Future<List<DiscoveredPlaylist>> findUnimportedPlaylists({
     Set<String> excludeUrls = const {},
+    List<DiscoveredPlaylist>? candidates,
+    bool skipOtherModeCopies = false,
   }) async {
-    final discovered = await scanForPlaylists();
+    final existing = await _db.getAllPlaylists();
+    // A folder a playlist already uses is always "imported": do not even
+    // read its (possibly large) sidecar.
+    final discovered =
+        candidates ??
+        await scanForPlaylists(
+          skipFolders: [for (final pl in existing) pl.outputPath],
+        );
     final result = <DiscoveredPlaylist>[];
+    final seenFolders = <String>{};
 
     for (final dp in discovered) {
       if (excludeUrls.contains(dp.url)) continue;
-      final existing = await _db.getPlaylistByUrl(dp.url);
-      if (existing == null) result.add(dp);
+      final folder = _folderKey(dp.folderPath);
+      if (!seenFolders.add(folder)) continue;
+      final imported = existing.any(
+        (pl) =>
+            _folderKey(pl.outputPath) == folder ||
+            (samePlaylistUrl(pl.url, dp.url) &&
+                (pl.audioOnly == dp.audioOnly || skipOtherModeCopies)),
+      );
+      // One offer per playlist and mode, even if several folders hold it.
+      final offered = result.any(
+        (other) =>
+            samePlaylistUrl(other.url, dp.url) &&
+            other.audioOnly == dp.audioOnly,
+      );
+      if (!imported && !offered) result.add(dp);
     }
 
     return result;
   }
 
-  /// Reconciles database track statuses with actual files on disk.
-  /// Single async directory pass: consumes yt-dlp info sidecars, categorizes
-  /// junk for deletion, widens any short-prefix filenames, then matches tracks
-  /// to files via O(1) map lookup.
-  Future<int> reconcilePlaylist(Playlist playlist) async {
-    final tracks = await _db.getTracksForPlaylist(playlist.id);
+  /// Folder identity on Android's shared storage, which ignores case.
+  static String _folderKey(String path) =>
+      p.normalize(p.absolute(path)).toLowerCase();
+
+  /// Whether two playlist URLs point at the same YouTube playlist.
+  static bool samePlaylistUrl(String a, String b) {
+    if (a == b) return true;
+    String? listId(String url) =>
+        Uri.tryParse(url.trim())?.queryParameters['list'];
+    final aId = listId(a);
+    return aId != null && aId.isNotEmpty && aId == listId(b);
+  }
+
+  /// Matches database tracks with the files in the playlist folder without
+  /// deleting or renaming anything. Safe while a download runs: a track in
+  /// the middle of a download is left alone.
+  Future<int> reconcilePlaylist(Playlist playlist) =>
+      _reconcile(playlist, recoverInterrupted: false, cleanup: false);
+
+  /// Full repair: also resets tracks a killed process left 'downloading',
+  /// renames files whose number no longer matches their track, and removes
+  /// download leftovers. Call only while holding the library gate.
+  Future<int> repairPlaylist(Playlist playlist) =>
+      _reconcile(playlist, recoverInterrupted: true, cleanup: true);
+
+  Future<int> _reconcile(
+    Playlist playlist, {
+    required bool recoverInterrupted,
+    required bool cleanup,
+  }) async {
+    var tracks = await _db.getTracksForPlaylist(playlist.id);
     final dir = Directory(playlist.outputPath);
+    var fixed = 0;
     if (!await dir.exists()) {
-      var fixed = 0;
+      if (!recoverInterrupted) return 0;
       for (final track in tracks.where((t) => t.status == 'downloading')) {
         await _db.resetInterruptedTrack(track.id);
         fixed++;
@@ -355,16 +686,15 @@ class MetadataService {
       return fixed;
     }
 
-    const imageExtensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif'};
-    final prefixRe = RegExp(r'^(\d+)_(.*)$');
-    final width = paddingWidth(tracks.length);
-
-    final toDelete = <File>[];
     final mediaFiles = <_CandidateFile>[];
     final infoFilesByIndex = <int, List<File>>{};
+    // Every file in the folder, so whether a track's file exists is a set
+    // lookup instead of a disk check per track.
+    final listing = _FolderListing(playlist.outputPath);
 
     await for (final entity in dir.list()) {
       if (entity is! File) continue;
+      listing.add(entity.path);
       final fileName = p.basename(entity.path);
       final ext = p.extension(entity.path).toLowerCase();
 
@@ -376,96 +706,196 @@ class MetadataService {
         }
         continue;
       }
-
-      if (isTransientFile(fileName) ||
-          (imageExtensions.contains(ext) && fileName != _metaFileName)) {
-        toDelete.add(entity);
-        continue;
-      }
-
-      if (!mediaExtensions.contains(ext)) continue;
-      final match = prefixRe.firstMatch(fileName);
-      if (match == null) continue;
-      mediaFiles.add(
-        _CandidateFile(
-          digits: match.group(1)!,
-          rest: match.group(2)!,
-          path: entity.path,
-        ),
-      );
+      if (isTransientFile(fileName) || !mediaExtensions.contains(ext)) continue;
+      final match = _indexPrefixPattern.firstMatch(fileName);
+      final index = match == null ? null : int.tryParse(match[1]!);
+      if (index == null) continue;
+      mediaFiles.add(_CandidateFile(index: index, path: entity.path));
     }
 
     for (final track in tracks) {
       if (track.isLocalReplacement) continue;
       for (final infoFile in infoFilesByIndex[track.index] ?? const <File>[]) {
-        await _captureChapterMetadataFile(track, infoFile);
+        await _consumeInfoJsonFile(track, infoFile, playlist.outputPath);
       }
     }
 
-    int fixed = 0;
-    for (final entity in toDelete) {
-      try {
-        await entity.delete();
-        fixed++;
-      } catch (_) {
-        // Best effort
-      }
-    }
+    // When the folder lists no media at all although tracks point into it,
+    // the storage is far more likely unreadable (no permission yet, storage
+    // not mounted) than emptied. Never demote tracks on that evidence.
+    final unreadable =
+        mediaFiles.isEmpty &&
+        tracks.any(
+          (t) =>
+              t.status == 'complete' &&
+              t.filePath != null &&
+              p.isWithin(playlist.outputPath, t.filePath!),
+        );
 
-    // Only widens — never shrinks — so folders that previously used a wider
-    // prefix (because the playlist was larger in the past) keep their names.
-    for (final f in mediaFiles) {
-      if (f.digits.length >= width) continue;
-      final parsed = int.tryParse(f.digits);
-      if (parsed == null) continue;
-      final widened = parsed.toString().padLeft(width, '0');
-      final newPath = p.join(dir.path, '${widened}_${f.rest}');
-      if (File(newPath).existsSync()) continue;
-      try {
-        await File(f.path).rename(newPath);
-        f.digits = widened;
-        f.path = newPath;
-      } catch (_) {
-        // Best effort
-      }
-    }
-
-    final filesByPrefix = <String, String>{
-      for (final f in mediaFiles) '${f.digits}_': f.path,
+    final claimed = <String>{
+      for (final t in tracks)
+        if (t.filePath != null && await listing.exists(t.filePath!))
+          p.normalize(t.filePath!),
     };
 
+    // Decide first, then write every change in one transaction: one stream
+    // update for the open pages instead of one per track.
+    final changes = <Future<void> Function()>[];
     for (final track in tracks) {
-      final indexPrefix = '${paddedIndex(track.index, tracks.length)}_';
-      final fileOnDisk = filesByPrefix[indexPrefix];
-
-      if (fileOnDisk != null &&
-          (track.status == 'pending' ||
-              track.status == 'error' ||
-              track.status == 'downloading' ||
-              track.status == 'unavailable')) {
-        await _db.updateTrackStatus(track.id, 'complete', filePath: fileOnDisk);
-        fixed++;
-      } else if (fileOnDisk == null && track.status == 'downloading') {
-        await _db.resetInterruptedTrack(track.id);
-        fixed++;
-      } else if (fileOnDisk == null && track.status == 'complete') {
-        await _db.updateTrackStatus(
-          track.id,
-          'pending',
-          clearFilePath: true,
-          clearDownloadedAt: true,
-          isLocalReplacement: false,
-        );
-        fixed++;
-      } else if (fileOnDisk != null &&
-          track.status == 'complete' &&
-          track.filePath != fileOnDisk) {
-        await _db.updateTrackStatus(track.id, 'complete', filePath: fileOnDisk);
-        fixed++;
+      final ownPath = track.filePath;
+      final hasOwnFile =
+          ownPath != null && claimed.contains(p.normalize(ownPath));
+      // Relinking a file that was downloaded before keeps its history.
+      final keepDownloadedAt = track.downloadedAt != null;
+      if (hasOwnFile) {
+        if (track.status == 'pending' ||
+            track.status == 'error' ||
+            track.status == 'unavailable' ||
+            (track.status == 'downloading' && recoverInterrupted)) {
+          changes.add(
+            () => _db.updateTrackStatus(
+              track.id,
+              'complete',
+              filePath: ownPath,
+              keepDownloadedAt: keepDownloadedAt,
+            ),
+          );
+        }
+        continue;
       }
+      if (track.status == 'downloading' && !recoverInterrupted) continue;
+
+      final candidate = _pickCandidate(mediaFiles, track, claimed);
+      if (candidate != null) {
+        claimed.add(p.normalize(candidate));
+        changes.add(
+          () => _db.updateTrackStatus(
+            track.id,
+            'complete',
+            filePath: candidate,
+            keepDownloadedAt: keepDownloadedAt,
+          ),
+        );
+      } else if (track.status == 'downloading') {
+        changes.add(() => _db.resetInterruptedTrack(track.id));
+      } else if (track.status == 'complete' && !unreadable) {
+        changes.add(
+          () => _db.updateTrackStatus(
+            track.id,
+            'pending',
+            clearFilePath: true,
+            clearDownloadedAt: true,
+          ),
+        );
+      }
+    }
+    if (changes.isNotEmpty) {
+      await _db.transaction(() async {
+        for (final change in changes) {
+          await change();
+        }
+      });
+      fixed += changes.length;
+    }
+
+    if (cleanup && !unreadable) {
+      tracks = await _db.getTracksForPlaylist(playlist.id);
+      fixed += await _renameToTrackNumbers(playlist, tracks, listing: listing);
+      tracks = await _db.getTracksForPlaylist(playlist.id);
+      fixed += await _cleanupFolder(playlist, tracks);
     }
 
     return fixed;
+  }
+
+  /// The unclaimed media file whose number equals the track's index. When
+  /// several match, only one whose name was made from the track's title is
+  /// taken; otherwise nothing is guessed.
+  static String? _pickCandidate(
+    List<_CandidateFile> files,
+    Track track,
+    Set<String> claimed,
+  ) {
+    final matches = [
+      for (final f in files)
+        if (f.index == track.index && !claimed.contains(p.normalize(f.path)))
+          f.path,
+    ];
+    if (matches.length == 1) return matches.single;
+    if (matches.isEmpty) return null;
+    final byTitle = matches.where((m) => titleMatchesFileName(track.title, m));
+    return byTitle.length == 1 ? byTitle.single : null;
+  }
+
+  /// A media file in the playlist folder that a pending [track] may adopt
+  /// instead of downloading again (for example after a crash between the
+  /// download and the database update).
+  ///
+  /// Costs one folder listing. Only when a file with the track's number is
+  /// there are the other tracks looked at: a listed candidate exists, so it
+  /// is taken when no other track records it as its file.
+  Future<String?> findAdoptableMediaFile(Playlist playlist, Track track) async {
+    final dir = Directory(playlist.outputPath);
+    if (!await dir.exists()) return null;
+    final files = <_CandidateFile>[];
+    await for (final entity in dir.list()) {
+      if (entity is! File) continue;
+      final name = p.basename(entity.path);
+      final match = _indexPrefixPattern.firstMatch(name);
+      if (match == null || int.tryParse(match[1]!) != track.index) continue;
+      if (isTransientFile(name) ||
+          !mediaExtensions.contains(p.extension(name).toLowerCase())) {
+        continue;
+      }
+      files.add(_CandidateFile(index: track.index, path: entity.path));
+    }
+    if (files.isEmpty) return null;
+    final tracks = await _db.getTracksForPlaylist(playlist.id);
+    final claimed = <String>{
+      for (final t in tracks)
+        if (t.id != track.id && t.filePath != null) p.normalize(t.filePath!),
+    };
+    return _pickCandidate(files, track, claimed);
+  }
+
+  /// Renames files whose number prefix no longer matches their track's index
+  /// (after an interrupted force insert, a migration that moved a track, or
+  /// an older, narrower prefix), so that sorting by name keeps giving the
+  /// playlist order. A rename never replaces an existing file.
+  Future<int> _renameToTrackNumbers(
+    Playlist playlist,
+    List<Track> tracks, {
+    required _FolderListing listing,
+  }) async {
+    final total = tracks.length;
+    final moved = <int, String>{};
+    for (final track in tracks) {
+      final path = track.filePath;
+      if (path == null || !p.equals(p.dirname(path), playlist.outputPath)) {
+        continue;
+      }
+      if (!await listing.exists(path)) continue;
+      final name = p.basename(path);
+      final rest = name.replaceFirst(_indexPrefixPattern, '');
+      final desired = '${paddedIndex(track.index, total)}_$rest';
+      if (desired == name) continue;
+      final target = p.join(playlist.outputPath, desired);
+      if (listing.mayExist(target) && await File(target).exists()) continue;
+      try {
+        await File(path).rename(target);
+        listing
+          ..remove(path)
+          ..add(target);
+        moved[track.id] = target;
+      } catch (_) {
+        // Best effort; the file keeps working under its current name.
+      }
+    }
+    // One transaction for all of them. A crash before it leaves files whose
+    // recorded path is gone; their new names carry the track's number, so
+    // the next repair links them again.
+    await _db.updateTrackFilePaths(moved);
+    return moved.length;
   }
 
   /// Media files WoolyTube downloads, imports or plays.
@@ -483,20 +913,32 @@ class MetadataService {
     '.mov',
   };
 
+  static const _imageExtensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif'};
+
   static final _partPattern = RegExp(r'\.part(-Frag\d+)?$');
   // yt-dlp per-format intermediates (`.f137.mp4`, `.f140.m4a`) and post-
   // processing temporaries (`.temp.mp4`) before the final merge/remux.
   static final _formatIntermediatePattern = RegExp(r'\.f\d+\.\w+$');
   static final _postProcessTempPattern = RegExp(r'\.temp\.\w+$');
-  static const _stagingPrefixes = [
+  // Temp files of this service's atomic writes (sidecar, .m3u8).
+  static final _atomicWriteTempPattern = RegExp(r'\.tmp\.\d+\.\d+$');
+
+  /// Staged copies of a file the owner picked; the picked original stays
+  /// where it was, so these can be removed.
+  static const _copyStagingPrefixes = [
     '.woolytube-force-insert-',
-    '.woolytube-force-move-',
     '.woolytube-local-replacement-',
   ];
 
+  /// Files an older version's force insert parked under a temporary name.
+  /// These are the only copy of a track and are never deleted.
+  static const _parkedOriginalPrefix = '.woolytube-force-move-';
+
   /// True for files that yt-dlp or WoolyTube create while working and that
   /// never represent a finished track: partial downloads, download state,
-  /// per-format intermediates, staging copies and metadata temp files.
+  /// per-format intermediates, staging copies and metadata temp files. Such
+  /// files are never matched to a track. Whether one may be deleted is
+  /// decided separately, see [cleanupPlaylistFolder].
   static bool isTransientFile(String fileName) {
     if (_partPattern.hasMatch(fileName)) return true;
     if (p.extension(fileName).toLowerCase() == '.ytdl') return true;
@@ -504,31 +946,142 @@ class MetadataService {
     if (_postProcessTempPattern.hasMatch(fileName)) return true;
     if (fileName.startsWith('$_metaFileName.tmp')) return true;
     if (fileName.endsWith('.tmp')) return true;
-    return _stagingPrefixes.any(fileName.startsWith);
+    if (_atomicWriteTempPattern.hasMatch(fileName)) return true;
+    if (fileName.startsWith(_parkedOriginalPrefix)) return true;
+    return _copyStagingPrefixes.any(fileName.startsWith);
   }
 
-  /// Deletes transient files (see [isTransientFile]) and orphaned image
-  /// files from the playlist folder. Returns the number of files deleted.
-  static Future<int> cleanupPlaylistFolder(String dirPath) async {
+  /// Removes download leftovers from a playlist folder and returns how many
+  /// files were removed. Only files that can never be anyone's only copy
+  /// are deleted:
+  ///  - partial downloads (`.part`, `.ytdl`) and temp files;
+  ///  - staged copies of files the owner picked;
+  ///  - yt-dlp per-format streams (`.f137.mp4`) and post-processing temp files
+  ///    (`.temp.mp4`), but only when the merged file they produced exists
+  ///    and no track uses them. After a failed merge they are kept: they
+  ///    may hold the only copy of a video that is gone from YouTube.
+  ///
+  /// Files listed in [keep] are never deleted. Images, files an older force
+  /// insert parked under a temporary name and every other file are left
+  /// alone.
+  static Future<int> cleanupPlaylistFolder(
+    String dirPath, {
+    Set<String> keep = const {},
+  }) async {
     final dir = Directory(dirPath);
     if (!await dir.exists()) return 0;
 
-    int deleted = 0;
-    const imageExtensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif'};
+    final files = <File>[
+      await for (final entity in dir.list())
+        if (entity is File) entity,
+    ];
+    final finalStems = <String>{
+      for (final f in files)
+        if (mediaExtensions.contains(p.extension(f.path).toLowerCase()) &&
+            !isTransientFile(p.basename(f.path)))
+          p.basenameWithoutExtension(f.path),
+    };
+    final kept = keep.map(p.normalize).toSet();
 
-    for (final entity in dir.listSync()) {
-      if (entity is! File) continue;
-      final fileName = p.basename(entity.path);
-      final ext = p.extension(entity.path).toLowerCase();
+    var deleted = 0;
+    for (final file in files) {
+      final fileName = p.basename(file.path);
+      if (kept.contains(p.normalize(file.path))) continue;
+      if (fileName.startsWith(_parkedOriginalPrefix)) continue;
+      if (!isTransientFile(fileName)) continue;
 
-      if (isTransientFile(fileName) ||
-          (imageExtensions.contains(ext) && fileName != _metaFileName)) {
-        await entity.delete();
+      if (_formatIntermediatePattern.hasMatch(fileName) ||
+          _postProcessTempPattern.hasMatch(fileName)) {
+        final stem = fileName
+            .replaceFirst(_formatIntermediatePattern, '')
+            .replaceFirst(_postProcessTempPattern, '');
+        if (!finalStems.contains(stem)) continue;
+      }
+      try {
+        await file.delete();
         deleted++;
+      } catch (_) {
+        // Best effort
       }
     }
-
     return deleted;
+  }
+
+  /// Removes download leftovers from [playlist]'s folder (see
+  /// [cleanupPlaylistFolder]) and files away cover images older versions
+  /// left beside the media. Call only while holding the library gate.
+  Future<int> cleanupPlaylist(Playlist playlist) async {
+    final tracks = await _db.getTracksForPlaylist(playlist.id);
+    return _cleanupFolder(playlist, tracks);
+  }
+
+  Future<int> _cleanupFolder(Playlist playlist, List<Track> tracks) async {
+    final folder = playlist.outputPath;
+    if (!await Directory(folder).exists()) return 0;
+    var changed = await _adoptLooseThumbnails(playlist, tracks);
+    final keep = <String>{
+      for (final t in tracks) ...[
+        if (t.filePath != null) t.filePath!,
+        if (t.thumbnailPath != null) t.thumbnailPath!,
+      ],
+    };
+    changed += await cleanupPlaylistFolder(folder, keep: keep);
+    await discardStaging(folder);
+    return changed;
+  }
+
+  /// Cover images yt-dlp left beside the media (named like the media file,
+  /// `<index>_<title>.webp`) become the track's offline thumbnail when it has
+  /// none yet, and are otherwise moved to `.woolytube_replaced/`. Images
+  /// without an index prefix, such as a folder.jpg, are never touched.
+  Future<int> _adoptLooseThumbnails(
+    Playlist playlist,
+    List<Track> tracks,
+  ) async {
+    final folder = playlist.outputPath;
+    final byIndex = {for (final t in tracks) t.index: t};
+    var changed = 0;
+    final adopted = <int, String?>{};
+    final images = <File>[
+      await for (final entity in Directory(folder).list())
+        if (entity is File &&
+            _imageExtensions.contains(p.extension(entity.path).toLowerCase()))
+          entity,
+    ];
+    for (final entity in images) {
+      final name = p.basename(entity.path);
+      final match = _indexPrefixPattern.firstMatch(name);
+      final index = match == null ? null : int.tryParse(match[1]!);
+      if (index == null) continue;
+      final track = byIndex[index];
+      try {
+        if (track != null &&
+            !adopted.containsKey(track.id) &&
+            !await thumbnailFileExists(track.thumbnailPath)) {
+          final stem = LibraryLayout.trackThumbnailStem(
+            folder,
+            track.videoId,
+            localFile: track.isLocalReplacement,
+          );
+          final target = '$stem${p.extension(name).toLowerCase()}';
+          await Directory(p.dirname(target)).create(recursive: true);
+          await _ensureNoMedia(p.dirname(target));
+          await moveFile(entity.path, target);
+          noteThumbnailWritten(target);
+          adopted[track.id] = target;
+        } else if (track != null) {
+          // The track already has a cover; keep this one out of the way.
+          await moveAside(folder, entity.path);
+        } else {
+          continue;
+        }
+        changed++;
+      } catch (_) {
+        // Best effort
+      }
+    }
+    await _db.updateTrackThumbnailPaths(adopted);
+    return changed;
   }
 
   /// Zero-pads [index] to at least 5 digits, widening further if [totalTracks]
@@ -547,18 +1100,42 @@ class MetadataService {
 
   /// Replaces characters illegal on common filesystems with '_', matching
   /// yt-dlp's default sanitisation (non-restrict mode). Collapses whitespace.
+  /// A trailing `.f<digits>` or `.temp` part is neutralised so the name can
+  /// never look like a yt-dlp intermediate.
   static String sanitizeFilename(String name) {
     final replaced = name.replaceAll(
       RegExp(r'''[\/\\:*?"<>|\x00-\x1f]'''),
       '_',
     );
-    final collapsed = replaced.replaceAll(RegExp(r'\s+'), ' ').trim();
+    var collapsed = replaced.replaceAll(RegExp(r'\s+'), ' ').trim();
+    collapsed = collapsed.replaceFirstMapped(
+      RegExp(r'\.(f\d+|temp|part)$', caseSensitive: false),
+      (m) => '_${m[1]}',
+    );
     return collapsed.isEmpty ? '_' : collapsed;
+  }
+
+  /// A file name whose title ends like a yt-dlp intermediate
+  /// (`Formula.f1.m4a`, `Live.temp.mp4`) gets that last dot replaced, so the
+  /// finished file can never be mistaken for a leftover.
+  static String neutralizeTransientLookingName(String fileName) {
+    if (!_formatIntermediatePattern.hasMatch(fileName) &&
+        !_postProcessTempPattern.hasMatch(fileName)) {
+      return fileName;
+    }
+    final ext = p.extension(fileName);
+    final stem = p.basenameWithoutExtension(fileName);
+    final fixed = stem.replaceFirstMapped(
+      RegExp(r'\.(f\d+|temp)$'),
+      (m) => '_${m[1]}',
+    );
+    return '$fixed$ext';
   }
 
   /// Resolves a stored track path (which may lack its extension) to the
   /// file on disk: the exact path, the same basename with any extension, or
-  /// the first media file sharing its index prefix.
+  /// the first media file sharing its index prefix (handles a title mismatch
+  /// from yt-dlp). Intermediate and staging files are never returned.
   static String? resolveStoredFilePath(String storedPath) {
     if (File(storedPath).existsSync()) return storedPath;
 
@@ -566,7 +1143,8 @@ class MetadataService {
     final baseName = p.basename(storedPath);
     if (!dir.existsSync()) return null;
 
-    for (final entity in dir.listSync()) {
+    final entries = dir.listSync();
+    for (final entity in entries) {
       if (entity is File &&
           p.basenameWithoutExtension(entity.path) == baseName) {
         return entity.path;
@@ -576,7 +1154,7 @@ class MetadataService {
     final indexPrefixMatch = RegExp(r'^\d+[_ -]').firstMatch(baseName);
     if (indexPrefixMatch != null) {
       final prefix = indexPrefixMatch.group(0)!;
-      for (final entity in dir.listSync()) {
+      for (final entity in entries) {
         if (entity is File) {
           final fileName = p.basename(entity.path);
           final ext = p.extension(entity.path).toLowerCase();
@@ -591,18 +1169,23 @@ class MetadataService {
     return null;
   }
 
-  /// Find a media file in [dirPath] matching an index prefix (e.g. "001_").
-  /// Intermediate and staging files are never returned, even when their
-  /// extension looks like media.
+  /// Find a media file in [dirPath] whose number prefix equals the number in
+  /// [indexPrefix] (e.g. "001_" also matches "00001_"). Intermediate and
+  /// staging files are never returned, even when their extension looks like
+  /// media.
   static String? resolveMediaFile(String dirPath, String indexPrefix) {
     final dir = Directory(dirPath);
     if (!dir.existsSync()) return null;
+    final wanted = int.tryParse(indexPrefix.replaceAll('_', ''));
+    if (wanted == null) return null;
 
     for (final entity in dir.listSync()) {
       if (entity is File) {
         final fileName = p.basename(entity.path);
         final ext = p.extension(entity.path).toLowerCase();
-        if (fileName.startsWith(indexPrefix) &&
+        final match = _indexPrefixPattern.firstMatch(fileName);
+        if (match != null &&
+            int.tryParse(match[1]!) == wanted &&
             mediaExtensions.contains(ext) &&
             !isTransientFile(fileName)) {
           return entity.path;
@@ -612,8 +1195,430 @@ class MetadataService {
     return null;
   }
 
+  // ---------------------------------------------------------------------
+  // Staging: yt-dlp only ever writes into `.woolytube-staging/track-<id>/`.
+
+  /// A fresh, empty working folder for one track's download.
+  Future<Directory> prepareStagingDir(String folder, int trackId) async {
+    final root = Directory(LibraryLayout.stagingRoot(folder));
+    await root.create(recursive: true);
+    await _ensureNoMedia(root.path);
+    final dir = Directory(p.join(root.path, 'track-$trackId'));
+    if (await dir.exists()) await dir.delete(recursive: true);
+    await dir.create();
+    return dir;
+  }
+
+  Future<void> discardStagingDir(Directory dir) async {
+    if (p.basename(p.dirname(dir.path)) != LibraryLayout.stagingDirName) {
+      return;
+    }
+    try {
+      if (await dir.exists()) await dir.delete(recursive: true);
+    } catch (_) {
+      // Removed with the whole staging folder later.
+    }
+  }
+
+  /// Deletes every working folder of [folder]'s downloads. Only call while
+  /// holding the library gate, when no download can be running.
+  Future<void> discardStaging(String folder) async {
+    final root = Directory(LibraryLayout.stagingRoot(folder));
+    try {
+      if (await root.exists()) await root.delete(recursive: true);
+    } catch (_) {
+      // Best effort
+    }
+  }
+
+  /// The finished media file in a staging folder: the only non-intermediate
+  /// media file, or the largest of the preferred kinds if yt-dlp left more.
+  static File? findStagedMedia(Directory dir) {
+    if (!dir.existsSync()) return null;
+    // A staging folder only ever holds one download, so a name that merely
+    // looks like an intermediate (a title ending in ".f1" or ".temp") is
+    // still the finished file. Unfinished parts never count.
+    final media = <File>[
+      for (final entity in dir.listSync())
+        if (entity is File &&
+            mediaExtensions.contains(p.extension(entity.path).toLowerCase()) &&
+            !_partPattern.hasMatch(p.basename(entity.path)))
+          entity,
+    ];
+    if (media.isEmpty) return null;
+    if (media.length == 1) return media.single;
+    final finished = [
+      for (final f in media)
+        if (!isTransientFile(p.basename(f.path))) f,
+    ];
+    if (finished.isNotEmpty) {
+      media
+        ..clear()
+        ..addAll(finished);
+    }
+    if (media.length == 1) return media.single;
+    const preferred = ['.m4a', '.mp4', '.mkv'];
+    media.sort((a, b) {
+      final ap = preferred.indexOf(p.extension(a.path).toLowerCase());
+      final bp = preferred.indexOf(p.extension(b.path).toLowerCase());
+      final aRank = ap < 0 ? preferred.length : ap;
+      final bRank = bp < 0 ? preferred.length : bp;
+      if (aRank != bRank) return aRank.compareTo(bRank);
+      return b.lengthSync().compareTo(a.lengthSync());
+    });
+    return media.first;
+  }
+
+  static File? _findStaged(Directory dir, bool Function(String name) test) {
+    if (!dir.existsSync()) return null;
+    for (final entity in dir.listSync()) {
+      if (entity is File && test(p.basename(entity.path))) return entity;
+    }
+    return null;
+  }
+
+  /// Moves a finished download from its staging folder into the playlist
+  /// folder and records it as the track's file, together with its cover and
+  /// YouTube information.
+  ///
+  /// The previous file is replaced only now, after the new one is complete:
+  /// a copy of the same video is superseded; a local replacement, or an
+  /// unknown file that happens to have the target name, is moved to
+  /// `.woolytube_replaced/` instead of being deleted; a file in another
+  /// folder (before a mode switch) stays where it is.
+  Future<Track?> publishDownload({
+    required Playlist playlist,
+    required int trackId,
+    required Directory stagingDir,
+    required File stagedMedia,
+    required MediaThumbnailService thumbnails,
+    required bool embeddedThumbnailExpected,
+  }) async {
+    final fresh = await _db.getTrack(trackId);
+    if (fresh == null) return null;
+    final folder = playlist.outputPath;
+    await Directory(folder).create(recursive: true);
+    final total = await _db.getTotalTrackCount(playlist.id);
+    final rest = neutralizeTransientLookingName(
+      p.basename(stagedMedia.path).replaceFirst(_indexPrefixPattern, ''),
+    );
+    var targetPath = p.join(folder, '${paddedIndex(fresh.index, total)}_$rest');
+
+    final oldPath = fresh.filePath;
+    final oldExists = oldPath != null && await File(oldPath).exists();
+    final wasLocal = fresh.isLocalReplacement;
+    var replacesOldInPlace = oldExists && await samePath(oldPath, targetPath);
+    var oldMovedAside = false;
+    if (await File(targetPath).exists() && !(replacesOldInPlace && !wasLocal)) {
+      var usedByOther = false;
+      for (final t in await _db.getTracksForPlaylist(playlist.id)) {
+        if (t.id != trackId &&
+            t.filePath != null &&
+            await samePath(t.filePath!, targetPath)) {
+          usedByOther = true;
+        }
+      }
+      if (usedByOther) {
+        // Another track's file has this name: never touch it, use another.
+        targetPath = await uniquePath(targetPath);
+        replacesOldInPlace = false;
+      } else {
+        await moveAside(folder, targetPath);
+        oldMovedAside = replacesOldInPlace;
+      }
+    }
+    await moveFile(stagedMedia.path, targetPath);
+
+    final thumbnailPath = await _publishThumbnail(
+      folder: folder,
+      track: fresh,
+      stagingDir: stagingDir,
+      mediaPath: targetPath,
+      thumbnails: thumbnails,
+      embeddedThumbnailExpected: embeddedThumbnailExpected,
+    );
+
+    await _db.markTrackDownloaded(
+      trackId,
+      filePath: targetPath,
+      thumbnailPath: thumbnailPath,
+    );
+
+    if (oldExists &&
+        !replacesOldInPlace &&
+        !oldMovedAside &&
+        !await samePath(oldPath, targetPath)) {
+      try {
+        // Older versions could point two tracks at one file; never remove
+        // a file another track still uses.
+        var sharedWithOther = false;
+        for (final t in await _db.getTracksForPlaylist(playlist.id)) {
+          if (t.id != trackId &&
+              t.filePath != null &&
+              await samePath(t.filePath!, oldPath)) {
+            sharedWithOther = true;
+          }
+        }
+        if (sharedWithOther) {
+          // Leave it to the track that also uses it.
+        } else if (!p.equals(p.dirname(oldPath), folder)) {
+          // A file in another folder (before a format switch) stays.
+        } else if (wasLocal || !titleMatchesFileName(fresh.title, oldPath)) {
+          // A local file, or a file that may not be a copy of this video
+          // (it was matched only by its number): keep it.
+          await moveAside(folder, oldPath);
+        } else {
+          // An older copy of the same video.
+          await File(oldPath).delete();
+        }
+      } catch (_) {
+        // The old file stays; nothing is lost.
+      }
+    }
+
+    final infoFile = _findStaged(stagingDir, (n) => n.endsWith('.info.json'));
+    var chaptersApplied = false;
+    if (infoFile != null) {
+      try {
+        final info =
+            jsonDecode(await infoFile.readAsString()) as Map<String, dynamic>;
+        if (info['id'] == fresh.videoId) {
+          await _applyDownloadedChapters(trackId, info, wasLocal: wasLocal);
+          chaptersApplied = true;
+          await keepVideoInfo(folder, fresh.videoId, info);
+        }
+      } catch (_) {
+        // Chapters and info are extras.
+      }
+    }
+    if (wasLocal && !chaptersApplied) {
+      // Without YouTube's chapter list, still undo what the local file
+      // changed: chapters made for it go, earlier ones fit again.
+      final current = await _db.getTrack(trackId);
+      if (current?.chaptersJson != null) {
+        final old = ChapterData.decode(current!.chaptersJson);
+        await _db.writeTrackChapters(
+          trackId,
+          ChapterData(
+            downloaded: old.downloaded,
+            custom: old.valid ? null : old.custom,
+            shuffleChapters: old.shuffleChapters,
+            checkedAt: old.checkedAt,
+            durationMs: old.durationMs,
+            undoChapters: old.valid ? null : old.undoChapters,
+            recognitionEpoch: old.recognitionEpoch + 1,
+            lastRecognitionRunId: old.lastRecognitionRunId,
+          ),
+        );
+      }
+    }
+    if (wasLocal) {
+      // Skip marks the owner made while the local file played were timed
+      // to that file, not to the YouTube original.
+      final since = fresh.downloadedAt;
+      for (final segment in await _db.getSegmentsForTrack(trackId)) {
+        if (segment.source == 'local' &&
+            (since == null || !segment.createdAt.isBefore(since))) {
+          await _db.deleteSegment(segment.id);
+        }
+      }
+    }
+    return _db.getTrack(trackId);
+  }
+
+  /// Whether two paths name the same file. Android's shared storage ignores
+  /// case, so "00005_song.m4a" and "00005_Song.m4a" are one file there.
+  static Future<bool> samePath(String a, String b) async {
+    final na = p.normalize(p.absolute(a));
+    final nb = p.normalize(p.absolute(b));
+    if (p.equals(na, nb)) return true;
+    if (na.toLowerCase() != nb.toLowerCase()) return false;
+    try {
+      return await FileSystemEntity.identical(na, nb);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<String?> _publishThumbnail({
+    required String folder,
+    required Track track,
+    required Directory stagingDir,
+    required String mediaPath,
+    required MediaThumbnailService thumbnails,
+    required bool embeddedThumbnailExpected,
+  }) async {
+    final stem = LibraryLayout.trackThumbnailStem(folder, track.videoId);
+    try {
+      final staged = _findStaged(
+        stagingDir,
+        (n) => _imageExtensions.contains(p.extension(n).toLowerCase()),
+      );
+      if (staged != null) {
+        await Directory(p.dirname(stem)).create(recursive: true);
+        await _ensureNoMedia(p.dirname(stem));
+        final target = '$stem${p.extension(staged.path).toLowerCase()}';
+        for (final ext in _imageExtensions) {
+          final stale = File('$stem$ext');
+          if (stale.path != target && await stale.exists()) {
+            await stale.delete();
+            noteThumbnailRemoved(stale.path);
+          }
+        }
+        await moveFile(staged.path, target);
+        noteThumbnailWritten(target);
+        return target;
+      }
+      if (embeddedThumbnailExpected) {
+        await Directory(p.dirname(stem)).create(recursive: true);
+        await _ensureNoMedia(p.dirname(stem));
+        final extracted = await thumbnails.extractEmbeddedThumbnail(
+          mediaPath: mediaPath,
+          targetStem: stem,
+        );
+        if (extracted != null) return extracted;
+      }
+    } catch (_) {
+      // Artwork is optional.
+    }
+    // Keep an earlier cover of this video, but not a local file's cover.
+    final existing = track.thumbnailPath;
+    if (!track.isLocalReplacement && await thumbnailFileExists(existing)) {
+      return existing;
+    }
+    return null;
+  }
+
+  /// For a track whose file is still in another folder (a mode switch whose
+  /// new download is impossible), moves that file into the playlist folder
+  /// under the track's number so the playlist folder stays complete.
+  Future<void> adoptKeptFile(Playlist playlist, int trackId) async {
+    final track = await _db.getTrack(trackId);
+    final path = track?.filePath;
+    if (track == null || path == null || !await File(path).exists()) return;
+    final folder = playlist.outputPath;
+    if (p.equals(p.dirname(path), folder)) return;
+    final total = await _db.getTotalTrackCount(playlist.id);
+    final rest = p.basename(path).replaceFirst(_indexPrefixPattern, '');
+    final target = await uniquePath(
+      p.join(folder, '${paddedIndex(track.index, total)}_$rest'),
+    );
+    await Directory(folder).create(recursive: true);
+    await moveFile(path, target);
+    await _db.updateTrackFields(trackId, filePath: target);
+    final thumb = track.thumbnailPath;
+    if (thumb != null &&
+        await thumbnailFileExists(thumb) &&
+        !p.isWithin(folder, thumb)) {
+      final stem = LibraryLayout.trackThumbnailStem(
+        folder,
+        track.videoId,
+        localFile: track.isLocalReplacement,
+      );
+      final thumbTarget = '$stem${p.extension(thumb).toLowerCase()}';
+      try {
+        await Directory(p.dirname(stem)).create(recursive: true);
+        await _ensureNoMedia(p.dirname(stem));
+        await moveFile(thumb, thumbTarget);
+        noteThumbnailRemoved(thumb);
+        noteThumbnailWritten(thumbTarget);
+        await _db.updateTrackThumbnailPath(trackId, thumbTarget);
+      } catch (_) {
+        // The cover stays where it is and still works.
+      }
+    }
+  }
+
+  /// Finishes a format switch the app could not complete: a downloaded
+  /// track that YouTube can no longer provide (or a local file) and whose
+  /// file is still in another folder is moved into the playlist folder.
+  /// Call only while holding the library gate.
+  Future<int> adoptStrayFiles(Playlist playlist) async {
+    var adopted = 0;
+    for (final track in await _db.getTracksForPlaylist(playlist.id)) {
+      final path = track.filePath;
+      if (track.status != 'complete' || track.replaceRequested) continue;
+      if (path == null || p.equals(p.dirname(path), playlist.outputPath)) {
+        continue;
+      }
+      final downloadable =
+          !track.videoId.startsWith(forcedInsertVideoIdPrefix) &&
+          !track.isLocalReplacement &&
+          track.unavailableReason == null;
+      if (!await File(path).exists()) continue;
+      if (downloadable) {
+        // Get the playlist's own format; this file keeps playing meanwhile.
+        await _db.setTrackReplaceRequested(track.id, true);
+      } else {
+        await adoptKeptFile(playlist, track.id);
+      }
+      adopted++;
+    }
+    return adopted;
+  }
+
+  /// Moves [path] into the playlist's `.woolytube_replaced/` folder and
+  /// returns the new path. Used instead of deleting a file the owner might
+  /// still want.
+  Future<String> moveAside(String folder, String path) async {
+    final dir = Directory(LibraryLayout.replacedDir(folder));
+    await dir.create(recursive: true);
+    await _ensureNoMedia(dir.path);
+    final target = await uniquePath(p.join(dir.path, p.basename(path)));
+    await moveFile(path, target);
+    return target;
+  }
+
+  /// [path], or `name (2).ext`, `name (3).ext`, ... if it exists.
+  static Future<String> uniquePath(String path) async {
+    if (!await File(path).exists() && !await Directory(path).exists()) {
+      return path;
+    }
+    final dir = p.dirname(path);
+    final stem = p.basenameWithoutExtension(path);
+    final ext = p.extension(path);
+    for (var i = 2; ; i++) {
+      final candidate = p.join(dir, '$stem ($i)$ext');
+      if (!await File(candidate).exists() &&
+          !await Directory(candidate).exists()) {
+        return candidate;
+      }
+    }
+  }
+
+  /// Renames [from] to [to], copying across file systems when needed.
+  static Future<void> moveFile(String from, String to) async {
+    try {
+      await File(from).rename(to);
+    } on FileSystemException {
+      await File(from).copy(to);
+      await File(from).delete();
+    }
+  }
+
+  static Future<void> _ensureNoMedia(String dirPath) async {
+    try {
+      final marker = File(p.join(dirPath, '.nomedia'));
+      if (!await marker.exists()) await marker.create(recursive: true);
+    } catch (_) {
+      // Only keeps gallery apps from listing covers.
+    }
+  }
+
   /// Imports a discovered playlist into the database.
-  Future<void> importPlaylist(DiscoveredPlaylist discovered) async {
+  Future<int> importPlaylist(DiscoveredPlaylist discovered) async {
+    // Never let two playlists own one folder or one playlist twice: they
+    // would rename and relink each other's files.
+    for (final existing in await _db.getAllPlaylists()) {
+      if (_folderKey(existing.outputPath) ==
+              _folderKey(discovered.folderPath) ||
+          (samePlaylistUrl(existing.url, discovered.url) &&
+              existing.audioOnly == discovered.audioOnly)) {
+        throw PlaylistExistsException(
+          '"${existing.name}" is already in your library.',
+        );
+      }
+    }
     // Resolve files first so the database transaction below stays short.
     final rows =
         <
@@ -630,7 +1635,9 @@ class MetadataService {
       String status = dt.status;
 
       if (dt.fileName != null) {
-        final fullPath = p.join(discovered.folderPath, dt.fileName!);
+        final fullPath = p.normalize(
+          p.join(discovered.folderPath, dt.fileName!),
+        );
         if (await File(fullPath).exists()) {
           filePath = fullPath;
           status = 'complete';
@@ -639,17 +1646,10 @@ class MetadataService {
         }
       }
 
-      if (dt.thumbnailFileName != null) {
-        final candidate = p.normalize(
-          p.join(discovered.folderPath, dt.thumbnailFileName!),
-        );
-        final normalizedFolder = p.normalize(p.absolute(discovered.folderPath));
-        final normalizedCandidate = p.normalize(p.absolute(candidate));
-        if (p.isWithin(normalizedFolder, normalizedCandidate) &&
-            await File(normalizedCandidate).exists()) {
-          thumbnailPath = normalizedCandidate;
-        }
-      }
+      thumbnailPath = await _resolveImportedImage(
+        discovered.folderPath,
+        dt.thumbnailFileName,
+      );
 
       // Preserve unavailable status from metadata
       if (status != 'complete' && status != 'unavailable') {
@@ -663,26 +1663,79 @@ class MetadataService {
       ));
     }
 
-    // Sidecars from older versions can repeat an index; the first entry keeps
-    // it and the others are appended, matching the database repair rule.
-    final usedIndices = <int>{};
+    // Sidecars from older versions can repeat an index, sometimes with two
+    // entries pointing at one file (a track that adopted another's file).
+    // The likely owner keeps the number, as in the database repair: the
+    // entry whose file carries the number, then the one that got its file
+    // first, then the one whose title matches the file name, then the
+    // first listed. The others are appended.
+    bool ownsNumber(int i) {
+      final path = rows[i].filePath;
+      if (path == null) return false;
+      final match = _indexPrefixPattern.firstMatch(p.basename(path));
+      return match != null && int.tryParse(match[1]!) == rows[i].track.index;
+    }
+
+    int compareOwnership(int a, int b) {
+      final aOwns = ownsNumber(a), bOwns = ownsNumber(b);
+      if (aOwns != bOwns) return aOwns ? -1 : 1;
+      final aAt = rows[a].track.downloadedAt;
+      final bAt = rows[b].track.downloadedAt;
+      if (aAt != bAt) {
+        if (aAt == null) return 1;
+        if (bAt == null) return -1;
+        final byTime = aAt.compareTo(bAt);
+        if (byTime != 0) return byTime;
+      }
+      final aPath = rows[a].filePath, bPath = rows[b].filePath;
+      final aTitle =
+          aPath != null && titleMatchesFileName(rows[a].track.title, aPath);
+      final bTitle =
+          bPath != null && titleMatchesFileName(rows[b].track.title, bPath);
+      if (aTitle != bTitle) return aTitle ? -1 : 1;
+      return a.compareTo(b);
+    }
+
+    final holderOf = <int, int>{};
+    for (var i = 0; i < rows.length; i++) {
+      final index = rows[i].track.index;
+      if (index <= 0) continue;
+      final holder = holderOf[index];
+      if (holder == null || compareOwnership(i, holder) < 0) {
+        holderOf[index] = i;
+      }
+    }
+
+    // One file never belongs to two tracks: the entry that keeps its number
+    // keeps a shared file; any other entry downloads its own copy again.
+    final filePaths = [for (final row in rows) row.filePath];
+    final statuses = [for (final row in rows) row.status];
+    bool isHolder(int i) => holderOf[rows[i].track.index] == i;
+    final byOwnership = List<int>.generate(rows.length, (i) => i)..sort((a, b) {
+      if (isHolder(a) != isHolder(b)) return isHolder(a) ? -1 : 1;
+      return compareOwnership(a, b);
+    });
+    final claimedFiles = <String>{};
+    for (final i in byOwnership) {
+      final path = filePaths[i];
+      if (path == null || claimedFiles.add(p.normalize(path))) continue;
+      filePaths[i] = null;
+      if (statuses[i] == 'complete') statuses[i] = 'pending';
+    }
     var maxIndex = rows.fold<int>(
       0,
       (max, row) => row.track.index > max ? row.track.index : max,
     );
     final indices = <int>[];
-    for (final row in rows) {
-      var index = row.track.index;
-      if (index <= 0 || !usedIndices.add(index)) {
-        index = ++maxIndex;
-        usedIndices.add(index);
-      }
-      indices.add(index);
+    for (var i = 0; i < rows.length; i++) {
+      final index = rows[i].track.index;
+      indices.add(index > 0 && holderOf[index] == i ? index : ++maxIndex);
     }
 
-    final discoveredByVideoId = <String, DiscoveredTrack>{
-      for (final dt in discovered.tracks) dt.videoId: dt,
-    };
+    final playlistThumbnail = await _resolveImportedImage(
+      discovered.folderPath,
+      discovered.thumbnailFileName,
+    );
 
     final playlistId = await _db.transaction(() async {
       final playlistId = await _db.insertPlaylist(
@@ -690,6 +1743,7 @@ class MetadataService {
           url: discovered.url,
           name: discovered.name,
           thumbnailUrl: Value(discovered.thumbnailUrl),
+          thumbnailPath: Value(playlistThumbnail),
           audioOnly: Value(discovered.audioOnly),
           playChapters: Value(discovered.playChapters),
           autoUpdate: Value(discovered.autoUpdate),
@@ -710,6 +1764,7 @@ class MetadataService {
       for (var i = 0; i < rows.length; i++) {
         final row = rows[i];
         final dt = row.track;
+        final complete = statuses[i] == 'complete';
         tracks.add(
           TracksCompanion.insert(
             playlistId: playlistId,
@@ -719,17 +1774,18 @@ class MetadataService {
             thumbnailUrl: Value(dt.thumbnailUrl),
             thumbnailPath: Value(row.thumbnailPath),
             durationSeconds: Value(dt.durationSeconds),
-            status: Value(row.status),
+            status: Value(statuses[i]),
             unavailableReason: Value(dt.unavailableReason),
             isLocalReplacement: Value(dt.isLocalReplacement),
             alwaysSkip: Value(dt.alwaysSkip),
             chaptersJson: Value(dt.chaptersJson),
             chaptersEnabled: Value(dt.chaptersEnabled),
-            filePath: Value(row.filePath),
+            filePath: Value(filePaths[i]),
             downloadedAt: Value(
-              row.status == 'complete' ? DateTime.now() : null,
+              complete ? (dt.downloadedAt ?? DateTime.now()) : null,
             ),
             sponsorBlockCheckedAt: Value(dt.sponsorBlockCheckedAt),
+            replaceRequested: Value(complete && dt.replaceRequested),
           ),
         );
       }
@@ -737,9 +1793,15 @@ class MetadataService {
         await _db.insertTracks(tracks);
       }
 
+      // Segments go to the row made from the same sidecar entry (by the
+      // index it was given): a video listed twice has its own segments in
+      // each entry.
       final importedTracks = await _db.getTracksForPlaylist(playlistId);
+      final entryByIndex = <int, DiscoveredTrack>{
+        for (var i = 0; i < rows.length; i++) indices[i]: rows[i].track,
+      };
       for (final track in importedTracks) {
-        final discoveredTrack = discoveredByVideoId[track.videoId];
+        final discoveredTrack = entryByIndex[track.index];
         if (discoveredTrack == null) continue;
         final segments =
             discoveredTrack.sponsorBlockSegments
@@ -751,9 +1813,13 @@ class MetadataService {
                     source: s.source,
                     uuid: Value(s.uuid),
                     category: s.category,
+                    actionType: Value(s.actionType),
                     startMs: s.startMs,
                     endMs: s.endMs,
-                    createdAt: DateTime.now(),
+                    votes: Value(s.votes),
+                    locked: Value(s.locked),
+                    description: Value(s.description),
+                    createdAt: s.createdAt ?? DateTime.now(),
                   ),
                 )
                 .toList();
@@ -764,12 +1830,27 @@ class MetadataService {
       return playlistId;
     });
 
-    // Reconcile with actual files on disk (catches mismatches from stale JSON)
+    // Link files the sidecar did not name (it may be older than the folder).
     final playlist = await _db.getPlaylist(playlistId);
     await reconcilePlaylist(playlist);
+    return playlistId;
   }
 
-  DiscoveredPlaylist? _parseMetadata(
+  /// An image named in a sidecar, resolved against the folder. Only images
+  /// inside the folder or inside a WoolyTube library folder are accepted.
+  Future<String?> _resolveImportedImage(String folder, String? name) async {
+    if (name == null || name.isEmpty) return null;
+    final normalizedFolder = p.normalize(p.absolute(folder));
+    final candidate = p.normalize(p.absolute(p.join(folder, name)));
+    final allowed =
+        p.isWithin(normalizedFolder, candidate) ||
+        p.isWithin(LibraryLayout.audioBasePath, candidate) ||
+        p.isWithin(LibraryLayout.videoBasePath, candidate);
+    if (!allowed || !await File(candidate).exists()) return null;
+    return candidate;
+  }
+
+  static DiscoveredPlaylist? _parseMetadata(
     String folderPath,
     Map<String, dynamic> json,
   ) {
@@ -780,42 +1861,48 @@ class MetadataService {
     final name = pl['name'] as String?;
     if (url == null || name == null) return null;
 
+    DateTime? date(Object? value) =>
+        value is String ? DateTime.tryParse(value) : null;
+
     final tracksJson = json['tracks'] as List<dynamic>? ?? [];
-    final tracks =
-        tracksJson.map((t) {
-          final m = t as Map<String, dynamic>;
-          return DiscoveredTrack(
-            index: m['index'] as int? ?? 0,
-            videoId: m['videoId'] as String? ?? '',
-            title: m['title'] as String? ?? 'Unknown',
-            thumbnailUrl: m['thumbnailUrl'] as String?,
-            thumbnailFileName: m['thumbnailFileName'] as String?,
-            durationSeconds: m['durationSeconds'] as int?,
-            status: m['status'] as String? ?? 'pending',
-            unavailableReason: m['unavailableReason'] as String?,
-            isLocalReplacement: m['isLocalReplacement'] as bool? ?? false,
-            alwaysSkip: m['alwaysSkip'] as bool? ?? false,
-            chaptersJson:
-                m['chapters'] == null
-                    ? null
-                    : ChapterData.fromJson(m['chapters']).encode(),
-            chaptersEnabled: m['chaptersEnabled'] as bool?,
-            sponsorBlockCheckedAt:
-                m['sponsorBlockCheckedAt'] != null
-                    ? DateTime.tryParse(m['sponsorBlockCheckedAt'] as String)
-                    : null,
-            fileName: m['fileName'] as String?,
-            sponsorBlockSegments: _parseSegments(
-              m['sponsorBlockSegments'] as List<dynamic>?,
-            ),
-          );
-        }).toList();
+    final tracks = <DiscoveredTrack>[];
+    for (final t in tracksJson) {
+      if (t is! Map<String, dynamic>) continue;
+      final m = t;
+      tracks.add(
+        DiscoveredTrack(
+          index: m['index'] as int? ?? 0,
+          videoId: m['videoId'] as String? ?? '',
+          title: m['title'] as String? ?? 'Unknown',
+          thumbnailUrl: m['thumbnailUrl'] as String?,
+          thumbnailFileName: m['thumbnailFileName'] as String?,
+          durationSeconds: m['durationSeconds'] as int?,
+          status: m['status'] as String? ?? 'pending',
+          unavailableReason: m['unavailableReason'] as String?,
+          isLocalReplacement: m['isLocalReplacement'] as bool? ?? false,
+          alwaysSkip: m['alwaysSkip'] as bool? ?? false,
+          chaptersJson:
+              m['chapters'] == null
+                  ? null
+                  : ChapterData.fromJson(m['chapters']).encode(),
+          chaptersEnabled: m['chaptersEnabled'] as bool?,
+          sponsorBlockCheckedAt: date(m['sponsorBlockCheckedAt']),
+          downloadedAt: date(m['downloadedAt']),
+          replaceRequested: m['replaceRequested'] as bool? ?? false,
+          fileName: m['fileName'] as String?,
+          sponsorBlockSegments: _parseSegments(
+            m['sponsorBlockSegments'] as List<dynamic>?,
+          ),
+        ),
+      );
+    }
 
     return DiscoveredPlaylist(
       folderPath: folderPath,
       url: url,
       name: name,
       thumbnailUrl: pl['thumbnailUrl'] as String?,
+      thumbnailFileName: pl['thumbnailFileName'] as String?,
       audioOnly: pl['audioOnly'] as bool? ?? false,
       playChapters: pl['playChapters'] != false,
       autoUpdate: pl['autoUpdate'] as bool? ?? true,
@@ -831,19 +1918,15 @@ class MetadataService {
             pl['sponsorBlockCategories'] as String? ??
                 '["sponsor","selfpromo","music_offtopic"]',
           ),
-      lastUpdated:
-          pl['lastUpdated'] != null
-              ? DateTime.tryParse(pl['lastUpdated'] as String)
-              : null,
-      createdAt:
-          pl['createdAt'] != null
-              ? DateTime.tryParse(pl['createdAt'] as String) ?? DateTime.now()
-              : DateTime.now(),
+      lastUpdated: date(pl['lastUpdated']),
+      createdAt: date(pl['createdAt']) ?? DateTime.now(),
       tracks: tracks,
     );
   }
 
-  List<DiscoveredSponsorBlockSegment> _parseSegments(List<dynamic>? raw) {
+  static List<DiscoveredSponsorBlockSegment> _parseSegments(
+    List<dynamic>? raw,
+  ) {
     if (raw == null) return const [];
     final result = <DiscoveredSponsorBlockSegment>[];
     for (final item in raw) {
@@ -863,11 +1946,227 @@ class MetadataService {
           source: source,
           uuid: item['uuid'] as String?,
           category: category,
+          // Sidecars written before version 2 have no action; 'skip' was the
+          // only action then.
+          actionType: item['actionType'] as String? ?? 'skip',
           startMs: startMs,
           endMs: endMs,
+          votes: item['votes'] as int?,
+          locked: item['locked'] as bool?,
+          description: item['description'] as String?,
+          createdAt:
+              item['createdAt'] is String
+                  ? DateTime.tryParse(item['createdAt'] as String)
+                  : null,
         ),
       );
     }
     return result;
   }
+}
+
+/// The files of one folder, listed once, so checking whether a track's file
+/// is there costs a set lookup instead of a disk access.
+class _FolderListing {
+  _FolderListing(String folder) : _folder = p.normalize(folder);
+
+  final String _folder;
+  final _exact = <String>{};
+  final _lower = <String>{};
+
+  void add(String path) {
+    final normalized = p.normalize(path);
+    _exact.add(normalized);
+    _lower.add(normalized.toLowerCase());
+  }
+
+  void remove(String path) {
+    final normalized = p.normalize(path);
+    _exact.remove(normalized);
+    _lower.remove(normalized.toLowerCase());
+  }
+
+  bool _inFolder(String normalized) => p.dirname(normalized) == _folder;
+
+  /// False only when [path] lies in the folder and was not listed (in any
+  /// letter case).
+  bool mayExist(String path) {
+    final normalized = p.normalize(path);
+    if (!_inFolder(normalized)) return true;
+    return _lower.contains(normalized.toLowerCase());
+  }
+
+  /// Whether the file at [path] exists. Files in the folder are answered
+  /// from the listing; only a name that differs from a listed one in letter
+  /// case, or a file elsewhere, is checked on disk.
+  Future<bool> exists(String path) async {
+    final normalized = p.normalize(path);
+    if (_inFolder(normalized)) {
+      if (_exact.contains(normalized)) return true;
+      if (!_lower.contains(normalized.toLowerCase())) return false;
+    }
+    return File(path).exists();
+  }
+}
+
+/// Everything needed to write one playlist's sidecar and `.m3u8`, in a form
+/// that can be sent to a worker isolate.
+class SidecarJob {
+  const SidecarJob({
+    required this.playlist,
+    required this.tracks,
+    required this.segmentsByTrack,
+    required this.metaPath,
+    required this.playlistFilePath,
+    required this.knownHashes,
+    required this.tempSuffix,
+  });
+
+  final Playlist playlist;
+  final List<Track> tracks;
+  final Map<int, List<SponsorBlockSegment>> segmentsByTrack;
+  final String metaPath;
+  final String playlistFilePath;
+
+  /// Hash of what was last written at each path, if known.
+  final Map<String, int?> knownHashes;
+  final String tempSuffix;
+}
+
+/// The sidecar JSON of a playlist.
+String buildSidecarJson(
+  Playlist playlist,
+  List<Track> tracks,
+  Map<int, List<SponsorBlockSegment>> segmentsByTrack,
+) {
+  String? relative(String? path) =>
+      MetadataService.fileNameRelativeTo(playlist.outputPath, path);
+  final tracksJson = <Map<String, dynamic>>[];
+  for (final t in tracks) {
+    final segments = segmentsByTrack[t.id] ?? const <SponsorBlockSegment>[];
+    tracksJson.add({
+      'index': t.index,
+      'videoId': t.videoId,
+      'title': t.title,
+      'thumbnailUrl': t.thumbnailUrl,
+      'thumbnailFileName': relative(t.thumbnailPath),
+      'durationSeconds': t.durationSeconds,
+      'status': t.status,
+      'unavailableReason': t.unavailableReason,
+      'isLocalReplacement': t.isLocalReplacement,
+      'alwaysSkip': t.alwaysSkip,
+      'chapters': ChapterData.decode(t.chaptersJson).toJson(),
+      'chaptersEnabled': t.chaptersEnabled,
+      'sponsorBlockCheckedAt':
+          t.sponsorBlockCheckedAt?.toUtc().toIso8601String(),
+      'downloadedAt': t.downloadedAt?.toUtc().toIso8601String(),
+      'replaceRequested': t.replaceRequested,
+      'fileName': relative(t.filePath),
+      'sponsorBlockSegments': [
+        for (final s in segments)
+          {
+            'source': s.source,
+            'uuid': s.uuid,
+            'category': s.category,
+            'actionType': s.actionType,
+            'startMs': s.startMs,
+            'endMs': s.endMs,
+            'votes': s.votes,
+            'locked': s.locked,
+            'description': s.description,
+            'createdAt': s.createdAt.toUtc().toIso8601String(),
+          },
+      ],
+    });
+  }
+
+  final data = {
+    'version': 2,
+    'playlist': {
+      'url': playlist.url,
+      'name': playlist.name,
+      'thumbnailUrl': playlist.thumbnailUrl,
+      'thumbnailFileName': relative(playlist.thumbnailPath),
+      'audioOnly': playlist.audioOnly,
+      'playChapters': playlist.playChapters ?? true,
+      'autoUpdate': playlist.autoUpdate,
+      'updateFrequencyHours': playlist.updateFrequencyHours,
+      'includeThumbnails': playlist.includeThumbnails,
+      'sponsorBlockEnabled': playlist.sponsorBlockEnabled,
+      'sponsorBlockCategories': playlist.sponsorBlockCategories,
+      'sponsorBlockCategoryActions': playlist.sponsorBlockCategoryActions,
+      'lastUpdated': playlist.lastUpdated?.toUtc().toIso8601String(),
+      'createdAt': playlist.createdAt.toUtc().toIso8601String(),
+    },
+    'tracks': tracksJson,
+  };
+  return const JsonEncoder.withIndent('  ').convert(data);
+}
+
+/// Builds and writes a playlist's sidecar and `.m3u8` (see [SidecarJob]).
+/// A file whose content is unchanged is not rewritten; when its last hash
+/// is not known, the file on disk is compared. Returns the hash of each
+/// file's current content. Runs on any isolate.
+Future<Map<String, int>> writeSidecarFiles(SidecarJob job) async {
+  final contents = {
+    job.metaPath: buildSidecarJson(
+      job.playlist,
+      job.tracks,
+      job.segmentsByTrack,
+    ),
+    job.playlistFilePath: MetadataService.buildPlaylistFile(
+      job.playlist,
+      job.tracks,
+    ),
+  };
+  final hashes = <String, int>{};
+  for (final entry in contents.entries) {
+    final path = entry.key;
+    final content = entry.value;
+    final hash = contentHash(content);
+    final target = File(path);
+    final known = job.knownHashes[path];
+    var unchanged = false;
+    if (known == hash) {
+      unchanged = await target.exists();
+    } else if (known == null) {
+      // Not written by this process yet (for example after a restart):
+      // compare with what is on disk instead of rewriting every file.
+      try {
+        unchanged =
+            await target.exists() && await target.readAsString() == content;
+      } catch (_) {
+        unchanged = false;
+      }
+    }
+    if (!unchanged) {
+      final tmpFile = File('$path.tmp.${job.tempSuffix}');
+      try {
+        await tmpFile.writeAsString(content);
+        await tmpFile.rename(path);
+      } catch (_) {
+        try {
+          if (await tmpFile.exists()) await tmpFile.delete();
+        } catch (_) {
+          // The folder cleanup removes leftover temp files later.
+        }
+        rethrow;
+      }
+    }
+    hashes[path] = hash;
+  }
+  return hashes;
+}
+
+/// A content hash of [content]: two independent 30-bit hashes (FNV-1a and
+/// a polynomial one) side by side, the same on every isolate and run.
+int contentHash(String content) {
+  var fnv = 0x811c9dc5;
+  var poly = content.length & 0x3FFFFFFF;
+  for (var i = 0; i < content.length; i++) {
+    final unit = content.codeUnitAt(i);
+    fnv = ((fnv ^ unit) * 0x01000193) & 0x3FFFFFFF;
+    poly = (poly * 31 + unit) & 0x3FFFFFFF;
+  }
+  return (fnv << 30) | poly;
 }

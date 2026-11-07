@@ -3,29 +3,57 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../database/database.dart';
 import 'providers.dart';
 
-/// Per-playlist `(downloaded, total)` track counts derived from the shared
-/// track stream, so the home page does not issue two database queries per
-/// playlist on every rebuild.
-typedef PlaylistTrackCounts = ({int downloaded, int total});
+/// Track counts of one playlist (total, downloaded, unavailable, failed).
+typedef PlaylistTrackCounts = PlaylistCounts;
 
-final playlistTrackCountsProvider = Provider<Map<int, PlaylistTrackCounts>>((
-  ref,
-) {
-  final tracks = ref.watch(allTracksProvider).valueOrNull ?? const <Track>[];
-  return countTracksByPlaylist(tracks);
+/// Per-playlist track counts, or null until the first answer arrived.
+///
+/// Comes from one SQL aggregate ([playlistTrackCountsStreamProvider]) that
+/// only emits when a number changes, so neither the track table nor the UI
+/// isolate is busy with it during downloads.
+final playlistTrackCountsProvider = Provider<Map<int, PlaylistCounts>?>((ref) {
+  return ref.watch(playlistTrackCountsStreamProvider).valueOrNull;
 });
 
-Map<int, PlaylistTrackCounts> countTracksByPlaylist(Iterable<Track> tracks) {
-  final downloaded = <int, int>{};
+/// The counts of one playlist for a card: whether the counts arrived yet,
+/// and the playlist's entry (null when it has no tracks). Only changes when
+/// this playlist's numbers change.
+final playlistCountsProvider = Provider.autoDispose
+    .family<({bool loaded, PlaylistCounts? counts}), int>((ref, playlistId) {
+      return ref.watch(
+        playlistTrackCountsProvider.select(
+          (all) => (loaded: all != null, counts: all?[playlistId]),
+        ),
+      );
+    });
+
+/// The same numbers as the database aggregate, from a list of tracks (for
+/// code that already holds the tracks, and for tests).
+Map<int, PlaylistCounts> countTracksByPlaylist(Iterable<Track> tracks) {
   final total = <int, int>{};
+  final downloaded = <int, int>{};
+  final unavailable = <int, int>{};
+  final failed = <int, int>{};
+  void bump(Map<int, int> map, int id) =>
+      map.update(id, (n) => n + 1, ifAbsent: () => 1);
   for (final track in tracks) {
-    total.update(track.playlistId, (n) => n + 1, ifAbsent: () => 1);
-    if (track.status == 'complete') {
-      downloaded.update(track.playlistId, (n) => n + 1, ifAbsent: () => 1);
+    bump(total, track.playlistId);
+    switch (track.status) {
+      case 'complete':
+        bump(downloaded, track.playlistId);
+      case 'unavailable':
+        bump(unavailable, track.playlistId);
+      case 'error':
+        bump(failed, track.playlistId);
     }
   }
   return {
     for (final entry in total.entries)
-      entry.key: (downloaded: downloaded[entry.key] ?? 0, total: entry.value),
+      entry.key: PlaylistCounts(
+        total: entry.value,
+        downloaded: downloaded[entry.key] ?? 0,
+        unavailable: unavailable[entry.key] ?? 0,
+        failed: failed[entry.key] ?? 0,
+      ),
   };
 }

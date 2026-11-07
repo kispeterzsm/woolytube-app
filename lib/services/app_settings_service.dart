@@ -62,13 +62,26 @@ class AppSettingsService {
     await preferences.setString(subtitleLanguagesKey, normalized);
   }
 
+  /// Checks and tidies a comma-separated list of subtitle language codes
+  /// for yt-dlp. Spaces and empty items (a trailing comma) are dropped. A
+  /// code may end in `.*` to also match its regional variants (`en.*` for
+  /// en-US and en-GB captions). 'all' is refused: it would download
+  /// hundreds of automatic translations.
   static String normalizeSubtitleLanguages(String value) {
-    final languages = value.split(',').map((code) => code.trim()).toSet();
-    if (languages.any(
-      (code) =>
-          code.toLowerCase() == 'all' ||
-          !RegExp(r'^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]+)*$').hasMatch(code),
-    )) {
+    final languages =
+        value
+            .split(',')
+            .map((code) => code.trim())
+            .where((code) => code.isNotEmpty)
+            .toSet();
+    if (languages.isEmpty ||
+        languages.any(
+          (code) =>
+              code.toLowerCase() == 'all' ||
+              !RegExp(
+                r'^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]+)*(?:\.\*)?$',
+              ).hasMatch(code),
+        )) {
       throw const FormatException(
         'Enter language codes separated by commas, such as en, hu, de.',
       );
@@ -117,6 +130,50 @@ class AppSettingsService {
       lastYtDlpUpdateAttemptKey,
       at.millisecondsSinceEpoch,
     );
+  }
+
+  /// Every stored setting by key, for the library backup. Values are JSON
+  /// types (bool, int, double, String, list of String).
+  Future<Map<String, Object?>> exportSettings() async {
+    final preferences = await _preferencesLoader();
+    await preferences.reload();
+    final keys = preferences.getKeys().toList()..sort();
+    return {for (final key in keys) key: preferences.get(key)};
+  }
+
+  /// Applies settings from a library backup (see [exportSettings]). Only
+  /// the owner's preferences are restored, never app bookkeeping such as
+  /// dismissed imports. Returns how many settings were applied.
+  Future<int> importSettings(Map<String, Object?> values) async {
+    final preferences = await _preferencesLoader();
+    var applied = 0;
+    for (final key in const [
+      autoDownloadWithMobileDataKey,
+      downloadSubtitlesKey,
+      pauseOnAudioInterruptionKey,
+    ]) {
+      final value = values[key];
+      if (value is bool) {
+        await preferences.setBool(key, value);
+        applied++;
+      }
+    }
+    final languages = values[subtitleLanguagesKey];
+    if (languages is String) {
+      // A hand-edited backup must not hand yt-dlp something the settings
+      // page would refuse.
+      try {
+        await preferences.setString(
+          subtitleLanguagesKey,
+          normalizeSubtitleLanguages(languages),
+        );
+        applied++;
+      } on FormatException {
+        // Keep the current languages.
+      }
+    }
+    if (applied > 0) await scheduleAutoUpdate();
+    return applied;
   }
 
   Future<void> scheduleAutoUpdate() async {

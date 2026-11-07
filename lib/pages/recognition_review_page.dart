@@ -74,7 +74,15 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
   Future<void> _preview(int startMs, {int? endMs}) async {
     final player = ref.read(playbackServiceProvider);
     if (_previewPlayer == null) {
-      await player.beginChapterEditing(widget.track);
+      final tracks = await ref
+          .read(databaseProvider)
+          .getTracksForPlaylist(widget.track.playlistId);
+      // Keeps the queue: the file plays now and the queue goes on after it.
+      await player.beginChapterEditing(widget.track, tracks);
+      if (!mounted) {
+        player.endChapterEditing();
+        return;
+      }
       _previewPlayer = player;
     }
     await player.seekTo(Duration(milliseconds: startMs.clamp(0, 1 << 40)));

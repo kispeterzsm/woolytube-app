@@ -34,6 +34,12 @@ class Playlists extends Table {
   DateTimeColumn get lastUpdated => dateTime().nullable()();
   DateTimeColumn get createdAt => dateTime()();
   TextColumn get outputPath => text()();
+
+  /// When an update (manual or scheduled) last started checking this
+  /// playlist, successful or not. The scheduled worker takes the playlists
+  /// it tried longest ago first, so one playlist that never finishes in
+  /// time cannot keep the others from ever being updated.
+  DateTimeColumn get lastUpdateAttempt => dateTime().nullable()();
 }
 
 class Tracks extends Table {
@@ -61,6 +67,12 @@ class Tracks extends Table {
   DateTimeColumn get downloadedAt => dateTime().nullable()();
   DateTimeColumn get sponsorBlockCheckedAt => dateTime().nullable()();
   TextColumn get lastError => text().nullable()();
+
+  /// The file should be replaced by a fresh download (the YouTube original
+  /// of a local replacement, or the other format after a mode switch). The
+  /// current file stays in use until the new one is completely on disk.
+  BoolColumn get replaceRequested =>
+      boolean().withDefault(const Constant(false))();
 }
 
 class SponsorBlockSegments extends Table {
@@ -80,6 +92,44 @@ class SponsorBlockSegments extends Table {
   DateTimeColumn get createdAt => dateTime()();
 }
 
+const _accentFolding = {
+  'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a', 'ã': 'a', 'å': 'a', 'æ': 'ae', //
+  'ç': 'c', 'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e', 'í': 'i', 'ì': 'i', //
+  'î': 'i', 'ï': 'i', 'ñ': 'n', 'ó': 'o', 'ò': 'o', 'ô': 'o', 'ö': 'o', //
+  'ő': 'o', 'õ': 'o', 'ø': 'o', 'œ': 'oe', 'ß': 'ss', 'ú': 'u', 'ù': 'u', //
+  'û': 'u', 'ü': 'u', 'ű': 'u', 'ý': 'y', 'ÿ': 'y',
+};
+
+/// Reduces [text] to lowercase ASCII letters and digits, folding accents the
+/// way yt-dlp's restricted file names do, so a title can be compared with
+/// the file name it produced.
+String foldForFileNameMatch(String text) {
+  final buffer = StringBuffer();
+  for (final rune in text.toLowerCase().runes) {
+    final char = String.fromCharCode(rune);
+    final folded = _accentFolding[char] ?? char;
+    for (final unit in folded.codeUnits) {
+      if ((unit >= 0x61 && unit <= 0x7a) || (unit >= 0x30 && unit <= 0x39)) {
+        buffer.writeCharCode(unit);
+      }
+    }
+  }
+  return buffer.toString();
+}
+
+/// Whether the title part of [filePath] (after the `<index>_` prefix) looks
+/// like it was made from [title].
+bool titleMatchesFileName(String title, String filePath) {
+  final base = p.basenameWithoutExtension(filePath);
+  final rest = base.replaceFirst(RegExp(r'^\d+_'), '');
+  final foldedTitle = foldForFileNameMatch(title);
+  final foldedRest = foldForFileNameMatch(rest);
+  if (foldedTitle.isEmpty || foldedRest.isEmpty) return false;
+  return foldedTitle == foldedRest ||
+      foldedTitle.startsWith(foldedRest) ||
+      foldedRest.startsWith(foldedTitle);
+}
+
 @DriftDatabase(tables: [Playlists, Tracks, SponsorBlockSegments])
 class AppDatabase extends _$AppDatabase {
   AppDatabase._internal(super.e);
@@ -96,7 +146,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 11;
+  int get schemaVersion => 14;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -115,6 +165,7 @@ class AppDatabase extends _$AppDatabase {
       await customStatement(
         'CREATE INDEX IF NOT EXISTS idx_sb_track_source ON sponsor_block_segments (track_id, source)',
       );
+      await _createRevisionTracking();
     },
     onUpgrade: (migrator, from, to) async {
       if (from < 2) {
@@ -184,19 +235,117 @@ class AppDatabase extends _$AppDatabase {
         await customStatement('DROP INDEX IF EXISTS idx_tracks_pl_index');
         await customStatement(_createUniqueTrackIndexSql);
       }
+      if (from < 12) {
+        await migrator.addColumn(tracks, tracks.replaceRequested);
+      }
+      if (from < 13) {
+        await migrator.addColumn(playlists, playlists.lastUpdateAttempt);
+        await _createRevisionTracking();
+      }
+      if (from < 14) {
+        await _deleteOrphanedTracks();
+      }
     },
   );
+
+  /// A counter per playlist that SQLite itself raises whenever the playlist,
+  /// one of its tracks or one of their skip segments changes, from any
+  /// connection (the app or the background worker). The metadata mirror
+  /// compares it with the counter it last wrote, so it only rebuilds the
+  /// files of playlists that really changed.
+  ///
+  /// The table is not a drift table on purpose: writes made by the triggers
+  /// do not wake drift's stream queries.
+  Future<void> _createRevisionTracking() async {
+    await customStatement(
+      'CREATE TABLE IF NOT EXISTS playlist_revisions ('
+      'playlist_id INTEGER NOT NULL PRIMARY KEY, '
+      'revision INTEGER NOT NULL DEFAULT 0)',
+    );
+    String bump(String playlistIdExpr) =>
+        'INSERT INTO playlist_revisions (playlist_id, revision) '
+        'SELECT $playlistIdExpr, 1 WHERE $playlistIdExpr IS NOT NULL '
+        'ON CONFLICT(playlist_id) DO UPDATE SET revision = revision + 1;';
+    String segmentPlaylist(String row) =>
+        '(SELECT playlist_id FROM tracks WHERE id = $row.track_id)';
+    final triggers = {
+      'trg_rev_tracks_insert':
+          'AFTER INSERT ON tracks BEGIN '
+          '${bump('NEW.playlist_id')} END',
+      'trg_rev_tracks_update':
+          'AFTER UPDATE ON tracks BEGIN '
+          '${bump('NEW.playlist_id')} END',
+      'trg_rev_tracks_delete':
+          'AFTER DELETE ON tracks BEGIN '
+          '${bump('OLD.playlist_id')} END',
+      'trg_rev_segments_insert':
+          'AFTER INSERT ON sponsor_block_segments BEGIN '
+          '${bump(segmentPlaylist('NEW'))} END',
+      'trg_rev_segments_update':
+          'AFTER UPDATE ON sponsor_block_segments BEGIN '
+          '${bump(segmentPlaylist('NEW'))} END',
+      'trg_rev_segments_delete':
+          'AFTER DELETE ON sponsor_block_segments BEGIN '
+          '${bump(segmentPlaylist('OLD'))} END',
+      'trg_rev_playlists_insert':
+          'AFTER INSERT ON playlists BEGIN '
+          '${bump('NEW.id')} END',
+      // A changed update-attempt stamp does not change the metadata file.
+      'trg_rev_playlists_update':
+          'AFTER UPDATE ON playlists WHEN '
+          'NEW.last_update_attempt IS OLD.last_update_attempt OR '
+          'NEW.name IS NOT OLD.name OR NEW.url IS NOT OLD.url OR '
+          'NEW.output_path IS NOT OLD.output_path OR '
+          'NEW.last_updated IS NOT OLD.last_updated BEGIN '
+          '${bump('NEW.id')} END',
+      'trg_rev_playlists_delete':
+          'AFTER DELETE ON playlists BEGIN '
+          'DELETE FROM playlist_revisions WHERE playlist_id = OLD.id; END',
+    };
+    for (final entry in triggers.entries) {
+      await customStatement(
+        'CREATE TRIGGER IF NOT EXISTS ${entry.key} ${entry.value}',
+      );
+    }
+  }
+
+  /// Removes tracks whose playlist no longer exists, with their skip
+  /// segments and revision counters. App versions before foreign keys were
+  /// enforced could delete a playlist and leave its tracks behind, where
+  /// they still showed up in the library search. Foreign keys now prevent
+  /// new ones, so this runs once on upgrade.
+  Future<void> _deleteOrphanedTracks() async {
+    const orphaned =
+        'SELECT id FROM tracks WHERE playlist_id NOT IN (SELECT id FROM playlists)';
+    await customStatement(
+      'DELETE FROM sponsor_block_segments WHERE track_id IN ($orphaned)',
+    );
+    await customStatement(
+      'DELETE FROM tracks WHERE playlist_id NOT IN (SELECT id FROM playlists)',
+    );
+    // Deleting the tracks raised the counters of their missing playlists.
+    await customStatement(
+      'DELETE FROM playlist_revisions '
+      'WHERE playlist_id NOT IN (SELECT id FROM playlists)',
+    );
+  }
 
   static const _createUniqueTrackIndexSql =
       'CREATE UNIQUE INDEX IF NOT EXISTS idx_tracks_pl_index_unique '
       'ON tracks (playlist_id, "index")';
 
   /// Older versions could give two tracks of one playlist the same index, for
-  /// example when a sync renumbered pending tracks onto a downloaded one. Keep
-  /// the oldest row at the contested index and append the others after the
-  /// playlist's current maximum. A moved row that points at the same file as
-  /// another row loses that file so it is downloaded again under its own
-  /// index instead of playing another track's media.
+  /// example when a sync renumbered a pending track onto a downloaded one,
+  /// and the download then adopted the other track's file by its prefix.
+  ///
+  /// The row that really owns the contested file keeps the index: the one
+  /// that got the file first (an adopting row was stamped later), then the
+  /// one whose title matches the file name, then the oldest row. The other
+  /// rows are appended after the playlist's current maximum. A moved row
+  /// that points at the same file as the kept row loses that file so it is
+  /// downloaded again under its own index instead of playing another
+  /// track's media; a moved row with its own file keeps it (reconcile keeps
+  /// an existing file path and renames it to the new prefix).
   Future<void> _repairDuplicateTrackIndices() async {
     final groups =
         await customSelect(
@@ -220,11 +369,12 @@ class AppDatabase extends _$AppDatabase {
       }
       final rows =
           await customSelect(
-            'SELECT id, file_path FROM tracks '
-            'WHERE playlist_id = ? AND "index" = ? ORDER BY id',
+            'SELECT id, file_path, title, downloaded_at, chapters_json '
+            'FROM tracks WHERE playlist_id = ? AND "index" = ? ORDER BY id',
             variables: [Variable<int>(playlistId), Variable<int>(index)],
           ).get();
-      for (final row in rows.skip(1)) {
+      final ranked = [...rows]..sort(_compareFileOwnership);
+      for (final row in ranked.skip(1)) {
         final id = row.read<int>('id');
         maxIndex = maxIndex! + 1;
         await customUpdate(
@@ -258,13 +408,50 @@ class AppDatabase extends _$AppDatabase {
     }
   }
 
+  /// Orders rows that share an index so the likely owner of the file comes
+  /// first. See [_repairDuplicateTrackIndices].
+  static int _compareFileOwnership(QueryRow a, QueryRow b) {
+    final aPath = a.readNullable<String>('file_path');
+    final bPath = b.readNullable<String>('file_path');
+    if ((aPath == null) != (bPath == null)) return aPath == null ? 1 : -1;
+    // drift stores dates as unix seconds by default.
+    final aAt = a.readNullable<int>('downloaded_at');
+    final bAt = b.readNullable<int>('downloaded_at');
+    if (aAt != bAt) {
+      if (aAt == null) return 1;
+      if (bAt == null) return -1;
+      return aAt.compareTo(bAt);
+    }
+    if (aPath != null && bPath != null) {
+      final aScore = titleMatchesFileName(a.read<String>('title'), aPath);
+      final bScore = titleMatchesFileName(b.read<String>('title'), bPath);
+      if (aScore != bScore) return aScore ? -1 : 1;
+    }
+    final aChapters = a.readNullable<String>('chapters_json') != null;
+    final bChapters = b.readNullable<String>('chapters_json') != null;
+    if (aChapters != bChapters) return aChapters ? -1 : 1;
+    return a.read<int>('id').compareTo(b.read<int>('id'));
+  }
+
   // Playlist queries
   Future<List<Playlist>> getAllPlaylists() => select(playlists).get();
 
-  Stream<List<Playlist>> watchAllPlaylists() => select(playlists).watch();
+  Stream<List<Playlist>> watchAllPlaylists() =>
+      select(playlists).watch().distinct(listsEqual);
 
   Future<Playlist> getPlaylist(int id) =>
       (select(playlists)..where((p) => p.id.equals(id))).getSingle();
+
+  /// The playlist, or null when it was deleted.
+  Future<Playlist?> getPlaylistOrNull(int id) =>
+      (select(playlists)..where((p) => p.id.equals(id))).getSingleOrNull();
+
+  /// Stamps the start of an update check (see [Playlists.lastUpdateAttempt]).
+  Future<void> markPlaylistUpdateAttempt(int id, DateTime at) =>
+      updatePlaylistFields(
+        id,
+        PlaylistsCompanion(lastUpdateAttempt: Value(at)),
+      );
 
   Future<int> insertPlaylist(PlaylistsCompanion playlist) =>
       into(playlists).insert(playlist);
@@ -306,11 +493,38 @@ class AppDatabase extends _$AppDatabase {
         (t) => OrderingTerm.asc(t.index),
       ])).get();
 
-  Stream<List<Track>> watchAllTracks() =>
-      (select(tracks)..orderBy([
-        (t) => OrderingTerm.asc(t.playlistId),
-        (t) => OrderingTerm.asc(t.index),
-      ])).watch();
+  /// Every track of the library. Drift re-runs the query after any write to
+  /// the tracks table; identical results are not passed on.
+  Stream<List<Track>> watchAllTracks() => (select(tracks)..orderBy([
+    (t) => OrderingTerm.asc(t.playlistId),
+    (t) => OrderingTerm.asc(t.index),
+  ])).watch().distinct(listsEqual);
+
+  /// Per playlist: how many tracks it has, how many are downloaded, how many
+  /// YouTube no longer provides (and have no file), and how many failed.
+  /// Cheap (one aggregate over an index) and only emits when a number
+  /// changes, so it does not wake the home page on every track write.
+  Stream<Map<int, PlaylistCounts>> watchPlaylistTrackCounts() => customSelect(
+        'SELECT playlist_id, COUNT(*) AS total, '
+        "COALESCE(SUM(status = 'complete'), 0) AS downloaded, "
+        "COALESCE(SUM(status = 'unavailable'), 0) AS unavailable, "
+        "COALESCE(SUM(status = 'error'), 0) AS failed "
+        'FROM tracks GROUP BY playlist_id',
+        readsFrom: {tracks},
+      )
+      .watch()
+      .map(
+        (rows) => {
+          for (final row in rows)
+            row.read<int>('playlist_id'): PlaylistCounts(
+              total: row.read<int>('total'),
+              downloaded: row.read<int>('downloaded'),
+              unavailable: row.read<int>('unavailable'),
+              failed: row.read<int>('failed'),
+            ),
+        },
+      )
+      .distinct(_mapsEqual);
 
   Future<List<Track>> getTracksForPlaylist(int playlistId) =>
       (select(tracks)
@@ -321,11 +535,18 @@ class AppDatabase extends _$AppDatabase {
   Future<Track?> getTrack(int id) =>
       (select(tracks)..where((t) => t.id.equals(id))).getSingleOrNull();
 
-  Stream<List<Track>> watchTracksForPlaylist(int playlistId) =>
+  /// The playlist's tracks in order. Writes to other playlists' tracks
+  /// make drift re-run the query; an unchanged result is not passed on.
+  Stream<List<Track>> watchTracksForPlaylist(int playlistId) => (select(tracks)
+        ..where((t) => t.playlistId.equals(playlistId))
+        ..orderBy([(t) => OrderingTerm.asc(t.index)]))
+      .watch()
+      .distinct(listsEqual);
+
+  /// One track, or null once it is deleted.
+  Stream<Track?> watchTrack(int id) =>
       (select(tracks)
-            ..where((t) => t.playlistId.equals(playlistId))
-            ..orderBy([(t) => OrderingTerm.asc(t.index)]))
-          .watch();
+        ..where((t) => t.id.equals(id))).watchSingleOrNull().distinct();
 
   Future<int> insertTrack(TracksCompanion track) => into(tracks).insert(track);
 
@@ -348,6 +569,40 @@ class AppDatabase extends _$AppDatabase {
     );
   }
 
+  /// Points several tracks at new files in one transaction (one stream
+  /// update instead of one per track).
+  Future<void> updateTrackFilePaths(Map<int, String> pathsByTrackId) async {
+    if (pathsByTrackId.isEmpty) return;
+    await batch((b) {
+      for (final entry in pathsByTrackId.entries) {
+        b.update(
+          tracks,
+          TracksCompanion(filePath: Value(entry.value)),
+          where: (t) => t.id.equals(entry.key),
+        );
+      }
+    });
+  }
+
+  /// Records several cover images in one transaction.
+  Future<void> updateTrackThumbnailPaths(
+    Map<int, String?> pathsByTrackId,
+  ) async {
+    if (pathsByTrackId.isEmpty) return;
+    await batch((b) {
+      for (final entry in pathsByTrackId.entries) {
+        b.update(
+          tracks,
+          TracksCompanion(thumbnailPath: Value(entry.value)),
+          where: (t) => t.id.equals(entry.key),
+        );
+      }
+    });
+  }
+
+  /// Sets [status]. 'complete' stamps `downloadedAt` with now, unless
+  /// [keepDownloadedAt] (relinking a file that was already downloaded
+  /// before, which must not rewrite its history).
   Future<void> updateTrackStatus(
     int trackId,
     String status, {
@@ -356,6 +611,7 @@ class AppDatabase extends _$AppDatabase {
     String? error,
     bool clearFilePath = false,
     bool clearDownloadedAt = false,
+    bool keepDownloadedAt = false,
   }) async {
     final Value<String?> errorValue;
     if (status == 'error') {
@@ -380,7 +636,7 @@ class AppDatabase extends _$AppDatabase {
                 ? Value(isLocalReplacement)
                 : const Value.absent(),
         downloadedAt:
-            status == 'complete'
+            status == 'complete' && !keepDownloadedAt
                 ? Value(DateTime.now())
                 : clearDownloadedAt
                 ? const Value(null)
@@ -390,15 +646,55 @@ class AppDatabase extends _$AppDatabase {
     );
   }
 
+  /// Tracks an update should download. A local replacement whose file is
+  /// missing (for example still being copied back after a restore) is not
+  /// among them unless the owner asked for the original: downloading would
+  /// silently swap the owner's chosen file for the YouTube version.
   Future<List<Track>> getPendingTracks(int playlistId) =>
       (select(tracks)
             ..where(
               (t) =>
                   t.playlistId.equals(playlistId) &
-                  (t.status.equals('pending') | t.status.equals('error')),
+                  (t.status.equals('pending') | t.status.equals('error')) &
+                  (t.isLocalReplacement.equals(false) |
+                      t.replaceRequested.equals(true)),
             )
             ..orderBy([(t) => OrderingTerm.asc(t.index)]))
           .get();
+
+  /// Downloaded tracks whose file should be replaced by a fresh download.
+  Future<List<Track>> getReplacementRequests(int playlistId) =>
+      (select(tracks)
+            ..where(
+              (t) =>
+                  t.playlistId.equals(playlistId) &
+                  t.status.equals('complete') &
+                  t.replaceRequested.equals(true),
+            )
+            ..orderBy([(t) => OrderingTerm.asc(t.index)]))
+          .get();
+
+  Future<void> setTrackReplaceRequested(int trackId, bool requested) =>
+      (update(tracks)..where(
+        (t) => t.id.equals(trackId),
+      )).write(TracksCompanion(replaceRequested: Value(requested)));
+
+  /// Records a finished download that is now the track's file.
+  Future<void> markTrackDownloaded(
+    int trackId, {
+    required String filePath,
+    required String? thumbnailPath,
+  }) => (update(tracks)..where((t) => t.id.equals(trackId))).write(
+    TracksCompanion(
+      status: const Value('complete'),
+      filePath: Value(filePath),
+      thumbnailPath: Value(thumbnailPath),
+      isLocalReplacement: const Value(false),
+      replaceRequested: const Value(false),
+      downloadedAt: Value(DateTime.now()),
+      lastError: const Value(null),
+    ),
+  );
 
   Future<int> getDownloadedTrackCount(int playlistId) async {
     final count = tracks.id.count();
@@ -423,15 +719,40 @@ class AppDatabase extends _$AppDatabase {
     return result.read(count) ?? 0;
   }
 
-  Future<List<Playlist>> getPlaylistsDueForUpdate() async {
+  /// How much earlier than its interval a playlist already counts as due.
+  /// The worker runs about hourly; without some slack, a playlist stamped 58
+  /// minutes ago would wait for the next run and "every hour" would become
+  /// every two hours.
+  static const updateDueTolerance = Duration(minutes: 15);
+
+  /// Auto-updating playlists whose interval has passed, the one tried
+  /// longest ago first (never tried first).
+  Future<List<Playlist>> getPlaylistsDueForUpdate({DateTime? now}) async {
     final all =
         await (select(playlists)
           ..where((p) => p.autoUpdate.equals(true))).get();
-    final now = DateTime.now();
-    return all.where((p) {
-      if (p.lastUpdated == null) return true;
-      return now.difference(p.lastUpdated!).inHours >= p.updateFrequencyHours;
-    }).toList();
+    final current = now ?? DateTime.now();
+    final due =
+        all.where((p) {
+          final last = p.lastUpdated;
+          if (last == null) return true;
+          final interval = Duration(hours: p.updateFrequencyHours);
+          final threshold =
+              interval > updateDueTolerance * 2
+                  ? interval - updateDueTolerance
+                  : interval;
+          return current.difference(last) >= threshold;
+        }).toList();
+    due.sort((a, b) {
+      final aAt = a.lastUpdateAttempt, bAt = b.lastUpdateAttempt;
+      if (aAt == null || bAt == null) {
+        if (aAt == bAt) return a.id.compareTo(b.id);
+        return aAt == null ? -1 : 1;
+      }
+      final byTime = aAt.compareTo(bAt);
+      return byTime != 0 ? byTime : a.id.compareTo(b.id);
+    });
+    return due;
   }
 
   Future<void> updateTrackUnavailable(int trackId, String reason) async {
@@ -441,6 +762,43 @@ class AppDatabase extends _$AppDatabase {
         unavailableReason: Value(reason),
       ),
     );
+  }
+
+  /// Marks a track YouTube has permanently taken down, found out by a
+  /// failed download. A track without a file becomes 'unavailable', so
+  /// updates stop retrying it; a downloaded file stays and keeps playing.
+  Future<void> markTrackRemovedFromYouTube(int trackId, String error) async {
+    final track = await getTrack(trackId);
+    if (track == null) return;
+    final hasFile = track.status == 'complete' && track.filePath != null;
+    await (update(tracks)..where((t) => t.id.equals(trackId))).write(
+      TracksCompanion(
+        status: hasFile ? const Value.absent() : const Value('unavailable'),
+        unavailableReason: const Value(removedFromYouTubeReason),
+        lastError: Value(error),
+      ),
+    );
+  }
+
+  /// Puts a track that a download found removed from YouTube back in the
+  /// queue, so the next update (or a manual retry) tries it again. A track
+  /// with a downloaded file keeps it.
+  Future<void> clearRemovedFromYouTube(int trackId) async {
+    await transaction(() async {
+      final track = await getTrack(trackId);
+      if (track == null ||
+          track.unavailableReason != removedFromYouTubeReason) {
+        return;
+      }
+      final hasFile = track.status == 'complete' && track.filePath != null;
+      await (update(tracks)..where((t) => t.id.equals(trackId))).write(
+        TracksCompanion(
+          unavailableReason: const Value(null),
+          status: hasFile ? const Value.absent() : const Value('pending'),
+          lastError: const Value(null),
+        ),
+      );
+    });
   }
 
   Future<void> updateTrackAvailable(
@@ -454,8 +812,14 @@ class AppDatabase extends _$AppDatabase {
         status: const Value('pending'),
         unavailableReason: const Value(null),
         title: Value(title),
-        thumbnailUrl: Value(thumbnailUrl),
-        durationSeconds: Value(durationSeconds),
+        thumbnailUrl: Value(
+          thumbnailUrl == null || thumbnailUrl.isEmpty ? null : thumbnailUrl,
+        ),
+        durationSeconds: Value(
+          durationSeconds == null || durationSeconds <= 0
+              ? null
+              : durationSeconds,
+        ),
       ),
     );
   }
@@ -556,16 +920,45 @@ class AppDatabase extends _$AppDatabase {
   /// A process can disappear between setting `downloading` and recording the
   /// completed file. This deliberately preserves playlist/index metadata while
   /// clearing state that only applies to a finished download.
-  Future<void> resetInterruptedTrack(int trackId) async {
-    await (update(tracks)..where((t) => t.id.equals(trackId))).write(
-      const TracksCompanion(
-        status: Value('pending'),
-        filePath: Value(null),
-        isLocalReplacement: Value(false),
-        downloadedAt: Value(null),
-        lastError: Value(null),
-      ),
-    );
+  ///
+  /// With [onlyIfDownloading], a track that has meanwhile finished (for
+  /// example a cancel that arrives while the file is being saved) is left
+  /// alone. The local-file flag is kept: an interrupted download replaced
+  /// nothing.
+  ///
+  /// A track marked removed from YouTube whose manual retry was interrupted
+  /// goes back to 'unavailable' with its removal message, not to the queue:
+  /// the mark always means "no file and not retried by updates".
+  Future<void> resetInterruptedTrack(
+    int trackId, {
+    bool onlyIfDownloading = false,
+  }) async {
+    await transaction(() async {
+      final track = await getTrack(trackId);
+      if (track == null) return;
+      if (onlyIfDownloading && track.status != 'downloading') return;
+      final removed = track.unavailableReason == removedFromYouTubeReason;
+      await (update(tracks)..where((t) => t.id.equals(trackId))).write(
+        TracksCompanion(
+          status: Value(removed ? 'unavailable' : 'pending'),
+          filePath: const Value(null),
+          downloadedAt: const Value(null),
+          lastError: removed ? const Value.absent() : const Value(null),
+        ),
+      );
+    });
+  }
+
+  /// Ends a failed manual retry of a track marked removed from YouTube: it
+  /// stays 'unavailable' with its removal message, whatever the retry
+  /// failed with (a bot check must not put it back into every update).
+  Future<void> restoreRemovedFromYouTube(int trackId) async {
+    await (update(tracks)..where(
+      (t) =>
+          t.id.equals(trackId) &
+          t.unavailableReason.equals(removedFromYouTubeReason) &
+          t.status.isNotIn(const ['complete']),
+    )).write(const TracksCompanion(status: Value('unavailable')));
   }
 
   Future<List<SponsorBlockSegment>> getSegmentsForTrack(int trackId) =>
@@ -653,6 +1046,68 @@ class AppDatabase extends _$AppDatabase {
     ),
   );
 
+  /// Stores the results of several SponsorBlock checks at once: each
+  /// track's remote segments are replaced (local, override and hidden ones
+  /// stay) and its check time is set. One transaction, one stream update.
+  Future<void> storeSponsorBlockResults(
+    Map<int, List<SponsorBlockSegmentsCompanion>> segmentsByTrackId,
+    DateTime checkedAt,
+  ) async {
+    if (segmentsByTrackId.isEmpty) return;
+    await transaction(() async {
+      for (final entry in segmentsByTrackId.entries) {
+        await replaceRemoteSponsorBlockSegments(entry.key, entry.value);
+        await updateTrackSponsorBlockCheckedAt(entry.key, checkedAt);
+      }
+    });
+  }
+
+  /// The change counter of every playlist (see [_createRevisionTracking]).
+  /// A playlist without an entry has not changed since the counters were
+  /// introduced and counts as revision 0.
+  Future<Map<int, int>> playlistRevisions() async {
+    final rows =
+        await customSelect(
+          'SELECT playlist_id, revision FROM playlist_revisions',
+        ).get();
+    return {
+      for (final row in rows)
+        row.read<int>('playlist_id'): row.read<int>('revision'),
+    };
+  }
+
+  /// The change counter of one playlist.
+  Future<int> playlistRevision(int playlistId) async {
+    final row =
+        await customSelect(
+          'SELECT revision FROM playlist_revisions WHERE playlist_id = ?',
+          variables: [Variable<int>(playlistId)],
+        ).getSingleOrNull();
+    return row?.read<int>('revision') ?? 0;
+  }
+
+  int? _dataVersion;
+
+  /// Drift only refreshes its streams for writes made through this
+  /// connection. The background worker writes through its own, so call this
+  /// when the app comes back to the foreground or while a background update
+  /// may be running: it asks SQLite whether another connection committed
+  /// since the last call and, if so, makes every stream query run again.
+  /// Returns whether anything was refreshed.
+  Future<bool> refreshIfChangedExternally() async {
+    final row = await customSelect('PRAGMA data_version').getSingle();
+    final version = row.read<int>('data_version');
+    final previous = _dataVersion;
+    _dataVersion = version;
+    if (previous == null || previous == version) return false;
+    notifyUpdates({
+      TableUpdate.onTable(playlists),
+      TableUpdate.onTable(tracks),
+      TableUpdate.onTable(sponsorBlockSegments),
+    });
+    return true;
+  }
+
   Future<void> deleteSegment(int segmentId) =>
       (delete(sponsorBlockSegments)..where((s) => s.id.equals(segmentId))).go();
 
@@ -674,6 +1129,91 @@ LazyDatabase _openConnection() {
   return LazyDatabase(() async {
     final dbFolder = await getApplicationDocumentsDirectory();
     final file = File(p.join(dbFolder.path, 'woolytube.sqlite'));
-    return NativeDatabase.createInBackground(file);
+    return NativeDatabase.createInBackground(
+      file,
+      setup: (raw) => configureConnection(raw.execute),
+    );
   });
+}
+
+/// Prepares a connection to the library file; [execute] runs one statement.
+///
+/// The app and the hourly background worker open this file through two
+/// connections. WAL lets one read while the other writes, and the busy
+/// timeout makes a write wait for the other side's transaction instead of
+/// failing at once with "database is locked". The busy timeout is set first:
+/// the first switch to WAL needs a moment of exclusive access and would
+/// otherwise fail at once if the other side is writing. The backup copy uses
+/// VACUUM INTO, which works with WAL.
+void configureConnection(void Function(String sql) execute) {
+  execute('PRAGMA busy_timeout=5000');
+  execute('PRAGMA journal_mode=WAL');
+  execute('PRAGMA synchronous=NORMAL');
+}
+
+/// `unavailableReason` of a track whose download failed because YouTube
+/// took the video down for good (copyright claim, guideline violation,
+/// terminated account). Shown as "Removed from YouTube".
+const removedFromYouTubeReason = 'removed_by_youtube';
+
+/// Track counts of one playlist, see [AppDatabase.watchPlaylistTrackCounts].
+class PlaylistCounts {
+  const PlaylistCounts({
+    required this.total,
+    required this.downloaded,
+    this.unavailable = 0,
+    this.failed = 0,
+  });
+
+  /// Every track of the playlist.
+  final int total;
+
+  /// Tracks with a downloaded file.
+  final int downloaded;
+
+  /// Tracks YouTube no longer provides and that have no file; updates do
+  /// not download them.
+  final int unavailable;
+
+  /// Tracks whose last download failed; the next update tries them again.
+  final int failed;
+
+  /// Tracks that are, or can still be, downloaded.
+  int get available => total - unavailable;
+
+  @override
+  bool operator ==(Object other) =>
+      other is PlaylistCounts &&
+      other.total == total &&
+      other.downloaded == downloaded &&
+      other.unavailable == unavailable &&
+      other.failed == failed;
+
+  @override
+  int get hashCode => Object.hash(total, downloaded, unavailable, failed);
+
+  @override
+  String toString() =>
+      'PlaylistCounts(total: $total, downloaded: $downloaded, '
+      'unavailable: $unavailable, failed: $failed)';
+}
+
+/// Element-wise equality of two lists (drift's data classes compare by
+/// value), so a stream can skip results identical to the previous one.
+bool listsEqual<T>(List<T> a, List<T> b) {
+  if (identical(a, b)) return true;
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
+}
+
+bool _mapsEqual<K, V>(Map<K, V> a, Map<K, V> b) {
+  if (identical(a, b)) return true;
+  if (a.length != b.length) return false;
+  for (final entry in a.entries) {
+    if (!b.containsKey(entry.key) || b[entry.key] != entry.value) return false;
+  }
+  return true;
 }

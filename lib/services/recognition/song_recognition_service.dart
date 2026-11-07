@@ -119,24 +119,59 @@ abstract interface class ScanForegroundNotifier {
 }
 
 /// Reuses the download foreground service of the yt-dlp plugin.
+///
+/// A download owns that service whenever [downloadActive] says one is
+/// running: the scan then leaves its notification alone and never stops the
+/// service, so a download that starts during a scan keeps its foreground
+/// protection when the scan ends. Once the download has finished (and
+/// stopped the service), the next progress update starts it again for the
+/// scan.
 class YtDlpScanForegroundNotifier implements ScanForegroundNotifier {
-  const YtDlpScanForegroundNotifier(this._ytdlp);
+  YtDlpScanForegroundNotifier(this._ytdlp, {bool Function()? downloadActive})
+    : _downloadActive = downloadActive ?? _never;
   final YtDlpService _ytdlp;
+  final bool Function() _downloadActive;
+
+  /// Whether this scan started the service and still owns it.
+  bool _owned = false;
+
+  static bool _never() => false;
 
   @override
-  Future<void> start(String label) => _ytdlp.startDownloadService(label);
+  Future<void> start(String label) async {
+    if (_downloadActive()) {
+      _owned = false;
+      return;
+    }
+    _owned = true;
+    await _ytdlp.startDownloadService(label);
+  }
 
   @override
-  Future<void> update(String label, int current, int total) =>
-      _ytdlp.updateDownloadServiceProgress(
-        playlistName: label,
-        currentTrack: current,
-        totalTracks: total,
-        progress: total == 0 ? 0 : (current * 100 ~/ total),
-      );
+  Future<void> update(String label, int current, int total) async {
+    if (_downloadActive()) {
+      _owned = false;
+      return;
+    }
+    if (!_owned) {
+      _owned = true;
+      await _ytdlp.startDownloadService(label);
+    }
+    await _ytdlp.updateDownloadServiceProgress(
+      playlistName: label,
+      currentTrack: current,
+      totalTracks: total,
+      progress: total == 0 ? 0 : (current * 100 ~/ total),
+    );
+  }
 
   @override
-  Future<void> stop() => _ytdlp.stopDownloadService();
+  Future<void> stop() async {
+    final owned = _owned;
+    _owned = false;
+    if (!owned || _downloadActive()) return;
+    await _ytdlp.stopDownloadService();
+  }
 }
 
 /// Runs the song recognition pipeline for one downloaded file.

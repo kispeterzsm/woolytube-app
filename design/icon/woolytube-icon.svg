@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="432" height="432">
+<title>WoolyTube - Ice Archive b</title>
+<defs>
+<linearGradient id="bg" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="108" y2="108"><stop offset="0" stop-color="#12305A"/><stop offset="1" stop-color="#06111F"/></linearGradient>
+<linearGradient id="ice" gradientUnits="userSpaceOnUse" x1="22.0" y1="32.0" x2="86.0" y2="76.0"><stop offset="0" stop-color="#E1F5FE"/><stop offset="1" stop-color="#4FC3F7"/></linearGradient>
+<radialGradient id="glow" gradientUnits="userSpaceOnUse" cx="54" cy="54" r="48"><stop offset="0" stop-color="#4FC3F7" stop-opacity="0.45"/><stop offset="1" stop-color="#4FC3F7" stop-opacity="0"/></radialGradient>
+<radialGradient id="tglow" gradientUnits="userSpaceOnUse" cx="55" cy="55" r="11.399999999999999"><stop offset="0" stop-color="#FFFFFF" stop-opacity="0.75"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/></radialGradient>
+<clipPath id="block"><rect x="22.0" y="32.0" width="64" height="44" rx="12"/></clipPath>
+<mask id="cut"><rect width="108" height="108" fill="white"/><path d="M50.46,49.00 L61.26,55.00 L50.46,61.00 Z" fill="black" stroke="black" stroke-width="3" stroke-linejoin="round"/></mask>
+</defs>
+<rect width="108" height="108" fill="url(#bg)"/>
+<circle cx="54" cy="54" r="48" fill="url(#glow)"/>
+<g id="fg">
+<rect x="22.0" y="32.0" width="64" height="44" rx="12" fill="url(#ice)"/>
+<g clip-path="url(#block)">
+<rect x="22.0" y="32.0" width="64" height="11.4" fill="#FFFFFF" opacity="0.4"/>
+<g mask="url(#cut)"><g transform="translate(54.0 55.5) scale(0.56) translate(-55.5 -52.0)" opacity="0.88"><path d="M70,60 C73,73 83,74 87,63" fill="none" stroke="#0D3B66" stroke-width="6" stroke-linecap="round"/><path d="M29,70 C24,62 25,52 31,46 C37,39 45,34 54,32 C58,25 70,22 77,30 C81,35 82,42 80,48 C82,58 84,68 81,75 C79,80 73,80 72,76 C75,70 75,63 70,59 L69,82 L59,82 L59,73 C52,74 47,74 42,73 L42,82 L33,82 L33,72 Z" fill="#0D3B66"/></g></g>
+
+<path d="M29.0,59.3 L36.0,40.8" stroke="#FFFFFF" stroke-width="3.2" stroke-linecap="round" opacity="0.9"/>
+<path d="M29.0,69.8 L31.5,64.6" stroke="#FFFFFF" stroke-width="2.6" stroke-linecap="round" opacity="0.8"/>
+</g>
+<rect x="22.0" y="32.0" width="64" height="44" rx="12" fill="none" stroke="#FFFFFF" stroke-width="2" opacity="0.75"/>
+</g>
+</svg>

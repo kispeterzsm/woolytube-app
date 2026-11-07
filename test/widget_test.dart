@@ -9,9 +9,11 @@ import 'package:woolytube/main.dart';
 import 'package:woolytube/providers/playback_providers.dart';
 import 'package:woolytube/providers/playlist_counts_provider.dart';
 import 'package:woolytube/providers/providers.dart';
+import 'package:woolytube/services/auto_update_runner.dart';
 import 'package:woolytube/services/download_errors.dart';
 import 'package:woolytube/services/download_service.dart';
 import 'package:woolytube/services/update_service.dart';
+import 'package:woolytube/services/ytdlp_service.dart';
 import 'package:woolytube/widgets/update_frequency_dropdown.dart';
 
 import 'helpers/test_database.dart';
@@ -51,7 +53,7 @@ void main() {
   });
 
   group('countTracksByPlaylist', () {
-    test('counts complete tracks per playlist', () async {
+    test('counts tracks per playlist by state', () async {
       final db = openTestDatabase();
       addTearDown(db.close);
       final a = await insertTestPlaylist(db, url: 'a');
@@ -67,15 +69,43 @@ void main() {
         ),
         await insertTestTrack(
           db,
+          playlistId: a.id,
+          index: 3,
+          videoId: 'v4',
+          status: 'unavailable',
+          unavailableReason: removedFromYouTubeReason,
+        ),
+        await insertTestTrack(
+          db,
+          playlistId: a.id,
+          index: 4,
+          videoId: 'v5',
+          status: 'error',
+        ),
+        await insertTestTrack(
+          db,
           playlistId: b.id,
           videoId: 'v3',
           status: 'complete',
         ),
       ];
       final counts = countTracksByPlaylist(tracks);
-      expect(counts[a.id], (downloaded: 1, total: 2));
-      expect(counts[b.id], (downloaded: 1, total: 1));
+      expect(
+        counts[a.id],
+        const PlaylistCounts(
+          total: 4,
+          downloaded: 1,
+          unavailable: 1,
+          failed: 1,
+        ),
+      );
+      expect(counts[a.id]!.available, 3);
+      expect(counts[b.id], const PlaylistCounts(total: 1, downloaded: 1));
       expect(counts.containsKey(999), isFalse);
+
+      // The database aggregate the home page uses agrees.
+      final fromDb = await db.watchPlaylistTrackCounts().first;
+      expect(fromDb, counts);
     });
   });
 
@@ -101,6 +131,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          foregroundAutoUpdateBridgeProvider.overrideWithValue(_NoBridge()),
           initProvider.overrideWith((ref) async => true),
           updateServiceProvider.overrideWithValue(_Updates()),
           playlistsProvider.overrideWith(
@@ -146,6 +177,107 @@ void main() {
     messages.add('Audio focus was denied');
     await tester.pumpAndSettle();
     expect(find.text('Audio focus was denied'), findsOneWidget);
+  });
+
+  testWidgets('home explains when yt-dlp could not start; Retry restarts '
+      'only yt-dlp', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    var inits = 0;
+    final ytdlp = _YtDlp(failures: 1);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          foregroundAutoUpdateBridgeProvider.overrideWithValue(_NoBridge()),
+          initProvider.overrideWith((ref) async {
+            inits++;
+            return true;
+          }),
+          ytdlpServiceProvider.overrideWithValue(ytdlp),
+          ytDlpInitErrorProvider.overrideWith((ref) => 'No space left'),
+          updateServiceProvider.overrideWithValue(_Updates()),
+          playlistsProvider.overrideWith(
+            (ref) => Stream.value(const <Playlist>[]),
+          ),
+          allTracksProvider.overrideWith(
+            (ref) => Stream.value(const <Track>[]),
+          ),
+          downloadProgressProvider.overrideWith(
+            (ref) => const Stream<DownloadProgress>.empty(),
+          ),
+          playbackMessagesProvider.overrideWith(
+            (ref) => const Stream<String>.empty(),
+          ),
+          currentTrackProvider.overrideWith(
+            (ref) => Stream<Track?>.value(null),
+          ),
+          isInPictureInPictureProvider.overrideWith(
+            (ref) => Stream.value(false),
+          ),
+        ],
+        child: const WoolyTubeApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The library still opens; only downloads are affected.
+    expect(find.text('No playlists yet'), findsOneWidget);
+    expect(
+      find.text('Downloads are unavailable: No space left'),
+      findsOneWidget,
+    );
+
+    // A failed retry shows the new reason. The startup (permission prompts,
+    // library repair) does not run again.
+    await tester.tap(find.text('Retry'));
+    await tester.pumpAndSettle();
+    expect(ytdlp.initializeCalls, 1);
+    expect(inits, 1);
+    expect(
+      find.text('Downloads are unavailable: still broken'),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byTooltip('Dismiss'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Downloads are unavailable'), findsNothing);
+  });
+
+  testWidgets('a successful yt-dlp retry removes the notice', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final ytdlp = _YtDlp(failures: 0);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          foregroundAutoUpdateBridgeProvider.overrideWithValue(_NoBridge()),
+          initProvider.overrideWith((ref) async => true),
+          ytdlpServiceProvider.overrideWithValue(ytdlp),
+          ytDlpInitErrorProvider.overrideWith((ref) => 'No space left'),
+          updateServiceProvider.overrideWithValue(_Updates()),
+          playlistsProvider.overrideWith(
+            (ref) => Stream.value(const <Playlist>[]),
+          ),
+          downloadProgressProvider.overrideWith(
+            (ref) => const Stream<DownloadProgress>.empty(),
+          ),
+          playbackMessagesProvider.overrideWith(
+            (ref) => const Stream<String>.empty(),
+          ),
+          currentTrackProvider.overrideWith(
+            (ref) => Stream<Track?>.value(null),
+          ),
+          isInPictureInPictureProvider.overrideWith(
+            (ref) => Stream.value(false),
+          ),
+        ],
+        child: const WoolyTubeApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Retry'));
+    await tester.pumpAndSettle();
+    expect(ytdlp.initializeCalls, 1);
+    expect(find.textContaining('Downloads are unavailable'), findsNothing);
   });
 
   group('isVersionNewer', () {
@@ -212,10 +344,46 @@ void main() {
   });
 }
 
+class _YtDlp implements YtDlpService {
+  _YtDlp({required this.failures});
+
+  int failures;
+  var initializeCalls = 0;
+
+  @override
+  Future<void> initialize() async {
+    initializeCalls++;
+    if (failures > 0) {
+      failures--;
+      throw 'still broken';
+    }
+  }
+
+  // The self-update after a successful start is not part of these tests.
+  @override
+  Future<bool> hasActiveDownloads() async => true;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
 class _Updates implements UpdateService {
   @override
   Future<AppUpdate?> checkForUpdate({String? currentVersion}) async => null;
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// The app attaches the scheduled-update bridge once the library is ready;
+/// these tests have no platform channels for it.
+class _NoBridge implements ForegroundAutoUpdateBridge {
+  @override
+  void attach() {}
+
+  @override
+  void detach() {}
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => null;
 }

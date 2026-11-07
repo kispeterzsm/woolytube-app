@@ -15,6 +15,10 @@ import '../services/sponsorblock_service.dart';
 import '../services/media_thumbnail_service.dart';
 import '../services/app_settings_service.dart';
 import '../services/download_network_policy.dart';
+import '../services/library_gate.dart';
+import '../services/sidecar_mirror.dart';
+import '../services/library_export_service.dart';
+import '../services/thumbnail_backfill_service.dart';
 import '../services/recognition/audio_window_decoder.dart';
 import '../services/recognition/shazam_client.dart';
 import '../services/recognition/song_recognition_service.dart';
@@ -23,6 +27,7 @@ final chapterServiceProvider = Provider<ChapterService>(
   (ref) => ChapterService(
     ref.watch(databaseProvider),
     ref.watch(ytdlpServiceProvider),
+    metadata: ref.watch(metadataServiceProvider),
   ),
 );
 
@@ -53,14 +58,36 @@ final pendingImportsProvider = StateProvider<List<DiscoveredPlaylist>>(
   (ref) => [],
 );
 
+/// Lets only one operation change library files at a time (downloads, sync,
+/// force insert, replacement, renames, format switch, deletion), also
+/// against the background worker.
+final libraryGateProvider = Provider<LibraryGate>((ref) {
+  return LibraryGate(lock: DownloadLock(), owner: DownloadLock.foregroundOwner);
+});
+
+/// Why yt-dlp could not start, or null when it is ready. The library and
+/// playback work without it; only downloads and updates need it.
+final ytDlpInitErrorProvider = StateProvider<String?>((ref) => null);
+
+/// True while [LibraryStartup.retryYtDlp] is trying to start yt-dlp again.
+final ytDlpRetryingProvider = StateProvider<bool>((ref) => false);
+
+/// Whether the app may read and write the shared Music/Movies folders: null
+/// until checked. Without it the library cannot be repaired, restored or
+/// mirrored; a page can offer [LibraryStartup.requestStorageAccess].
+final storageAccessProvider = StateProvider<bool?>((ref) => null);
+
 final playlistServiceProvider = Provider<PlaylistService>((ref) {
-  return PlaylistService(
+  final service = PlaylistService(
     ref.watch(databaseProvider),
     ref.watch(ytdlpServiceProvider),
     ref.watch(metadataServiceProvider),
     ref.watch(mediaThumbnailServiceProvider),
     ref.watch(appSettingsServiceProvider),
+    ref.watch(libraryGateProvider),
   );
+  ref.onDispose(service.dispose);
+  return service;
 });
 
 final notificationServiceProvider = Provider<DownloadNotificationService>((
@@ -101,9 +128,60 @@ final downloadServiceProvider = Provider<DownloadService>((ref) {
     ref.watch(notificationServiceProvider),
     ref.watch(sponsorBlockServiceProvider),
     ref.watch(appSettingsServiceProvider),
+    null,
+    DownloadLock.foregroundOwner,
+    ref.watch(libraryGateProvider),
+    ref.watch(mediaThumbnailServiceProvider),
   );
   ref.onDispose(() => service.dispose());
   return service;
+});
+
+/// Gate operations during which the cover backfill waits: they move,
+/// rename or delete files in playlist folders. A download only adds files
+/// and a playlist check only links them, so the backfill keeps going then.
+const _backfillPausingOperationsExempt = {'download', 'playlist check'};
+
+/// Saves offline covers for tracks and playlists that only had a YouTube
+/// image URL.
+final thumbnailBackfillServiceProvider = Provider<ThumbnailBackfillService>((
+  ref,
+) {
+  final gate = ref.watch(libraryGateProvider);
+  return ThumbnailBackfillService(
+    ref.watch(databaseProvider),
+    ref.watch(metadataServiceProvider),
+    ref.watch(mediaThumbnailServiceProvider),
+    ref.watch(logServiceProvider),
+    shouldPause: () {
+      final operation = gate.activeOperation;
+      return operation != null &&
+          !_backfillPausingOperationsExempt.contains(operation);
+    },
+  );
+});
+
+/// Rewrites each playlist folder's metadata file and playlist file shortly
+/// after any change in the database, so no edit is lost on a reinstall.
+final sidecarMirrorProvider = Provider<SidecarMirror>((ref) {
+  final mirror = SidecarMirror(
+    ref.watch(databaseProvider),
+    ref.watch(metadataServiceProvider),
+    ref.watch(libraryGateProvider),
+    log: ref.watch(logServiceProvider),
+  );
+  ref.onDispose(mirror.dispose);
+  return mirror;
+});
+
+final libraryExportServiceProvider = Provider<LibraryExportService>((ref) {
+  return LibraryExportService(
+    ref.watch(databaseProvider),
+    ref.watch(metadataServiceProvider),
+    ref.watch(thumbnailBackfillServiceProvider),
+    ref.watch(appSettingsServiceProvider),
+    ref.watch(logServiceProvider),
+  );
 });
 
 /// Minimum spacing between yt-dlp self-update attempts.
@@ -131,86 +209,296 @@ Future<bool> shouldRunYtDlpSelfUpdate({
   return networkPolicy.allowsAutomaticNetworkUse();
 }
 
-Future<void> _maybeUpdateYtDlp(Ref ref, LogService log) async {
-  final ytdlp = ref.read(ytdlpServiceProvider);
-  final settings = ref.read(appSettingsServiceProvider);
-  try {
-    final shouldRun = await shouldRunYtDlpSelfUpdate(
-      ytdlp: ytdlp,
-      settings: settings,
-      networkPolicy: ref.read(downloadNetworkPolicyProvider),
-    );
-    if (!shouldRun) {
-      log.info('yt-dlp update skipped (recent attempt, busy or mobile data)');
-      return;
+/// Whether the app may use the shared folders; with [ask], asks for it.
+typedef StorageAccessCheck = Future<bool> Function({required bool ask});
+
+/// Everything the app does once at startup besides showing the library, and
+/// what it does when it comes back to the foreground.
+///
+/// The library opens as soon as yt-dlp was tried and the permissions were
+/// asked. The repair of what a killed process left behind, the search for
+/// playlists to restore, the metadata mirror and the cover backfill then run
+/// in the background, in that order. They need storage access; when it is
+/// granted later (in the system settings), [onAppResumed] starts them.
+class LibraryStartup {
+  /// [storageAccess] replaces the platform permission check (for tests).
+  LibraryStartup(this._ref, {StorageAccessCheck? storageAccess})
+    : _storageAccess = storageAccess ?? _platformStorageAccess;
+
+  final Ref _ref;
+  final StorageAccessCheck _storageAccess;
+
+  /// How often the app checks whether the background worker changed the
+  /// database (see [AppDatabase.refreshIfChangedExternally]).
+  static const externalChangeInterval = Duration(seconds: 10);
+
+  bool _libraryStarted = false;
+  Future<void>? _libraryRun;
+  Timer? _externalChanges;
+  bool _disposed = false;
+
+  LogService get _log => _ref.read(logServiceProvider);
+
+  /// Starts yt-dlp, recording why it could not start in
+  /// [ytDlpInitErrorProvider], and starts its self-update when it is due.
+  /// Safe to call again (the Retry of the "yt-dlp could not start" notice).
+  Future<void> initializeYtDlp() async {
+    final ytdlp = _ref.read(ytdlpServiceProvider);
+    try {
+      await ytdlp.initialize();
+      _ref.read(ytDlpInitErrorProvider.notifier).state = null;
+      // yt-dlp self-update is a network call; must not block the UI.
+      unawaited(_maybeUpdateYtDlp());
+    } catch (e) {
+      _log.error('yt-dlp could not start: $e');
+      _ref.read(ytDlpInitErrorProvider.notifier).state = '$e';
     }
-    await settings.setLastYtDlpUpdateAttempt(DateTime.now());
-    await ytdlp.updateYtDlp();
-    log.info('yt-dlp updated to latest');
-  } catch (e) {
-    log.warn('yt-dlp update failed: $e');
+  }
+
+  /// Tries to start yt-dlp again, and only that (no permission prompts, no
+  /// library repair). [ytDlpRetryingProvider] is true meanwhile.
+  Future<void> retryYtDlp() async {
+    final retrying = _ref.read(ytDlpRetryingProvider.notifier);
+    if (retrying.state) return;
+    retrying.state = true;
+    try {
+      await initializeYtDlp();
+    } finally {
+      retrying.state = false;
+    }
+  }
+
+  Future<void> _maybeUpdateYtDlp() async {
+    final ytdlp = _ref.read(ytdlpServiceProvider);
+    final settings = _ref.read(appSettingsServiceProvider);
+    try {
+      final shouldRun = await shouldRunYtDlpSelfUpdate(
+        ytdlp: ytdlp,
+        settings: settings,
+        networkPolicy: _ref.read(downloadNetworkPolicyProvider),
+      );
+      if (!shouldRun) {
+        _log.info(
+          'yt-dlp update skipped (recent attempt, busy or mobile data)',
+        );
+        return;
+      }
+      await settings.setLastYtDlpUpdateAttempt(DateTime.now());
+      await ytdlp.updateYtDlp();
+      _log.info('yt-dlp updated to latest');
+    } catch (e) {
+      _log.warn('yt-dlp update failed: $e');
+    }
+  }
+
+  /// Whether the app may use the shared Music/Movies folders. Android 11
+  /// and later need "All files access"; older versions the storage
+  /// permission. With [ask], the system screen to allow it is opened.
+  Future<bool> checkStorageAccess({bool ask = false}) async {
+    var granted = false;
+    try {
+      granted = await _storageAccess(ask: ask);
+    } catch (e) {
+      _log.warn('storage access check failed: $e');
+    }
+    if (!_disposed) _ref.read(storageAccessProvider.notifier).state = granted;
+    return granted;
+  }
+
+  static Future<bool> _platformStorageAccess({required bool ask}) async {
+    final status = await Permission.manageExternalStorage.status;
+    if (status.isGranted) return true;
+    if (status.isRestricted) {
+      // Before Android 11 there is no "All files access".
+      if (await Permission.storage.isGranted) return true;
+      return ask && (await Permission.storage.request()).isGranted;
+    }
+    return ask && (await Permission.manageExternalStorage.request()).isGranted;
+  }
+
+  /// Asks for storage access (for a "Grant access" button) and starts the
+  /// library work once it is granted.
+  Future<bool> requestStorageAccess() async {
+    final granted = await checkStorageAccess(ask: true);
+    if (granted) unawaited(startLibrary());
+    return granted;
+  }
+
+  /// Runs the storage-dependent startup once per session: repair, restore
+  /// search, metadata mirror and cover backfill. Does nothing without
+  /// storage access (files would look deleted and be "repaired" away).
+  Future<void> startLibrary() {
+    if (_libraryStarted) return _libraryRun ?? Future.value();
+    if (_ref.read(storageAccessProvider) != true) return Future.value();
+    _libraryStarted = true;
+    return _libraryRun = _runLibraryStartup();
+  }
+
+  Future<void> _runLibraryStartup() async {
+    final log = _log;
+    final sw = Stopwatch()..start();
+    // A killed process cannot clear its transient database state. Never
+    // disturb a live scheduled download in a second Flutter engine in this
+    // process: the gate keeps the repair away from it.
+    try {
+      final repaired = await _ref.read(libraryGateProvider).run(
+        'startup check',
+        () async {
+          // Older versions could give two playlists one folder; split them
+          // before anything writes into it.
+          final separated =
+              await _ref.read(playlistServiceProvider).separateSharedFolders();
+          if (separated > 0) {
+            log.info('startup: gave $separated playlists their own folder');
+          }
+          return _ref
+              .read(metadataServiceProvider)
+              .recoverInterruptedDownloads(
+                onProblem:
+                    (playlist, e) => log.warn(
+                      'startup: could not check "${playlist.name}": $e',
+                    ),
+              );
+        },
+      );
+      if (repaired > 0) {
+        log.info(
+          'startup: recovered $repaired interrupted download '
+          'files/states',
+        );
+      }
+    } on LibraryBusyException catch (e) {
+      log.info('startup: recovery skipped: $e');
+    } catch (e) {
+      log.warn('Interrupted download recovery failed: $e');
+    }
+    log.info('startup: recovery ${sw.elapsedMilliseconds}ms');
+
+    // Playlists left by a previous installation, to offer for restore.
+    try {
+      final metadata = _ref.read(metadataServiceProvider);
+      final dismissed =
+          await _ref.read(appSettingsServiceProvider).getDismissedImportUrls();
+      final unimported = await metadata.findUnimportedPlaylists(
+        excludeUrls: dismissed,
+        skipOtherModeCopies: true,
+      );
+      if (unimported.isNotEmpty && !_disposed) {
+        _ref.read(pendingImportsProvider.notifier).state = unimported;
+      }
+    } catch (e) {
+      log.warn('startup: restore search failed: $e');
+    }
+    log.info('startup: scan ${sw.elapsedMilliseconds}ms');
+
+    if (_disposed) return;
+    // From now on every edit reaches the playlist folders' metadata files.
+    _ref.read(sidecarMirrorProvider).start();
+    // Offline covers for older downloads; not urgent.
+    unawaited(_backfillThumbnails());
+  }
+
+  /// Gives the existing library offline covers. Covers are downloaded only
+  /// when automatic network use is allowed.
+  Future<void> _backfillThumbnails() async {
+    final log = _log;
+    try {
+      final networkPolicy = _ref.read(downloadNetworkPolicyProvider);
+      final backfill = _ref.read(thumbnailBackfillServiceProvider);
+      // Let the library open first; this is not urgent.
+      await Future<void>.delayed(const Duration(seconds: 5));
+      if (_disposed) return;
+      var allowNetwork = false;
+      try {
+        allowNetwork = await networkPolicy.allowsAutomaticNetworkUse();
+      } catch (e) {
+        log.warn('thumbnail backfill: network check failed: $e');
+      }
+      final added = await backfill.backfillAll(allowNetwork: allowNetwork);
+      if (added > 0) log.info('thumbnail backfill: saved $added covers');
+    } catch (e) {
+      log.warn('thumbnail backfill failed: $e');
+    }
+  }
+
+  /// Starts watching for database changes made by the background worker.
+  void watchExternalChanges() {
+    _externalChanges ??= Timer.periodic(
+      externalChangeInterval,
+      (_) => unawaited(_refreshExternal()),
+    );
+    unawaited(_refreshExternal());
+  }
+
+  Future<void> _refreshExternal() async {
+    try {
+      await _ref.read(databaseProvider).refreshIfChangedExternally();
+    } catch (_) {
+      // Checked again on the next tick.
+    }
+  }
+
+  /// Call when the app comes back to the foreground: shows what the
+  /// background worker changed meanwhile, and starts the library work if
+  /// storage access was granted in the system settings in the meantime.
+  Future<void> onAppResumed() async {
+    watchExternalChanges();
+    if (_ref.read(storageAccessProvider) != true) {
+      if (await checkStorageAccess()) unawaited(startLibrary());
+    }
+  }
+
+  /// Call when the app goes to the background: no need to poll then.
+  void onAppPaused() {
+    _externalChanges?.cancel();
+    _externalChanges = null;
+  }
+
+  void dispose() {
+    _disposed = true;
+    _externalChanges?.cancel();
+    _externalChanges = null;
   }
 }
 
-// Initialization state
+final libraryStartupProvider = Provider<LibraryStartup>((ref) {
+  final startup = LibraryStartup(ref);
+  ref.onDispose(startup.dispose);
+  return startup;
+});
+
+// Initialization state: true once the library can be shown. Only yt-dlp and
+// the permission prompts are waited for; the library work continues in the
+// background (see [LibraryStartup]).
 final initProvider = FutureProvider<bool>((ref) async {
-  final ytdlp = ref.watch(ytdlpServiceProvider);
-  final log = ref.watch(logServiceProvider);
+  final startup = ref.read(libraryStartupProvider);
+  final log = ref.read(logServiceProvider);
   final sw = Stopwatch()..start();
 
-  await ytdlp.initialize();
+  // The downloader is only needed for downloads and updates. If it cannot
+  // start (for example on a full phone), the library must still open and
+  // play offline.
+  await startup.initializeYtDlp();
   log.info('init: ytdlp.initialize ${sw.elapsedMilliseconds}ms');
 
-  // yt-dlp self-update is a network call; must not block the splash screen.
-  unawaited(_maybeUpdateYtDlp(ref, log));
-
-  // Request storage permission for Android 11+
-  if (!await Permission.manageExternalStorage.isGranted) {
-    final status = await Permission.manageExternalStorage.request();
-    if (!status.isGranted) {
-      await openAppSettings();
-    }
-  }
+  final storageGranted = await startup.checkStorageAccess(ask: true);
 
   // Request notification permission for Android 13+ (media controls)
-  if (!await Permission.notification.isGranted) {
-    await Permission.notification.request();
+  try {
+    if (!await Permission.notification.isGranted) {
+      await Permission.notification.request();
+    }
+  } catch (e) {
+    log.warn('notification permission check failed: $e');
   }
   log.info('init: permissions ${sw.elapsedMilliseconds}ms');
 
-  // A killed process cannot clear its transient database state. Reconcile it
-  // before exposing the UI, but never disturb a live scheduled download in a
-  // second Flutter engine in this process.
-  try {
-    if (!await ytdlp.hasActiveDownloads()) {
-      final repaired =
-          await ref
-              .watch(metadataServiceProvider)
-              .recoverInterruptedDownloads();
-      if (repaired > 0) {
-        log.info('init: recovered $repaired interrupted download files/states');
-      }
-    }
-  } catch (e) {
-    log.warn('Interrupted download recovery failed: $e');
+  if (storageGranted) {
+    unawaited(startup.startLibrary());
+  } else {
+    log.warn('init: no storage access; library repair and import scan wait');
   }
-  log.info('init: recovery ${sw.elapsedMilliseconds}ms');
-
-  // Scan for importable playlists from previous installation
-  try {
-    final metadata = ref.watch(metadataServiceProvider);
-    final dismissed =
-        await ref.watch(appSettingsServiceProvider).getDismissedImportUrls();
-    final unimported = await metadata.findUnimportedPlaylists(
-      excludeUrls: dismissed,
-    );
-    if (unimported.isNotEmpty) {
-      ref.read(pendingImportsProvider.notifier).state = unimported;
-    }
-  } catch (_) {
-    // Non-critical — don't block app startup
-  }
-  log.info('init: scan ${sw.elapsedMilliseconds}ms');
+  startup.watchExternalChanges();
 
   log.info('init: total ${sw.elapsedMilliseconds}ms');
   return true;
@@ -221,18 +509,72 @@ final playlistsProvider = StreamProvider<List<Playlist>>((ref) {
   return ref.watch(playlistServiceProvider).watchAllPlaylists();
 });
 
-final allTracksProvider = StreamProvider<List<Track>>((ref) {
+/// Every track of the library. Expensive to keep up to date (the whole
+/// table is read after every track change), so it is only live while
+/// something watches it, such as the library search. For per-playlist counts
+/// use [playlistTrackCountsStreamProvider].
+final allTracksProvider = StreamProvider.autoDispose<List<Track>>((ref) {
   return ref.watch(playlistServiceProvider).watchAllTracks();
 });
 
-final tracksProvider = StreamProvider.family<List<Track>, int>((
+/// How long the tracks of a playlist stay cached after its page closed, so
+/// going back to it shows the list at once.
+const tracksCacheDuration = Duration(minutes: 2);
+
+/// The tracks of one playlist, in order. Only emits when the list changed.
+/// Kept for [tracksCacheDuration] after the last page watching it closed,
+/// then the database query stops.
+final tracksProvider = StreamProvider.autoDispose.family<List<Track>, int>((
   ref,
   playlistId,
 ) {
+  final link = ref.keepAlive();
+  Timer? release;
+  ref.onCancel(() {
+    release?.cancel();
+    release = Timer(tracksCacheDuration, link.close);
+  });
+  ref.onResume(() => release?.cancel());
+  ref.onDispose(() => release?.cancel());
   return ref.watch(playlistServiceProvider).watchTracksForPlaylist(playlistId);
 });
 
-// Download progress stream
+/// One track (null once deleted). Only emits when the track changed.
+final trackProvider = StreamProvider.autoDispose.family<Track?, int>((
+  ref,
+  trackId,
+) {
+  return ref.watch(databaseProvider).watchTrack(trackId);
+});
+
+/// Per playlist: total, downloaded, unavailable ("Removed from YouTube",
+/// private, deleted, ...) and failed track counts. One cheap query that only
+/// emits when a number changes.
+final playlistTrackCountsStreamProvider =
+    StreamProvider<Map<int, PlaylistCounts>>((ref) {
+      return ref.watch(playlistServiceProvider).watchPlaylistTrackCounts();
+    });
+
+/// Playlists whose update is asking YouTube for the playlist right now (see
+/// [PlaylistService.syncingPlaylistIds]); the download that follows shows in
+/// [downloadProgressProvider].
+final syncingPlaylistsProvider = StreamProvider<Set<int>>((ref) async* {
+  final service = ref.watch(playlistServiceProvider);
+  yield service.syncingPlaylistIds;
+  yield* service.syncingStream;
+});
+
+/// Playlists waiting for the running download, in order.
+final downloadQueueProvider = StreamProvider<List<int>>((ref) async* {
+  final service = ref.watch(downloadServiceProvider);
+  yield service.queuedPlaylistIds;
+  yield* service.queueStream;
+});
+
+/// Download progress. Reports arrive at most a few times a second and
+/// compare by value; watch only the part a widget shows, for example
+/// `ref.watch(downloadProgressProvider.select((a) => a.valueOrNull?.status))`,
+/// and keep the per-percent progress in a small widget of its own.
 final downloadProgressProvider = StreamProvider<DownloadProgress>((ref) {
   return ref.watch(downloadServiceProvider).progressStream;
 });
@@ -244,7 +586,10 @@ final songRecognitionServiceProvider = Provider<SongRecognitionService>((ref) {
     decoder: const PlatformAudioWindowDecoder(),
     recognizer: ShazamClient(),
     rootDirectory: getApplicationSupportDirectory,
-    notifier: YtDlpScanForegroundNotifier(ref.watch(ytdlpServiceProvider)),
+    notifier: YtDlpScanForegroundNotifier(
+      ref.watch(ytdlpServiceProvider),
+      downloadActive: () => ref.read(downloadServiceProvider).isDownloading,
+    ),
   );
   ref.onDispose(service.dispose);
   return service;

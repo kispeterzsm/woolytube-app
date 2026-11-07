@@ -210,6 +210,33 @@ void main() {
       expect(messages, ['Skipped "missing": file not found']);
     });
 
+    test('a queued track whose file a sync renamed still plays', () async {
+      final first = await addTrack('first');
+      final second = await addTrack('second');
+      await db.markTrackDownloaded(
+        second.id,
+        filePath: second.filePath!,
+        thumbnailPath: null,
+      );
+      final queued = (await db.getTrack(second.id))!;
+      await playback.playAll([first, queued]);
+
+      // A sync placed a new video above it: the same recording under a new
+      // number. Its download time stays the same.
+      final renamed = '${dir.path}/00003_second.m4a';
+      await File(queued.filePath!).rename(renamed);
+      await db.updateTrackFields(queued.id, filePath: renamed);
+      expect((await db.getTrack(queued.id))!.downloadedAt, queued.downloadedAt);
+
+      await playback.next();
+      await settle();
+
+      expect(playback.currentTrack!.id, queued.id);
+      expect(player.opened, hasLength(2));
+      expect(player.opened.last.uri, endsWith('00003_second.m4a'));
+      expect(messages, isEmpty);
+    });
+
     test('denied audio focus leaves everything untouched', () async {
       final track = await addTrack('track');
       session.grantFocus = false;
@@ -318,15 +345,27 @@ void main() {
 
     test('previous at the first item restarts it', () async {
       final track = await addTrack('album', chapters: threeChapters);
-      await playback.playTrack(track, [track], chapterId: 'two');
-      player.tick(const Duration(seconds: 21));
+      await playback.playTrack(track, [track], chapterId: 'one');
+      player.tick(const Duration(seconds: 1));
       expect(playback.position, const Duration(seconds: 1));
 
       await playback.previous();
 
-      expect(playback.currentTrack!.title, 'Second song');
-      expect(player.seeks.last, const Duration(seconds: 20));
+      expect(playback.currentTrack!.title, 'First song');
+      expect(player.seeks.last, Duration.zero);
       expect(playback.position, Duration.zero);
+      expect(player.opened, hasLength(1));
+    });
+
+    test('previous from a tapped chapter plays the chapter above', () async {
+      final track = await addTrack('album', chapters: threeChapters);
+      await playback.playTrack(track, [track], chapterId: 'two');
+      player.tick(const Duration(seconds: 21));
+
+      await playback.previous();
+
+      expect(playback.currentTrack!.title, 'First song');
+      expect(player.opened.last.start, Duration.zero);
     });
 
     test(
@@ -403,7 +442,7 @@ void main() {
         await settle();
 
         expect(playback.isVideoContent, isFalse);
-        expect(seen, [false, true, false, false]);
+        expect(seen, [false, true, false]);
       },
     );
   });

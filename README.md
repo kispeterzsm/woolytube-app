@@ -16,10 +16,12 @@ Per-architecture APKs are also available on the [Releases page](https://github.c
 - **Media playback** -- built-in video player with mini-player and background audio support
 - **Shuffle & autoplay** -- queue controls with search within playlists
 - **Album chapters** -- play and shuffle chapters within an album before moving to another playlist entry; add or edit your own chapters without changing the media file
-- **Persistent storage** -- files are saved to accessible folders that survive app uninstall
+- **Persistent storage** -- files are saved to accessible folders that survive app uninstall; nothing you downloaded is deleted to make room for a new copy until that copy has finished
 - **Audio-only mode** -- download and play just the audio from any video
-- **Thumbnails** -- download and display video thumbnails
-- **Stable local order** -- a downloaded track keeps its number and file name forever; videos added to the YouTube playlist later are appended after the existing entries
+- **Offline covers** -- every download keeps its cover as a file, so covers show offline and after YouTube deletes the video
+- **Your order** -- new videos go where you put them in the YouTube playlist; tracks already downloaded keep their order even when YouTube reorders or deletes videos. File names start with the position, so the folder sorts in playlist order
+- **Plays without the app** -- each playlist folder has a `.m3u8` playlist, files carry title/artist/album tags and cover art, and video downloads prefer H.264 so they play on almost any device
+- **Library backup** -- Settings > Library backup exports everything (covers, playlist files, a copy of the app data) and restores playlists from any copied folder
 - **Audio focus** -- playback pauses for calls and resumes when they end, lowers volume for short prompts, and pauses when headphones disconnect
 
 ## Installation
@@ -32,7 +34,7 @@ Per-architecture APKs are also available on the [Releases page](https://github.c
 
 ## Playlists and downloads
 
-Tap the update icon on a playlist to sync it with YouTube and download new entries; while a download runs the same control cancels it, keeping finished tracks. Download problems are shown in the app with a **Details** action. Deleting a playlist offers to remove its downloaded files too; if they are kept, the folder is no longer offered for import on the next launch. Switching a playlist between video and audio-only uses a new folder and downloads everything again, which the app confirms first.
+Tap the update icon on a playlist to sync it with YouTube and download new entries; while a download runs the same control cancels it, keeping finished tracks. Download problems are shown in the app with a **Details** action. Deleting a playlist offers to remove its downloaded files too; if they are kept, the folder is no longer offered for import on the next launch. Switching a playlist between video and audio-only uses a new folder: tracks YouTube no longer has (and your own files) move along, every other track keeps playing its current file until the new format has downloaded, and switching back reuses the earlier folder.
 
 ## Album chapters
 

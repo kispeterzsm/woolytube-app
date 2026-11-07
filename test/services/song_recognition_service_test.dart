@@ -234,4 +234,72 @@ void main() {
       expect(await service.pruneCache([track]), 1);
     },
   );
+
+  group('YtDlpScanForegroundNotifier', () {
+    test('never stops the service while a download owns it', () async {
+      final ytdlp = _ServiceRecorder();
+      var downloading = false;
+      final notifier = YtDlpScanForegroundNotifier(
+        ytdlp,
+        downloadActive: () => downloading,
+      );
+
+      // Scan alone: it starts, updates and stops the service.
+      await notifier.start('scan');
+      await notifier.update('scan', 1, 4);
+      await notifier.stop();
+      expect(ytdlp.events, ['start scan', 'update 1/4', 'stop']);
+
+      // A download starts during the scan: the scan leaves the service and
+      // its notification to the download, also when the scan ends.
+      ytdlp.events.clear();
+      await notifier.start('scan');
+      downloading = true;
+      await notifier.update('scan', 2, 4);
+      await notifier.stop();
+      expect(ytdlp.events, ['start scan']);
+
+      // A scan that starts while the download still runs: once the
+      // download has ended (and stopped the service), the scan takes the
+      // service back and stops it at the end.
+      ytdlp.events.clear();
+      await notifier.start('scan');
+      await notifier.update('scan', 1, 4);
+      downloading = false;
+      await notifier.update('scan', 2, 4);
+      await notifier.stop();
+      expect(ytdlp.events, ['start scan', 'update 2/4', 'stop']);
+    });
+
+    test('a scan started during a download never touches it', () async {
+      final ytdlp = _ServiceRecorder();
+      final notifier = YtDlpScanForegroundNotifier(
+        ytdlp,
+        downloadActive: () => true,
+      );
+      await notifier.start('scan');
+      await notifier.update('scan', 1, 4);
+      await notifier.stop();
+      expect(ytdlp.events, isEmpty);
+    });
+  });
+}
+
+class _ServiceRecorder extends YtDlpService {
+  final events = <String>[];
+
+  @override
+  Future<void> startDownloadService(String playlistName) async =>
+      events.add('start $playlistName');
+
+  @override
+  Future<void> updateDownloadServiceProgress({
+    required String playlistName,
+    required int currentTrack,
+    required int totalTracks,
+    required int progress,
+  }) async => events.add('update $currentTrack/$totalTracks');
+
+  @override
+  Future<void> stopDownloadService() async => events.add('stop');
 }

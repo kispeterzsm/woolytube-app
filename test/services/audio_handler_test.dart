@@ -118,6 +118,43 @@ void main() {
     expect(playback.resumeCalls, 0);
   });
 
+  test('the next-file control appears only for a chapter item', () async {
+    bool hasNextFile() => handler.playbackState.value.controls.any(
+      (control) => control.customAction?.name == 'nextFile',
+    );
+    expect(hasNextFile(), isFalse);
+    playback.currentIsChapter = true;
+    playback.setPlaying(true);
+    await _flushStreams();
+    expect(hasNextFile(), isTrue);
+  });
+
+  test('starting from the car switches audio-only on temporarily', () async {
+    await handler.playFromMediaId('track:${track.id}:${playlist.id}');
+    expect(playback.temporaryAudioOnlyCalls, 1);
+    expect(playback.playedTrack?.id, track.id);
+
+    // A malformed chapter id changes nothing.
+    await handler.playFromMediaId('chapter:${track.id}:${playlist.id}');
+    expect(playback.temporaryAudioOnlyCalls, 1);
+  });
+
+  test('the car browser lists playable items of a playlist', () async {
+    await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 2,
+      videoId: 'pending-video',
+    );
+    final items = await handler.getChildren('playlist:${playlist.id}');
+    expect(items.map((i) => i.id), ['track:${track.id}:${playlist.id}']);
+    expect(
+      items.single.artUri,
+      Uri.parse('https://i.ytimg.com/vi/fallback-video-id/hqdefault.jpg'),
+    );
+    expect(await handler.getChildren('playlist:nope'), isEmpty);
+  });
+
   test('shuffle control updates both its action and system state', () async {
     final offControl = handler.playbackState.value.controls.last;
     expect(offControl.customAction?.name, 'toggleShuffle');
@@ -320,6 +357,18 @@ class _FakePlaybackController implements PlaybackNotificationController {
   @override
   Future<void> setAudioOnlyMode(bool enabled) async {
     audioOnlyMode = enabled;
+  }
+
+  bool currentIsChapter = false;
+  int temporaryAudioOnlyCalls = 0;
+
+  @override
+  bool get currentItemIsChapter => currentIsChapter;
+
+  @override
+  Future<void> enableTemporaryAudioOnly() async {
+    temporaryAudioOnlyCalls++;
+    if (!audioOnlyMode) audioOnlyMode = true;
   }
 
   @override

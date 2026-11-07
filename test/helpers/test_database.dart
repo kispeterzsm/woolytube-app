@@ -22,6 +22,7 @@ Future<Playlist> insertTestPlaylist(
   String sponsorBlockCategoryActions = defaultSponsorBlockCategoryActionsJson,
   DateTime? lastUpdated,
   DateTime? createdAt,
+  bool? playChapters,
   String outputPath = '/tmp/woolytube-test',
 }) async {
   final id = await db.insertPlaylist(
@@ -39,6 +40,7 @@ Future<Playlist> insertTestPlaylist(
       sponsorBlockCategoryActions: Value(sponsorBlockCategoryActions),
       lastUpdated: Value(lastUpdated),
       createdAt: createdAt ?? DateTime(2024),
+      playChapters: Value(playChapters),
       outputPath: outputPath,
     ),
   );
@@ -62,6 +64,9 @@ Future<Track> insertTestTrack(
   DateTime? downloadedAt,
   DateTime? sponsorBlockCheckedAt,
   String? lastError,
+  bool replaceRequested = false,
+  String? chaptersJson,
+  bool? chaptersEnabled,
 }) async {
   final id = await db.insertTrack(
     TracksCompanion.insert(
@@ -80,6 +85,9 @@ Future<Track> insertTestTrack(
       downloadedAt: Value(downloadedAt),
       sponsorBlockCheckedAt: Value(sponsorBlockCheckedAt),
       lastError: Value(lastError),
+      replaceRequested: Value(replaceRequested),
+      chaptersJson: Value(chaptersJson),
+      chaptersEnabled: Value(chaptersEnabled),
     ),
   );
   return (await db.getTracksForPlaylist(
