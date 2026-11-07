@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../providers/providers.dart';
 import '../services/download_errors.dart';
+import '../services/playlist_service.dart';
 import '../widgets/mobile_data_download_guard.dart';
 import '../widgets/update_frequency_dropdown.dart';
 
@@ -17,6 +18,10 @@ class AddPlaylistPage extends ConsumerStatefulWidget {
 
 class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
   final _urlController = TextEditingController();
+
+  /// The playlist's name in the app and its folder name; starts as the
+  /// YouTube title.
+  final _nameController = TextEditingController();
   bool _audioOnly = false;
   bool _playChapters = true;
   bool _autoUpdate = true;
@@ -28,7 +33,6 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
   String? _error;
 
   // Fetched playlist info
-  String? _playlistTitle;
   String? _playlistThumbnail;
   int _trackCount = 0;
   Map<String, dynamic>? _playlistInfo;
@@ -48,6 +52,7 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
   void dispose() {
     _urlController.removeListener(_onUrlChanged);
     _urlController.dispose();
+    _nameController.dispose();
     super.dispose();
   }
 
@@ -56,7 +61,6 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
     if (_urlController.text.trim() == _fetchedUrl) return;
     setState(() {
       _playlistInfo = null;
-      _playlistTitle = null;
       _playlistThumbnail = null;
       _trackCount = 0;
       _fetchedUrl = null;
@@ -64,9 +68,12 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
     });
   }
 
+  bool get _nameValid => _nameController.text.trim().isNotEmpty;
+
   bool get _canAdd =>
       !_adding &&
       !_fetching &&
+      _nameValid &&
       _playlistInfo != null &&
       _fetchedUrl != null &&
       _urlController.text.trim() == _fetchedUrl;
@@ -87,10 +94,12 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
       final ytdlp = ref.read(ytdlpServiceProvider);
       final info = await ytdlp.getPlaylistInfo(url);
       if (!mounted) return;
+      final title = (info['title'] as String? ?? '').trim();
       setState(() {
         _playlistInfo = info;
         _fetchedUrl = url;
-        _playlistTitle = info['title'] as String? ?? 'Unknown Playlist';
+        // Never prefill a blank name: it also names the playlist's folder.
+        _nameController.text = title.isEmpty ? 'Playlist' : title;
         _playlistThumbnail = info['thumbnail'] as String?;
         _trackCount = info['count'] as int? ?? 0;
         _fetching = false;
@@ -109,8 +118,8 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
     if (!_canAdd) return;
     final info = _playlistInfo;
     final url = _fetchedUrl;
-    final title = _playlistTitle;
-    if (info == null || url == null || title == null) return;
+    final name = _nameController.text.trim();
+    if (info == null || url == null || name.isEmpty) return;
 
     if (!await confirmManualDownload(
       context,
@@ -127,10 +136,12 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
     final service = ref.read(playlistServiceProvider);
     final db = ref.read(databaseProvider);
     final downloadService = ref.read(downloadServiceProvider);
+    final messenger = ScaffoldMessenger.of(context);
+    final int playlistId;
     try {
-      final playlistId = await service.addPlaylist(
+      playlistId = await service.addPlaylist(
         url: url,
-        name: title,
+        name: name,
         thumbnailUrl: _playlistThumbnail,
         audioOnly: _audioOnly,
         playChapters: _playChapters,
@@ -138,23 +149,57 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
         updateFrequencyHours: _updateFrequencyHours,
         includeThumbnails: _includeThumbnails,
       );
-
-      await service.populateTracksFromInfo(playlistId, info);
-
-      // Start downloading automatically. The playlist exists now, so the
-      // download runs regardless of whether this page is still open.
-      final playlist = await db.getPlaylist(playlistId);
-      unawaited(downloadService.downloadPlaylist(playlist));
-
-      if (!mounted) return;
-      Navigator.of(context).pop();
-    } catch (e) {
+      // The import banner must not offer this playlist's folder again.
+      final pending = ref.read(pendingImportsProvider);
+      if (pending.isNotEmpty) {
+        ref.read(pendingImportsProvider.notifier).state = await ref
+            .read(metadataServiceProvider)
+            .findUnimportedPlaylists(candidates: pending);
+      }
+    } on PlaylistExistsException catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = 'Failed to add playlist: ${friendlyDownloadError('$e')}';
+        _error = e.message;
         _adding = false;
       });
+      return;
+    } catch (e) {
+      if (!mounted) return;
+      final reason = e is StateError ? e.message : '$e';
+      setState(() {
+        _error = 'Failed to add playlist: ${friendlyDownloadError(reason)}';
+        _adding = false;
+      });
+      return;
     }
+
+    // The playlist exists from here on, so the page closes whatever happens
+    // next; Update on the playlist retries anything left undone.
+    String message;
+    try {
+      // A backup found in the playlist's folder was restored with its
+      // tracks and their order; the fetched list only adds what is new.
+      final restored = await service.getTotalCount(playlistId);
+      await service.populateTracksFromInfo(playlistId, info);
+
+      // Start downloading automatically. The download runs regardless of
+      // whether this page is still open.
+      final playlist = await db.getPlaylist(playlistId);
+      unawaited(downloadService.downloadPlaylist(playlist));
+      message =
+          restored > 0
+              ? 'Added "${playlist.name}". Restored $restored '
+                  'track${restored == 1 ? '' : 's'} from the existing folder.'
+              : 'Added "${playlist.name}"';
+    } catch (e) {
+      final reason = e is StateError ? e.message : '$e';
+      message =
+          'Added "$name", but its tracks are not listed yet. Tap Update on '
+          'the playlist to fetch them.\n$reason';
+    }
+
+    if (mounted) Navigator.of(context).pop();
+    messenger.showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
@@ -167,6 +212,7 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             TextField(
+              key: const ValueKey('add-playlist-url-field'),
               controller: _urlController,
               style: const TextStyle(color: Colors.white),
               decoration: InputDecoration(
@@ -267,15 +313,22 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  _playlistTitle ?? '',
+                TextField(
+                  key: const ValueKey('add-playlist-name-field'),
+                  controller: _nameController,
+                  onChanged: (_) => setState(() {}),
                   style: const TextStyle(
                     color: Colors.white,
                     fontSize: 16,
                     fontWeight: FontWeight.w600,
                   ),
+                  decoration: InputDecoration(
+                    labelText: 'Name',
+                    labelStyle: const TextStyle(color: Color(0xFF888888)),
+                    errorText: _nameValid ? null : 'Enter a name',
+                  ),
                 ),
-                const SizedBox(height: 4),
+                const SizedBox(height: 8),
                 Text(
                   '$_trackCount videos',
                   style: const TextStyle(

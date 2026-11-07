@@ -185,6 +185,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Redownload track?'), findsOneWidget);
     expect(find.textContaining('"Normal song"'), findsOneWidget);
+    // The old file is never deleted up front any more.
+    expect(find.textContaining('nothing changes'), findsOneWidget);
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
     expect(find.text('Redownload track?'), findsNothing);

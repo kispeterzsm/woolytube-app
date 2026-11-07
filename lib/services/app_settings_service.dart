@@ -119,6 +119,41 @@ class AppSettingsService {
     );
   }
 
+  /// Every stored setting by key, for the library backup. Values are JSON
+  /// types (bool, int, double, String, list of String).
+  Future<Map<String, Object?>> exportSettings() async {
+    final preferences = await _preferencesLoader();
+    await preferences.reload();
+    final keys = preferences.getKeys().toList()..sort();
+    return {for (final key in keys) key: preferences.get(key)};
+  }
+
+  /// Applies settings from a library backup (see [exportSettings]). Only
+  /// the owner's preferences are restored, never app bookkeeping such as
+  /// dismissed imports. Returns how many settings were applied.
+  Future<int> importSettings(Map<String, Object?> values) async {
+    final preferences = await _preferencesLoader();
+    var applied = 0;
+    for (final key in const [
+      autoDownloadWithMobileDataKey,
+      downloadSubtitlesKey,
+      pauseOnAudioInterruptionKey,
+    ]) {
+      final value = values[key];
+      if (value is bool) {
+        await preferences.setBool(key, value);
+        applied++;
+      }
+    }
+    final languages = values[subtitleLanguagesKey];
+    if (languages is String && languages.trim().isNotEmpty) {
+      await preferences.setString(subtitleLanguagesKey, languages.trim());
+      applied++;
+    }
+    if (applied > 0) await scheduleAutoUpdate();
+    return applied;
+  }
+
   Future<void> scheduleAutoUpdate() async {
     final allowMobileData = await getAutoDownloadWithMobileData();
     try {

@@ -33,12 +33,22 @@ class YtDlpService {
     }
   }
 
+  /// Runs one yt-dlp download.
+  ///
+  /// [writeThumbnail] keeps the cover as a JPEG beside the media,
+  /// [embedMetadata] writes title/artist/date/URL tags into the file, and
+  /// [metadataAlbum]/[metadataTrackNumber] tag it as track N of the playlist
+  /// so other players keep the playlist together and in order.
   Future<void> download({
     required String url,
     required String outputPath,
     String? formatOption,
     bool audioOnly = false,
     bool embedThumbnail = true,
+    bool writeThumbnail = false,
+    bool embedMetadata = false,
+    String? metadataAlbum,
+    int? metadataTrackNumber,
     bool downloadSubtitles = false,
     String subtitleLanguages = 'en',
     String? outputTemplate,
@@ -49,6 +59,11 @@ class YtDlpService {
       if (formatOption != null) 'format': formatOption,
       'audioOnly': audioOnly,
       'embedThumbnail': embedThumbnail,
+      'writeThumbnail': writeThumbnail,
+      'embedMetadata': embedMetadata,
+      if (metadataAlbum != null) 'metadataAlbum': metadataAlbum,
+      if (metadataTrackNumber != null)
+        'metadataTrackNumber': metadataTrackNumber,
       'downloadSubtitles': downloadSubtitles && !audioOnly,
       'subtitleLanguages': subtitleLanguages,
       if (outputTemplate != null) 'outputTemplate': outputTemplate,

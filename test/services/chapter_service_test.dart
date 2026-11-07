@@ -28,6 +28,7 @@ class _Ytdlp extends YtDlpService {
 
 void main() {
   late AppDatabase db;
+  late Directory root;
   late Directory dir;
   late File media;
   late Track track;
@@ -35,7 +36,10 @@ void main() {
   late ChapterService service;
   setUp(() async {
     db = openTestDatabase();
-    dir = await Directory.systemTemp.createTemp('woolytube-chapters-');
+    root = await Directory.systemTemp.createTemp('woolytube-chapters-');
+    // Writing metadata also puts a README into the folder above the
+    // playlist, so keep that inside the temp folder too.
+    dir = await Directory('${root.path}/Playlist').create();
     media = await File(
       '${dir.path}/00001_album.m4a',
     ).writeAsBytes([0, 1, 2, 3, 255]);
@@ -52,7 +56,7 @@ void main() {
   });
   tearDown(() async {
     await db.close();
-    await dir.delete(recursive: true);
+    await root.delete(recursive: true);
   });
 
   test('fractional starts, missing ends, and malformed ranges', () {
@@ -287,6 +291,10 @@ void main() {
       );
       await database.customStatement(
         'ALTER TABLE tracks DROP COLUMN chapters_enabled',
+      );
+      // Added in schema 12; a real v9 database does not have it either.
+      await database.customStatement(
+        'ALTER TABLE tracks DROP COLUMN replace_requested',
       );
       await database.customStatement('PRAGMA user_version = 9');
       await database.close();

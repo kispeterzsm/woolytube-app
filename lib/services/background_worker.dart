@@ -6,6 +6,8 @@ import 'log_service.dart';
 import 'metadata_service.dart';
 import 'notification_service.dart';
 import 'download_service.dart';
+import 'library_gate.dart';
+import 'media_thumbnail_service.dart';
 import 'playlist_service.dart';
 import 'sponsorblock_service.dart';
 
@@ -47,7 +49,16 @@ void backgroundMain() async {
         return;
       }
 
-      final playlistService = PlaylistService(db, ytdlp, metadata);
+      const thumbnails = MediaThumbnailService();
+      final gate = LibraryGate(lock: lock, owner: DownloadLock.backgroundOwner);
+      final playlistService = PlaylistService(
+        db,
+        ytdlp,
+        metadata,
+        thumbnails,
+        null,
+        gate,
+      );
       final downloadService = DownloadService(
         db,
         ytdlp,
@@ -58,14 +69,28 @@ void backgroundMain() async {
         null,
         lock,
         DownloadLock.backgroundOwner,
+        gate,
+        thumbnails,
       );
 
       for (final playlist in duePlaylists) {
+        var synced = true;
         try {
           await playlistService.syncPlaylist(playlist);
+        } catch (e) {
+          synced = false;
+          // The playlist may have become private or been deleted on YouTube.
+          // Tracks already known can often still be downloaded one by one,
+          // so carry on with them.
+          log.warn('Sync of "${playlist.name}" failed: $e');
+        }
+        try {
           // Re-fetch after sync since tracks may have changed
           final freshPlaylist = await db.getPlaylist(playlist.id);
-          await downloadService.downloadPlaylist(freshPlaylist);
+          await downloadService.downloadPlaylist(
+            freshPlaylist,
+            sourceChecked: synced,
+          );
         } catch (_) {
           // Continue with next playlist
         }

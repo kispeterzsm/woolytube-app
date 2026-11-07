@@ -601,9 +601,11 @@ class PlaybackService
   /// rather than the ones captured when the queue was built.
   Future<PlaybackItem?> _freshPlaybackItem(PlaybackItem item) async {
     final fresh = await _db.getTrack(item.track.id);
+    // A sync that places a new video above this one renames its file; that
+    // is the same recording under a new name. Only a new download (a new
+    // downloadedAt) means different media.
     if (fresh == null ||
         !isTrackAutomaticallyPlayable(fresh) ||
-        fresh.filePath != item.track.filePath ||
         fresh.downloadedAt != item.track.downloadedAt) {
       return null;
     }
@@ -858,8 +860,9 @@ class PlaybackService
       }
       if (_loading) return;
       // The last open failed; try the published item again instead of
-      // silently ignoring the press.
-      final filePath = _resolveTrackFile(item.track);
+      // silently ignoring the press. Its file may have been renamed since.
+      final current = await _db.getTrack(item.track.id);
+      final filePath = _resolveTrackFile(current ?? item.track);
       if (filePath == null) {
         reportMessage('File not found: ${item.track.title}');
         return;

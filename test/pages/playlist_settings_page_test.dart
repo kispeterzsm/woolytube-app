@@ -152,7 +152,7 @@ void main() {
     expect(find.text('detail marker'), findsOneWidget);
   });
 
-  testWidgets('turning on audio only asks before re-downloading', (
+  testWidgets('switching the format asks first, in both directions', (
     tester,
   ) async {
     final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
@@ -162,6 +162,7 @@ void main() {
     await tester.tap(audioSwitch.first);
     await tester.pumpAndSettle();
     expect(find.text('Switch to audio only?'), findsOneWidget);
+    expect(find.textContaining('No file is deleted'), findsOneWidget);
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
     expect(tester.widget<Switch>(audioSwitch.first).value, isFalse);
@@ -171,6 +172,27 @@ void main() {
     await tester.tap(find.text('Switch'));
     await tester.pumpAndSettle();
     expect(tester.widget<Switch>(audioSwitch.first).value, isTrue);
+
+    // Going back to the saved format only undoes the change.
+    await tester.tap(audioSwitch.first);
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(tester.widget<Switch>(audioSwitch.first).value, isFalse);
+
+    final audioPlaylist = await insertTestPlaylist(
+      db,
+      url: 'https://www.youtube.com/playlist?list=audio',
+      audioOnly: true,
+      outputPath: tempDir.path,
+    );
+    await tester.pumpWidget(const SizedBox.shrink());
+    await pumpStack(tester, audioPlaylist.id);
+    await tester.tap(audioSwitch.first);
+    await tester.pumpAndSettle();
+    expect(find.text('Switch to video?'), findsOneWidget);
+    await tester.tap(find.text('Switch'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<Switch>(audioSwitch.first).value, isFalse);
   });
 
   testWidgets('delete offers file removal and returns to the home page', (

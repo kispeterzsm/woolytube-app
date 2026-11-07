@@ -61,6 +61,12 @@ class Tracks extends Table {
   DateTimeColumn get downloadedAt => dateTime().nullable()();
   DateTimeColumn get sponsorBlockCheckedAt => dateTime().nullable()();
   TextColumn get lastError => text().nullable()();
+
+  /// The file should be replaced by a fresh download (the YouTube original
+  /// of a local replacement, or the other format after a mode switch). The
+  /// current file stays in use until the new one is completely on disk.
+  BoolColumn get replaceRequested =>
+      boolean().withDefault(const Constant(false))();
 }
 
 class SponsorBlockSegments extends Table {
@@ -80,6 +86,44 @@ class SponsorBlockSegments extends Table {
   DateTimeColumn get createdAt => dateTime()();
 }
 
+const _accentFolding = {
+  'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a', 'ã': 'a', 'å': 'a', 'æ': 'ae', //
+  'ç': 'c', 'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e', 'í': 'i', 'ì': 'i', //
+  'î': 'i', 'ï': 'i', 'ñ': 'n', 'ó': 'o', 'ò': 'o', 'ô': 'o', 'ö': 'o', //
+  'ő': 'o', 'õ': 'o', 'ø': 'o', 'œ': 'oe', 'ß': 'ss', 'ú': 'u', 'ù': 'u', //
+  'û': 'u', 'ü': 'u', 'ű': 'u', 'ý': 'y', 'ÿ': 'y',
+};
+
+/// Reduces [text] to lowercase ASCII letters and digits, folding accents the
+/// way yt-dlp's restricted file names do, so a title can be compared with
+/// the file name it produced.
+String foldForFileNameMatch(String text) {
+  final buffer = StringBuffer();
+  for (final rune in text.toLowerCase().runes) {
+    final char = String.fromCharCode(rune);
+    final folded = _accentFolding[char] ?? char;
+    for (final unit in folded.codeUnits) {
+      if ((unit >= 0x61 && unit <= 0x7a) || (unit >= 0x30 && unit <= 0x39)) {
+        buffer.writeCharCode(unit);
+      }
+    }
+  }
+  return buffer.toString();
+}
+
+/// Whether the title part of [filePath] (after the `<index>_` prefix) looks
+/// like it was made from [title].
+bool titleMatchesFileName(String title, String filePath) {
+  final base = p.basenameWithoutExtension(filePath);
+  final rest = base.replaceFirst(RegExp(r'^\d+_'), '');
+  final foldedTitle = foldForFileNameMatch(title);
+  final foldedRest = foldForFileNameMatch(rest);
+  if (foldedTitle.isEmpty || foldedRest.isEmpty) return false;
+  return foldedTitle == foldedRest ||
+      foldedTitle.startsWith(foldedRest) ||
+      foldedRest.startsWith(foldedTitle);
+}
+
 @DriftDatabase(tables: [Playlists, Tracks, SponsorBlockSegments])
 class AppDatabase extends _$AppDatabase {
   AppDatabase._internal(super.e);
@@ -96,7 +140,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 11;
+  int get schemaVersion => 12;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -184,6 +228,9 @@ class AppDatabase extends _$AppDatabase {
         await customStatement('DROP INDEX IF EXISTS idx_tracks_pl_index');
         await customStatement(_createUniqueTrackIndexSql);
       }
+      if (from < 12) {
+        await migrator.addColumn(tracks, tracks.replaceRequested);
+      }
     },
   );
 
@@ -192,11 +239,17 @@ class AppDatabase extends _$AppDatabase {
       'ON tracks (playlist_id, "index")';
 
   /// Older versions could give two tracks of one playlist the same index, for
-  /// example when a sync renumbered pending tracks onto a downloaded one. Keep
-  /// the oldest row at the contested index and append the others after the
-  /// playlist's current maximum. A moved row that points at the same file as
-  /// another row loses that file so it is downloaded again under its own
-  /// index instead of playing another track's media.
+  /// example when a sync renumbered a pending track onto a downloaded one,
+  /// and the download then adopted the other track's file by its prefix.
+  ///
+  /// The row that really owns the contested file keeps the index: the one
+  /// that got the file first (an adopting row was stamped later), then the
+  /// one whose title matches the file name, then the oldest row. The other
+  /// rows are appended after the playlist's current maximum. A moved row
+  /// that points at the same file as the kept row loses that file so it is
+  /// downloaded again under its own index instead of playing another
+  /// track's media; a moved row with its own file keeps it (reconcile keeps
+  /// an existing file path and renames it to the new prefix).
   Future<void> _repairDuplicateTrackIndices() async {
     final groups =
         await customSelect(
@@ -220,11 +273,12 @@ class AppDatabase extends _$AppDatabase {
       }
       final rows =
           await customSelect(
-            'SELECT id, file_path FROM tracks '
-            'WHERE playlist_id = ? AND "index" = ? ORDER BY id',
+            'SELECT id, file_path, title, downloaded_at, chapters_json '
+            'FROM tracks WHERE playlist_id = ? AND "index" = ? ORDER BY id',
             variables: [Variable<int>(playlistId), Variable<int>(index)],
           ).get();
-      for (final row in rows.skip(1)) {
+      final ranked = [...rows]..sort(_compareFileOwnership);
+      for (final row in ranked.skip(1)) {
         final id = row.read<int>('id');
         maxIndex = maxIndex! + 1;
         await customUpdate(
@@ -256,6 +310,31 @@ class AppDatabase extends _$AppDatabase {
       }
       maxIndexByPlaylist[playlistId] = maxIndex!;
     }
+  }
+
+  /// Orders rows that share an index so the likely owner of the file comes
+  /// first. See [_repairDuplicateTrackIndices].
+  static int _compareFileOwnership(QueryRow a, QueryRow b) {
+    final aPath = a.readNullable<String>('file_path');
+    final bPath = b.readNullable<String>('file_path');
+    if ((aPath == null) != (bPath == null)) return aPath == null ? 1 : -1;
+    // drift stores dates as unix seconds by default.
+    final aAt = a.readNullable<int>('downloaded_at');
+    final bAt = b.readNullable<int>('downloaded_at');
+    if (aAt != bAt) {
+      if (aAt == null) return 1;
+      if (bAt == null) return -1;
+      return aAt.compareTo(bAt);
+    }
+    if (aPath != null && bPath != null) {
+      final aScore = titleMatchesFileName(a.read<String>('title'), aPath);
+      final bScore = titleMatchesFileName(b.read<String>('title'), bPath);
+      if (aScore != bScore) return aScore ? -1 : 1;
+    }
+    final aChapters = a.readNullable<String>('chapters_json') != null;
+    final bChapters = b.readNullable<String>('chapters_json') != null;
+    if (aChapters != bChapters) return aChapters ? -1 : 1;
+    return a.read<int>('id').compareTo(b.read<int>('id'));
   }
 
   // Playlist queries
@@ -390,15 +469,55 @@ class AppDatabase extends _$AppDatabase {
     );
   }
 
+  /// Tracks an update should download. A local replacement whose file is
+  /// missing (for example still being copied back after a restore) is not
+  /// among them unless the owner asked for the original: downloading would
+  /// silently swap the owner's chosen file for the YouTube version.
   Future<List<Track>> getPendingTracks(int playlistId) =>
       (select(tracks)
             ..where(
               (t) =>
                   t.playlistId.equals(playlistId) &
-                  (t.status.equals('pending') | t.status.equals('error')),
+                  (t.status.equals('pending') | t.status.equals('error')) &
+                  (t.isLocalReplacement.equals(false) |
+                      t.replaceRequested.equals(true)),
             )
             ..orderBy([(t) => OrderingTerm.asc(t.index)]))
           .get();
+
+  /// Downloaded tracks whose file should be replaced by a fresh download.
+  Future<List<Track>> getReplacementRequests(int playlistId) =>
+      (select(tracks)
+            ..where(
+              (t) =>
+                  t.playlistId.equals(playlistId) &
+                  t.status.equals('complete') &
+                  t.replaceRequested.equals(true),
+            )
+            ..orderBy([(t) => OrderingTerm.asc(t.index)]))
+          .get();
+
+  Future<void> setTrackReplaceRequested(int trackId, bool requested) =>
+      (update(tracks)..where(
+        (t) => t.id.equals(trackId),
+      )).write(TracksCompanion(replaceRequested: Value(requested)));
+
+  /// Records a finished download that is now the track's file.
+  Future<void> markTrackDownloaded(
+    int trackId, {
+    required String filePath,
+    required String? thumbnailPath,
+  }) => (update(tracks)..where((t) => t.id.equals(trackId))).write(
+    TracksCompanion(
+      status: const Value('complete'),
+      filePath: Value(filePath),
+      thumbnailPath: Value(thumbnailPath),
+      isLocalReplacement: const Value(false),
+      replaceRequested: const Value(false),
+      downloadedAt: Value(DateTime.now()),
+      lastError: const Value(null),
+    ),
+  );
 
   Future<int> getDownloadedTrackCount(int playlistId) async {
     final count = tracks.id.count();
@@ -556,12 +675,24 @@ class AppDatabase extends _$AppDatabase {
   /// A process can disappear between setting `downloading` and recording the
   /// completed file. This deliberately preserves playlist/index metadata while
   /// clearing state that only applies to a finished download.
-  Future<void> resetInterruptedTrack(int trackId) async {
-    await (update(tracks)..where((t) => t.id.equals(trackId))).write(
+  ///
+  /// With [onlyIfDownloading], a track that has meanwhile finished (for
+  /// example a cancel that arrives while the file is being saved) is left
+  /// alone. The local-file flag is kept: an interrupted download replaced
+  /// nothing.
+  Future<void> resetInterruptedTrack(
+    int trackId, {
+    bool onlyIfDownloading = false,
+  }) async {
+    await (update(tracks)..where(
+      (t) =>
+          onlyIfDownloading
+              ? t.id.equals(trackId) & t.status.equals('downloading')
+              : t.id.equals(trackId),
+    )).write(
       const TracksCompanion(
         status: Value('pending'),
         filePath: Value(null),
-        isLocalReplacement: Value(false),
         downloadedAt: Value(null),
         lastError: Value(null),
       ),

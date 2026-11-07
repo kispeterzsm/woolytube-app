@@ -39,6 +39,9 @@ class _HomePageState extends ConsumerState<HomePage> {
   Future<void>? _updateCheck;
   bool _isCheckingForUpdate = false;
 
+  /// The yt-dlp start failure the owner closed the notice for.
+  String? _dismissedYtDlpError;
+
   @override
   void initState() {
     super.initState();
@@ -59,6 +62,7 @@ class _HomePageState extends ConsumerState<HomePage> {
     final downloadAsync = ref.watch(downloadProgressProvider);
     final downloadProgress = downloadAsync.valueOrNull ?? DownloadProgress.idle;
     final pendingImports = ref.watch(pendingImportsProvider);
+    final ytDlpError = ref.watch(ytDlpInitErrorProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -132,6 +136,8 @@ class _HomePageState extends ConsumerState<HomePage> {
       ),
       body: Column(
         children: [
+          if (ytDlpError != null && ytDlpError != _dismissedYtDlpError)
+            _buildYtDlpNotice(ytDlpError),
           if (pendingImports.isNotEmpty) _buildImportBanner(pendingImports),
           if (_showSearch)
             Padding(
@@ -636,13 +642,18 @@ class _HomePageState extends ConsumerState<HomePage> {
   Future<void> _startUpdate(Playlist playlist) async {
     if (_syncingPlaylistIds.contains(playlist.id)) return;
 
+    // Read every provider before the first await; the download must start
+    // even if this page goes away meanwhile.
     final downloadService = ref.read(downloadServiceProvider);
+    final playlistService = ref.read(playlistServiceProvider);
+    final db = ref.read(databaseProvider);
     if (downloadService.isDownloading) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('A download is already in progress')),
       );
       return;
     }
+    if (explainDownloadsUnavailable(context, ref)) return;
 
     if (!await confirmManualDownload(
       context,
@@ -654,40 +665,19 @@ class _HomePageState extends ConsumerState<HomePage> {
 
     setState(() => _syncingPlaylistIds.add(playlist.id));
     try {
-      // Sync first to detect new, unavailable, and removed tracks
-      final playlistService = ref.read(playlistServiceProvider);
-      final result = await playlistService.syncPlaylist(playlist);
-
-      if (result.hasChanges && mounted) {
-        final parts = <String>[];
-        if (result.added > 0) parts.add('${result.added} new');
-        if (result.markedUnavailable > 0) {
-          parts.add('${result.markedUnavailable} unavailable');
-        }
-        if (result.removed > 0) parts.add('${result.removed} removed');
-        if (result.markedAvailable > 0) {
-          parts.add('${result.markedAvailable} restored');
-        }
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Synced: ${parts.join(', ')}')));
-      }
-
-      if (result.hasConflicts && mounted) {
-        await _showReplacementConflicts(result.replacementConflicts);
-      }
-
-      final freshPlaylist = await ref
-          .read(databaseProvider)
-          .getPlaylist(playlist.id);
-      // The download is a service-level operation and runs regardless of
-      // whether this page is still mounted.
-      unawaited(downloadService.downloadPlaylist(freshPlaylist));
+      await syncAndDownloadPlaylist(
+        context: context,
+        playlist: playlist,
+        playlists: playlistService,
+        downloads: downloadService,
+        db: db,
+      );
     } catch (e) {
       if (!mounted) return;
+      final reason = e is StateError ? e.message : '$e';
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Update failed: ${friendlyDownloadError('$e')}'),
+          content: Text('Update failed: ${friendlyDownloadError(reason)}'),
         ),
       );
     } finally {
@@ -697,48 +687,54 @@ class _HomePageState extends ConsumerState<HomePage> {
     }
   }
 
-  Future<void> _showReplacementConflicts(List<Track> conflicts) async {
-    final playlistService = ref.read(playlistServiceProvider);
-    for (final track in conflicts) {
-      if (!mounted) return;
-      final decision = await showDialog<String>(
-        context: context,
-        barrierDismissible: false,
-        builder:
-            (ctx) => AlertDialog(
-              backgroundColor: const Color(0xFF2A2A2A),
-              title: const Text(
-                'Video Available Again',
-                style: TextStyle(color: Colors.white),
-              ),
-              content: Text(
-                '"${track.title}" is available on YouTube again.\n\n'
-                'You have a local replacement file. '
-                'Would you like to keep it or download the original?',
-                style: const TextStyle(color: Color(0xFFCCCCCC)),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx, 'keep'),
-                  child: const Text('Keep Replacement'),
-                ),
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx, 'download'),
-                  child: const Text('Download Original'),
-                ),
-              ],
+  Widget _buildYtDlpNotice(String reason) {
+    final retrying = ref.watch(initProvider).isLoading;
+    return Container(
+      key: const ValueKey('ytdlp-unavailable-notice'),
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+      padding: const EdgeInsets.fromLTRB(14, 4, 4, 4),
+      decoration: BoxDecoration(
+        color: const Color(0xFF3A2E1E),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFFFB74D), width: 0.5),
+      ),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.warning_amber_rounded,
+            color: Color(0xFFFFB74D),
+            size: 20,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'Downloads are unavailable: $reason',
+              style: const TextStyle(color: Color(0xFFDDCCBB), fontSize: 13),
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
             ),
-      );
-      if (decision == 'download') {
-        // Delete the replacement so the fresh download is not re-adopted by
-        // its index prefix, and drop segments that belonged to its timeline.
-        await playlistService.resetTrackForRedownload(
-          track,
-          deleteFile: true,
-          clearSegments: true,
-        );
-      }
-    }
+          ),
+          TextButton(
+            onPressed:
+                retrying
+                    ? null
+                    : () {
+                      // Show the notice again if the retry fails too.
+                      setState(() => _dismissedYtDlpError = null);
+                      ref.invalidate(initProvider);
+                    },
+            child: const Text('Retry'),
+          ),
+          IconButton(
+            icon: const Icon(Icons.close, size: 18),
+            color: const Color(0xFF888888),
+            tooltip: 'Dismiss',
+            onPressed: () => setState(() => _dismissedYtDlpError = reason),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildImportBanner(List<DiscoveredPlaylist> imports) {
@@ -839,6 +835,12 @@ class _HomePageState extends ConsumerState<HomePage> {
         try {
           await metadata.importPlaylist(discovered);
           imported++;
+          final remaining = ref.read(pendingImportsProvider);
+          ref.read(pendingImportsProvider.notifier).state =
+              remaining.where((p) => p.url != discovered.url).toList();
+        } on PlaylistExistsException {
+          // Already in the library (for example added again by URL since
+          // the banner appeared): nothing to import.
           final remaining = ref.read(pendingImportsProvider);
           ref.read(pendingImportsProvider.notifier).state =
               remaining.where((p) => p.url != discovered.url).toList();

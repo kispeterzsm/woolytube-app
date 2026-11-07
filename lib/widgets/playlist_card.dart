@@ -1,6 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../database/database.dart';
+import '../services/media_thumbnail_service.dart';
 
 class PlaylistCard extends StatelessWidget {
   final Playlist playlist;
@@ -152,16 +155,26 @@ class PlaylistCard extends StatelessWidget {
     );
   }
 
+  /// The cover saved in the playlist folder works offline, so it comes
+  /// first; the YouTube image is the fallback.
   Widget _buildThumbnail() {
-    if (playlist.thumbnailUrl != null && playlist.thumbnailUrl!.isNotEmpty) {
-      return CachedNetworkImage(
-        imageUrl: playlist.thumbnailUrl!,
-        fit: BoxFit.contain,
-        placeholder: (_, __) => _placeholderBox(),
-        errorWidget: (_, __, ___) => _placeholderBox(),
-      );
-    }
-    return _placeholderBox();
+    final url = playlist.thumbnailUrl;
+    final remote =
+        url != null && url.isNotEmpty
+            ? CachedNetworkImage(
+              imageUrl: url,
+              fit: BoxFit.contain,
+              placeholder: (_, __) => _placeholderBox(),
+              errorWidget: (_, __, ___) => _placeholderBox(),
+            )
+            : _placeholderBox();
+    final localPath = existingThumbnailPath(playlist.thumbnailPath);
+    if (localPath == null) return remote;
+    return Image.file(
+      File(localPath),
+      fit: BoxFit.contain,
+      errorBuilder: (_, __, ___) => remote,
+    );
   }
 
   Widget _placeholderBox() {

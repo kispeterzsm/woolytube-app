@@ -7,7 +7,9 @@ import 'package:path_provider/path_provider.dart';
 import '../database/database.dart';
 import 'ytdlp_service.dart';
 import 'app_settings_service.dart';
+import 'library_gate.dart';
 import 'log_service.dart';
+import 'media_thumbnail_service.dart';
 import 'metadata_service.dart';
 import 'notification_service.dart';
 import 'sponsorblock_service.dart';
@@ -111,18 +113,55 @@ class DownloadLock {
     }
   }
 
-  Future<void> release() async {
+  /// Removes the lock. With [owner], only a lock that still names [owner] is
+  /// removed, so one side can never drop the other side's live lock.
+  Future<void> release([String? owner]) async {
     final file = await _file();
-    if (file.existsSync()) file.deleteSync();
+    if (!file.existsSync()) return;
+    if (owner != null) {
+      try {
+        final holder = file.readAsStringSync().split(' ').first.trim();
+        if (holder != owner) return;
+      } on FileSystemException {
+        return;
+      }
+    }
+    file.deleteSync();
   }
 }
 
 enum _TrackDownloadResult { downloaded, reused, failed, cancelled }
 
+/// Words in a yt-dlp error that mean the video itself can no longer be
+/// fetched, as opposed to a network hiccup or a yt-dlp bug.
+const _permanentErrorPatterns = [
+  'video unavailable',
+  'this video is not available',
+  'this video has been removed',
+  'private video',
+  'video is private',
+  'members-only',
+  'members only',
+  'premium',
+  'confirm your age',
+  'age-restricted',
+  'account associated with this video has been terminated',
+  'copyright',
+];
+
+bool isPermanentDownloadError(String message) {
+  final lower = message.toLowerCase();
+  return _permanentErrorPatterns.any(lower.contains);
+}
+
 class DownloadService {
   static const lockHeldMessage =
       'A scheduled update is running in the background. '
       'Try again in a few minutes.';
+
+  /// Longest title part of a downloaded file name, in bytes. File names are
+  /// limited to 255 bytes and non-Latin titles take 2-4 bytes per letter.
+  static const titleByteLimit = 150;
 
   final AppDatabase _db;
   final YtDlpService _ytdlp;
@@ -131,7 +170,8 @@ class DownloadService {
   final DownloadNotificationService? _notifications;
   final SponsorBlockService? _sponsorBlock;
   final AppSettingsService _settings;
-  final DownloadLock _lock;
+  final LibraryGate _gate;
+  final MediaThumbnailService _thumbnails;
 
   final _progressController = StreamController<DownloadProgress>.broadcast();
   Stream<DownloadProgress> get progressStream => _progressController.stream;
@@ -141,8 +181,16 @@ class DownloadService {
   bool _cancelRequested = false;
   bool _reportingStarted = false;
   int? _activeTrackId;
+  bool _activeTrackIsReplacement = false;
   Playlist? _activePlaylist;
+  String? _lastFailure;
   bool get isDownloading => _isDownloading;
+
+  /// The track whose file is being downloaded right now, if any.
+  int? get activeTrackId => _activeTrackId;
+
+  /// Mutual exclusion shared with every other operation that changes files.
+  LibraryGate get gate => _gate;
 
   DownloadService(
     this._db,
@@ -154,18 +202,12 @@ class DownloadService {
     AppSettingsService? settings,
     DownloadLock? lock,
     String lockOwner = DownloadLock.foregroundOwner,
+    LibraryGate? gate,
+    MediaThumbnailService? thumbnails,
   ]) : _settings = settings ?? AppSettingsService(),
-       _lock = lock ?? DownloadLock(),
-       _lockOwner = lockOwner;
-
-  /// Which kind of engine this service runs in; the shared lock refuses a
-  /// live holder of the other kind.
-  final String _lockOwner;
-
-  String get _lockHeldMessage =>
-      _lockOwner == DownloadLock.backgroundOwner
-          ? 'A download started from the app is running.'
-          : lockHeldMessage;
+       _gate =
+           gate ?? LibraryGate(lock: lock ?? DownloadLock(), owner: lockOwner),
+       _thumbnails = thumbnails ?? const MediaThumbnailService();
 
   /// yt-dlp reads `%` in `-o` as the start of a format field, so a literal
   /// path component such as `100% Hits` must be doubled.
@@ -176,21 +218,32 @@ class DownloadService {
     if (!_progressController.isClosed) _progressController.add(progress);
   }
 
-  Future<void> downloadPlaylist(Playlist playlist) async {
+  /// Downloads every pending or failed track of [playlist], and replaces the
+  /// files of tracks whose replacement was requested (a mode switch, or the
+  /// original of a local replacement). An existing file is only replaced
+  /// after its successor is completely on disk.
+  ///
+  /// Pass [sourceChecked] false when the playlist could not be read from
+  /// YouTube first: the run then does not count as an update, so the next
+  /// scheduled check still happens on time.
+  Future<void> downloadPlaylist(
+    Playlist playlist, {
+    bool sourceChecked = true,
+  }) async {
     if (_isDownloading) return;
     _isDownloading = true;
     _cancelRequested = false;
     _activePlaylist = playlist;
-    var lockAcquired = false;
+    var entered = false;
     var totalTracks = 0;
     var downloadedCount = 0;
     var reusedCount = 0;
     var failedCount = 0;
 
     try {
-      lockAcquired = await _lock.acquire(_lockOwner);
-      if (!lockAcquired) {
-        _log.warn('Playlist download skipped: $_lockHeldMessage');
+      final busy = await _gate.tryEnter('download');
+      if (busy != null) {
+        _log.warn('Playlist download skipped: $busy');
         _emit(
           DownloadProgress(
             playlistId: playlist.id,
@@ -198,25 +251,40 @@ class DownloadService {
             totalTracks: 0,
             trackProgress: 0,
             status: 'error',
-            error: _lockHeldMessage,
+            error: busy,
           ),
         );
         return;
       }
+      entered = true;
+
+      // Settings such as the folder may have changed since the caller read
+      // the row (for example a mode switch).
+      playlist = await _db.getPlaylist(playlist.id);
+      _activePlaylist = playlist;
 
       // A manual or scheduled update is an explicit download trigger. Repair
-      // anything a previous process left behind before selecting pending work.
-      final recovered = await _metadata.recoverInterruptedPlaylist(playlist);
+      // anything a previous process left behind before selecting work.
+      await _metadata.discardStaging(playlist.outputPath);
+      var recovered = await _metadata.recoverInterruptedPlaylist(playlist);
+      recovered += await _metadata.adoptStrayFiles(playlist);
       if (recovered > 0) {
         _log.info('Recovered $recovered interrupted download files/states');
         await _writeMetadataForPlaylist(playlist.id);
       }
 
       final pendingTracks = await _db.getPendingTracks(playlist.id);
+      final replaceTracks = await _db.getReplacementRequests(playlist.id);
+      final work = [
+        for (final track in pendingTracks) (track: track, replace: false),
+        for (final track in replaceTracks) (track: track, replace: true),
+      ]..sort((a, b) => a.track.index.compareTo(b.track.index));
       totalTracks = await _db.getTotalTrackCount(playlist.id);
 
       _log.info(
-        'Updating "${playlist.name}": ${pendingTracks.length} of $totalTracks tracks to download',
+        'Updating "${playlist.name}": ${pendingTracks.length} of '
+        '$totalTracks tracks to download'
+        '${replaceTracks.isEmpty ? '' : ', ${replaceTracks.length} to replace'}',
       );
 
       if (_cancelRequested) {
@@ -224,11 +292,11 @@ class DownloadService {
         return;
       }
 
-      if (pendingTracks.isEmpty) {
+      if (work.isEmpty) {
         // A successful check with no pending work still starts the next
         // auto-update interval. Without this, an unchanged playlist remains
         // overdue and gets checked on every background-worker run.
-        await _markPlaylistUpdated(playlist);
+        if (sourceChecked) await _markPlaylistUpdated(playlist);
         await _backfillMissingSponsorBlockSegments(playlist);
         await _writeMetadataForPlaylist(playlist.id);
         _emit(
@@ -243,8 +311,8 @@ class DownloadService {
         return;
       }
 
-      final downloadedSoFar = totalTracks - pendingTracks.length;
-      var currentTrackNum = downloadedSoFar + 1;
+      final doneSoFar = (totalTracks - work.length).clamp(0, totalTracks);
+      var currentTrackNum = doneSoFar + 1;
 
       await _startDownloadReporting(
         playlist: playlist,
@@ -252,21 +320,22 @@ class DownloadService {
         totalTracks: totalTracks,
       );
 
-      for (var i = 0; i < pendingTracks.length; i++) {
+      for (var i = 0; i < work.length; i++) {
         if (_cancelRequested) break;
-        final track = pendingTracks[i];
-        final trackNum = downloadedSoFar + i + 1;
+        final item = work[i];
+        final trackNum = doneSoFar + i + 1;
         currentTrackNum = trackNum;
-        await _lock.refresh(_lockOwner);
+        await _gate.refresh();
 
         final result = await _downloadTrackFile(
           playlist: playlist,
-          track: track,
+          track: item.track,
           totalTracks: totalTracks,
           progressTrackIndex: trackNum,
           progressTotalTracks: totalTracks,
-          trackLabel: '[$trackNum/$totalTracks] ${track.title}',
-          reuseExistingFile: true,
+          trackLabel: '[$trackNum/$totalTracks] ${item.track.title}',
+          reuseExistingFile: !item.replace,
+          replaceExisting: item.replace,
         );
         switch (result) {
           case _TrackDownloadResult.downloaded:
@@ -293,25 +362,16 @@ class DownloadService {
           downloadedCount + reusedCount == 0 && failedCount > 0;
       if (failedEntirely) {
         _log.warn(
-          'All $failedCount pending downloads failed; '
+          'All $failedCount downloads failed; '
           'not stamping "${playlist.name}" as updated',
         );
-      } else {
+      } else if (sourceChecked) {
         await _markPlaylistUpdated(playlist);
       }
 
       await _backfillMissingSponsorBlockSegments(playlist);
       await _writeMetadataForPlaylist(playlist.id);
-
-      // Cleanup .part files and orphaned thumbnails
-      try {
-        final cleaned = await MetadataService.cleanupPlaylistFolder(
-          playlist.outputPath,
-        );
-        if (cleaned > 0) _log.info('Cleaned up $cleaned leftover files');
-      } catch (e) {
-        _log.warn('Cleanup failed: $e');
-      }
+      await _cleanupFolder(playlist);
 
       // Only now is the playlist really finished; emitting earlier left the
       // UI claiming completion while the backfill still ran for minutes.
@@ -341,9 +401,6 @@ class DownloadService {
       }
       _log.error('Playlist download failed: $e');
       await _writeMetadataForPlaylist(playlist.id);
-      try {
-        await MetadataService.cleanupPlaylistFolder(playlist.outputPath);
-      } catch (_) {}
       _emit(
         DownloadProgress(
           playlistId: playlist.id,
@@ -355,31 +412,45 @@ class DownloadService {
         ),
       );
     } finally {
-      await _finishRun(lockAcquired: lockAcquired);
+      await _finishRun(entered: entered);
     }
   }
 
-  Future<void> downloadTrack(Playlist playlist, Track track) async {
-    if (_isDownloading) return;
+  /// Downloads one track now: a retry of a failed track, or a fresh copy of
+  /// a downloaded one. A downloaded file is replaced only once the new copy
+  /// is complete; if the download fails the old file stays as it was.
+  ///
+  /// Returns true when a new file was saved, false when the owner stopped
+  /// it (nothing changed then). Throws with the reason when it failed.
+  Future<bool> downloadTrack(Playlist playlist, Track track) async {
+    // A caller must never report success for a download that never ran.
+    if (_isDownloading) {
+      throw StateError('A download is already in progress.');
+    }
     _isDownloading = true;
     _cancelRequested = false;
     _activePlaylist = playlist;
-    var lockAcquired = false;
-    var totalTracks = 0;
+    _lastFailure = null;
+    var entered = false;
     const progressTrackIndex = 1;
     const progressTotalTracks = 1;
 
     try {
-      lockAcquired = await _lock.acquire(_lockOwner);
-      if (!lockAcquired) {
-        _log.warn('Track download skipped: $_lockHeldMessage');
-        throw StateError(_lockHeldMessage);
+      final busy = await _gate.tryEnter('download');
+      if (busy != null) {
+        _log.warn('Track download skipped: $busy');
+        throw StateError(busy);
       }
+      entered = true;
 
-      totalTracks = await _db.getTotalTrackCount(playlist.id);
+      playlist = await _db.getPlaylist(playlist.id);
+      _activePlaylist = playlist;
+      final fresh = await _db.getTrack(track.id);
+      if (fresh == null) throw StateError('The track no longer exists.');
+      final totalTracks = await _db.getTotalTrackCount(playlist.id);
       if (_cancelRequested) {
         _emit(DownloadProgress.idle);
-        return;
+        return false;
       }
 
       await _startDownloadReporting(
@@ -389,44 +460,45 @@ class DownloadService {
       );
       if (_cancelRequested) {
         _emit(DownloadProgress.idle);
-        return;
+        return false;
       }
 
-      _log.info('Downloading "${track.title}" from "${playlist.name}"');
-      await _db.resetTrackForRedownload(track.id);
+      final replace =
+          fresh.status == 'complete' &&
+          fresh.filePath != null &&
+          await File(fresh.filePath!).exists();
+      _log.info(
+        '${replace ? 'Redownloading' : 'Downloading'} "${fresh.title}" '
+        'from "${playlist.name}"',
+      );
 
       final result = await _downloadTrackFile(
         playlist: playlist,
-        track: track,
+        track: fresh,
         totalTracks: totalTracks,
         progressTrackIndex: progressTrackIndex,
         progressTotalTracks: progressTotalTracks,
-        trackLabel: '[${track.index}/$totalTracks] ${track.title}',
+        trackLabel: '[${fresh.index}/$totalTracks] ${fresh.title}',
         reuseExistingFile: false,
+        replaceExisting: replace,
       );
 
       if (result != _TrackDownloadResult.downloaded) {
         if (_cancelRequested) {
           await _writeMetadataForPlaylist(playlist.id);
           _emit(DownloadProgress.idle);
-          return;
+          return false;
         }
         // The caller shows this failure, so carry the recorded reason.
         final failed = await _db.getTrack(track.id);
-        throw StateError(failed?.lastError ?? 'Download failed');
+        throw StateError(
+          _lastFailure ?? failed?.lastError ?? 'Download failed',
+        );
       }
 
       await _markPlaylistUpdated(playlist);
       await _writeMetadataForPlaylist(playlist.id);
-
-      try {
-        final cleaned = await MetadataService.cleanupPlaylistFolder(
-          playlist.outputPath,
-        );
-        if (cleaned > 0) _log.info('Cleaned up $cleaned leftover files');
-      } catch (e) {
-        _log.warn('Cleanup failed: $e');
-      }
+      await _cleanupFolder(playlist);
 
       _emit(
         DownloadProgress(
@@ -439,28 +511,29 @@ class DownloadService {
       );
 
       await _notifications?.showDownloadComplete(
-        track.title,
+        fresh.title,
         notificationId: playlist.id,
       );
+      return true;
     } catch (e) {
       if (_cancelRequested) {
-        await _db.resetInterruptedTrack(track.id);
         await _writeMetadataForPlaylist(playlist.id);
         _emit(DownloadProgress.idle);
-        return;
+        return false;
       }
       // A single-track download is always user-initiated and its caller
       // reports the failure, so do not also raise the global error event.
       _emit(DownloadProgress.idle);
       rethrow;
     } finally {
-      await _finishRun(lockAcquired: lockAcquired);
+      await _finishRun(entered: entered);
     }
   }
 
-  Future<void> _finishRun({required bool lockAcquired}) async {
+  Future<void> _finishRun({required bool entered}) async {
     _isDownloading = false;
     _activeTrackId = null;
+    _activeTrackIsReplacement = false;
     _activePlaylist = null;
     _ytdlpProgressSub?.cancel();
     _ytdlpProgressSub = null;
@@ -472,9 +545,9 @@ class DownloadService {
         _log.warn('Failed to stop download foreground service: $e');
       }
     }
-    if (lockAcquired) {
+    if (entered) {
       try {
-        await _lock.release();
+        await _gate.exit();
       } catch (e) {
         _log.warn('Failed to release download lock: $e');
       }
@@ -526,34 +599,31 @@ class DownloadService {
     required int progressTotalTracks,
     required String trackLabel,
     required bool reuseExistingFile,
+    required bool replaceExisting,
   }) async {
     final indexStr = MetadataService.paddedIndex(track.index, totalTracks);
 
     if (reuseExistingFile) {
-      final existingFile = MetadataService.resolveMediaFile(
-        playlist.outputPath,
-        '${indexStr}_',
+      final existingFile = await _metadata.findAdoptableMediaFile(
+        playlist,
+        track,
       );
       if (existingFile != null) {
+        // A local file that was briefly missing stays a local file: its
+        // timeline is not the YouTube video's.
         await _db.updateTrackStatus(
           track.id,
           'complete',
           filePath: existingFile,
-          isLocalReplacement: false,
         );
-        await _metadata.captureChapterMetadata(
-          track.copyWith(isLocalReplacement: false),
-          playlist.outputPath,
-        );
-        await _sponsorBlock?.refreshTrackSegments(
-          track.copyWith(
-            filePath: Value(existingFile),
-            status: 'complete',
-            isLocalReplacement: false,
-          ),
-        );
+        await _metadata.captureChapterMetadata(track, playlist.outputPath);
+        if (!track.isLocalReplacement) {
+          await _sponsorBlock?.refreshTrackSegments(
+            track.copyWith(filePath: Value(existingFile), status: 'complete'),
+          );
+        }
         _log.info(
-          '$trackLabel Found existing file: ${existingFile.split('/').last}',
+          '$trackLabel Found existing file: ${p.basename(existingFile)}',
         );
         _emit(
           DownloadProgress(
@@ -568,6 +638,18 @@ class DownloadService {
       }
     }
 
+    if (track.videoId.startsWith(forcedInsertVideoIdPrefix)) {
+      // A local-only entry has nothing on YouTube to download.
+      const errorMsg = 'This entry is a local file and has no YouTube source';
+      if (replaceExisting) {
+        await _db.setTrackReplaceRequested(track.id, false);
+      } else {
+        await _db.updateTrackStatus(track.id, 'error', error: errorMsg);
+      }
+      _lastFailure = errorMsg;
+      return _TrackDownloadResult.failed;
+    }
+
     _emit(
       DownloadProgress(
         playlistId: playlist.id,
@@ -579,46 +661,101 @@ class DownloadService {
     );
 
     _activeTrackId = track.id;
-    await _db.updateTrackStatus(track.id, 'downloading');
+    _activeTrackIsReplacement = replaceExisting;
+    if (!replaceExisting) {
+      await _db.updateTrackStatus(track.id, 'downloading');
+    }
 
+    final Directory staging;
+    try {
+      staging = await _metadata.prepareStagingDir(
+        playlist.outputPath,
+        track.id,
+      );
+    } catch (e) {
+      _activeTrackId = null;
+      _activeTrackIsReplacement = false;
+      return _recordFailure(
+        track: track,
+        playlist: playlist,
+        replaceExisting: replaceExisting,
+        trackLabel: trackLabel,
+        errorMsg:
+            'Could not prepare the download folder: ${_cleanErrorMessage(e)}',
+      );
+    }
     final outputTemplate =
-        '${escapeOutputTemplateLiteral(playlist.outputPath)}/'
-        '${indexStr}_%(title)s.%(ext)s';
+        '${escapeOutputTemplateLiteral(staging.path)}/'
+        '${indexStr}_%(title).${titleByteLimit}B.%(ext)s';
     final videoUrl = 'https://www.youtube.com/watch?v=${track.videoId}';
 
     try {
-      await _downloadWithRetry(
-        url: videoUrl,
-        outputPath: playlist.outputPath,
-        audioOnly: playlist.audioOnly,
-        embedThumbnail: playlist.includeThumbnails,
-        outputTemplate: outputTemplate,
-        trackLabel: trackLabel,
-      );
+      String? failure;
+      try {
+        await _downloadWithRetry(
+          url: videoUrl,
+          outputPath: staging.path,
+          audioOnly: playlist.audioOnly,
+          embedThumbnail: playlist.includeThumbnails,
+          metadataAlbum: playlist.name,
+          outputTemplate: outputTemplate,
+          trackLabel: trackLabel,
+        );
+      } catch (e) {
+        failure = _cleanErrorMessage(e);
+      }
 
       if (_cancelRequested) {
-        await _db.resetInterruptedTrack(track.id);
+        if (!replaceExisting) {
+          await _db.resetInterruptedTrack(track.id, onlyIfDownloading: true);
+        }
+        _log.info('$trackLabel Interrupted; nothing was changed');
         return _TrackDownloadResult.cancelled;
       }
 
-      final actualPath = MetadataService.resolveMediaFile(
-        playlist.outputPath,
-        '${indexStr}_',
-      );
-      if (actualPath == null) {
+      final staged = MetadataService.findStagedMedia(staging);
+      if (failure != null) {
+        // yt-dlp reports a failed post-processing step (thumbnail or
+        // metadata embedding) as an error although the media is complete.
+        // Keep such a file rather than throw away a good copy.
+        if (staged != null && _isPostProcessingError(failure)) {
+          _log.warn('$trackLabel Saved, but post-processing failed: $failure');
+        } else {
+          return await _recordFailure(
+            track: track,
+            playlist: playlist,
+            replaceExisting: replaceExisting,
+            trackLabel: trackLabel,
+            errorMsg: failure,
+          );
+        }
+      }
+
+      if (staged == null) {
         // yt-dlp reported success but left no playable file (for example a
         // failed merge). Recording a made-up path would present a track that
         // cannot be played and would never be retried.
-        const errorMsg = 'Downloaded file not found';
-        await _db.updateTrackStatus(track.id, 'error', error: errorMsg);
-        _log.error('$trackLabel Failed "${track.title}": $errorMsg');
+        return await _recordFailure(
+          track: track,
+          playlist: playlist,
+          replaceExisting: replaceExisting,
+          trackLabel: trackLabel,
+          errorMsg: 'Downloaded file not found',
+        );
+      }
+
+      final updatedTrack = await _metadata.publishDownload(
+        playlist: playlist,
+        trackId: track.id,
+        stagingDir: staging,
+        stagedMedia: staged,
+        thumbnails: _thumbnails,
+        embeddedThumbnailExpected: playlist.includeThumbnails,
+      );
+      if (updatedTrack == null) {
+        _lastFailure = 'The track was removed during the download';
         return _TrackDownloadResult.failed;
       }
-      await _db.updateTrackStatus(track.id, 'complete', filePath: actualPath);
-      final updatedTrack = (await _db.getTracksForPlaylist(
-        playlist.id,
-      )).firstWhere((t) => t.id == track.id, orElse: () => track);
-      await _metadata.captureChapterMetadata(updatedTrack, playlist.outputPath);
       await _sponsorBlock?.refreshTrackSegments(updatedTrack);
       _log.info('$trackLabel Downloaded: ${track.title}');
 
@@ -633,22 +770,62 @@ class DownloadService {
       );
       return _TrackDownloadResult.downloaded;
     } catch (e) {
-      if (_cancelRequested) {
-        await _db.resetInterruptedTrack(track.id);
-        _log.info('$trackLabel Interrupted; returned to pending');
-        return _TrackDownloadResult.cancelled;
-      }
+      // Unexpected failure while publishing; the previous file, if any, was
+      // not touched before the new one was in place.
       final errorMsg = _cleanErrorMessage(e);
-      await _db.updateTrackStatus(track.id, 'error', error: errorMsg);
-      _log.error('$trackLabel Failed "${track.title}": $errorMsg');
+      _log.error('$trackLabel Could not save "${track.title}": $errorMsg');
+      _lastFailure = errorMsg;
+      if (!replaceExisting) {
+        await _db.updateTrackStatus(track.id, 'error', error: errorMsg);
+      }
       return _TrackDownloadResult.failed;
     } finally {
-      if (_activeTrackId == track.id) _activeTrackId = null;
+      await _metadata.discardStagingDir(staging);
+      if (_activeTrackId == track.id) {
+        _activeTrackId = null;
+        _activeTrackIsReplacement = false;
+      }
     }
   }
 
-  /// Stops this service's native yt-dlp process and makes its current track
-  /// eligible for a future manual or scheduled update. It does not resume it.
+  Future<_TrackDownloadResult> _recordFailure({
+    required Track track,
+    required Playlist playlist,
+    required bool replaceExisting,
+    required String trackLabel,
+    required String errorMsg,
+  }) async {
+    _lastFailure = errorMsg;
+    if (!replaceExisting) {
+      await _db.updateTrackStatus(track.id, 'error', error: errorMsg);
+      _log.error('$trackLabel Failed "${track.title}": $errorMsg');
+      return _TrackDownloadResult.failed;
+    }
+    // The existing copy is still in place and keeps playing.
+    _log.error(
+      '$trackLabel Could not download a new copy of "${track.title}"; '
+      'kept the existing file: $errorMsg',
+    );
+    if (track.replaceRequested && isPermanentDownloadError(errorMsg)) {
+      // YouTube no longer serves it: keep what we have for good.
+      await _metadata.adoptKeptFile(playlist, track.id);
+      await _db.setTrackReplaceRequested(track.id, false);
+    }
+    return _TrackDownloadResult.failed;
+  }
+
+  /// Only a failed embedding step leaves a complete, playable file. A failed
+  /// audio conversion can leave a truncated one, so it is not accepted.
+  static bool _isPostProcessingError(String message) {
+    final lower = message.toLowerCase();
+    return lower.contains('postprocessing') &&
+        (lower.contains('thumbnail') ||
+            lower.contains('embed') ||
+            lower.contains('metadata'));
+  }
+
+  /// Stops this service's native yt-dlp process. A track that had no file
+  /// returns to the queue; a track that was being replaced keeps its file.
   Future<void> cancelActiveDownloads() async {
     if (!_isDownloading) return;
     _cancelRequested = true;
@@ -660,14 +837,13 @@ class DownloadService {
     }
 
     final trackId = _activeTrackId;
-    if (trackId != null) {
-      await _db.resetInterruptedTrack(trackId);
+    if (trackId != null && !_activeTrackIsReplacement) {
+      await _db.resetInterruptedTrack(trackId, onlyIfDownloading: true);
     }
 
     final playlist = _activePlaylist;
     if (playlist != null) {
       try {
-        await MetadataService.cleanupPlaylistFolder(playlist.outputPath);
         await _writeMetadataForPlaylist(playlist.id);
       } catch (e) {
         _log.warn('Interrupted download cleanup failed: $e');
@@ -681,10 +857,21 @@ class DownloadService {
   Future<void> _markPlaylistUpdated(Playlist playlist) =>
       _db.markPlaylistUpdated(playlist.id, DateTime.now());
 
+  Future<void> _cleanupFolder(Playlist playlist) async {
+    try {
+      final cleaned = await _metadata.cleanupPlaylist(playlist);
+      if (cleaned > 0) _log.info('Cleaned up $cleaned leftover files');
+    } catch (e) {
+      _log.warn('Cleanup failed: $e');
+    }
+  }
+
   static const _transientErrorPatterns = [
     'no address associated with hostname',
     'unable to download webpage',
     'http error 5',
+    'http error 429',
+    'too many requests',
     'connection reset',
     'connection refused',
     'connection closed',
@@ -700,20 +887,32 @@ class DownloadService {
     return _transientErrorPatterns.any(lower.contains);
   }
 
+  static bool _isExtrasError(String message) {
+    final lower = message.toLowerCase();
+    return (lower.contains('postprocessing:') ||
+            lower.contains('preprocessing:')) &&
+        !lower.contains('audio conversion');
+  }
+
+  static bool _isSubtitleError(String message) =>
+      message.toLowerCase().contains('subtitles');
+
   Future<void> _downloadWithRetry({
     required String url,
     required String outputPath,
     required bool audioOnly,
     required bool embedThumbnail,
+    required String metadataAlbum,
     required String outputTemplate,
     required String trackLabel,
   }) async {
-    final downloadSubtitles =
+    var downloadSubtitles =
         !audioOnly && await _settings.getDownloadSubtitles();
     final subtitleLanguages =
         downloadSubtitles ? await _settings.getSubtitleLanguages() : 'en';
     const backoffs = [Duration(seconds: 5), Duration(seconds: 15)];
     var attempt = 0;
+    var withExtras = true;
     while (true) {
       if (_cancelRequested) return;
       try {
@@ -721,7 +920,10 @@ class DownloadService {
           url: url,
           outputPath: outputPath,
           audioOnly: audioOnly,
-          embedThumbnail: embedThumbnail,
+          embedThumbnail: embedThumbnail && withExtras,
+          writeThumbnail: withExtras,
+          embedMetadata: withExtras,
+          metadataAlbum: metadataAlbum,
           downloadSubtitles: downloadSubtitles,
           subtitleLanguages: subtitleLanguages,
           outputTemplate: outputTemplate,
@@ -729,6 +931,27 @@ class DownloadService {
         return;
       } catch (e) {
         final cleaned = _cleanErrorMessage(e);
+        if (downloadSubtitles && _isSubtitleError(cleaned)) {
+          // Subtitles are an extra. Never let them cost the media itself.
+          _log.warn(
+            '$trackLabel: subtitles failed, retrying without: $cleaned',
+          );
+          downloadSubtitles = false;
+          continue;
+        }
+        if (withExtras && _isExtrasError(cleaned)) {
+          // Cover art, tags and the kept thumbnail are extras too. yt-dlp
+          // reports their failure with the same bare "Conversion failed!"
+          // as a failed merge, so try once more without them: the media
+          // already in staging is reused, and a real merge failure fails
+          // again.
+          _log.warn(
+            '$trackLabel: post-processing failed, retrying without '
+            'cover/tags: $cleaned',
+          );
+          withExtras = false;
+          continue;
+        }
         if (attempt >= backoffs.length || !_isTransientError(cleaned)) {
           rethrow;
         }
@@ -838,6 +1061,12 @@ class DownloadService {
       raw = e.toString();
     }
     var cleaned = raw.replaceAll(_ansiPattern, '').trim();
+    // yt-dlp prints warnings before the error; keep the error lines.
+    final errorLines = [
+      for (final line in cleaned.split('\n'))
+        if (line.trimLeft().startsWith('ERROR:')) line.trim(),
+    ];
+    if (errorLines.isNotEmpty) cleaned = errorLines.join('\n');
     // Strip a leading "ERROR: [youtube] xxxx: " prefix once.
     cleaned = cleaned.replaceFirst(_ytPrefixPattern, '').trim();
     if (cleaned.isEmpty) cleaned = raw.trim();
