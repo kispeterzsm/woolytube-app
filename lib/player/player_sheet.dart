@@ -336,7 +336,19 @@ class _PlayerSheetState extends ConsumerState<PlayerSheet> {
             height: sheetHeight,
             child: IgnorePointer(
               ignoring: t < 1 || v < 1,
-              child: Opacity(opacity: videoOpacity, child: _videoView),
+              child: Opacity(
+                opacity: videoOpacity,
+                // Laid out at full size and revealed by the growing sheet, so
+                // its controls never get squeezed into a mid-animation box.
+                child: ClipRect(
+                  child: OverflowBox(
+                    alignment: Alignment.topCenter,
+                    minHeight: height,
+                    maxHeight: height,
+                    child: _videoView,
+                  ),
+                ),
+              ),
             ),
           ),
         if (t < 1)

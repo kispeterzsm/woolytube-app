@@ -109,7 +109,13 @@ final ValueNotifier<bool> videoFullscreenNotifier = ValueNotifier<bool>(false);
 final ValueNotifier<double> audioPlayerOverlayHeightNotifier =
     ValueNotifier<double>(0);
 
-/// True while playback is set to pause when the current song ends.
+/// True while the current item is one chapter of a longer file.
+final currentItemIsChapterProvider = StreamProvider<bool>((ref) {
+  return ref.watch(playbackServiceProvider).currentItemIsChapterStream;
+});
+
+/// True while playback is set to pause when the current file (or chapter)
+/// ends.
 final stopAfterCurrentProvider = StreamProvider<bool>((ref) {
   return ref.watch(playbackServiceProvider).stopAfterCurrentStream;
 });

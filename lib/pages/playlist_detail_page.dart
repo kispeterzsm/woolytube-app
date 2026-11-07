@@ -65,6 +65,10 @@ class PlaylistDetailPage extends ConsumerStatefulWidget {
 
 /// Everything the page derives from one tracks list and one search query.
 /// Rebuilt only when either changes, never on playback or download ticks.
+/// A track whose download failed or that cannot be downloaded.
+bool _isProblemTrack(Track track) =>
+    track.status == 'error' || track.status == 'unavailable';
+
 class _TrackListView {
   _TrackListView(this.tracks, this.query) {
     final matches = <int, MediaChapter>{};
@@ -83,6 +87,10 @@ class _TrackListView {
     }
     chapterMatches = matches;
     rowOf = {for (var i = 0; i < visible.length; i++) visible[i].id: i};
+    problemRows = [
+      for (var i = 0; i < visible.length; i++)
+        if (_isProblemTrack(visible[i])) i,
+    ];
 
     var downloaded = 0;
     var unavailable = 0;
@@ -114,6 +122,9 @@ class _TrackListView {
   final String query;
   late final List<Track> visible;
   late final Map<int, int> rowOf;
+
+  /// Rows (in [visible]) whose download failed or that are unavailable.
+  late final List<int> problemRows;
   late final Map<int, MediaChapter> chapterMatches;
   late final int maxIndex;
 
@@ -187,6 +198,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
   /// list).
   DateTime? _forceFollowUntil;
   DateTime? _lastUserScroll;
+  int? _lastProblemRow;
   final ValueNotifier<bool> _showJumpToPlaying = ValueNotifier(false);
 
   @override
@@ -607,6 +619,45 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
     );
   }
 
+  /// Scrolls to the first failed or unavailable track below the one in the
+  /// middle of the list, wrapping around to the top after the last one.
+  void _jumpToNextProblem() {
+    final view = _view;
+    final position = _position;
+    if (view == null || view.problemRows.isEmpty) return;
+    var anchor = -1;
+    if (position != null && _rowExtent > 0) {
+      final visibleHeight = math.max(
+        _rowExtent,
+        position.viewportDimension - _overlayHeight,
+      );
+      anchor =
+          ((position.pixels + visibleHeight * 0.4 - _rowExtent / 2) /
+                  _rowExtent)
+              .round();
+      // At either end the list cannot centre the row; use the last jump.
+      final last = _lastProblemRow;
+      if (last != null && _rowFullyVisible(last)) {
+        anchor = math.max(anchor, last);
+      }
+    }
+    final rows = view.problemRows;
+    var index = rows.indexWhere((row) => row > anchor);
+    final wrapped = index == -1;
+    if (wrapped) index = 0;
+    final row = rows[index];
+    _lastProblemRow = row;
+    // A jump the user asked for counts as browsing: auto-follow waits.
+    _lastUserScroll = DateTime.now();
+    _scrollToRow(row, animate: true);
+    final track = view.visible[row];
+    _showModeFeedback(
+      '${wrapped && rows.length > 1 ? 'Back to the first · ' : ''}'
+      '${index + 1} of ${rows.length}: #${track.index} '
+      '${track.status == 'unavailable' ? 'unavailable' : 'download failed'}',
+    );
+  }
+
   void _showModeFeedback(String message) {
     final messenger = ScaffoldMessenger.of(context);
     messenger.hideCurrentSnackBar();
@@ -761,6 +812,8 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
             switch (value) {
               case 'settings':
                 _openPlaylistSettings();
+              case 'next-problem':
+                _jumpToNextProblem();
               case 'retry-removed':
                 unawaited(_retryRemovedTracks());
               case 'youtube':
@@ -779,6 +832,21 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
                     contentPadding: EdgeInsets.zero,
                   ),
                 ),
+                if (view != null && view.problemRows.isNotEmpty)
+                  PopupMenuItem(
+                    key: const ValueKey('playlist-detail-next-problem'),
+                    value: 'next-problem',
+                    child: ListTile(
+                      leading: const Icon(
+                        Icons.error_outline,
+                        color: Color(0xFFE57373),
+                      ),
+                      title: Text(
+                        'Jump to next failed (${view.problemRows.length})',
+                      ),
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                  ),
                 if (view != null && view.removedFromYouTube > 0)
                   PopupMenuItem(
                     key: const ValueKey('playlist-detail-retry-removed'),
@@ -814,102 +882,94 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
     final playback = ref.read(playbackServiceProvider);
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      padding: const EdgeInsets.fromLTRB(12, 4, 8, 4),
+      child: Row(
         children: [
-          Row(
-            children: [
-              FilledButton.icon(
+          // Shrinks with very large text instead of pushing the toggles off.
+          Flexible(
+            flex: 3,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: FilledButton.icon(
                 key: const ValueKey('playlist-detail-play'),
                 onPressed: canPlay ? () => _playAll(playTracks) : null,
                 icon: const Icon(Icons.play_arrow),
                 label: Text(filtering ? 'Play results' : 'Play'),
               ),
-              const SizedBox(width: 8),
-              Flexible(
-                child: _UpdateControl(
-                  playlistId: widget.playlistId,
-                  starting: _isUpdating,
-                  onUpdate: _startUpdate,
-                  onStopCheck: _stopCheck,
-                  onStopDownload: _confirmCancelDownload,
-                  onLeaveQueue: _leaveQueue,
-                ),
-              ),
-            ],
-          ),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: [
-                _ModeChip(
-                  key: const ValueKey('playlist-mode-shuffle'),
-                  provider: shuffleEnabledProvider,
-                  defaultValue: false,
-                  label: 'Shuffle',
-                  icon: Icons.shuffle,
-                  tooltip:
-                      (on) =>
-                          on
-                              ? 'Shuffle is on for all playback'
-                              : 'Shuffle is off',
-                  onToggle: (on) {
-                    playback.toggleShuffle();
-                    _showModeFeedback(
-                      on
-                          ? 'Shuffle off: tracks play in playlist order'
-                          : 'Shuffle on: tracks play in random order',
-                    );
-                  },
-                ),
-                const SizedBox(width: 8),
-                _ModeChip(
-                  key: const ValueKey('playlist-mode-autoplay'),
-                  provider: autoplayEnabledProvider,
-                  defaultValue: true,
-                  label: 'Autoplay',
-                  icon: Icons.playlist_play,
-                  tooltip:
-                      (on) =>
-                          on
-                              ? 'The next track starts by itself'
-                              : 'Playback stops after each track',
-                  onToggle: (on) {
-                    playback.toggleAutoplay();
-                    _showModeFeedback(
-                      on
-                          ? 'Autoplay off: playback stops after each track'
-                          : 'Autoplay on: the next track starts by itself',
-                    );
-                  },
-                ),
-                if (isVideoPlaylist) ...[
-                  const SizedBox(width: 8),
-                  _ModeChip(
-                    key: const ValueKey('playlist-mode-audio-only'),
-                    provider: audioOnlyModeProvider,
-                    defaultValue: false,
-                    label: 'Audio only',
-                    icon: Icons.videocam_off_outlined,
-                    tooltip:
-                        (on) =>
-                            on
-                                ? 'Videos play as sound only'
-                                : 'Videos play with picture',
-                    onToggle: (on) {
-                      unawaited(playback.toggleAudioOnlyMode());
-                      _showModeFeedback(
-                        on
-                            ? 'Video on: videos play with picture'
-                            : 'Audio only: videos play without picture',
-                      );
-                    },
-                  ),
-                ],
-              ],
             ),
           ),
+          const SizedBox(width: 4),
+          Expanded(
+            flex: 2,
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: _UpdateControl(
+                playlistId: widget.playlistId,
+                starting: _isUpdating,
+                onUpdate: _startUpdate,
+                onStopCheck: _stopCheck,
+                onStopDownload: _confirmCancelDownload,
+                onLeaveQueue: _leaveQueue,
+              ),
+            ),
+          ),
+          _ModeChip(
+            key: const ValueKey('playlist-mode-shuffle'),
+            provider: shuffleEnabledProvider,
+            defaultValue: false,
+            label: 'Shuffle',
+            icon: Icons.shuffle,
+            tooltip: (on) => on ? 'Shuffle is on' : 'Shuffle is off',
+            onToggle: (on) {
+              playback.toggleShuffle();
+              _showModeFeedback(
+                on
+                    ? 'Shuffle off: tracks play in playlist order'
+                    : 'Shuffle on: tracks play in random order',
+              );
+            },
+          ),
+          _ModeChip(
+            key: const ValueKey('playlist-mode-autoplay'),
+            provider: autoplayEnabledProvider,
+            defaultValue: true,
+            label: 'Autoplay',
+            icon: Icons.playlist_play,
+            tooltip:
+                (on) =>
+                    on
+                        ? 'Autoplay is on: the next track starts by itself'
+                        : 'Autoplay is off: playback stops after each track',
+            onToggle: (on) {
+              playback.toggleAutoplay();
+              _showModeFeedback(
+                on
+                    ? 'Autoplay off: playback stops after each track'
+                    : 'Autoplay on: the next track starts by itself',
+              );
+            },
+          ),
+          if (isVideoPlaylist)
+            _ModeChip(
+              key: const ValueKey('playlist-mode-audio-only'),
+              provider: audioOnlyModeProvider,
+              defaultValue: false,
+              label: 'Audio only',
+              icon: Icons.videocam_off_outlined,
+              tooltip:
+                  (on) =>
+                      on
+                          ? 'Audio only is on: videos play as sound only'
+                          : 'Audio only is off: videos play with picture',
+              onToggle: (on) {
+                unawaited(playback.toggleAudioOnlyMode());
+                _showModeFeedback(
+                  on
+                      ? 'Video on: videos play with picture'
+                      : 'Audio only: videos play without picture',
+                );
+              },
+            ),
         ],
       ),
     );
@@ -1479,17 +1539,33 @@ class _ModeChip extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final on = ref.watch(provider).valueOrNull ?? defaultValue;
-    return Tooltip(
-      message: tooltip(on),
-      child: FilterChip(
-        avatar: Icon(icon, size: 18),
-        label: Text(label),
-        selected: on,
-        showCheckmark: true,
-        selectedColor: _accent.withValues(alpha: 0.25),
-        checkmarkColor: Colors.white,
-        side: BorderSide(color: on ? _accent : const Color(0xFF555555)),
-        onSelected: (_) => onToggle(on),
+    // Compact round toggle: filled when on, so the state reads at a glance;
+    // the label goes to screen readers and the tooltip.
+    return Semantics(
+      label: label,
+      toggled: on,
+      child: IconButton(
+        icon: Icon(icon, size: 22),
+        tooltip: tooltip(on),
+        isSelected: on,
+        onPressed: () => onToggle(on),
+        style: IconButton.styleFrom(
+          foregroundColor: const Color(0xFF9E9E9E),
+          backgroundColor: Colors.transparent,
+        ).copyWith(
+          foregroundColor: WidgetStateProperty.resolveWith(
+            (states) =>
+                states.contains(WidgetState.selected)
+                    ? Colors.white
+                    : const Color(0xFF9E9E9E),
+          ),
+          backgroundColor: WidgetStateProperty.resolveWith(
+            (states) =>
+                states.contains(WidgetState.selected)
+                    ? _accent.withValues(alpha: 0.35)
+                    : Colors.transparent,
+          ),
+        ),
       ),
     );
   }

@@ -33,9 +33,16 @@ class SleepTimerButton extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final remaining = ref.watch(sleepTimerRemainingProvider).valueOrNull;
     final endOfSong = ref.watch(stopAfterCurrentProvider).valueOrNull ?? false;
+    final isChapter =
+        ref.watch(currentItemIsChapterProvider).valueOrNull ?? false;
+    final unit = isChapter ? 'chapter' : 'file';
     final active = remaining != null || endOfSong;
     final activeLabel =
-        remaining != null ? formatSleepTimerRemaining(remaining) : 'Song end';
+        remaining != null
+            ? formatSleepTimerRemaining(remaining)
+            : isChapter
+            ? 'Chapter end'
+            : 'File end';
 
     return PlayerActionButton(
       key: const ValueKey('sleep-timer-button'),
@@ -45,14 +52,14 @@ class SleepTimerButton extends ConsumerWidget {
           remaining != null
               ? 'Sleep timer: ${formatSleepTimerRemaining(remaining)} remaining'
               : endOfSong
-              ? 'Sleep timer: pauses when this song ends'
+              ? 'Sleep timer: pauses when this $unit ends'
               : 'Sleep timer',
       toggled: active,
       showLabel: showLabel,
       activeColor: activeColor,
       inactiveColor: inactiveColor,
       iconSize: iconSize,
-      onPressed: () => _showOptions(context, ref, remaining, endOfSong),
+      onPressed: () => _showOptions(context, ref, remaining, endOfSong, unit),
     );
   }
 
@@ -61,6 +68,7 @@ class SleepTimerButton extends ConsumerWidget {
     WidgetRef ref,
     Duration? remaining,
     bool endOfSong,
+    String unit,
   ) async {
     final selection = await showModalBottomSheet<Duration>(
       context: context,
@@ -89,7 +97,7 @@ class SleepTimerButton extends ConsumerWidget {
                           Text(
                             remaining != null
                                 ? '${formatSleepTimerRemaining(remaining)} remaining'
-                                : 'Pauses when this song ends',
+                                : 'Pauses when this $unit ends',
                             style: const TextStyle(color: Color(0xFFBBBBBB)),
                           ),
                         ],
@@ -116,8 +124,8 @@ class SleepTimerButton extends ConsumerWidget {
                       Icons.music_off_outlined,
                       color: Color(0xFFBBBBBB),
                     ),
-                    title: const Text(
-                      'End of this song',
+                    title: Text(
+                      'End of this $unit',
                       style: TextStyle(color: Colors.white),
                     ),
                     onTap: () => Navigator.pop(context, Duration.zero),
@@ -151,7 +159,7 @@ class SleepTimerButton extends ConsumerWidget {
     if (selection != null) {
       final playback = ref.read(playbackServiceProvider);
       if (selection == Duration.zero) {
-        // 'End of this song' replaces a running countdown.
+        // 'End of this file' replaces a running countdown.
         playback.cancelSleepTimer();
         playback.setStopAfterCurrent(true);
       } else {

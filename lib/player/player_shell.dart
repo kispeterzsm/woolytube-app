@@ -48,7 +48,7 @@ enum PlayerDragOrigin { miniBar, panel }
 
 class PlayerShellState extends ConsumerState<PlayerShell>
     with TickerProviderStateMixin {
-  static const Duration _expandDuration = Duration(milliseconds: 340);
+  static const Duration _expandDuration = Duration(milliseconds: 220);
 
   /// 0 = mini bar, 1 = expanded panel (or full-screen video).
   late final AnimationController expansion = AnimationController(
@@ -264,7 +264,8 @@ class PlayerShellState extends ConsumerState<PlayerShell>
     expansion.animateTo(
       target,
       duration: Duration(milliseconds: ms),
-      curve: Curves.easeOutCubic,
+      // Starts fast so a tap feels immediate, then settles softly.
+      curve: Curves.easeOutQuart,
     );
   }
 

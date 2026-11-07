@@ -922,12 +922,20 @@ void main() {
     ];
     await pumpPage(tester, tracks: tracks);
     expect(find.text('2 tracks · 1 downloaded · 1 h 20 min'), findsOneWidget);
-    expect(find.text('Shuffle'), findsOneWidget);
-    expect(find.text('Autoplay'), findsOneWidget);
+    const shuffle = ValueKey('playlist-mode-shuffle');
+    const autoplay = ValueKey('playlist-mode-autoplay');
     // A video playlist also offers audio-only playback.
-    expect(find.text('Audio only'), findsOneWidget);
+    const audioOnly = ValueKey('playlist-mode-audio-only');
+    final playY =
+        tester.getCenter(find.byKey(const ValueKey('playlist-detail-play'))).dy;
+    for (final key in [shuffle, autoplay, audioOnly]) {
+      expect(find.byKey(key), findsOneWidget);
+      // Everything sits in one row next to Play.
+      expect(tester.getCenter(find.byKey(key)).dy, closeTo(playY, 1));
+    }
+    expect(find.byTooltip('Shuffle is off'), findsOneWidget);
 
-    await tester.tap(find.text('Shuffle'));
+    await tester.tap(find.byKey(shuffle));
     await tester.pump();
     expect(playback.shuffleToggles, 1);
     expect(find.textContaining('Shuffle on'), findsOneWidget);
@@ -935,6 +943,52 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('playlist-detail-play')));
     await tester.pump();
     expect(playback.playAllCalls, 1);
+  });
+
+  testWidgets('the menu jumps from one failed track to the next', (
+    tester,
+  ) async {
+    final tracks = [
+      for (var i = 1; i <= 60; i++)
+        await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: i,
+          videoId: 'v$i',
+          title: 'Track $i',
+          status: i == 30 ? 'error' : (i == 50 ? 'unavailable' : 'complete'),
+          filePath: i == 30 || i == 50 ? null : '/tmp/$i.m4a',
+          lastError: i == 30 ? 'HTTP Error 403' : null,
+        ),
+    ];
+    await pumpPage(tester, tracks: tracks);
+
+    Future<void> jump() async {
+      await tester.tap(find.byKey(const ValueKey('playlist-detail-menu')));
+      await tester.pumpAndSettle();
+      expect(find.text('Jump to next failed (2)'), findsOneWidget);
+      await tester.tap(find.text('Jump to next failed (2)'));
+      await tester.pumpAndSettle();
+    }
+
+    await jump();
+    expect(find.byKey(ValueKey('track-row-${tracks[29].id}')), findsOneWidget);
+    expect(find.textContaining('1 of 2: #30 download failed'), findsOneWidget);
+
+    await jump();
+    expect(find.byKey(ValueKey('track-row-${tracks[49].id}')), findsOneWidget);
+    expect(find.textContaining('2 of 2: #50 unavailable'), findsOneWidget);
+
+    await jump();
+    expect(find.byKey(ValueKey('track-row-${tracks[29].id}')), findsOneWidget);
+    expect(find.textContaining('Back to the first'), findsOneWidget);
+  });
+
+  testWidgets('the jump entry is hidden when nothing failed', (tester) async {
+    await pumpPage(tester, tracks: const []);
+    await tester.tap(find.byKey(const ValueKey('playlist-detail-menu')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Jump to next failed'), findsNothing);
   });
 
   testWidgets('the menu opens the playlist settings', (tester) async {
