@@ -1,172 +1,92 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:woolytube/database/database.dart';
-import 'package:woolytube/providers/playback_providers.dart';
-import 'package:woolytube/services/playback_service.dart';
 import 'package:woolytube/widgets/mini_player.dart';
 
-import '../helpers/test_database.dart';
+import '../helpers/player_shell_harness.dart';
+
+final _title = find.byKey(const ValueKey('player-mini-title'));
 
 void main() {
-  setUp(() => videoFullscreenNotifier.value = false);
-  tearDown(() => videoFullscreenNotifier.value = false);
-
-  testWidgets('mini-player has its own Material, tooltips and semantics', (
+  testWidgets('mini bar shows the track with Material, tooltips, semantics', (
     tester,
   ) async {
-    final db = openTestDatabase();
-    addTearDown(db.close);
-    final playlist = await insertTestPlaylist(db, audioOnly: true);
-    final track = await insertTestTrack(
-      db,
-      playlistId: playlist.id,
-      title: 'Audio track',
-      status: 'complete',
-      filePath: '/tmp/audio-track.m4a',
-    );
-    final playback = _FakePlaybackService();
-    var opened = 0;
-
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          playbackServiceProvider.overrideWithValue(playback),
-          currentTrackProvider.overrideWith(
-            (ref) => Stream<Track?>.value(track),
-          ),
-          isPlayingProvider.overrideWith((ref) => Stream.value(true)),
-          positionProvider.overrideWith(
-            (ref) => Stream.value(const Duration(seconds: 30)),
-          ),
-          durationProvider.overrideWith(
-            (ref) => Stream.value(const Duration(minutes: 3)),
-          ),
-          isVideoContentProvider.overrideWith((ref) => Stream.value(false)),
-          playbackSponsorBlockSegmentsProvider.overrideWith(
-            (ref) => Stream.value(const <PlaybackSponsorBlockSegment>[]),
-          ),
-          queueProvider.overrideWith((ref) => Stream.value([track])),
-          queueIndexProvider.overrideWith((ref) => Stream.value(0)),
-        ],
-        child: MaterialApp(
-          // Mirrors main.dart: the bar sits outside any Scaffold.
-          builder:
-              (context, child) => Column(
-                children: [
-                  Expanded(child: child!),
-                  MiniPlayerBar(onOpenPlayer: () => opened++),
-                ],
-              ),
-          home: const Scaffold(body: SizedBox.shrink()),
-        ),
-      ),
-    );
+    final handle = tester.ensureSemantics();
+    final harness = await pumpPlayerShell(tester);
+    harness.position.add(const Duration(seconds: 30));
     await tester.pumpAndSettle();
 
-    final title = find.descendant(
-      of: find.byType(MiniPlayerBar),
-      matching: find.text('Audio track'),
-    );
-    expect(title, findsOneWidget);
-    // A Material ancestor inside the bar means the text is not drawn with
-    // the yellow-underline fallback style.
+    expect(find.byType(MiniPlayerBar), findsOneWidget);
+    expect(_title, findsOneWidget);
+    expect(tester.widget<Text>(_title).data, 'Audio track');
+    expect(find.text('0:30 / 3:00'), findsOneWidget);
+    // Text inside the bar has a Material ancestor (no yellow underline).
     expect(
-      find.ancestor(
-        of: title,
-        matching: find.descendant(
-          of: find.byType(MiniPlayerBar),
-          matching: find.byType(Material),
-        ),
-      ),
+      find.ancestor(of: _title, matching: find.byType(Material)),
       findsWidgets,
     );
+    expect(find.bySemanticsLabel('Open player'), findsOneWidget);
+    // Tooltips work: the bar has an Overlay above it.
+    expect(find.byTooltip('Pause'), findsOneWidget);
+    expect(find.byTooltip('Next'), findsOneWidget);
     expect(tester.takeException(), isNull);
 
-    // No Overlay exists above the Navigator, so the buttons expose their
-    // labels through semantics instead of Tooltip (which would assert).
-    expect(find.byType(Tooltip), findsNothing);
-    final pause = find.bySemanticsLabel('Pause');
-    final next = find.bySemanticsLabel('Next');
-    final close = find.bySemanticsLabel('Close player');
-    expect(pause, findsOneWidget);
-    expect(next, findsOneWidget);
-    expect(close, findsOneWidget);
-    expect(find.bySemanticsLabel('Open player'), findsOneWidget);
+    await tester.tap(find.byTooltip('Pause'));
+    expect(harness.playback.toggleCalls, 1);
+    await tester.tap(find.byTooltip('Next'));
+    expect(harness.playback.nextCalls, 1);
 
-    await tester.tap(title);
-    expect(opened, 1);
-    await tester.tap(
-      find.descendant(of: pause, matching: find.byType(IconButton)),
-    );
-    expect(playback.toggleCalls, 1);
-    await tester.tap(
-      find.descendant(of: next, matching: find.byType(IconButton)),
-    );
-    expect(playback.nextCalls, 1);
-    await tester.tap(
-      find.descendant(of: close, matching: find.byType(IconButton)),
-    );
-    expect(playback.stopCalls, 1);
+    await tester.tap(find.text('0:30 / 3:00'));
+    await tester.pumpAndSettle();
+    expect(harness.shellState(tester).expansion.value, 1);
+    handle.dispose();
   });
 
-  testWidgets('mini-player uses tooltips when an Overlay is available', (
+  testWidgets('bar slides in when playback starts and out when it stops', (
     tester,
   ) async {
-    final db = openTestDatabase();
-    addTearDown(db.close);
-    final playlist = await insertTestPlaylist(db, audioOnly: true);
-    final track = await insertTestTrack(
-      db,
-      playlistId: playlist.id,
-      title: 'Audio track',
-      status: 'complete',
-      filePath: '/tmp/audio-track.m4a',
-    );
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          playbackServiceProvider.overrideWithValue(_FakePlaybackService()),
-          currentTrackProvider.overrideWith(
-            (ref) => Stream<Track?>.value(track),
-          ),
-          isPlayingProvider.overrideWith((ref) => Stream.value(false)),
-          positionProvider.overrideWith((ref) => Stream.value(Duration.zero)),
-          durationProvider.overrideWith(
-            (ref) => Stream.value(const Duration(minutes: 3)),
-          ),
-          isVideoContentProvider.overrideWith((ref) => Stream.value(false)),
-          playbackSponsorBlockSegmentsProvider.overrideWith(
-            (ref) => Stream.value(const <PlaybackSponsorBlockSegment>[]),
-          ),
-        ],
-        child: const MaterialApp(
-          home: Scaffold(bottomNavigationBar: MiniPlayerBar()),
-        ),
-      ),
-    );
+    final harness = await pumpPlayerShell(tester, startPlaying: false);
+    final shell = harness.shellState(tester);
+    final page = find.byKey(const ValueKey('test-page'));
+    final fullHeight = tester.getSize(page).height;
+    expect(find.byType(MiniPlayerBar), findsNothing);
+
+    harness.play(harness.audioTrack);
+    // One frame to deliver the track, one for the animation's first tick.
+    await tester.pump();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    // Mid-way: the bar is partly in and the page is shrinking smoothly.
+    expect(shell.presence.value, inExclusiveRange(0.0, 1.0));
+    expect(find.byType(MiniPlayerBar), findsOneWidget);
     await tester.pumpAndSettle();
-    expect(find.byTooltip('Play'), findsOneWidget);
-    expect(find.byTooltip('Next'), findsOneWidget);
-    expect(find.byTooltip('Close player'), findsOneWidget);
-    expect(tester.takeException(), isNull);
+    expect(
+      tester.getSize(page).height,
+      closeTo(fullHeight - shell.geometry.miniHeight, 0.01),
+    );
+
+    harness.track.add(null);
+    await tester.pump();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(shell.presence.value, inExclusiveRange(0.0, 1.0));
+    await tester.pumpAndSettle();
+    expect(find.byType(MiniPlayerBar), findsNothing);
+    expect(tester.getSize(page).height, fullHeight);
   });
-}
 
-class _FakePlaybackService implements PlaybackService {
-  int toggleCalls = 0;
-  int nextCalls = 0;
-  int stopCalls = 0;
-
-  @override
-  Future<void> togglePlayPause() async => toggleCalls++;
-
-  @override
-  Future<void> next() async => nextCalls++;
-
-  @override
-  Future<void> stop() async => stopCalls++;
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+  testWidgets('a video plays in the bar after the full screen is closed', (
+    tester,
+  ) async {
+    final harness = await pumpPlayerShell(tester, video: true);
+    final shell = harness.shellState(tester);
+    expect(shell.expansion.value, 1);
+    shell.collapse();
+    await tester.pumpAndSettle();
+    final surface = find.byKey(const ValueKey('test-video-surface'));
+    expect(surface, findsOneWidget);
+    // The 16:9 picture covers the square thumbnail slot.
+    final rect = tester.getRect(surface);
+    expect(rect.height, closeTo(48, 0.01));
+    expect(rect.width, closeTo(48 * 16 / 9, 0.01));
+  });
 }
