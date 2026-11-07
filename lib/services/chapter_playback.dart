@@ -453,6 +453,74 @@ class AlbumPlaybackQueue {
     _remaining.removeWhere((i) => i.track.id == item.track.id);
   }
 
+  /// Makes chapter [chapterId] of the file that is current (track
+  /// [trackId]) the current item, keeping the rest of the queue. Chapters
+  /// skipped on the way count as played, so Previous reaches them, unless
+  /// the file's chapters are shuffled (then they still play later). Null
+  /// when the current item is not that file or the chapter is not part of
+  /// its unplayed or played chapters.
+  PlaybackItem? jumpToChapter(int trackId, String chapterId) {
+    final playing = current;
+    if (playing == null || playing.track.id != trackId) return null;
+    bool matches(PlaybackItem i) =>
+        i.track.id == trackId && i.chapter?.id == chapterId;
+    // The run of this file's items around the cursor.
+    var first = _historyIndex, last = _historyIndex;
+    while (first > 0 && _history[first - 1].track.id == trackId) {
+      first--;
+    }
+    while (last + 1 < _history.length &&
+        _history[last + 1].track.id == trackId) {
+      last++;
+    }
+    for (var i = first; i <= last; i++) {
+      if (matches(_history[i])) {
+        _historyIndex = i;
+        return _history[i];
+      }
+    }
+    // Unplayed chapters belong to this file only when its run ends the
+    // history.
+    if (last != _history.length - 1) return null;
+    final target = _remaining.indexWhere(matches);
+    if (target < 0) return null;
+    final item = _remaining.removeAt(target);
+    if (!(shuffle && _shuffleCurrentChapters)) {
+      final skipped = _remaining.sublist(0, target);
+      _remaining.removeRange(0, target);
+      _history.addAll(skipped);
+    }
+    _history.add(item);
+    _historyIndex = _history.length - 1;
+    return item;
+  }
+
+  /// Drops every item whose track matches [test] from the queue: played and
+  /// unplayed songs, "Up next" and the playlist still to come. The current
+  /// item stays (stop playback first when it matches). Dropped playlist
+  /// entries count as played, so a shuffle switch never brings them back.
+  void removeTracksWhere(bool Function(Track track) test) {
+    final keep = current;
+    var removedBefore = 0;
+    for (var i = _history.length - 1; i >= 0; i--) {
+      final item = _history[i];
+      if (identical(item, keep) || !test(item.track)) continue;
+      _history.removeAt(i);
+      if (i < _historyIndex) removedBefore++;
+    }
+    _historyIndex -= removedBefore;
+    _remaining.removeWhere((i) => test(i.track));
+    bool albumMatches(PlaybackAlbum album) =>
+        album.items.isNotEmpty && test(album.items.first.track);
+    _albums.removeWhere(albumMatches);
+    _before.removeWhere(albumMatches);
+    _queued.removeWhere(albumMatches);
+    _taken.removeWhere(albumMatches);
+    for (final album in _ordered) {
+      if (albumMatches(album)) _consumed.add(album.trackId);
+    }
+  }
+
   /// Rebuilds playlist albums that have not started yet, for example after
   /// the playlist's chapter setting changed. [rebuild] returns the new album
   /// for an album, or null to keep it. Albums that end up empty are dropped.

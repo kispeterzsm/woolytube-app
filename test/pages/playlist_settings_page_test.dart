@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -5,20 +6,36 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/pages/playlist_settings_page.dart';
+import 'package:woolytube/pages/sponsorblock_settings_page.dart';
+import 'package:woolytube/providers/chapter_fetch_jobs.dart';
+import 'package:woolytube/providers/playback_providers.dart';
 import 'package:woolytube/providers/providers.dart';
+import 'package:woolytube/services/chapter_service.dart';
+import 'package:woolytube/services/download_service.dart';
+import 'package:woolytube/services/library_gate.dart';
+import 'package:woolytube/services/playback_service.dart';
 import 'package:woolytube/services/playlist_service.dart';
+import 'package:woolytube/services/sponsorblock_categories.dart';
 
 import '../helpers/test_database.dart';
 
 void main() {
   late AppDatabase db;
   late Directory tempDir;
+  late _Playlists playlists;
+  late _Player player;
+  late _Downloads downloads;
+  late List<String> events;
 
   setUp(() async {
     db = openTestDatabase();
     tempDir = await Directory.systemTemp.createTemp(
       'woolytube_playlist_settings_test_',
     );
+    events = [];
+    playlists = _Playlists(db, events);
+    player = _Player(events);
+    downloads = _Downloads(events);
   });
 
   tearDown(() async {
@@ -31,15 +48,21 @@ void main() {
   Future<void> pumpStack(
     WidgetTester tester,
     int playlistId, {
-    PlaylistService? playlistService,
+    List<Override> overrides = const [],
   }) async {
+    // Tall enough that every row of the page is built.
+    tester.view.physicalSize = const Size(800, 2400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
     final navigatorKey = GlobalKey<NavigatorState>();
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
           databaseProvider.overrideWithValue(db),
-          if (playlistService != null)
-            playlistServiceProvider.overrideWithValue(playlistService),
+          playlistServiceProvider.overrideWithValue(playlists),
+          playbackServiceProvider.overrideWithValue(player),
+          downloadServiceProvider.overrideWithValue(downloads),
+          ...overrides,
         ],
         child: MaterialApp(
           navigatorKey: navigatorKey,
@@ -61,33 +84,232 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  Finder switchFor(String title) => find.descendant(
-    of: find.ancestor(of: find.text(title), matching: find.byType(Row)),
-    matching: find.byType(Switch),
-  );
+  Future<void> tapRow(WidgetTester tester, String key) async {
+    final row = find.byKey(ValueKey(key));
+    await tester.scrollUntilVisible(
+      row,
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+  }
 
-  testWidgets('Force Insert asks for an index before file selection', (
+  testWidgets('has sections and no Save button', (tester) async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    await pumpStack(tester, playlist.id);
+
+    expect(find.text('Playlist settings'), findsOneWidget);
+    expect(find.text('Save'), findsNothing);
+    for (final section in ['Playlist', 'Downloads', 'Updates', 'Playback']) {
+      expect(find.text(section), findsOneWidget);
+    }
+    expect(find.text('Danger zone'), findsOneWidget);
+    expect(find.text('Tools'), findsOneWidget);
+    expect(find.text('Force Insert'), findsNothing);
+    expect(find.text('Add a file from this phone'), findsOneWidget);
+  });
+
+  testWidgets('a switch saves at once, from anywhere on its row, and reaches '
+      'the player', (tester) async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    await pumpStack(tester, playlist.id);
+
+    // Tap the title, not the switch.
+    await tester.tap(find.text('Add cover art to files'));
+    await tester.pumpAndSettle();
+
+    expect((await db.getPlaylist(playlist.id)).includeThumbnails, isFalse);
+    expect(playlists.calls.single, {'includeThumbnails': false});
+    expect(player.settingsChanged, [playlist.id]);
+
+    // Back leaves without asking anything.
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.text('detail marker'), findsOneWidget);
+  });
+
+  testWidgets('a failed save puts the switch back and says why', (
+    tester,
+  ) async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    playlists.failWith = const LibraryBusyException('Busy right now.');
+    await pumpStack(tester, playlist.id);
+
+    await tester.tap(find.text('SponsorBlock'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Busy right now.'), findsOneWidget);
+    final tile = tester.widget<SwitchListTile>(
+      find.byKey(const ValueKey('playlist-sponsorblock')),
+    );
+    expect(tile.value, isTrue);
+    expect((await db.getPlaylist(playlist.id)).sponsorBlockEnabled, isTrue);
+  });
+
+  testWidgets('the name saves when editing finishes; an empty name is not '
+      'saved', (tester) async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    await pumpStack(tester, playlist.id);
+    final field = find.byKey(const ValueKey('playlist-name-field'));
+
+    await tester.enterText(field, '   ');
+    await tester.pump();
+    expect(find.text('Enter a name'), findsOneWidget);
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+    expect(playlists.calls, isEmpty);
+    expect(find.textContaining('A playlist needs a name'), findsOneWidget);
+    expect(tester.widget<TextField>(field).controller!.text, 'Test Playlist');
+
+    await tester.enterText(field, 'Road trip');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+    expect((await db.getPlaylist(playlist.id)).name, 'Road trip');
+
+    // Leaving with Back keeps an edit that was not submitted.
+    await tester.enterText(field, 'Road trip 2');
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.text('detail marker'), findsOneWidget);
+    expect((await db.getPlaylist(playlist.id)).name, 'Road trip 2');
+  });
+
+  testWidgets('switching the format asks first and then applies at once', (
+    tester,
+  ) async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    await pumpStack(tester, playlist.id);
+
+    await tapRow(tester, 'playlist-audio-only');
+    expect(find.text('Switch to audio only?'), findsOneWidget);
+    expect(find.textContaining('No file is deleted'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(playlists.calls, isEmpty);
+    expect((await db.getPlaylist(playlist.id)).audioOnly, isFalse);
+
+    await tapRow(tester, 'playlist-audio-only');
+    await tester.tap(find.text('Switch'));
+    await tester.pumpAndSettle();
+    expect(playlists.calls.single, {'audioOnly': true});
+    expect((await db.getPlaylist(playlist.id)).audioOnly, isTrue);
+    expect(find.text('Switched to audio only.'), findsOneWidget);
+
+    await tapRow(tester, 'playlist-audio-only');
+    expect(find.text('Switch to video?'), findsOneWidget);
+  });
+
+  testWidgets('an unusual update interval is kept until the owner changes it', (
+    tester,
+  ) async {
+    final playlist = await insertTestPlaylist(
+      db,
+      outputPath: tempDir.path,
+      updateFrequencyHours: 6,
+    );
+    await pumpStack(tester, playlist.id);
+    expect(find.text('Every 6 hours'), findsOneWidget);
+
+    // Another change does not touch the interval.
+    await tester.tap(find.text('Add cover art to files'));
+    await tester.pumpAndSettle();
+    expect((await db.getPlaylist(playlist.id)).updateFrequencyHours, 6);
+
+    await tapRow(tester, 'playlist-update-frequency');
+    expect(find.text('Every 6 hours'), findsNWidgets(2));
+    await tester.tap(find.text('Every day'));
+    await tester.pumpAndSettle();
+    expect((await db.getPlaylist(playlist.id)).updateFrequencyHours, 24);
+    expect(find.text('Every day'), findsOneWidget);
+  });
+
+  testWidgets('the interval row is disabled while automatic checks are off', (
+    tester,
+  ) async {
+    final playlist = await insertTestPlaylist(
+      db,
+      outputPath: tempDir.path,
+      autoUpdate: false,
+    );
+    await pumpStack(tester, playlist.id);
+    expect(
+      tester
+          .widget<ListTile>(
+            find.byKey(const ValueKey('playlist-update-frequency')),
+          )
+          .enabled,
+      isFalse,
+    );
+    await tester.tap(find.text('Check for new videos automatically'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<ListTile>(
+            find.byKey(const ValueKey('playlist-update-frequency')),
+          )
+          .enabled,
+      isTrue,
+    );
+  });
+
+  testWidgets('skip choices are summarised, saved at once and need '
+      'SponsorBlock on', (tester) async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    await pumpStack(tester, playlist.id);
+    expect(find.text('7 skipped'), findsOneWidget);
+
+    await tapRow(tester, 'playlist-skip-segments');
+    expect(find.byType(SponsorBlockSettingsPage), findsOneWidget);
+    final sponsor = find.byKey(const ValueKey('sponsorblock-category-sponsor'));
+    await tester.tap(find.descendant(of: sponsor, matching: find.text('Show')));
+    await tester.pumpAndSettle();
+    final stored = decodeSponsorBlockCategoryActions(
+      (await db.getPlaylist(playlist.id)).sponsorBlockCategoryActions,
+    );
+    expect(stored['sponsor'], SponsorBlockCategoryAction.showInSeekbar);
+    expect(player.settingsChanged, [playlist.id]);
+
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.text('6 skipped · 1 shown'), findsOneWidget);
+
+    await tester.tap(find.text('SponsorBlock'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<ListTile>(
+            find.byKey(const ValueKey('playlist-skip-segments')),
+          )
+          .enabled,
+      isFalse,
+    );
+  });
+
+  testWidgets('fetching chapters says so when nothing is missing', (
+    tester,
+  ) async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    await pumpStack(tester, playlist.id);
+
+    await tapRow(tester, 'fetch-missing-chapters');
+    expect(
+      find.text('All downloaded videos already have chapter info.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('adding a local file asks for a position before the file', (
     tester,
   ) async {
     final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
     await insertTestTrack(db, playlistId: playlist.id, index: 1);
+    await pumpStack(tester, playlist.id);
 
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [databaseProvider.overrideWithValue(db)],
-        child: MaterialApp(
-          theme: ThemeData.dark(),
-          home: PlaylistSettingsPage(playlistId: playlist.id),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    final forceInsertButton = find.byKey(const ValueKey('force-insert-button'));
-    expect(forceInsertButton, findsOneWidget);
-    expect(find.text('Force Insert'), findsOneWidget);
-    await tester.ensureVisible(forceInsertButton);
-    await tester.tap(forceInsertButton);
+    // The row shows a spinner while the dialog is open, so the frames never
+    // settle.
+    await tester.tap(find.byKey(const ValueKey('force-insert-button')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
 
@@ -95,7 +317,7 @@ void main() {
       find.byKey(const ValueKey('force-insert-index-field')),
       findsOneWidget,
     );
-    expect(find.text('Select file'), findsOneWidget);
+    expect(find.text('Choose file'), findsOneWidget);
     await tester.enterText(
       find.byKey(const ValueKey('force-insert-index-field')),
       '3',
@@ -104,108 +326,18 @@ void main() {
     await tester.pump();
     expect(find.text('Enter a number from 1 to 2.'), findsOneWidget);
     await tester.tap(find.text('Cancel'));
-    await tester.pumpAndSettle();
-  });
-
-  testWidgets('Save is disabled while the name is empty', (tester) async {
-    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
-    await pumpStack(tester, playlist.id);
-
-    final save = find.byKey(const ValueKey('playlist-settings-save'));
-    expect(tester.widget<TextButton>(save).enabled, isTrue);
-    await tester.enterText(
-      find.byKey(const ValueKey('playlist-name-field')),
-      '   ',
-    );
     await tester.pump();
-    expect(tester.widget<TextButton>(save).enabled, isFalse);
-    expect(find.text('Enter a name'), findsOneWidget);
-  });
-
-  testWidgets('leaving with unsaved changes asks for confirmation', (
-    tester,
-  ) async {
-    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
-    await pumpStack(tester, playlist.id);
-
-    // Clean page: back leaves immediately.
-    await tester.pageBack();
-    await tester.pumpAndSettle();
-    expect(find.text('detail marker'), findsOneWidget);
-
-    await tester.pumpWidget(const SizedBox.shrink());
-    await pumpStack(tester, playlist.id);
-    await tester.tap(switchFor('Include thumbnails').first);
-    await tester.pump();
-
-    await tester.pageBack();
-    await tester.pumpAndSettle();
-    expect(find.text('Discard changes?'), findsOneWidget);
-    await tester.tap(find.text('Keep editing'));
-    await tester.pumpAndSettle();
-    expect(find.text('Playlist Settings'), findsOneWidget);
-
-    await tester.pageBack();
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Discard'));
-    await tester.pumpAndSettle();
-    expect(find.text('detail marker'), findsOneWidget);
-  });
-
-  testWidgets('switching the format asks first, in both directions', (
-    tester,
-  ) async {
-    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
-    await pumpStack(tester, playlist.id);
-
-    final audioSwitch = switchFor('Audio only');
-    await tester.tap(audioSwitch.first);
-    await tester.pumpAndSettle();
-    expect(find.text('Switch to audio only?'), findsOneWidget);
-    expect(find.textContaining('No file is deleted'), findsOneWidget);
-    await tester.tap(find.text('Cancel'));
-    await tester.pumpAndSettle();
-    expect(tester.widget<Switch>(audioSwitch.first).value, isFalse);
-
-    await tester.tap(audioSwitch.first);
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Switch'));
-    await tester.pumpAndSettle();
-    expect(tester.widget<Switch>(audioSwitch.first).value, isTrue);
-
-    // Going back to the saved format only undoes the change.
-    await tester.tap(audioSwitch.first);
-    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 500));
     expect(find.byType(AlertDialog), findsNothing);
-    expect(tester.widget<Switch>(audioSwitch.first).value, isFalse);
-
-    final audioPlaylist = await insertTestPlaylist(
-      db,
-      url: 'https://www.youtube.com/playlist?list=audio',
-      audioOnly: true,
-      outputPath: tempDir.path,
-    );
-    await tester.pumpWidget(const SizedBox.shrink());
-    await pumpStack(tester, audioPlaylist.id);
-    await tester.tap(audioSwitch.first);
-    await tester.pumpAndSettle();
-    expect(find.text('Switch to video?'), findsOneWidget);
-    await tester.tap(find.text('Switch'));
-    await tester.pumpAndSettle();
-    expect(tester.widget<Switch>(audioSwitch.first).value, isFalse);
   });
 
   testWidgets('delete offers file removal and returns to the home page', (
     tester,
   ) async {
     final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
-    final service = _Playlists();
-    await pumpStack(tester, playlist.id, playlistService: service);
+    await pumpStack(tester, playlist.id);
 
-    final deleteButton = find.byKey(const ValueKey('delete-playlist-button'));
-    await tester.ensureVisible(deleteButton);
-    await tester.tap(deleteButton);
-    await tester.pumpAndSettle();
+    await tapRow(tester, 'delete-playlist-button');
     expect(find.text('Also delete downloaded files'), findsOneWidget);
     expect(find.textContaining('Downloaded files are kept'), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('delete-files-checkbox')));
@@ -215,21 +347,347 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('delete-playlist-confirm')));
     await tester.pumpAndSettle();
 
-    expect(service.deletedIds, [playlist.id]);
-    expect(service.deleteFilesFlags, [true]);
+    expect(playlists.deletedIds, [playlist.id]);
+    expect(playlists.deleteFilesFlags, [true]);
     expect(find.text('home marker'), findsOneWidget);
     expect(find.text('detail marker'), findsNothing);
+    // Its songs left the player first.
+    expect(events, ['playlistRemoved ${playlist.id}', 'delete ${playlist.id}']);
+  });
+
+  testWidgets('deleting a playlist that is downloading stops the download '
+      'first', (tester) async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    downloads
+      ..downloading = true
+      ..activePlaylistId = playlist.id;
+    await pumpStack(tester, playlist.id);
+
+    await tapRow(tester, 'delete-playlist-button');
+    expect(find.text('Its running download will be stopped.'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('delete-playlist-confirm')));
+    await tester.pump();
+    expect(events, ['cancel downloads']);
+    expect(playlists.deletedIds, isEmpty, reason: 'waits for the run to end');
+
+    downloads.finishRun();
+    await tester.pumpAndSettle();
+    expect(events, [
+      'cancel downloads',
+      'playlistRemoved ${playlist.id}',
+      'delete ${playlist.id}',
+    ]);
+    expect(find.text('home marker'), findsOneWidget);
+  });
+
+  testWidgets('a download that does not stop keeps the playlist', (
+    tester,
+  ) async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    downloads
+      ..downloading = true
+      ..activePlaylistId = playlist.id;
+    await pumpStack(tester, playlist.id);
+
+    await tapRow(tester, 'delete-playlist-button');
+    await tester.tap(find.byKey(const ValueKey('delete-playlist-confirm')));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 31));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Could not stop the download. Try again.'),
+      findsOneWidget,
+    );
+    expect(playlists.deletedIds, isEmpty);
+    expect(events, ['cancel downloads']);
+    expect(find.text('Playlist settings'), findsOneWidget);
+    expect(
+      tester
+          .widget<ListTile>(
+            find.byKey(const ValueKey('delete-playlist-button')),
+          )
+          .enabled,
+      isTrue,
+    );
+  });
+
+  testWidgets('a queued download of the playlist is dropped before deleting', (
+    tester,
+  ) async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    downloads.queued.add(playlist.id);
+    await pumpStack(tester, playlist.id);
+
+    await tapRow(tester, 'delete-playlist-button');
+    expect(
+      find.text('Its waiting download will be cancelled.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const ValueKey('delete-playlist-confirm')));
+    await tester.pumpAndSettle();
+    expect(downloads.queued, isEmpty);
+    expect(playlists.deletedIds, [playlist.id]);
+  });
+
+  testWidgets('delete waits for a running chapter fetch to stop', (
+    tester,
+  ) async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    final chapters = _SlowChapters(events);
+    await pumpStack(
+      tester,
+      playlist.id,
+      overrides: [chapterServiceProvider.overrideWithValue(chapters)],
+    );
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlaylistSettingsPage)),
+    );
+    final job = container
+        .read(chapterFetchJobsProvider.notifier)
+        .start(playlist.id);
+    await tester.pump();
+    expect(find.text('Fetching missing chapters'), findsOneWidget);
+
+    // The job's spinner never settles, so pump by hand.
+    await tester.tap(find.byKey(const ValueKey('delete-playlist-button')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.tap(find.byKey(const ValueKey('delete-playlist-confirm')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(chapters.cancellation!.isCancelled, isTrue);
+    expect(playlists.deletedIds, isEmpty, reason: 'one video is still checked');
+
+    chapters.finishCurrentVideo();
+    await tester.pumpAndSettle();
+    expect(events, [
+      'chapter job ended',
+      'playlistRemoved ${playlist.id}',
+      'delete ${playlist.id}',
+    ]);
+    // Quietly: no result for a deleted playlist.
+    expect(await job, isNull);
+    expect(find.textContaining('chapters'), findsNothing);
+  });
+
+  testWidgets('a failed save shows what is stored without losing a change '
+      'queued after it', (tester) async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    await pumpStack(tester, playlist.id);
+    final firstWrite = Completer<void>();
+    playlists.beforeWrite = (call) async {
+      if (call.containsKey('sponsorBlockEnabled')) {
+        await firstWrite.future;
+        throw StateError('Disk full');
+      }
+    };
+
+    await tester.tap(find.text('SponsorBlock'));
+    await tester.pump();
+    await tester.tap(find.text('Add cover art to files'));
+    await tester.pump();
+    firstWrite.complete();
+    await tester.pumpAndSettle();
+
+    expect(find.text('Could not save: Disk full'), findsOneWidget);
+    SwitchListTile tile(String key) =>
+        tester.widget<SwitchListTile>(find.byKey(ValueKey(key)));
+    expect(tile('playlist-sponsorblock').value, isTrue);
+    expect(tile('playlist-include-thumbnails').value, isFalse);
+    final stored = await db.getPlaylist(playlist.id);
+    expect(stored.sponsorBlockEnabled, isTrue);
+    expect(stored.includeThumbnails, isFalse);
+  });
+
+  testWidgets('a name that cannot be saved after leaving is reported', (
+    tester,
+  ) async {
+    final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+    await pumpStack(tester, playlist.id);
+    playlists.failWith = Exception('disk full');
+
+    await tester.enterText(
+      find.byKey(const ValueKey('playlist-name-field')),
+      'Road trip',
+    );
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+
+    expect(find.text('detail marker'), findsOneWidget);
+    expect(
+      find.textContaining('Could not rename the playlist to "Road trip"'),
+      findsOneWidget,
+    );
+    expect((await db.getPlaylist(playlist.id)).name, 'Test Playlist');
   });
 }
 
+/// Fetches chapters until cancelled, then finishes the video it is on when
+/// told to and fails like a job whose playlist was deleted.
+class _SlowChapters implements ChapterService {
+  _SlowChapters(this.events);
+
+  final List<String> events;
+  ChapterFetchCancellation? cancellation;
+  final _videoDone = Completer<void>();
+
+  void finishCurrentVideo() => _videoDone.complete();
+
+  @override
+  Future<ChapterFetchResult> fetchMissingChapters(
+    int playlistId, {
+    void Function(int done, int total)? onProgress,
+    ChapterFetchCancellation? cancellation,
+    int persistEvery = 25,
+  }) async {
+    this.cancellation = cancellation;
+    onProgress?.call(0, 5);
+    await _videoDone.future;
+    events.add('chapter job ended');
+    throw StateError('No element');
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// Records settings writes and applies them to the test database, like the
+/// real service minus the file work.
 class _Playlists implements PlaylistService {
+  _Playlists(this.db, this.events);
+
+  final AppDatabase db;
+  final List<String> events;
+
+  /// Runs before each settings write with the changed fields; may throw.
+  Future<void> Function(Map<String, Object?> call)? beforeWrite;
+  final calls = <Map<String, Object?>>[];
   final deletedIds = <int>[];
   final deleteFilesFlags = <bool>[];
+  Exception? failWith;
+
+  @override
+  Future<void> updatePlaylistSettings({
+    required int id,
+    String? name,
+    bool? audioOnly,
+    bool? autoUpdate,
+    bool? playChapters,
+    int? updateFrequencyHours,
+    bool? includeThumbnails,
+    bool? sponsorBlockEnabled,
+    List<String>? sponsorBlockCategories,
+    Map<String, SponsorBlockCategoryAction>? sponsorBlockCategoryActions,
+  }) async {
+    final failure = failWith;
+    if (failure != null) throw failure;
+    final call = {
+      if (name != null) 'name': name,
+      if (audioOnly != null) 'audioOnly': audioOnly,
+      if (autoUpdate != null) 'autoUpdate': autoUpdate,
+      if (playChapters != null) 'playChapters': playChapters,
+      if (updateFrequencyHours != null)
+        'updateFrequencyHours': updateFrequencyHours,
+      if (includeThumbnails != null) 'includeThumbnails': includeThumbnails,
+      if (sponsorBlockEnabled != null)
+        'sponsorBlockEnabled': sponsorBlockEnabled,
+      if (sponsorBlockCategoryActions != null)
+        'sponsorBlockCategoryActions': sponsorBlockCategoryActions,
+    };
+    await beforeWrite?.call(call);
+    calls.add(call);
+    final current = await db.getPlaylist(id);
+    await db.updatePlaylist(
+      current
+          .copyWith(
+            name: name,
+            audioOnly: audioOnly,
+            autoUpdate: autoUpdate,
+            updateFrequencyHours: updateFrequencyHours,
+            includeThumbnails: includeThumbnails,
+            sponsorBlockEnabled: sponsorBlockEnabled,
+            sponsorBlockCategoryActions:
+                sponsorBlockCategoryActions == null
+                    ? null
+                    : encodeSponsorBlockCategoryActions(
+                      sponsorBlockCategoryActions,
+                    ),
+          )
+          .toCompanion(true),
+    );
+  }
+
+  @override
+  Future<List<Track>> getTracksForPlaylist(int playlistId) =>
+      db.getTracksForPlaylist(playlistId);
 
   @override
   Future<void> deletePlaylist(int id, {bool deleteFiles = false}) async {
+    events.add('delete $id');
     deletedIds.add(id);
     deleteFilesFlags.add(deleteFiles);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _Player implements PlaybackService {
+  _Player(this.events);
+
+  final List<String> events;
+  final settingsChanged = <int>[];
+
+  @override
+  Future<void> playlistRemoved(int playlistId) async {
+    events.add('playlistRemoved $playlistId');
+  }
+
+  @override
+  Future<void> playlistSettingsChanged(int playlistId) async {
+    settingsChanged.add(playlistId);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _Downloads implements DownloadService {
+  _Downloads(this.events);
+
+  final List<String> events;
+  bool downloading = false;
+  final queued = <int>[];
+  Completer<void>? _run;
+
+  @override
+  int? activePlaylistId;
+
+  @override
+  bool get isDownloading => downloading;
+
+  @override
+  List<int> get queuedPlaylistIds => List.of(queued);
+
+  @override
+  bool removeFromQueue(int playlistId) => queued.remove(playlistId);
+
+  @override
+  Future<void> cancelActiveDownloads() async {
+    events.add('cancel downloads');
+    queued.clear();
+    _run ??= Completer<void>();
+  }
+
+  @override
+  Future<void> get runFinished =>
+      downloading ? (_run ??= Completer<void>()).future : Future.value();
+
+  void finishRun() {
+    downloading = false;
+    activePlaylistId = null;
+    _run?.complete();
   }
 
   @override

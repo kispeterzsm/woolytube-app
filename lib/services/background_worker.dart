@@ -28,6 +28,8 @@ Future<void> backgroundMain() async {
 
   const controlChannel = MethodChannel(backgroundControlChannelName);
   const ytdlpControlChannel = MethodChannel(ytdlpControlChannelName);
+  // Lines from this engine are marked "(background)" in the Debug log.
+  final log = LogService(source: LogService.backgroundSource);
 
   AutoUpdateRunner? runner;
   var stopRequested = false;
@@ -66,24 +68,46 @@ Future<void> backgroundMain() async {
       openDatabase: () => db = AppDatabase(),
       isStopRequested: () => stopRequested,
       onRunner: (created) => runner = created,
+      log: log,
     );
   } catch (e, stack) {
     debugPrint('Background update failed: $e\n$stack');
+    log.error('Scheduled update failed: $e');
     report = AutoUpdateReport(AutoUpdateStatus.failed, error: '$e');
   }
 
-  // Close before reporting: the engine is destroyed right after the reply.
-  try {
-    await db?.close();
-  } catch (_) {}
+  await finishBackgroundRun(
+    report,
+    log: log,
+    closeDatabase: () async => db?.close(),
+    reportToNative: controlChannel.invokeMethod,
+  );
+}
 
+/// Ends a headless run: closes the database, saves the log and only then
+/// reports [report] to the worker, which destroys the engine right after
+/// the reply (anything not yet written would be lost).
+@visibleForTesting
+Future<void> finishBackgroundRun(
+  AutoUpdateReport report, {
+  required LogService log,
+  required Future<void> Function() closeDatabase,
+  required Future<Object?> Function(String method, Object? arguments)
+  reportToNative,
+}) async {
+  try {
+    await closeDatabase();
+  } catch (_) {}
+  try {
+    await log.flush();
+  } catch (_) {}
   try {
     if (report.status == AutoUpdateStatus.failed) {
-      await controlChannel.invokeMethod('taskFailed', {
+      await reportToNative('taskFailed', {
         'error': report.error ?? 'unknown error',
       });
     } else {
-      await controlChannel.invokeMethod('taskComplete', report.toMap());
+      await reportToNative('taskComplete', report.toMap());
     }
   } catch (e) {
     debugPrint('Background update could not report back: $e');
@@ -106,7 +130,7 @@ Future<AutoUpdateReport> runBackgroundAutoUpdate({
 }) async {
   final yt = ytdlp ?? YtDlpService();
   final downloadLock = lock ?? DownloadLock();
-  final logService = log ?? LogService();
+  final logService = log ?? LogService(source: LogService.backgroundSource);
   final attemptLog = attempts ?? AutoUpdateAttemptLog();
   final now = clock ?? DateTime.now;
 
@@ -115,6 +139,7 @@ Future<AutoUpdateReport> runBackgroundAutoUpdate({
   // between two tracks has no process).
   if (await yt.hasActiveDownloads() ||
       await downloadLock.isHeldByOther(DownloadLock.backgroundOwner)) {
+    logService.info('Scheduled update skipped: the app is downloading');
     return const AutoUpdateReport(AutoUpdateStatus.busy);
   }
 

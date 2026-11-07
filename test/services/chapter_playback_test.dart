@@ -48,6 +48,63 @@ void main() {
   });
   tearDown(() => db.close());
 
+  group('jumping to a chapter of the current file', () {
+    test('in order: the chapters skipped count as played', () {
+      final q = AlbumPlaybackQueue(random: Random(1));
+      expect(q.start(albums, shuffled: false)!.chapter!.id, '0-0');
+      final trackId = albums[0].trackId;
+
+      expect(q.jumpToChapter(trackId, '0-2')!.chapter!.id, '0-2');
+      expect(q.previous()!.chapter!.id, '0-1');
+      // Back in the played chapters, a jump moves the cursor there.
+      expect(q.jumpToChapter(trackId, '0-0')!.chapter!.id, '0-0');
+      expect(q.next()!.chapter!.id, '0-1');
+      expect(q.next()!.chapter!.id, '0-2');
+      expect(q.next()!.track.id, albums[1].trackId);
+      // Another file: nothing happens.
+      expect(q.jumpToChapter(trackId, '0-1'), isNull);
+      expect(q.current!.track.id, albums[1].trackId);
+    });
+
+    test('with shuffled chapters the others still play afterwards', () {
+      for (var seed = 0; seed < 20; seed++) {
+        final q = AlbumPlaybackQueue(random: Random(seed));
+        final first = q.start(
+          albums,
+          trackId: albums[0].trackId,
+          shuffled: true,
+        );
+        final trackId = albums[0].trackId;
+        final others = {'0-0', '0-1', '0-2'}..remove(first!.chapter!.id);
+        final target = others.first;
+        expect(q.jumpToChapter(trackId, target)!.chapter!.id, target);
+        final rest = <String>[];
+        var item = q.next();
+        while (item != null && item.track.id == trackId) {
+          rest.add(item.chapter!.id);
+          item = q.next();
+        }
+        expect(rest, [others.last], reason: 'seed $seed');
+      }
+    });
+  });
+
+  test('removing tracks keeps the current item and never brings them back', () {
+    final q = AlbumPlaybackQueue(random: Random(3));
+    q.start(albums, trackId: albums[1].trackId, shuffled: false);
+    q.enqueue(albums[2]);
+    final removed = albums[2].trackId;
+    q.removeTracksWhere((t) => t.id == removed);
+    expect(q.current!.track.id, albums[1].trackId);
+    expect(q.queued, isEmpty);
+    expect(q.items.where((i) => i.track.id == removed), isEmpty);
+    q.setShuffle(true);
+    q.setShuffle(false);
+    expect(q.items.where((i) => i.track.id == removed), isEmpty);
+    // The entry above is still reachable with Previous.
+    expect(q.previous()!.track.id, albums[0].trackId);
+  });
+
   test('shuffle completes each album once before another playlist entry', () {
     for (var seed = 0; seed < 50; seed++) {
       final q = AlbumPlaybackQueue(random: Random(seed));
