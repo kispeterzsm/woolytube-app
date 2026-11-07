@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:drift/drift.dart' show Value;
@@ -10,6 +11,30 @@ import 'package:woolytube/services/playback_settings_store.dart';
 
 import '../helpers/test_database.dart';
 import 'playback_fakes.dart';
+
+/// A settings store whose [load] waits for [gate], like shared preferences
+/// that are slow to open at a cold start.
+class _GatedStore implements PlaybackSettingsStore {
+  final MemoryPlaybackSettingsStore inner;
+  final Future<void> gate;
+  _GatedStore(this.inner, this.gate);
+
+  @override
+  Future<PlaybackPreferences> load() async {
+    await gate;
+    return inner.load();
+  }
+
+  @override
+  Future<void> saveShuffle(bool enabled) => inner.saveShuffle(enabled);
+  @override
+  Future<void> saveAutoplay(bool enabled) => inner.saveAutoplay(enabled);
+  @override
+  Future<void> saveAudioOnly(bool enabled) => inner.saveAudioOnly(enabled);
+  @override
+  Future<void> saveSession(PlaybackSession? session) =>
+      inner.saveSession(session);
+}
 
 const _threeChapters = ChapterData(
   downloaded: [
@@ -299,6 +324,53 @@ void main() {
       expect(player.opened, hasLength(2));
     });
 
+    test('Play pressed while the next song opens paused plays it', () async {
+      final tracks = await addTracks(2);
+      await playback.playTrack(tracks[0], tracks);
+      playback.setStopAfterCurrent(true);
+      final gate = player.openGate = Completer<void>();
+      player.finish();
+      await settle();
+      await playback.resume();
+      gate.complete();
+      await settle();
+      expect(playback.currentTrack!.id, tracks[1].id);
+      expect(player.state.playing, isTrue);
+      expect(playback.isPlaying, isTrue);
+    });
+
+    test(
+      'Next over missing files at the end keeps the queue position',
+      () async {
+        final song = await addTrack('song');
+        final gone = [
+          await addTrack('gone1', fileExists: false),
+          await addTrack('gone2', fileExists: false),
+        ];
+        await playback.playTrack(song, [song, ...gone]);
+        await playback.next();
+        expect(playback.currentTrack!.id, song.id);
+        expect(playback.queueIndex, 0);
+
+        await playback.previous();
+        expect(player.opened, hasLength(1), reason: 'nothing to reload');
+        expect(playback.currentTrack!.id, song.id);
+      },
+    );
+
+    test('removing from Up next removes the entry the user saw', () async {
+      final tracks = await addTracks(4);
+      await playback.playTrack(tracks[0], [tracks[0]]);
+      await playback.addToUpNextQueue(tracks[1]);
+      await playback.addToUpNextQueue(tracks[2]);
+      await playback.addToUpNextQueue(tracks[3]);
+      playback.removeUpNextQueueAt(1);
+      expect(playback.upNextQueue.map((t) => t.id), [
+        tracks[1].id,
+        tracks[3].id,
+      ]);
+    });
+
     test('playlist settings apply to songs that have not started', () async {
       final album = await addTrack('album', chapters: _threeChapters);
       final first = await addTrack('first');
@@ -443,10 +515,11 @@ void main() {
       expect(player.opened, hasLength(1));
     });
 
-    test('editing chapters keeps the queue', () async {
+    test('editing chapters keeps the queue and the interrupted spot', () async {
       final tracks = await addTracks(3);
       final album = await addTrack('album', chapters: _threeChapters);
       await playback.playTrack(tracks[0], [...tracks, album]);
+      player.tick(const Duration(seconds: 12));
 
       await playback.beginChapterEditing(album);
       expect(playback.currentTrack!.id, album.id);
@@ -454,9 +527,80 @@ void main() {
       playback.endChapterEditing();
 
       await playback.next();
+      expect(playback.currentTrack!.id, tracks[0].id);
+      expect(
+        player.opened.last.start,
+        const Duration(seconds: 12),
+        reason: 'the interrupted song continues where it was',
+      );
+      await playback.next();
       expect(playback.currentTrack!.id, tracks[1].id);
+      expect(player.opened.last.start, isNull);
+      await playback.previous();
       await playback.previous();
       expect(playback.currentTrack!.id, album.id);
+    });
+
+    test('editing a paused chapter keeps it paused', () async {
+      final album = await addTrack('album', chapters: _threeChapters);
+      await playback.playTrack(album, [album], chapterId: 'two');
+      player.tick(const Duration(seconds: 25));
+      await playback.pause();
+
+      await playback.beginChapterEditing(album);
+      expect(playback.currentItem!.chapter, isNull);
+      expect(player.opened.last.start, const Duration(seconds: 25));
+      expect(player.state.playing, isFalse);
+      expect(playback.isPlaying, isFalse);
+    });
+
+    test(
+      'a chapter whose file fails to reopen for editing stays current',
+      () async {
+        final album = await addTrack('album', chapters: _threeChapters);
+        await playback.playTrack(album, [album], chapterId: 'two');
+        player.tick(const Duration(seconds: 25));
+        final queue = playback.queue;
+        player.openFails = (media) => media.end == null;
+
+        await expectLater(
+          playback.beginChapterEditing(album),
+          throwsA(isA<StateError>()),
+        );
+        expect(playback.currentItem!.chapter!.id, 'two');
+        expect(playback.queue, queue);
+        expect(playback.hasLoadedMedia, isFalse);
+        expect(playback.position, const Duration(seconds: 5));
+
+        player.openFails = null;
+        await playback.resume();
+        expect(player.opened.last.start, const Duration(seconds: 25));
+        expect(playback.currentItem!.chapter!.id, 'two');
+      },
+    );
+
+    test('a paused chapter opens for editing without audio focus', () async {
+      final album = await addTrack('album', chapters: _threeChapters);
+      await playback.playTrack(album, [album], chapterId: 'two');
+      await playback.pause();
+      session.grantFocus = false;
+      await playback.beginChapterEditing(album);
+      expect(playback.currentItem!.chapter, isNull);
+      expect(player.state.playing, isFalse);
+    });
+
+    test('a file that will not open for editing starts nothing else', () async {
+      final tracks = await addTracks(2);
+      player.openFails = (media) => media.uri.contains('t0.m4a');
+
+      await expectLater(
+        playback.beginChapterEditing(tracks[0], tracks),
+        throwsA(isA<StateError>()),
+      );
+      expect(player.opened, isEmpty);
+      expect(playback.currentTrack, isNull);
+      expect(playback.queue, isEmpty);
+      expect(player.state.playing, isFalse);
     });
 
     test('editing the chapter that plays keeps the spot', () async {
@@ -539,6 +683,29 @@ void main() {
       await playback.resume();
       expect(player.opened.single.start, const Duration(seconds: 42));
       expect(playback.hasLoadedMedia, isTrue);
+    });
+
+    test('Play while the last song is still being restored opens it', () async {
+      final tracks = await addTracks(2);
+      final store = MemoryPlaybackSettingsStore();
+      await playback.dispose();
+      playback = await createPlayback(store: store);
+      await playback.playTrack(tracks[1], tracks);
+      player.tick(const Duration(seconds: 30));
+      await playback.pause();
+      await settle();
+      await playback.dispose();
+
+      final gate = Completer<void>();
+      playback = await createPlayback(store: _GatedStore(store, gate.future));
+      final play = playback.resume();
+      await settle();
+      expect(player.opened, isEmpty);
+      gate.complete();
+      await play;
+      expect(playback.currentTrack!.id, tracks[1].id);
+      expect(player.opened.single.start, const Duration(seconds: 30));
+      expect(player.state.playing, isTrue);
     });
 
     test('an explicit stop forgets the last song', () async {

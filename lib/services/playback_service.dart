@@ -205,6 +205,15 @@ class PlaybackService
   /// Where a not-yet-opened current item (a restored session) starts.
   Duration? _resumeAtSource;
 
+  /// The song that opening the chapter editor for another file interrupted:
+  /// its queue id and where it was. The next step that reaches it continues
+  /// there instead of at its start.
+  ({String id, Duration at})? _resumeAfterEdit;
+
+  /// The albums behind the published "Up next" list, so an index from the UI
+  /// always means what the user saw, even while a step is in flight.
+  List<PlaybackAlbum> _publishedUpNext = const [];
+
   /// Audio-only was switched on for the car or picture-in-picture, not by
   /// the user, and is undone when the app comes back to the foreground.
   bool _temporaryAudioOnly = false;
@@ -491,8 +500,9 @@ class PlaybackService
     if (!listEquals(items, _queue.value)) _queue.add(items);
     final index = _albumQueue.index;
     if (_queueIndex.value != index) _queueIndex.add(index);
+    _publishedUpNext = _albumQueue.queued;
     final upNext =
-        _albumQueue.queued
+        _publishedUpNext
             .map(
               (g) =>
                   g.items.length > 1
@@ -684,6 +694,7 @@ class PlaybackService
     if (!await _requestFocus()) return;
     _pendingSkipTarget = null;
     _skipOrigin = null;
+    _resumeAfterEdit = null;
     final first = _albumQueue.start(
       groups,
       trackId: trackId,
@@ -794,6 +805,8 @@ class PlaybackService
               .toList();
     }
     if (items.isEmpty) return false;
+    // A step that is rolled back meanwhile keeps this (see
+    // [AlbumPlaybackQueue.restore]).
     _albumQueue.enqueue(PlaybackAlbum(items));
     _publishQueue();
     return true;
@@ -811,8 +824,11 @@ class PlaybackService
     return started;
   }
 
+  /// Removes the [index]th entry of the published [upNextQueue].
   void removeUpNextQueueAt(int index) {
-    _albumQueue.removeQueued(index);
+    final shown = _publishedUpNext;
+    if (index < 0 || index >= shown.length) return;
+    _albumQueue.removeQueuedAlbum(shown[index]);
     _publishQueue();
   }
 
@@ -857,16 +873,28 @@ class PlaybackService
     }
   }
 
-  /// [_stepQueue], but a backward step that finds nothing leaves the queue
-  /// where it was, so the queue position keeps matching what is playing.
+  /// [_stepQueue], but a step that finds nothing leaves the queue where it
+  /// was, so the queue position keeps matching what is playing (also after
+  /// walking over missing files at the end of the queue).
   Future<_Stepped?> _stepOrStay({
     bool forward = true,
     bool skipFile = false,
   }) async {
-    final before = forward ? null : _albumQueue.snapshot();
+    final before = _albumQueue.snapshot();
     final stepped = await _stepQueue(forward: forward, skipFile: skipFile);
-    if (stepped == null && before != null) _albumQueue.restore(before);
+    if (stepped == null) {
+      _restoreQueue(before);
+      // "Next file" at the last file still skips the rest of this one.
+      if (skipFile) _albumQueue.discardRestOfCurrentFile();
+    }
     return stepped;
+  }
+
+  /// Rolls the queue back to [snapshot]. A shuffle switch made since then
+  /// still applies; "Up next" changes are kept.
+  void _restoreQueue(PlaybackQueueSnapshot snapshot) {
+    _albumQueue.restore(snapshot);
+    _albumQueue.setShuffle(shuffleEnabled);
   }
 
   /// One press of a burst of Next/Previous presses: moves the queue without
@@ -888,9 +916,13 @@ class PlaybackService
   }) async {
     final pending = _pendingSkipTarget;
     final origin = _skipOrigin ?? _albumQueue.snapshot();
+    final resumeEdit = _resumeAfterEdit;
     _pendingSkipTarget = null;
     _skipOrigin = null;
+    _resumeAfterEdit = null;
     final failedOpens = <String>[];
+    // When the last press of a burst finds nothing, the queue is back at the
+    // item the earlier presses reached, which is [pending].
     var target =
         await _stepOrStay(forward: forward, skipFile: skipFile) ?? pending;
     var attempts = 0;
@@ -899,6 +931,7 @@ class PlaybackService
       final result = await _loadAndPlay(
         target.item,
         filePath: target.path,
+        startAt: _resumePositionFor(target.item, resumeEdit),
         reportFailure: false,
       );
       if (result == _LoadResult.opened) {
@@ -906,7 +939,7 @@ class PlaybackService
         return _AdvanceResult.loaded;
       }
       if (result == _LoadResult.focusDenied) {
-        _albumQueue.restore(origin);
+        _restoreQueue(origin);
         _publishQueue();
         _reportFailedOpens(failedOpens);
         return _AdvanceResult.focusDenied;
@@ -919,6 +952,21 @@ class PlaybackService
     _reportFailedOpens(failedOpens);
     if (_loadedTrackId == null) await _abandonFocus();
     return _AdvanceResult.nothingLeft;
+  }
+
+  /// Where [item] continues when it is the song the chapter editor
+  /// interrupted; null (its start) otherwise.
+  Duration? _resumePositionFor(
+    PlaybackItem item,
+    ({String id, Duration at})? resume,
+  ) {
+    if (resume == null || resume.id != item.id) return null;
+    final at = resume.at.inMilliseconds;
+    final chapter = item.chapter;
+    if (chapter != null && (at < chapter.startMs || at >= chapter.endMs)) {
+      return null;
+    }
+    return resume.at;
   }
 
   /// Re-reads a queued item from the database. Returns null when the track is
@@ -964,14 +1012,16 @@ class PlaybackService
 
   /// Opens [item] from the already resolved [filePath]. Audio focus is taken
   /// before anything is published, so a denied request leaves the previous
-  /// item and its media untouched.
+  /// item and its media untouched. A file opened paused ([_openNextPaused])
+  /// needs no focus until Play.
   Future<_LoadResult> _loadAndPlay(
     PlaybackItem item, {
     required String filePath,
     Duration? startAt,
     bool reportFailure = true,
   }) async {
-    if (!await _requestFocus()) return _LoadResult.focusDenied;
+    final focused = !_openNextPaused;
+    if (focused && !await _requestFocus()) return _LoadResult.focusDenied;
     _loading = true;
     _pauseAfterLoad = _openNextPaused;
     _pauseAfterLoadKeepFocus = false;
@@ -1000,9 +1050,15 @@ class PlaybackService
     _setDuration(item.duration ?? Duration.zero);
     final end = _openEndFor(item);
     _openedEndMs = end?.inMilliseconds;
+    var playOnOpen = true;
     try {
       await _player.pause();
       await _loadActiveSegments(item.track);
+      // A pause pressed until now (or "stop after this song") opens the file
+      // paused, so not even a moment of it is heard.
+      playOnOpen = !(_pauseAfterLoad || _pauseAfterLoadKeepFocus);
+      // Play pressed during a paused open: it needs audio focus first.
+      if (playOnOpen && !focused) playOnOpen = await _requestFocus();
       await _player.open(
         Media(
           Uri.file(filePath).toString(),
@@ -1013,7 +1069,7 @@ class PlaybackService
                   : Duration(milliseconds: item.startMs)),
           end: end,
         ),
-        play: !_openNextPaused,
+        play: playOnOpen,
       );
       _loadedTrackId = item.track.id;
     } catch (_) {
@@ -1046,6 +1102,9 @@ class PlaybackService
       _pauseAfterLoadKeepFocus = false;
       await _player.pause();
       if (abandon) await _abandonFocus();
+    } else if (!playOnOpen) {
+      // Play was pressed while the file was opening paused.
+      if (await _requestFocus()) await _player.play();
     }
     _syncPlaying();
     _armLoadWatch();
@@ -1220,7 +1279,7 @@ class PlaybackService
         !current.continuesInto(fresh) ||
         fresh.chapter!.endMs > (_openedEndMs ?? 0)) {
       // The chapters were edited meanwhile: open the next item normally.
-      _albumQueue.restore(snapshot);
+      _restoreQueue(snapshot);
       _completionHandled = true;
       _itemEnded = true;
       await _player.pause();
@@ -1255,71 +1314,190 @@ class PlaybackService
   /// Opens [track] as one whole file for marking chapters, without throwing
   /// away the play queue:
   /// * already playing as a whole file: nothing is reloaded;
-  /// * a chapter of it is playing: the whole file continues from the same
-  ///   spot in the queue's place of that chapter;
-  /// * anything else: the file plays now, and the queue continues after it
-  ///   once editing ends. With nothing playing at all, [playlistTracks]
-  ///   (when given) becomes the queue, as if the file had been tapped.
+  /// * a chapter of it is current: the whole file takes that chapter's place
+  ///   in the queue and continues from the same spot, playing or paused as
+  ///   before (a song restored at start-up opens paused);
+  /// * another file: it starts playing now. Once it ends (or on Next), the
+  ///   song it interrupted continues where it was, then the rest of the
+  ///   queue;
+  /// * nothing at all is current: with [playlistTracks] the file starts as if
+  ///   it had been tapped in that list, otherwise it plays alone.
   ///
-  /// Throws a [StateError] with a user-facing message when the file cannot
-  /// be opened. Call [endChapterEditing] when the editor closes.
+  /// On failure nothing changes (or, when the player had to close the old
+  /// song, that song stays current, ready to reopen with Play) and a
+  /// [StateError] with a user-facing message is thrown. Call
+  /// [endChapterEditing] when the editor closes.
   Future<void> beginChapterEditing(Track track, [List<Track>? playlistTracks]) {
     return _transition(() async {
       final item = currentItem;
-      if (_loadedTrackId == track.id && item?.track.id == track.id) {
-        if (item!.chapter == null) {
-          _chapterEditing = true;
-          return;
-        }
-        final fresh = await _db.getTrack(track.id) ?? item.track;
-        final path = _currentFilePath ?? _resolveTrackFile(fresh);
-        if (path == null) throw StateError('File not found.');
-        final whole = PlaybackItem(fresh);
-        final at = _player.state.position;
-        _albumQueue.replaceCurrent(whole);
-        _publishQueue();
-        if (await _loadAndPlay(whole, filePath: path, startAt: at) !=
-            _LoadResult.opened) {
-          throw StateError('The local media file could not be opened.');
-        }
-        _chapterEditing = true;
-        return;
-      }
-      final fresh = await _db.getTrack(track.id);
-      if (fresh == null || !isTrackPlayable(fresh)) {
-        throw StateError('This file is not downloaded.');
-      }
-      final path = _resolveTrackFile(fresh);
-      if (path == null) throw StateError('File not found.');
-      if (item == null && playlistTracks != null) {
-        await _startQueue(
-          playableTracksForPlayback(
-            playlistTracks,
-            directlySelectedTrackId: fresh.id,
-          ),
-          selected: fresh,
-          whole: true,
-        );
+      if (item != null && item.track.id == track.id) {
+        await _editCurrentFile(item);
+      } else if (item == null && playlistTracks != null) {
+        await _editInPlaylist(track, playlistTracks);
       } else {
-        final whole = PlaybackItem(fresh);
-        final snapshot = _albumQueue.snapshot();
-        _albumQueue.playNow(whole);
-        _publishQueue();
-        final result = await _loadAndPlay(
-          whole,
-          filePath: path,
-          reportFailure: false,
-        );
-        if (result != _LoadResult.opened) {
-          _albumQueue.restore(snapshot);
-          _publishQueue();
-        }
-      }
-      if (_loadedTrackId != track.id) {
-        throw StateError('The local media file could not be opened.');
+        await _editOtherFile(track, item);
       }
       _chapterEditing = true;
     });
+  }
+
+  Future<(Track, String)> _editableFile(int trackId) async {
+    final fresh = await _db.getTrack(trackId);
+    if (fresh == null || !isTrackPlayable(fresh)) {
+      throw StateError('This file is not downloaded.');
+    }
+    final path = _resolveTrackFile(fresh);
+    if (path == null) throw StateError('File not found.');
+    return (fresh, path);
+  }
+
+  Never _editFailed(_LoadResult result) =>
+      throw StateError(
+        result == _LoadResult.focusDenied
+            ? 'Another app is using audio.'
+            : 'The local media file could not be opened.',
+      );
+
+  Future<void> _editCurrentFile(PlaybackItem item) async {
+    final loaded = _loadedTrackId == item.track.id;
+    if (loaded && item.chapter == null) return;
+    final (fresh, path) = await _editableFile(item.track.id);
+    final at =
+        loaded
+            ? _player.state.position
+            : _resumeAtSource ?? Duration(milliseconds: item.startMs);
+    final whole = PlaybackItem(fresh);
+    final snapshot = _albumQueue.snapshot();
+    _albumQueue.replaceCurrent(whole);
+    _publishQueue();
+    final result = await _loadKeepingPause(
+      paused: !(loaded && isPlaying),
+      () => _loadAndPlay(
+        whole,
+        filePath: path,
+        startAt: at,
+        reportFailure: false,
+      ),
+    );
+    if (result == _LoadResult.opened) return;
+    _restoreQueue(snapshot);
+    _publishQueue();
+    if (result == _LoadResult.openFailed) await _showUnopened(item, at);
+    _editFailed(result);
+  }
+
+  Future<void> _editInPlaylist(Track track, List<Track> playlistTracks) async {
+    final (fresh, path) = await _editableFile(track.id);
+    final groups = await _buildAlbums(
+      playableTracksForPlayback(
+        playlistTracks,
+        directlySelectedTrackId: fresh.id,
+      ),
+      trackId: fresh.id,
+      whole: true,
+    );
+    if (!groups.any((g) => g.trackId == fresh.id)) {
+      await _editOtherFile(fresh, null);
+      return;
+    }
+    if (!await _requestFocus()) _editFailed(_LoadResult.focusDenied);
+    _pendingSkipTarget = null;
+    _skipOrigin = null;
+    _resumeAfterEdit = null;
+    final snapshot = _albumQueue.snapshot();
+    final first = _albumQueue.start(
+      groups,
+      trackId: fresh.id,
+      shuffled: shuffleEnabled,
+    );
+    _publishQueue();
+    // Unlike a tap, a file that does not open must not start another song.
+    final result =
+        first == null || first.track.id != fresh.id
+            ? _LoadResult.openFailed
+            : await _loadAndPlay(first, filePath: path, reportFailure: false);
+    if (result == _LoadResult.opened) return;
+    _restoreQueue(snapshot);
+    _publishQueue();
+    if (result == _LoadResult.openFailed) await _showUnopened(null, null);
+    _editFailed(result);
+  }
+
+  Future<void> _editOtherFile(Track track, PlaybackItem? interrupted) async {
+    final (fresh, path) = await _editableFile(track.id);
+    final whole = PlaybackItem(fresh);
+    final snapshot = _albumQueue.snapshot();
+    final interruptedAt =
+        _loadedTrackId != null ? _player.state.position : _resumeAtSource;
+    // Pick the interrupted song up again afterwards, where it was.
+    final resume =
+        interrupted != null && !_itemEnded && !_queueEnded
+            ? PlaybackItem(interrupted.track, interrupted.chapter)
+            : null;
+    _albumQueue.playNow(whole, thenResume: resume);
+    _publishQueue();
+    final result = await _loadAndPlay(
+      whole,
+      filePath: path,
+      reportFailure: false,
+    );
+    if (result == _LoadResult.opened) {
+      if (resume != null && interruptedAt != null) {
+        _resumeAfterEdit = (id: resume.id, at: interruptedAt);
+      }
+      return;
+    }
+    _restoreQueue(snapshot);
+    _publishQueue();
+    if (result == _LoadResult.openFailed) {
+      await _showUnopened(interrupted, interruptedAt);
+    }
+    _editFailed(result);
+  }
+
+  /// Runs [load] with the file opening paused when [paused] is true.
+  Future<_LoadResult> _loadKeepingPause(
+    Future<_LoadResult> Function() load, {
+    required bool paused,
+  }) async {
+    if (!paused) return load();
+    final before = _openNextPaused;
+    _openNextPaused = true;
+    try {
+      return await load();
+    } finally {
+      _openNextPaused = before;
+    }
+  }
+
+  /// After a failed open closed the player: shows [item] again, not opened,
+  /// at [at] (Play reopens it there), or nothing at all when [item] is null.
+  Future<void> _showUnopened(PlaybackItem? item, Duration? at) async {
+    _loadedTrackId = null;
+    _currentFilePath = null;
+    _completionHandled = true;
+    _cancelLoadWatch();
+    _syncPlaying(false);
+    _resumeAtSource = item == null ? null : at;
+    _currentItem.add(item);
+    _currentTrack.add(item?.displayTrack);
+    if (item == null) {
+      _currentPlaylist.add(null);
+      _activeSegments = const [];
+      _visibleSegments = const [];
+      _sponsorBlockSegments.add(const []);
+      if (_detectedVideo.value != null) _detectedVideo.add(null);
+      _setPosition(Duration.zero, immediate: true);
+      _setDuration(Duration.zero);
+    } else {
+      _setDuration(item.duration ?? Duration.zero);
+      _setPosition(
+        item.relativePosition(at ?? Duration(milliseconds: item.startMs)),
+        immediate: true,
+      );
+      await _loadActiveSegments(item.track, clearPendingMark: false);
+    }
+    await _abandonFocus();
   }
 
   void endChapterEditing() => _chapterEditing = false;
@@ -1550,37 +1728,50 @@ class PlaybackService
       return;
     }
     if (_loadedTrackId == null) {
-      final item = currentItem;
-      if (item == null) {
-        // Nothing is queued: a play press while idle may still start tracks
-        // that were queued up next.
-        await startUpNextQueueIfIdle();
-        return;
-      }
-      await _transition(() async {
-        if (_loadedTrackId != null || currentItem?.id != item.id) return;
-        // A restored session, or the last open failed: open the item now.
-        // Its file may have been renamed since.
-        final current = await _db.getTrack(item.track.id);
-        final filePath = _resolveTrackFile(current ?? item.track);
-        if (filePath == null) {
-          reportMessage('File not found: ${item.track.title}');
-          return;
-        }
-        final result = await _loadAndPlay(
-          item,
-          filePath: filePath,
-          startAt: _resumeAtSource,
-        );
-        if (result == _LoadResult.openFailed) await _abandonFocus();
-      });
+      // Decided inside the command queue: the session restored at start-up
+      // may still be loading, and a Play sent right then (headset, car,
+      // notification) must open it rather than be dropped.
+      await _transition(_resumeUnopened);
       return;
     }
+    await _resumeOpened();
+  }
+
+  /// Play with nothing open: opens the current item (a restored session, or
+  /// one whose open failed), or starts "Up next" when nothing is current.
+  Future<void> _resumeUnopened() async {
+    if (_loadedTrackId != null) {
+      await _resumeOpened(inTransition: true);
+      return;
+    }
+    final item = currentItem;
+    if (item == null) {
+      if (_idle) await _advance();
+      return;
+    }
+    // Its file may have been renamed since.
+    final current = await _db.getTrack(item.track.id);
+    final filePath = _resolveTrackFile(current ?? item.track);
+    if (filePath == null) {
+      reportMessage('File not found: ${item.track.title}');
+      return;
+    }
+    final result = await _loadAndPlay(
+      item,
+      filePath: filePath,
+      startAt: _resumeAtSource,
+    );
+    if (result == _LoadResult.openFailed) await _abandonFocus();
+  }
+
+  Future<void> _resumeOpened({bool inTransition = false}) async {
     if (_queueEnded && _albumQueue.queued.isNotEmpty) {
       // Songs were queued after the end: play them, not the last song again.
-      await _transition(() async {
+      Future<void> playQueued() async {
         if (_queueEnded && _albumQueue.queued.isNotEmpty) await _advance();
-      });
+      }
+
+      await (inTransition ? playQueued() : _transition(playQueued));
       return;
     }
     if (!await _requestFocus()) return;
@@ -1847,6 +2038,7 @@ class PlaybackService
     _boundaryHandled = false;
     _openedEndMs = null;
     _resumeAtSource = null;
+    _resumeAfterEdit = null;
     _pendingSkipTarget = null;
     _skipOrigin = null;
     _cancelLoadWatch();

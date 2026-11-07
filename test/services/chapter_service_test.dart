@@ -165,6 +165,16 @@ void main() {
     expect((await service.fetchMissingChapters(track.playlistId)).eligible, 0);
   });
 
+  test('a sidecar changed by another writer is rewritten', () async {
+    final sidecar = File('${dir.path}/woolytube_meta.json');
+    await service.persist(track.playlistId);
+    final written = await sidecar.readAsString();
+    // Downloads or sync (another MetadataService) rewrote it meanwhile.
+    await sidecar.writeAsString('{}');
+    await service.persist(track.playlistId);
+    expect(await sidecar.readAsString(), written);
+  });
+
   test('a deleted chapter can be put back', () async {
     await service.refresh(track);
     track = (await db.getTrack(track.id))!;

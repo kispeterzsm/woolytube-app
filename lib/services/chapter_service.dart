@@ -47,16 +47,29 @@ class ChapterFetchResult {
 class ChapterService {
   final AppDatabase db;
   final YtDlpService ytdlp;
-  final MetadataService _metadata;
+  final MetadataService? _metadata;
+  Future<void> _ownWrites = Future<void>.value();
 
-  /// Pass the app's shared [metadata] service so chapter writes are ordered
-  /// with every other sidecar write. Without one, this service keeps its
-  /// own.
+  /// Pass the app's shared [metadata] service (one long-lived instance) so
+  /// chapter writes are ordered with every other sidecar write.
   ChapterService(this.db, this.ytdlp, {MetadataService? metadata})
-    : _metadata = metadata ?? MetadataService(db);
+    : _metadata = metadata;
 
-  Future<void> persist(int playlistId) =>
-      _metadata.writeMetadataFor(playlistId);
+  /// Rewrites the playlist's sidecar from the database.
+  ///
+  /// Without a shared [MetadataService], every write uses a fresh one: a
+  /// long-lived private instance would remember what it wrote last and skip
+  /// a write after downloads or sync changed the file behind its back. Such
+  /// writes still run one after another.
+  Future<void> persist(int playlistId) {
+    final shared = _metadata;
+    if (shared != null) return shared.writeMetadataFor(playlistId);
+    final write = _ownWrites.then(
+      (_) => MetadataService(db).writeMetadataFor(playlistId),
+    );
+    _ownWrites = write.then<void>((_) {}, onError: (Object _, StackTrace _) {});
+    return write;
+  }
 
   Future<void> setOverride(Track track, bool? enabled) async {
     await db.setTrackChapterOverride(track.id, enabled);

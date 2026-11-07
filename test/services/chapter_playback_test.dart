@@ -101,39 +101,42 @@ void main() {
   });
 
   test(
-    'Previous traverses real history and toggle does not replay consumed songs',
+    'Previous traverses real history and a toggle restarts from the cursor',
     () {
       for (var seed = 0; seed < 20; seed++) {
         final q = AlbumPlaybackQueue(random: Random(seed));
         final first = q.start(albums, shuffled: true)!;
-        final second = q.next()!;
+        q.next();
         expect(q.previous()!.id, first.id);
         q.setShuffle(false);
-        expect(q.next()!.id, second.id);
-        final played = <String>{first.id, second.id};
-        final remaining = <String>[];
+        final remaining = <PlaybackItem>[];
         for (var next = q.next(); next != null; next = q.next()) {
-          remaining.add(next.id);
+          remaining.add(next);
         }
-        expect(remaining.toSet().intersection(played), isEmpty);
-        // In playlist order, everything after the current album follows;
-        // what lies above it stays reachable through Previous.
+        final ids = remaining.map((i) => i.id).toList();
+        expect(ids, isNot(contains(first.id)));
+        expect(ids.toSet(), hasLength(ids.length), reason: 'no repeats');
+        // In playlist order: the rest of the current file in its own order,
+        // then everything after it; what lies above stays reachable
+        // through Previous.
         final order = albums.map((a) => a.trackId).toList();
-        final anchor = order.indexOf(second.track.id);
-        for (final id in remaining) {
-          final trackId = int.parse(id.split(':')[1]);
-          expect(
-            trackId == second.track.id || order.indexOf(trackId) > anchor,
-            isTrue,
-          );
+        final anchor = order.indexOf(first.track.id);
+        final sameFile =
+            remaining.takeWhile((i) => i.track.id == first.track.id).toList();
+        expect(
+          sameFile.map((i) => i.startMs).toList(),
+          [...sameFile.map((i) => i.startMs)]..sort(),
+        );
+        for (final item in remaining.skip(sameFile.length)) {
+          expect(order.indexOf(item.track.id), greaterThan(anchor));
         }
         final above = <String>[];
         for (var prev = q.previous(); prev != null; prev = q.previous()) {
           above.add(prev.id);
         }
         expect({
-          ...played,
-          ...remaining,
+          first.id,
+          ...ids,
           ...above,
         }, albums.expand((a) => a.items).map((i) => i.id).toSet());
       }
@@ -334,6 +337,76 @@ void main() {
       expect(rest.toSet().intersection(played), isEmpty);
       expect(rest.length + played.length, list.length);
     });
+
+    test('Previous then shuffle off continues after the current song', () {
+      for (var seed = 0; seed < 20; seed++) {
+        final q = AlbumPlaybackQueue(random: Random(seed));
+        q.start(list, trackId: list[4].trackId, shuffled: true);
+        q.next();
+        q.next();
+        q.previous();
+        expect(q.previous()!.track.id, list[4].trackId);
+        q.setShuffle(false);
+        expect(
+          _drain(q),
+          ids(list.skip(5)),
+          reason: 'the old shuffle history does not come first',
+        );
+      }
+    });
+
+    test('Previous then shuffle on does not replay songs in order', () {
+      final firstAfterToggle = <int>{};
+      for (var seed = 0; seed < 20; seed++) {
+        final q = AlbumPlaybackQueue(random: Random(seed));
+        q.start(list, trackId: list[2].trackId, shuffled: false);
+        q.next();
+        q.next();
+        q.previous();
+        expect(q.previous()!.track.id, list[2].trackId);
+        q.setShuffle(true);
+        final rest = _drain(q);
+        expect(rest.toSet(), ids(list).toSet()..remove(list[2].trackId));
+        expect(rest, hasLength(list.length - 1));
+        firstAfterToggle.add(rest.first);
+      }
+      expect(
+        firstAfterToggle.length,
+        greaterThan(1),
+        reason: 'the songs reached before are shuffled like the rest',
+      );
+    });
+
+    test('a rolled-back step keeps Up next changes made meanwhile', () {
+      final q = AlbumPlaybackQueue(random: Random(1));
+      q.start(list, shuffled: false);
+      q.enqueue(list[7]);
+      q.enqueue(list[8]);
+      final snapshot = q.snapshot();
+      expect(q.next()!.track.id, list[7].trackId);
+      q.enqueue(list[9]);
+      q.removeQueuedAlbum(q.queued.firstWhere((a) => a == list[8]));
+      q.restore(snapshot);
+      expect(q.current!.track.id, list[0].trackId);
+      expect(q.queued, [list[7], list[9]]);
+    });
+
+    test(
+      'a rolled-back step returns a song queued after Up next was cleared',
+      () {
+        final q = AlbumPlaybackQueue(random: Random(1));
+        q.start(list, shuffled: false);
+        q.enqueue(list[7]);
+        final snapshot = q.snapshot();
+        expect(q.next()!.track.id, list[7].trackId);
+        q.clearQueued();
+        q.enqueue(list[9]);
+        expect(q.next()!.track.id, list[9].trackId);
+        q.restore(snapshot);
+        expect(q.current!.track.id, list[0].trackId);
+        expect(q.queued, [list[9]], reason: 'the cleared song stays gone');
+      },
+    );
 
     test('a queued song comes before the rest of the playlist', () {
       final q = AlbumPlaybackQueue(random: Random(1));

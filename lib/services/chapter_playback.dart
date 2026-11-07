@@ -90,7 +90,9 @@ class PlaybackQueueSnapshot {
   final List<PlaybackItem> _remaining;
   final List<PlaybackAlbum> _albums;
   final List<PlaybackAlbum> _before;
-  final List<PlaybackAlbum> _queued;
+  final List<PlaybackAlbum> _ordered;
+  final Map<int, int> _albumOrder;
+  final List<PlaybackAlbum> _taken;
   final Set<int> _consumed;
   final int? _anchor;
 
@@ -102,7 +104,9 @@ class PlaybackQueueSnapshot {
       _remaining = List.of(q._remaining),
       _albums = List.of(q._albums),
       _before = List.of(q._before),
-      _queued = List.of(q._queued),
+      _ordered = List.of(q._ordered),
+      _albumOrder = Map.of(q._albumOrder),
+      _taken = List.of(q._taken),
       _consumed = Set.of(q._consumed),
       _anchor = q._anchor;
 }
@@ -116,6 +120,8 @@ class PlaybackQueueSnapshot {
 /// * turning shuffle on mid-play shuffles every song not played yet,
 ///   including the ones above the current song;
 /// * turning shuffle off continues in playlist order after the current song;
+/// * either switch forgets songs ahead of the cursor that Previous went back
+///   over, so they come again in the new order and not in the old one;
 /// * an album (a file split into chapters) always finishes before another
 ///   playlist entry starts, and explicitly queued entries ("Up next") come
 ///   before the rest of the playlist.
@@ -140,6 +146,11 @@ class AlbumPlaybackQueue {
 
   /// Explicitly queued albums ("Up next"). They are not part of the playlist.
   final List<PlaybackAlbum> _queued = [];
+
+  /// Albums [next] and [nextFile] took out of [_queued], oldest first, so a
+  /// [restore] can put back exactly those and keep every other change the
+  /// user made to "Up next" in the meantime.
+  final List<PlaybackAlbum> _taken = [];
 
   /// The playlist in its original order, and each album's position in it.
   final List<PlaybackAlbum> _ordered = [];
@@ -202,9 +213,20 @@ class AlbumPlaybackQueue {
     _before
       ..clear()
       ..addAll(s._before);
-    _queued
+    _ordered
       ..clear()
-      ..addAll(s._queued);
+      ..addAll(s._ordered);
+    _albumOrder
+      ..clear()
+      ..addAll(s._albumOrder);
+    // "Up next" is not rolled back: additions and removals made while a step
+    // was in flight stay. Only the albums the step itself took come back.
+    final returned = [
+      for (final album in _taken)
+        if (!s._taken.any((a) => identical(a, album))) album,
+    ];
+    _queued.insertAll(0, returned);
+    _taken.removeWhere((album) => returned.any((a) => identical(a, album)));
     _consumed
       ..clear()
       ..addAll(s._consumed);
@@ -225,6 +247,7 @@ class AlbumPlaybackQueue {
     _ordered.clear();
     _albumOrder.clear();
     _consumed.clear();
+    _taken.clear();
     _anchor = null;
     shuffle = shuffled;
     final valid = albums.where((g) => g.items.isNotEmpty).toList();
@@ -256,11 +279,18 @@ class AlbumPlaybackQueue {
     if (album.items.isNotEmpty) _queued.add(album);
   }
 
-  void removeQueued(int index) {
-    if (index >= 0 && index < _queued.length) _queued.removeAt(index);
+  /// Removes [album] (as returned by [queued]) when it is still waiting.
+  void removeQueuedAlbum(PlaybackAlbum album) {
+    final index = _queued.indexWhere((a) => identical(a, album));
+    if (index >= 0) _queued.removeAt(index);
   }
 
-  void clearQueued() => _queued.clear();
+  void clearQueued() {
+    _queued.clear();
+    // A cleared list stays cleared, also when a step is rolled back.
+    _taken.clear();
+  }
+
   void clear() {
     _history.clear();
     _historyIndex = -1;
@@ -268,6 +298,7 @@ class AlbumPlaybackQueue {
     _albums.clear();
     _before.clear();
     _queued.clear();
+    _taken.clear();
     _ordered.clear();
     _albumOrder.clear();
     _consumed.clear();
@@ -327,7 +358,9 @@ class AlbumPlaybackQueue {
     if (_historyIndex + 1 < _history.length) return _history[++_historyIndex];
     if (_remaining.isEmpty) {
       if (_queued.isNotEmpty) {
-        _openAlbum(_queued.removeAt(0), fromPlaylist: false);
+        final album = _queued.removeAt(0);
+        _taken.add(album);
+        _openAlbum(album, fromPlaylist: false);
       } else if (_albums.isNotEmpty) {
         _openAlbum(_albums.removeAt(0), fromPlaylist: true);
       }
@@ -349,7 +382,7 @@ class AlbumPlaybackQueue {
     }
     _remaining.clear();
     while (_queued.isNotEmpty && _queued.first.trackId == trackId) {
-      _queued.removeAt(0);
+      _taken.add(_queued.removeAt(0));
     }
     if (_queued.isEmpty) {
       while (_albums.isNotEmpty && _albums.first.trackId == trackId) {
@@ -357,6 +390,19 @@ class AlbumPlaybackQueue {
       }
     }
     return next();
+  }
+
+  /// Drops the chapters of the current file that have not played yet, for a
+  /// "next file" that found nothing after it. The cursor stays.
+  void discardRestOfCurrentFile() {
+    final trackId = current?.track.id;
+    if (trackId == null) return;
+    var end = _historyIndex + 1;
+    while (end < _history.length && _history[end].track.id == trackId) {
+      end++;
+    }
+    _history.removeRange(_historyIndex + 1, end);
+    _remaining.removeWhere((i) => i.track.id == trackId);
   }
 
   /// Steps back through the songs played. At the first played song, in
@@ -373,9 +419,12 @@ class AlbumPlaybackQueue {
   }
 
   /// Makes [item] the current item right away, keeping everything that was
-  /// queued: once it ends, playback continues where it was.
-  PlaybackItem playNow(PlaybackItem item) {
+  /// queued: once it ends, playback continues where it was. [thenResume]
+  /// (normally a copy of the item that is interrupted) plays right after
+  /// [item], so the interrupted song is picked up again.
+  PlaybackItem playNow(PlaybackItem item, {PlaybackItem? thenResume}) {
     _history.insert(_historyIndex + 1, item);
+    if (thenResume != null) _history.insert(_historyIndex + 2, thenResume);
     _historyIndex++;
     return item;
   }
@@ -418,9 +467,41 @@ class AlbumPlaybackQueue {
     _ordered.removeWhere((a) => a.items.isEmpty);
   }
 
+  /// Forgets the songs ahead of the cursor that were reached before with
+  /// Previous. They were played in the old order; after a shuffle switch
+  /// they go back into the pool, so the new order decides when they come.
+  /// Chapters of the current file go back in front of its other chapters.
+  /// Songs from "Up next" among them were played already and are dropped.
+  void _dropForwardHistory() {
+    if (_historyIndex < 0 || _historyIndex + 1 >= _history.length) return;
+    final dropped = _history.sublist(_historyIndex + 1);
+    _history.removeRange(_historyIndex + 1, _history.length);
+    final currentId = current!.track.id;
+    final kept = {for (final item in _history) item.track.id};
+    // The unplayed rest of a dropped album goes back to the pool with it;
+    // the rest of a file that is still in the history stays.
+    _remaining.removeWhere((i) => !kept.contains(i.track.id));
+    _remaining.insertAll(0, dropped.where((i) => i.track.id == currentId));
+    for (final item in dropped) {
+      if (!kept.contains(item.track.id)) _consumed.remove(item.track.id);
+    }
+    final order = _albumOrder[currentId];
+    if (order != null && _remaining.every((i) => i.track.id == currentId)) {
+      _shuffleCurrentChapters = _ordered[order].shuffleChapters;
+    }
+    for (var i = _history.length - 1; i >= 0; i--) {
+      final order = _albumOrder[_history[i].track.id];
+      if (order != null) {
+        _anchor = order;
+        break;
+      }
+    }
+  }
+
   void setShuffle(bool value) {
     if (shuffle == value) return;
     shuffle = value;
+    _dropForwardHistory();
     final pending =
         _ordered.where((a) => !_consumed.contains(a.trackId)).toList();
     if (value) {
