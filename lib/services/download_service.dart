@@ -461,9 +461,14 @@ class DownloadService {
   /// When another download is running, the playlist is queued and starts
   /// right after it ([DownloadStart.queued]); the returned future then
   /// completes at once.
+  ///
+  /// [shouldStop] is asked before each track (the scheduled worker passes
+  /// its time budget): once it says true, no further track starts, what is
+  /// done so far is saved and the playlist stays due, like after a cancel.
   Future<DownloadStart> downloadPlaylist(
     Playlist playlist, {
     bool sourceChecked = true,
+    bool Function()? shouldStop,
   }) async {
     if (_isDownloading) {
       final inQueue = _queue.indexWhere((e) => e.playlistId == playlist.id);
@@ -573,8 +578,13 @@ class DownloadService {
       await _startDownloadReporting(playlist);
 
       var playlistDeleted = false;
+      var outOfTime = false;
       for (var i = 0; i < work.length; i++) {
         if (_cancelRequested) break;
+        if (shouldStop?.call() ?? false) {
+          outOfTime = true;
+          break;
+        }
         // Deleting a playlist (keeping its files) does not wait for its
         // download; stop instead of downloading files nobody keeps.
         if (await _db.getPlaylistOrNull(playlist.id) == null) {
@@ -618,8 +628,13 @@ class DownloadService {
         return DownloadStart.started;
       }
 
-      if (_cancelRequested) {
-        _log.info('Playlist download stopped');
+      if (_cancelRequested || outOfTime) {
+        _log.info(
+          outOfTime
+              ? 'Out of time; the rest of "${playlist.name}" waits for the '
+                  'next update'
+              : 'Playlist download stopped',
+        );
         await _writeMetadataForPlaylist(playlist.id);
         _emit(DownloadProgress.idle);
         return DownloadStart.started;

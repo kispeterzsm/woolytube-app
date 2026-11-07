@@ -1401,6 +1401,29 @@ void main() {
       expect(watch.elapsed, lessThan(const Duration(seconds: 4)));
       expect(service.isDownloading, isFalse);
     });
+
+    test(
+      'a time budget stops before the next track and keeps it due',
+      () async {
+        final playlist = await insertTestPlaylist(db, outputPath: folder);
+        await insertTestTrack(db, playlistId: playlist.id, index: 1);
+        await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: 2,
+          videoId: 'video-2',
+        );
+
+        await service.downloadPlaylist(
+          playlist,
+          shouldStop: () => ytdlp.calls.isNotEmpty,
+        );
+
+        expect(ytdlp.calls, hasLength(1));
+        expect((await db.getPlaylist(playlist.id)).lastUpdated, isNull);
+        expect(await db.getPendingTracks(playlist.id), hasLength(1));
+      },
+    );
   });
 
   group('lock', () {
