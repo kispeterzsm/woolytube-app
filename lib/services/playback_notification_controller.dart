@@ -13,6 +13,10 @@ abstract interface class PlaybackNotificationController {
 
   Track? get currentTrack;
   String? get currentMediaId;
+
+  /// Whether the current item is one chapter of a longer file, so "skip to
+  /// the next file" does something different from Next.
+  bool get currentItemIsChapter;
   bool get isPlaying;
   Duration get position;
   bool get shuffleEnabled;
@@ -26,6 +30,10 @@ abstract interface class PlaybackNotificationController {
   Future<void> seekTo(Duration position);
   void toggleShuffle();
   Future<void> setAudioOnlyMode(bool enabled);
+
+  /// Audio-only until the app is next brought to the foreground (used when
+  /// playback starts from the car). Does nothing if audio-only is on.
+  Future<void> enableTemporaryAudioOnly();
   Future<void> playTrack(
     Track track,
     List<Track> allTracks, {

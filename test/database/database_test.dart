@@ -1,4 +1,6 @@
-import 'package:drift/drift.dart' show Value;
+import 'dart:io';
+
+import 'package:drift/drift.dart' show Value, driftRuntimeOptions;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:woolytube/database/database.dart';
@@ -184,12 +186,21 @@ void main() {
       name: 'Fresh',
       lastUpdated: now.subtract(const Duration(hours: 2)),
     );
+    // The worker runs about hourly: a stamp 58 minutes old must not wait
+    // for the run after next.
+    final hourlyAlmost = await insertTestPlaylist(
+      db,
+      url: 'https://example.com/hourly-almost',
+      name: 'Hourly Almost',
+      updateFrequencyHours: 1,
+      lastUpdated: now.subtract(const Duration(minutes: 58)),
+    );
     await insertTestPlaylist(
       db,
       url: 'https://example.com/hourly-fresh',
       name: 'Hourly Fresh',
       updateFrequencyHours: 1,
-      lastUpdated: now.subtract(const Duration(minutes: 59)),
+      lastUpdated: now.subtract(const Duration(minutes: 30)),
     );
     await insertTestPlaylist(
       db,
@@ -199,12 +210,198 @@ void main() {
       lastUpdated: null,
     );
 
-    final due = await db.getPlaylistsDueForUpdate();
+    final due = await db.getPlaylistsDueForUpdate(now: now);
     expect(due.map((playlist) => playlist.id), [
       neverUpdated.id,
       expired.id,
       hourly.id,
+      hourlyAlmost.id,
     ]);
+
+    // The playlist tried longest ago comes first, so one that never
+    // finishes cannot starve the others.
+    await db.markPlaylistUpdateAttempt(neverUpdated.id, now);
+    await db.markPlaylistUpdateAttempt(
+      expired.id,
+      now.subtract(const Duration(hours: 1)),
+    );
+    final rotated = await db.getPlaylistsDueForUpdate(now: now);
+    expect(rotated.map((playlist) => playlist.id), [
+      hourly.id,
+      hourlyAlmost.id,
+      expired.id,
+      neverUpdated.id,
+    ]);
+  });
+
+  test('counts tracks per playlist and only emits changed counts', () async {
+    final playlist = await insertTestPlaylist(db);
+    final complete = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 1,
+      videoId: 'a',
+      status: 'complete',
+      filePath: '/x/00001_a.m4a',
+    );
+    await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 2,
+      videoId: 'b',
+      status: 'unavailable',
+      unavailableReason: removedFromYouTubeReason,
+    );
+    await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 3,
+      videoId: 'c',
+      status: 'error',
+    );
+
+    final emitted = <Map<int, PlaylistCounts>>[];
+    final sub = db.watchPlaylistTrackCounts().listen(emitted.add);
+    addTearDown(sub.cancel);
+    await pumpEventQueue();
+    expect(
+      emitted.single[playlist.id],
+      const PlaylistCounts(total: 3, downloaded: 1, unavailable: 1, failed: 1),
+    );
+
+    // A write that changes no count does not emit.
+    await db.updateTrackAlwaysSkip(complete.id, true);
+    await pumpEventQueue();
+    expect(emitted, hasLength(1));
+  });
+
+  test('track streams skip results identical to the previous one', () async {
+    final playlist = await insertTestPlaylist(db);
+    final other = await insertTestPlaylist(
+      db,
+      url: 'https://www.youtube.com/playlist?list=other',
+      name: 'Other',
+    );
+    await insertTestTrack(db, playlistId: playlist.id);
+    final elsewhere = await insertTestTrack(
+      db,
+      playlistId: other.id,
+      videoId: 'elsewhere',
+    );
+
+    final emitted = <List<Track>>[];
+    final sub = db.watchTracksForPlaylist(playlist.id).listen(emitted.add);
+    addTearDown(sub.cancel);
+    await pumpEventQueue();
+    expect(emitted, hasLength(1));
+
+    await db.updateTrackAlwaysSkip(elsewhere.id, true);
+    await pumpEventQueue();
+    expect(emitted, hasLength(1));
+  });
+
+  test('raises a playlist revision on every change to it', () async {
+    final playlist = await insertTestPlaylist(db);
+    final other = await insertTestPlaylist(
+      db,
+      url: 'https://www.youtube.com/playlist?list=other',
+      name: 'Other',
+    );
+    final start = await db.playlistRevision(playlist.id);
+    final track = await insertTestTrack(db, playlistId: playlist.id);
+    final afterInsert = await db.playlistRevision(playlist.id);
+    expect(afterInsert, greaterThan(start));
+
+    await db.updateTrackAlwaysSkip(track.id, true);
+    final afterUpdate = await db.playlistRevision(playlist.id);
+    expect(afterUpdate, greaterThan(afterInsert));
+
+    await db.insertSegment(
+      SponsorBlockSegmentsCompanion.insert(
+        trackId: track.id,
+        videoId: track.videoId,
+        source: 'local',
+        category: 'sponsor',
+        startMs: 0,
+        endMs: 10,
+        createdAt: DateTime(2024),
+      ),
+    );
+    final afterSegment = await db.playlistRevision(playlist.id);
+    expect(afterSegment, greaterThan(afterUpdate));
+
+    await db.updatePlaylistFields(
+      playlist.id,
+      const PlaylistsCompanion(name: Value('Renamed')),
+    );
+    final afterRename = await db.playlistRevision(playlist.id);
+    expect(afterRename, greaterThan(afterSegment));
+
+    // The update-attempt stamp is not part of the metadata file.
+    await db.markPlaylistUpdateAttempt(playlist.id, DateTime(2024));
+    expect(await db.playlistRevision(playlist.id), afterRename);
+
+    final otherBefore = await db.playlistRevision(other.id);
+    await db.updateTrackAlwaysSkip(track.id, false);
+    expect(await db.playlistRevision(other.id), otherBefore);
+
+    await db.deletePlaylist(playlist.id);
+    expect((await db.playlistRevisions()).containsKey(playlist.id), isFalse);
+  });
+
+  test('a track removed from YouTube leaves the queue until retried', () async {
+    final playlist = await insertTestPlaylist(db);
+    final pending = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 1,
+      videoId: 'gone',
+      status: 'error',
+    );
+    final downloaded = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 2,
+      videoId: 'kept',
+      status: 'complete',
+      filePath: '/x/00002_kept.m4a',
+      downloadedAt: DateTime(2024),
+    );
+
+    await db.markTrackRemovedFromYouTube(pending.id, 'removed');
+    await db.markTrackRemovedFromYouTube(downloaded.id, 'removed');
+    expect(await db.getPendingTracks(playlist.id), isEmpty);
+    final gone = (await db.getTrack(pending.id))!;
+    expect(gone.status, 'unavailable');
+    expect(gone.unavailableReason, removedFromYouTubeReason);
+    final kept = (await db.getTrack(downloaded.id))!;
+    expect(kept.status, 'complete');
+    expect(kept.unavailableReason, removedFromYouTubeReason);
+
+    await db.clearRemovedFromYouTube(pending.id);
+    await db.clearRemovedFromYouTube(downloaded.id);
+    expect((await db.getPendingTracks(playlist.id)).map((t) => t.id), [
+      pending.id,
+    ]);
+    expect((await db.getTrack(downloaded.id))!.status, 'complete');
+    expect((await db.getTrack(downloaded.id))!.unavailableReason, isNull);
+  });
+
+  test('relinking a file keeps its download time', () async {
+    final playlist = await insertTestPlaylist(db);
+    final track = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      status: 'pending',
+      downloadedAt: DateTime(2024, 3, 1),
+    );
+    await db.updateTrackStatus(
+      track.id,
+      'complete',
+      filePath: '/x/a.m4a',
+      keepDownloadedAt: true,
+    );
+    expect((await db.getTrack(track.id))!.downloadedAt, DateTime(2024, 3, 1));
   });
 
   test('deleting a playlist removes its tracks and segments', () async {
@@ -558,6 +755,20 @@ void main() {
     expect(byVideoId['adopter']!.thumbnailPath, isNull);
   });
 
+  test('an upgraded library keeps its data and counts changes', () async {
+    final migrated = _openSchema10([
+      _v10Track(40, 1, 'kept', 'complete', '/tmp/list/00001_Kept.m4a'),
+    ]);
+    addTearDown(migrated.close);
+
+    final track = (await migrated.getTracksForPlaylist(1)).single;
+    expect(track.filePath, '/tmp/list/00001_Kept.m4a');
+    expect((await migrated.getPlaylist(1)).lastUpdateAttempt, isNull);
+    final before = await migrated.playlistRevision(1);
+    await migrated.updateTrackAlwaysSkip(track.id, true);
+    expect(await migrated.playlistRevision(1), greaterThan(before));
+  });
+
   test('the duplicate-index repair lets the title decide a tie', () async {
     final migrated = _openSchema10([
       _v10Track(
@@ -597,6 +808,41 @@ void main() {
       titleMatchesFileName('Other Song', '/x/00003_Real Song.m4a'),
       isFalse,
     );
+  });
+
+  test('two connections to the library file share it through WAL', () async {
+    final dir = await Directory.systemTemp.createTemp('woolytube_wal');
+    final file = File('${dir.path}/library.sqlite');
+    // Two databases on one file is the point here (app and worker engine).
+    final warned = driftRuntimeOptions.dontWarnAboutMultipleDatabases;
+    driftRuntimeOptions.dontWarnAboutMultipleDatabases = true;
+    addTearDown(
+      () => driftRuntimeOptions.dontWarnAboutMultipleDatabases = warned,
+    );
+    final app = AppDatabase.forTesting(
+      NativeDatabase(file, setup: (raw) => configureConnection(raw.execute)),
+    );
+    final worker = AppDatabase.forTesting(
+      NativeDatabase(file, setup: (raw) => configureConnection(raw.execute)),
+    );
+    try {
+      final mode = await app.customSelect('PRAGMA journal_mode').getSingle();
+      expect(mode.read<String>('journal_mode'), 'wal');
+      final timeout =
+          await worker.customSelect('PRAGMA busy_timeout').getSingle();
+      expect(timeout.data.values.single, 5000);
+
+      expect(await app.refreshIfChangedExternally(), isFalse);
+      expect(await app.refreshIfChangedExternally(), isFalse);
+      await insertTestPlaylist(worker);
+      expect(await app.refreshIfChangedExternally(), isTrue);
+      expect(await app.getAllPlaylists(), hasLength(1));
+      expect(await app.refreshIfChangedExternally(), isFalse);
+    } finally {
+      await app.close();
+      await worker.close();
+      await dir.delete(recursive: true);
+    }
   });
 }
 

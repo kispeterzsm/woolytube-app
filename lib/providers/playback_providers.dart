@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart' show SubtitleTrack;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../database/database.dart';
+import '../services/chapter_playback.dart';
 import '../services/playback_service.dart';
 import '../services/audio_handler.dart';
 import '../services/picture_in_picture_service.dart';
@@ -34,11 +35,37 @@ final currentPlaylistProvider = StreamProvider<Playlist?>((ref) {
 });
 
 final isPlayingProvider = StreamProvider<bool>((ref) {
-  return ref.watch(playbackServiceProvider).isPlayingStream;
+  return _seededPlayingStream(ref.watch(playbackServiceProvider));
 });
 
+/// media_kit's `playing` stream does not replay its last value, so a listener
+/// that subscribes after playback started would otherwise show 'Play' while
+/// audio is playing until the next state change.
+Stream<bool> _seededPlayingStream(PlaybackService service) async* {
+  yield service.isPlaying;
+  yield* service.isPlayingStream;
+}
+
+/// Playback position at UI rate.
+///
+/// libmpv reports the position once per audio buffer or video frame. Widgets
+/// only need about five updates a second, so this drops updates that stay in
+/// the same 200 ms bucket. Seeks and track loads land in a new bucket and
+/// still show immediately. `PlaybackService.position` stays exact for code
+/// that needs the precise value (seeking by 10 s, the notification).
 final positionProvider = StreamProvider<Duration>((ref) {
-  return ref.watch(playbackServiceProvider).positionStream;
+  return ref
+      .watch(playbackServiceProvider)
+      .positionStream
+      .distinct((a, b) => a.inMilliseconds ~/ 200 == b.inMilliseconds ~/ 200);
+});
+
+/// Whole seconds of [positionProvider], for clock labels that only need to
+/// rebuild once a second.
+final positionSecondsProvider = Provider<int>((ref) {
+  return ref.watch(
+    positionProvider.select((value) => value.valueOrNull?.inSeconds ?? 0),
+  );
 });
 
 final durationProvider = StreamProvider<Duration>((ref) {
@@ -53,19 +80,45 @@ final videoAspectProvider = StreamProvider<double?>((ref) {
   return ref.watch(playbackServiceProvider).videoAspectStream;
 });
 
-/// True while the expanded player route is mounted. The global MiniPlayerBar
-/// uses this to hide itself so expanded playback can use the full app surface.
-/// The route owns this value rather than its audio/video children because
-/// those children can be replaced while playback metadata is resolving.
-/// Plain ValueNotifier (not Riverpod) so the route can flip it from
-/// initState/dispose without violating lifecycle rules.
+/// The item that is playing: a whole track, or one chapter of it when the
+/// playlist plays chapters as separate tracks.
+final currentPlaybackItemProvider = StreamProvider<PlaybackItem?>((ref) {
+  return ref.watch(playbackServiceProvider).currentItemStream;
+});
+
+/// True while the current item is a chapter played as its own track. Only
+/// then does 'Next file' (skip the rest of the file) differ from 'Next'.
+final isChapterItemProvider = Provider<bool>((ref) {
+  return ref.watch(
+    currentPlaybackItemProvider.select(
+      (value) => value.valueOrNull?.chapter != null,
+    ),
+  );
+});
+
+/// True while the player is expanded to full-screen video. The persistent
+/// player in `lib/player/player_shell.dart` owns this value.
 final ValueNotifier<bool> videoFullscreenNotifier = ValueNotifier<bool>(false);
 
-/// The vertical space occupied by the expanded audio-player overlay. Pages
-/// behind the pass-through overlay use this as a scroll inset so their last
-/// items remain reachable.
+/// Logical pixels the EXPANDED audio panel covers above the mini-player strip
+/// that the page area always reserves while a track is loaded. It is 0 while
+/// the player is collapsed (and for full-screen video). It switches to the
+/// panel's covered height as soon as the panel starts to expand, and back to
+/// 0 once it has fully collapsed, so lists pad their bottom once rather than
+/// on every animation frame.
 final ValueNotifier<double> audioPlayerOverlayHeightNotifier =
     ValueNotifier<double>(0);
+
+/// True while the current item is one chapter of a longer file.
+final currentItemIsChapterProvider = StreamProvider<bool>((ref) {
+  return ref.watch(playbackServiceProvider).currentItemIsChapterStream;
+});
+
+/// True while playback is set to pause when the current file (or chapter)
+/// ends.
+final stopAfterCurrentProvider = StreamProvider<bool>((ref) {
+  return ref.watch(playbackServiceProvider).stopAfterCurrentStream;
+});
 
 final shuffleEnabledProvider = StreamProvider<bool>((ref) {
   return ref.watch(playbackServiceProvider).shuffleEnabledStream;

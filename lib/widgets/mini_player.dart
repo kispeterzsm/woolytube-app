@@ -1,195 +1,76 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:cached_network_image/cached_network_image.dart';
-import 'package:media_kit_video/media_kit_video.dart';
+
+import '../player/player_layout.dart';
+import '../player/player_widgets.dart';
 import '../providers/playback_providers.dart';
-import '../pages/player_page.dart';
-import 'sponsorblock_progress_bar.dart';
-import '../services/media_thumbnail_service.dart';
-import 'next_file_button.dart';
 
-class MiniPlayerBar extends ConsumerStatefulWidget {
-  final VoidCallback? onOpenPlayer;
+/// The collapsed player's own content: elapsed time, play/pause and next.
+///
+/// The thumbnail, title and progress line are drawn by the player sheet on
+/// top of this bar, because they move into the expanded panel. This widget
+/// leaves room for them and handles the bar's gestures: tap opens the player,
+/// dragging up expands it, dragging down dismisses it (stops playback).
+class MiniPlayerBar extends StatelessWidget {
+  final VoidCallback onOpen;
 
-  const MiniPlayerBar({super.key, this.onOpenPlayer});
+  /// Stops playback; offered to screen readers in place of the swipe.
+  final VoidCallback onStop;
+  final GestureDragStartCallback onDragStart;
+  final GestureDragUpdateCallback onDragUpdate;
+  final GestureDragEndCallback onDragEnd;
 
-  @override
-  ConsumerState<MiniPlayerBar> createState() => _MiniPlayerBarState();
-}
-
-class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
-  @override
-  void initState() {
-    super.initState();
-    videoFullscreenNotifier.addListener(_onFullscreenChanged);
-  }
-
-  @override
-  void dispose() {
-    videoFullscreenNotifier.removeListener(_onFullscreenChanged);
-    super.dispose();
-  }
-
-  void _onFullscreenChanged() {
-    final binding = WidgetsBinding.instance;
-    // Route lifecycle callbacks can run during build/dispose. Defer only
-    // then; waiting for endOfFrame from a post-frame callback can wait for
-    // an unscheduled frame and leave the bar hidden until the next gesture.
-    if (binding.schedulerPhase == SchedulerPhase.persistentCallbacks) {
-      binding.addPostFrameCallback((_) {
-        if (mounted) setState(() {});
-      });
-    } else if (mounted) {
-      setState(() {});
-    }
-  }
+  const MiniPlayerBar({
+    super.key,
+    required this.onOpen,
+    required this.onStop,
+    required this.onDragStart,
+    required this.onDragUpdate,
+    required this.onDragEnd,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final currentTrack = ref.watch(currentTrackProvider).valueOrNull;
-    if (currentTrack == null) return const SizedBox.shrink();
-    if (videoFullscreenNotifier.value) return const SizedBox.shrink();
-    return _buildBar(context, ref, currentTrack);
-  }
-
-  Widget _buildBar(BuildContext context, WidgetRef ref, dynamic currentTrack) {
-    final isPlaying = ref.watch(isPlayingProvider).valueOrNull ?? false;
-    final position = ref.watch(positionProvider).valueOrNull ?? Duration.zero;
-    final duration = ref.watch(durationProvider).valueOrNull ?? Duration.zero;
-    final sponsorBlockSegments =
-        ref.watch(playbackSponsorBlockSegmentsProvider).valueOrNull ?? const [];
-    final isVideo = ref.watch(isVideoContentProvider).valueOrNull ?? false;
-    final playbackService = ref.watch(playbackServiceProvider);
-
-    final progress =
-        duration.inMilliseconds > 0
-            ? position.inMilliseconds / duration.inMilliseconds
-            : 0.0;
-    // The bar sits outside the Navigator, so there is usually no Overlay for
-    // Tooltip to attach to; fall back to semantics labels there.
-    final hasOverlay = Overlay.maybeOf(context) != null;
-
-    // The bar lives in MaterialApp.builder, outside any Scaffold, so it needs
-    // its own Material ancestor for text styling and ink effects.
-    return Material(
-      color: const Color(0xFF2A2A2A),
-      child: Semantics(
-        button: true,
-        label: 'Open player',
-        // Keep the title and control buttons as their own nodes so this
-        // label stays exactly 'Open player' for screen readers.
-        explicitChildNodes: true,
-        child: GestureDetector(
-          onTap: _openPlayer,
-          behavior: HitTestBehavior.opaque,
-          child: Container(
-            decoration: const BoxDecoration(
-              border: Border(
-                top: BorderSide(color: Color(0xFF333333), width: 0.5),
-              ),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
+    return Semantics(
+      container: true,
+      button: true,
+      label: 'Open player',
+      hint: 'Swipe down to stop playback',
+      onTap: onOpen,
+      customSemanticsActions: {
+        const CustomSemanticsAction(label: 'Stop playback'): onStop,
+      },
+      explicitChildNodes: true,
+      child: GestureDetector(
+        key: const ValueKey('mini-player-bar'),
+        behavior: HitTestBehavior.opaque,
+        onTap: onOpen,
+        onVerticalDragStart: onDragStart,
+        onVerticalDragUpdate: onDragUpdate,
+        onVerticalDragEnd: onDragEnd,
+        child: const SizedBox(
+          height: PlayerLayout.miniHeight,
+          child: Padding(
+            padding: EdgeInsets.only(top: PlayerLayout.miniProgressHeight),
+            child: Row(
               children: [
-                SegmentedProgressBar(
-                  progress: progress,
-                  durationMs: duration.inMilliseconds,
-                  segments: sponsorBlockSegments,
-                  height: 2,
-                ),
-                // Content
-                SizedBox(
-                  height: 62,
-                  child: Row(
+                // Thumbnail slot; the sheet draws the artwork here.
+                SizedBox(width: PlayerLayout.miniTitleLeft),
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const SizedBox(width: 12),
-                      // Thumbnail or video preview
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(4),
-                        child: SizedBox(
-                          width: 48,
-                          height: 48,
-                          child:
-                              isVideo
-                                  ? Video(
-                                    controller: playbackService.videoController,
-                                    controls: noVideoControls,
-                                    pauseUponEnteringBackgroundMode: false,
-                                  )
-                                  : _buildThumbnail(currentTrack),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      // Title
-                      Expanded(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              currentTrack.title,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 13,
-                                fontWeight: FontWeight.w500,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              _formatDuration(position, duration),
-                              style: const TextStyle(
-                                color: Color(0xFF888888),
-                                fontSize: 11,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      // Controls
-                      _barButton(
-                        label: isPlaying ? 'Pause' : 'Play',
-                        hasOverlay: hasOverlay,
-                        icon: Icon(
-                          isPlaying ? Icons.pause : Icons.play_arrow,
-                          color: Colors.white,
-                          size: 28,
-                        ),
-                        onPressed: playbackService.togglePlayPause,
-                        minWidth: 40,
-                      ),
-                      _barButton(
-                        label: 'Next',
-                        hasOverlay: hasOverlay,
-                        icon: const Icon(
-                          Icons.skip_next,
-                          color: Colors.white,
-                          size: 24,
-                        ),
-                        onPressed: () => playbackService.next(),
-                        minWidth: 40,
-                      ),
-                      const NextFileButton(iconSize: 28),
-                      // Close button
-                      _barButton(
-                        label: 'Close player',
-                        hasOverlay: hasOverlay,
-                        icon: const Icon(
-                          Icons.close,
-                          color: Color(0xFF888888),
-                          size: 20,
-                        ),
-                        onPressed: () => playbackService.stop(),
-                        minWidth: 36,
-                      ),
-                      const SizedBox(width: 4),
+                      // Title slot; the sheet draws the moving title here.
+                      SizedBox(height: 20),
+                      _MiniTime(),
                     ],
                   ),
                 ),
+                PlayPauseButton(iconSize: 30),
+                _MiniNextButton(),
+                SizedBox(width: 8),
               ],
             ),
           ),
@@ -197,80 +78,43 @@ class _MiniPlayerBarState extends ConsumerState<MiniPlayerBar> {
       ),
     );
   }
+}
 
-  Widget _barButton({
-    required String label,
-    required bool hasOverlay,
-    required Widget icon,
-    required VoidCallback onPressed,
-    required double minWidth,
-  }) {
-    return Semantics(
-      label: hasOverlay ? null : label,
-      button: true,
-      child: IconButton(
-        icon: icon,
-        tooltip: hasOverlay ? label : null,
-        onPressed: onPressed,
-        padding: EdgeInsets.zero,
-        constraints: BoxConstraints(minWidth: minWidth),
+class _MiniTime extends ConsumerWidget {
+  const _MiniTime();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final seconds = ref.watch(positionSecondsProvider);
+    final duration = ref.watch(durationProvider).valueOrNull ?? Duration.zero;
+    return SizedBox(
+      height: 16,
+      child: Text(
+        duration > Duration.zero
+            ? '${formatClock(Duration(seconds: seconds))} / ${formatClock(duration)}'
+            : '',
+        style: const TextStyle(
+          color: PlayerLayout.mutedText,
+          fontSize: 11,
+          fontFeatures: [FontFeature.tabularFigures()],
+        ),
+        maxLines: 1,
       ),
     );
   }
-
-  void _openPlayer() {
-    final openPlayer = widget.onOpenPlayer;
-    if (openPlayer != null) {
-      openPlayer();
-      return;
-    }
-
-    Navigator.maybeOf(context)?.push(playerPageRoute());
-  }
-
-  Widget _buildThumbnail(dynamic track) {
-    final url = resolveRemoteThumbnailUrl(
-      thumbnailUrl: track.thumbnailUrl as String?,
-      youtubeVideoId: track.videoId as String?,
-    );
-    final fallback =
-        url != null && url.isNotEmpty
-            ? CachedNetworkImage(
-              imageUrl: url,
-              fit: BoxFit.cover,
-              placeholder: (_, __) => Container(color: const Color(0xFF333333)),
-              errorWidget: (_, __, ___) => _placeholderIcon(),
-            )
-            : _placeholderIcon();
-    final path = existingThumbnailPath(track.thumbnailPath as String?);
-    if (path != null) {
-      return Image.file(
-        File(path),
-        fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => fallback,
-      );
-    }
-    return fallback;
-  }
-
-  Widget _placeholderIcon() {
-    return Container(
-      color: const Color(0xFF333333),
-      child: const Icon(Icons.music_note, color: Color(0xFF555555), size: 24),
-    );
-  }
-
-  String _formatDuration(Duration pos, Duration dur) {
-    if (dur == Duration.zero) return '';
-    return '${_fmt(pos)} / ${_fmt(dur)}';
-  }
-
-  String _fmt(Duration d) {
-    final m = d.inMinutes;
-    final s = d.inSeconds % 60;
-    return '$m:${s.toString().padLeft(2, '0')}';
-  }
 }
 
-// No-controls callback for mini video preview
-Widget noVideoControls(VideoState state) => const SizedBox.shrink();
+class _MiniNextButton extends ConsumerWidget {
+  const _MiniNextButton();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final chapter = ref.watch(isChapterItemProvider);
+    return IconButton(
+      icon: const Icon(Icons.skip_next_rounded, size: 28),
+      color: Colors.white,
+      tooltip: chapter ? 'Next chapter' : 'Next',
+      onPressed: () => ref.read(playbackServiceProvider).next(),
+    );
+  }
+}

@@ -345,15 +345,27 @@ void main() {
 
     test('previous at the first item restarts it', () async {
       final track = await addTrack('album', chapters: threeChapters);
-      await playback.playTrack(track, [track], chapterId: 'two');
-      player.tick(const Duration(seconds: 21));
+      await playback.playTrack(track, [track], chapterId: 'one');
+      player.tick(const Duration(seconds: 1));
       expect(playback.position, const Duration(seconds: 1));
 
       await playback.previous();
 
-      expect(playback.currentTrack!.title, 'Second song');
-      expect(player.seeks.last, const Duration(seconds: 20));
+      expect(playback.currentTrack!.title, 'First song');
+      expect(player.seeks.last, Duration.zero);
       expect(playback.position, Duration.zero);
+      expect(player.opened, hasLength(1));
+    });
+
+    test('previous from a tapped chapter plays the chapter above', () async {
+      final track = await addTrack('album', chapters: threeChapters);
+      await playback.playTrack(track, [track], chapterId: 'two');
+      player.tick(const Duration(seconds: 21));
+
+      await playback.previous();
+
+      expect(playback.currentTrack!.title, 'First song');
+      expect(player.opened.last.start, Duration.zero);
     });
 
     test(
@@ -430,7 +442,7 @@ void main() {
         await settle();
 
         expect(playback.isVideoContent, isFalse);
-        expect(seen, [false, true, false, false]);
+        expect(seen, [false, true, false]);
       },
     );
   });

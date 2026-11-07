@@ -951,4 +951,135 @@ void main() {
       {'a': 1, 'b': 2, 'c': 3, 'd': 4},
     );
   });
+
+  test('a video listed twice keeps each entry\'s own segments', () async {
+    DiscoveredTrack entry(int index, int startMs) => DiscoveredTrack(
+      index: index,
+      videoId: 'same',
+      title: 'Same',
+      status: 'pending',
+      sponsorBlockSegments: [
+        DiscoveredSponsorBlockSegment(
+          source: 'local',
+          category: 'sponsor',
+          startMs: startMs,
+          endMs: startMs + 1000,
+        ),
+      ],
+    );
+
+    final id = await metadata.importPlaylist(
+      DiscoveredPlaylist(
+        folderPath: folder,
+        url: 'https://www.youtube.com/playlist?list=twice',
+        name: 'Twice',
+        audioOnly: true,
+        autoUpdate: false,
+        updateFrequencyHours: 24,
+        includeThumbnails: false,
+        sponsorBlockEnabled: false,
+        sponsorBlockCategories: '[]',
+        createdAt: DateTime.utc(2024),
+        tracks: [entry(1, 1000), entry(2, 5000)],
+      ),
+    );
+
+    final tracks = await db.getTracksForPlaylist(id);
+    final starts = [
+      for (final t in tracks)
+        (await db.getSegmentsForTrack(t.id)).map((s) => s.startMs).toList(),
+    ];
+    expect(starts, [
+      [1000],
+      [5000],
+    ]);
+  });
+
+  group('metadata files', () {
+    test('a big playlist is written from a worker isolate', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final count = MetadataService.isolateTrackThreshold + 5;
+      for (var i = 1; i <= count; i++) {
+        await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: i,
+          videoId: 'v$i',
+          title: 'Track $i',
+        );
+      }
+
+      await metadata.writeMetadataFor(playlist.id);
+
+      final data =
+          jsonDecode(await File(at('woolytube_meta.json')).readAsString())
+              as Map<String, dynamic>;
+      expect(data['tracks'] as List, hasLength(count));
+      expect(
+        metadata.writtenRevision(playlist.id),
+        await db.playlistRevision(playlist.id),
+      );
+    });
+
+    test('unchanged files are not rewritten, even after a restart', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      await insertTestTrack(db, playlistId: playlist.id);
+      await metadata.writeMetadataFor(playlist.id);
+      final file = File(at('woolytube_meta.json'));
+      final old = DateTime(2020);
+      await file.setLastModified(old);
+
+      // A new service knows nothing about what was written before.
+      await MetadataService(db).writeMetadataFor(playlist.id);
+      expect(await file.lastModified(), old);
+
+      await db.updateTrackAlwaysSkip(
+        (await db.getTracksForPlaylist(playlist.id)).single.id,
+        true,
+      );
+      await metadata.writeMetadataFor(playlist.id);
+      expect(await file.lastModified(), isNot(old));
+    });
+
+    test('requests while a write waits share it and read fresh data', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final track = await insertTestTrack(db, playlistId: playlist.id);
+      final first = metadata.writeMetadataFor(playlist.id);
+      final second = metadata.writeMetadataFor(playlist.id);
+      final third = metadata.writeMetadataFor(playlist.id);
+      expect(identical(second, third), isTrue);
+      await db.updateTrackFields(track.id, title: 'Renamed');
+      await Future.wait([first, second, third]);
+
+      final data =
+          jsonDecode(await File(at('woolytube_meta.json')).readAsString())
+              as Map<String, dynamic>;
+      expect((data['tracks'] as List).single['title'], 'Renamed');
+    });
+
+    test('a deleted playlist is ignored', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      await db.deletePlaylist(playlist.id);
+      await metadata.writeMetadataFor(playlist.id);
+      expect(exists('woolytube_meta.json'), isFalse);
+    });
+  });
+
+  test(
+    'the import scan does not read folders already in the library',
+    () async {
+      final libraryRoot = p.join(tempDir.path, 'Music');
+      final known = await insertTestPlaylist(db, outputPath: folder);
+      await insertTestTrack(db, playlistId: known.id);
+      await metadata.writeMetadataFor(known.id);
+      final found = await metadata.scanDirectory(
+        libraryRoot,
+        maxDepth: 1,
+        skipFolders: [folder],
+      );
+      expect(found, isEmpty);
+      final all = await metadata.scanDirectory(libraryRoot, maxDepth: 1);
+      expect(all.map((d) => d.folderPath), [folder]);
+    },
+  );
 }

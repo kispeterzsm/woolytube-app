@@ -17,6 +17,14 @@ abstract interface class PictureInPicturePlaybackController {
   Future<void> togglePlayPause();
   Future<void> next();
   Future<void> setAudioOnlyMode(bool enabled);
+
+  /// Audio-only until [restoreTemporaryAudioOnly]; does nothing when the
+  /// user already chose audio-only.
+  Future<void> enableTemporaryAudioOnly();
+
+  /// Switches video back on if [enableTemporaryAudioOnly] switched it off
+  /// and the user did not change the mode since.
+  Future<void> restoreTemporaryAudioOnly();
 }
 
 class PictureInPictureService {
@@ -30,7 +38,6 @@ class PictureInPictureService {
 
   bool _syncScheduled = false;
   bool _initialized = false;
-  bool _restoreVideoOnNextForeground = false;
   double? _aspectRatio;
 
   PictureInPictureService(
@@ -67,14 +74,14 @@ class PictureInPictureService {
         if (_mode.value != enabled) _mode.add(enabled);
         return null;
       case 'enableAudioOnly':
+      // The PiP window was closed while a video kept playing: nobody can
+      // see the picture, so stop decoding it.
+      case 'pipDismissed':
         // The PiP headphone action is a background convenience, unlike the
-        // persistent audio-only toggle in the player UI. Restore video when
-        // the user explicitly brings WoolyTube back to the foreground, but
-        // only if this action is what switched video off.
-        if (!_playback.audioOnlyMode) {
-          _restoreVideoOnNextForeground = true;
-          await _playback.setAudioOnlyMode(true);
-        }
+        // persistent audio-only toggle in the player UI. Video comes back
+        // when the user explicitly brings WoolyTube to the foreground, but
+        // only if this switched it off.
+        await _playback.enableTemporaryAudioOnly();
         return null;
       case 'togglePlayPause':
         await _playback.togglePlayPause();
@@ -87,14 +94,28 @@ class PictureInPictureService {
     }
   }
 
+  /// Call when the app returns to the foreground: switches video back on
+  /// after a temporary audio-only mode (PiP headphone button, closed PiP
+  /// window, the app hidden during a video, or playback from the car).
   Future<void> handleAppResumed() async {
-    if (!_restoreVideoOnNextForeground) return;
-    _restoreVideoOnNextForeground = false;
     try {
-      await _playback.setAudioOnlyMode(false);
+      await _playback.restoreTemporaryAudioOnly();
     } catch (error) {
-      _restoreVideoOnNextForeground = true;
-      debugPrint('Could not restore video after PiP audio-only mode: $error');
+      debugPrint('Could not restore video after audio-only mode: $error');
+    }
+  }
+
+  /// Call when the app is hidden (AppLifecycleState.hidden). A video that
+  /// keeps playing without a picture-in-picture window is invisible, so
+  /// only its audio is kept until [handleAppResumed].
+  Future<void> handleAppBackgrounded() async {
+    if (_mode.value || !_playback.isVideoContent || _playback.audioOnlyMode) {
+      return;
+    }
+    try {
+      await _playback.enableTemporaryAudioOnly();
+    } catch (error) {
+      debugPrint('Could not stop video decoding in the background: $error');
     }
   }
 
