@@ -186,6 +186,10 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
         scaffoldBackgroundColor: const Color(0xFF1E1E1E),
         colorScheme: const ColorScheme.dark(
           primary: Color(0xFF2196F3),
+          // Selected segments and chips use these; the default is teal.
+          secondary: Color(0xFF64B5F6),
+          secondaryContainer: Color(0xFF173A5E),
+          onSecondaryContainer: Color(0xFFD6E9FF),
           surface: Color(0xFF1E1E1E),
           onSurface: Colors.white,
         ),
