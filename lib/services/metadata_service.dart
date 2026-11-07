@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'package:drift/drift.dart';
 import 'package:path/path.dart' as p;
 import '../database/database.dart';
@@ -175,15 +176,21 @@ class MetadataService {
   /// sidecar whose database/filesystem state changed. This never starts a
   /// download; recovered tracks remain pending until a later update trigger.
   /// Call only while holding the library gate.
-  Future<int> recoverInterruptedDownloads() async {
+  ///
+  /// A playlist whose folder cannot be repaired (for example a permission
+  /// problem) is reported through [onProblem] and the others still are.
+  Future<int> recoverInterruptedDownloads({
+    void Function(Playlist playlist, Object error)? onProblem,
+  }) async {
     var fixed = 0;
     for (final playlist in await _db.getAllPlaylists()) {
-      await discardStaging(playlist.outputPath);
-      final playlistFixed = await repairPlaylist(playlist);
-      fixed += playlistFixed;
-      if (playlistFixed > 0) {
-        final tracks = await _db.getTracksForPlaylist(playlist.id);
-        await writeMetadata(playlist, tracks);
+      try {
+        await discardStaging(playlist.outputPath);
+        final playlistFixed = await repairPlaylist(playlist);
+        fixed += playlistFixed;
+        if (playlistFixed > 0) await writeMetadataFor(playlist.id);
+      } catch (e) {
+        onProblem?.call(playlist, e);
       }
     }
     return fixed;
@@ -283,117 +290,101 @@ class MetadataService {
     }
   }
 
+  /// The tail of each playlist's chain of writes.
   final _metadataWrites = <int, Future<void>>{};
-  final _lastWritten = <String, String>{};
+
+  /// A write per playlist that is queued but has not started yet. It reads
+  /// the database when it starts, so later requests can simply join it.
+  final _queuedWrites = <int, Future<void>>{};
+
+  /// A hash of the content last written (or found) at each path, instead of
+  /// the content itself: the sidecar of a big playlist is over a megabyte.
+  final _writtenHashes = <String, int>{};
+
+  /// The playlist revision (see [AppDatabase.playlistRevisions]) each
+  /// playlist's files were last written from.
+  final _writtenRevisions = <int, int>{};
   var _metadataWriteCounter = 0;
+
+  /// Playlists with at least this many tracks build their files on a
+  /// worker isolate, so the UI never stalls on a big JSON document.
+  static const isolateTrackThreshold = 40;
+
+  /// The revision of [playlistId] its files were last written from, or
+  /// null when this service has not written them yet.
+  int? writtenRevision(int playlistId) => _writtenRevisions[playlistId];
 
   /// Writes playlist metadata as JSON sidecar file in the playlist folder,
   /// together with a `.m3u8` playlist other players can open.
   ///
+  /// The files are always written from the database as it is when the write
+  /// starts; [playlist] and [tracks] only name the playlist (they are kept
+  /// for callers that already hold them).
+  Future<void> writeMetadata(Playlist playlist, List<Track> tracks) =>
+      writeMetadataFor(playlist.id);
+
+  /// Rewrites the sidecar and playlist file of [playlistId] from the
+  /// database. Safe to call after any edit; a playlist that no longer exists
+  /// is ignored.
+  ///
   /// Writes for one playlist run strictly one after another. Download
   /// progress, sync and UI edits can all request a write at the same time and
   /// would otherwise race on the temp file or rename a half-written sidecar
-  /// into place.
-  Future<void> writeMetadata(Playlist playlist, List<Track> tracks) {
-    final previous = _metadataWrites[playlist.id] ?? Future<void>.value();
-    final current = previous
-        .catchError((_) {})
-        .then((_) => _writeMetadataNow(playlist, tracks));
-    _metadataWrites[playlist.id] = current;
-    return current.whenComplete(() {
-      if (identical(_metadataWrites[playlist.id], current)) {
-        _metadataWrites.remove(playlist.id);
+  /// into place. Requests that arrive while a write is waiting to start
+  /// share it, since it reads the database only when it starts.
+  Future<void> writeMetadataFor(int playlistId) {
+    final queued = _queuedWrites[playlistId];
+    if (queued != null) return queued;
+    final previous = _metadataWrites[playlistId] ?? Future<void>.value();
+    late final Future<void> current;
+    current = previous.then<void>((_) {}, onError: (_) {}).then((_) {
+      if (identical(_queuedWrites[playlistId], current)) {
+        _queuedWrites.remove(playlistId);
+      }
+      return _writeMetadataNow(playlistId);
+    });
+    _queuedWrites[playlistId] = current;
+    _metadataWrites[playlistId] = current;
+    current.then<void>((_) {}, onError: (_) {}).whenComplete(() {
+      if (identical(_metadataWrites[playlistId], current)) {
+        _metadataWrites.remove(playlistId);
       }
     });
+    return current;
   }
 
-  /// Rewrites the sidecar and playlist file of [playlistId] from the
-  /// database. Safe to call after any edit.
-  Future<void> writeMetadataFor(int playlistId) async {
-    final playlist = await _db.getPlaylist(playlistId);
-    final tracks = await _db.getTracksForPlaylist(playlistId);
-    await writeMetadata(playlist, tracks);
-  }
-
-  Future<void> _writeMetadataNow(Playlist playlist, List<Track> tracks) async {
+  Future<void> _writeMetadataNow(int playlistId) async {
+    // Read the revision first: a change made while the files are built
+    // leaves the recorded revision behind, so the mirror writes again.
+    final revision = await _db.playlistRevision(playlistId);
+    final playlist = await _db.getPlaylistOrNull(playlistId);
+    if (playlist == null) return;
     final dir = Directory(playlist.outputPath);
     if (!await dir.exists()) return;
 
+    final tracks = await _db.getTracksForPlaylist(playlistId);
     final segmentsByTrack = await _segmentsByTrack(tracks);
-    final tracksJson = <Map<String, dynamic>>[];
-    for (final t in tracks) {
-      final segments = segmentsByTrack[t.id] ?? const <SponsorBlockSegment>[];
-      tracksJson.add({
-        'index': t.index,
-        'videoId': t.videoId,
-        'title': t.title,
-        'thumbnailUrl': t.thumbnailUrl,
-        'thumbnailFileName': _fileNameRelativeTo(
-          playlist.outputPath,
-          t.thumbnailPath,
-        ),
-        'durationSeconds': t.durationSeconds,
-        'status': t.status,
-        'unavailableReason': t.unavailableReason,
-        'isLocalReplacement': t.isLocalReplacement,
-        'alwaysSkip': t.alwaysSkip,
-        'chapters': ChapterData.decode(t.chaptersJson).toJson(),
-        'chaptersEnabled': t.chaptersEnabled,
-        'sponsorBlockCheckedAt':
-            t.sponsorBlockCheckedAt?.toUtc().toIso8601String(),
-        'downloadedAt': t.downloadedAt?.toUtc().toIso8601String(),
-        'replaceRequested': t.replaceRequested,
-        'fileName': _fileNameRelativeTo(playlist.outputPath, t.filePath),
-        'sponsorBlockSegments':
-            segments
-                .map(
-                  (s) => {
-                    'source': s.source,
-                    'uuid': s.uuid,
-                    'category': s.category,
-                    'actionType': s.actionType,
-                    'startMs': s.startMs,
-                    'endMs': s.endMs,
-                    'votes': s.votes,
-                    'locked': s.locked,
-                    'description': s.description,
-                    'createdAt': s.createdAt.toUtc().toIso8601String(),
-                  },
-                )
-                .toList(),
-      });
-    }
-
-    final data = {
-      'version': 2,
-      'playlist': {
-        'url': playlist.url,
-        'name': playlist.name,
-        'thumbnailUrl': playlist.thumbnailUrl,
-        'thumbnailFileName': _fileNameRelativeTo(
-          playlist.outputPath,
-          playlist.thumbnailPath,
-        ),
-        'audioOnly': playlist.audioOnly,
-        'playChapters': playlist.playChapters ?? true,
-        'autoUpdate': playlist.autoUpdate,
-        'updateFrequencyHours': playlist.updateFrequencyHours,
-        'includeThumbnails': playlist.includeThumbnails,
-        'sponsorBlockEnabled': playlist.sponsorBlockEnabled,
-        'sponsorBlockCategories': playlist.sponsorBlockCategories,
-        'sponsorBlockCategoryActions': playlist.sponsorBlockCategoryActions,
-        'lastUpdated': playlist.lastUpdated?.toUtc().toIso8601String(),
-        'createdAt': playlist.createdAt.toUtc().toIso8601String(),
+    final metaPath = p.join(playlist.outputPath, _metaFileName);
+    final m3uPath = playlistFilePath(playlist.outputPath);
+    final job = SidecarJob(
+      playlist: playlist,
+      tracks: tracks,
+      segmentsByTrack: segmentsByTrack,
+      metaPath: metaPath,
+      playlistFilePath: m3uPath,
+      knownHashes: {
+        metaPath: _writtenHashes[metaPath],
+        m3uPath: _writtenHashes[m3uPath],
       },
-      'tracks': tracksJson,
-    };
-
-    final jsonStr = const JsonEncoder.withIndent('  ').convert(data);
-    await _writeIfChanged(p.join(playlist.outputPath, _metaFileName), jsonStr);
-    await _writeIfChanged(
-      playlistFilePath(playlist.outputPath),
-      buildPlaylistFile(playlist, tracks),
+      tempSuffix:
+          '${DateTime.now().microsecondsSinceEpoch}.${_metadataWriteCounter++}',
     );
+    final hashes =
+        tracks.length >= isolateTrackThreshold
+            ? await Isolate.run(() => writeSidecarFiles(job))
+            : await writeSidecarFiles(job);
+    _writtenHashes.addAll(hashes);
+    _writtenRevisions[playlistId] = revision;
     await _writeLibraryReadme(p.dirname(playlist.outputPath));
   }
 
@@ -419,29 +410,6 @@ class MetadataService {
       }
     }
     return result;
-  }
-
-  /// Writes [content] to [path] atomically, skipping the write when this
-  /// service already wrote the same content there.
-  Future<void> _writeIfChanged(String path, String content) async {
-    final target = File(path);
-    if (_lastWritten[path] == content && await target.exists()) return;
-    final tmpFile = File(
-      '$path.tmp.'
-      '${DateTime.now().microsecondsSinceEpoch}.${_metadataWriteCounter++}',
-    );
-    try {
-      await tmpFile.writeAsString(content);
-      await tmpFile.rename(target.path);
-      _lastWritten[path] = content;
-    } catch (_) {
-      try {
-        if (await tmpFile.exists()) await tmpFile.delete();
-      } catch (_) {
-        // The folder cleanup removes leftover temp files later.
-      }
-      rethrow;
-    }
   }
 
   /// `<folder name>.m3u8` in the playlist folder. The folder name never
@@ -480,6 +448,9 @@ class MetadataService {
   /// [path] relative to [folder]: just the name for files inside it, a
   /// `../` path for files elsewhere (for example in the other format's
   /// folder while a mode switch is still downloading).
+  static String? fileNameRelativeTo(String folder, String? path) =>
+      _fileNameRelativeTo(folder, path);
+
   static String? _fileNameRelativeTo(String folder, String? path) {
     if (path == null || path.isEmpty) return null;
     final normalizedFolder = p.normalize(p.absolute(folder));
@@ -523,25 +494,36 @@ for video) to keep a complete backup.
   }
 
   /// Scans public WoolyTube folders for playlist metadata files.
-  Future<List<DiscoveredPlaylist>> scanForPlaylists() async {
+  ///
+  /// Folders in [skipFolders] (folder paths of playlists already in the
+  /// library) are neither read nor searched.
+  Future<List<DiscoveredPlaylist>> scanForPlaylists({
+    Iterable<String> skipFolders = const [],
+  }) async {
     final discovered = <DiscoveredPlaylist>[];
     for (final scanPath in [
       LibraryLayout.audioBasePath,
       LibraryLayout.videoBasePath,
     ]) {
-      discovered.addAll(await scanDirectory(scanPath, maxDepth: 1));
+      discovered.addAll(
+        await scanDirectory(scanPath, maxDepth: 1, skipFolders: skipFolders),
+      );
     }
     return discovered;
   }
 
   /// Finds playlist folders (folders with a `woolytube_meta.json`) at or
-  /// below [rootPath], for restoring a copied backup from anywhere.
+  /// below [rootPath], for restoring a copied backup from anywhere. Folders
+  /// in [skipFolders] are neither read nor searched.
   Future<List<DiscoveredPlaylist>> scanDirectory(
     String rootPath, {
     int maxDepth = 3,
+    Iterable<String> skipFolders = const [],
   }) async {
     final discovered = <DiscoveredPlaylist>[];
+    final skip = {for (final folder in skipFolders) _folderKey(folder)};
     Future<void> visit(Directory dir, int depth) async {
+      if (skip.isNotEmpty && skip.contains(_folderKey(dir.path))) return;
       final metaFile = File(p.join(dir.path, _metaFileName));
       if (await metaFile.exists()) {
         final parsed = await _readSidecar(dir.path, metaFile);
@@ -568,10 +550,28 @@ for video) to keep a complete backup.
     return discovered;
   }
 
+  /// Sidecars at least this big are read on a worker isolate.
+  static const _isolateSidecarBytes = 64 * 1024;
+
   Future<DiscoveredPlaylist?> _readSidecar(String folder, File metaFile) async {
     try {
+      final path = metaFile.path;
+      if (await metaFile.length() >= _isolateSidecarBytes) {
+        return await Isolate.run(() => _readSidecarFile(folder, path));
+      }
+      return await _readSidecarFile(folder, path);
+    } catch (_) {
+      return null; // Unreadable or malformed
+    }
+  }
+
+  static Future<DiscoveredPlaylist?> _readSidecarFile(
+    String folder,
+    String path,
+  ) async {
+    try {
       final json =
-          jsonDecode(await metaFile.readAsString()) as Map<String, dynamic>;
+          jsonDecode(await File(path).readAsString()) as Map<String, dynamic>;
       return _parseMetadata(folder, json);
     } catch (_) {
       return null; // Malformed JSON
@@ -605,8 +605,14 @@ for video) to keep a complete backup.
     List<DiscoveredPlaylist>? candidates,
     bool skipOtherModeCopies = false,
   }) async {
-    final discovered = candidates ?? await scanForPlaylists();
     final existing = await _db.getAllPlaylists();
+    // A folder a playlist already uses is always "imported": do not even
+    // read its (possibly large) sidecar.
+    final discovered =
+        candidates ??
+        await scanForPlaylists(
+          skipFolders: [for (final pl in existing) pl.outputPath],
+        );
     final result = <DiscoveredPlaylist>[];
     final seenFolders = <String>{};
 
@@ -676,9 +682,13 @@ for video) to keep a complete backup.
 
     final mediaFiles = <_CandidateFile>[];
     final infoFilesByIndex = <int, List<File>>{};
+    // Every file in the folder, so whether a track's file exists is a set
+    // lookup instead of a disk check per track.
+    final listing = _FolderListing(playlist.outputPath);
 
     await for (final entity in dir.list()) {
       if (entity is! File) continue;
+      listing.add(entity.path);
       final fileName = p.basename(entity.path);
       final ext = p.extension(entity.path).toLowerCase();
 
@@ -718,21 +728,32 @@ for video) to keep a complete backup.
 
     final claimed = <String>{
       for (final t in tracks)
-        if (t.filePath != null && File(t.filePath!).existsSync())
+        if (t.filePath != null && await listing.exists(t.filePath!))
           p.normalize(t.filePath!),
     };
 
+    // Decide first, then write every change in one transaction: one stream
+    // update for the open pages instead of one per track.
+    final changes = <Future<void> Function()>[];
     for (final track in tracks) {
       final ownPath = track.filePath;
       final hasOwnFile =
           ownPath != null && claimed.contains(p.normalize(ownPath));
+      // Relinking a file that was downloaded before keeps its history.
+      final keepDownloadedAt = track.downloadedAt != null;
       if (hasOwnFile) {
         if (track.status == 'pending' ||
             track.status == 'error' ||
             track.status == 'unavailable' ||
             (track.status == 'downloading' && recoverInterrupted)) {
-          await _db.updateTrackStatus(track.id, 'complete', filePath: ownPath);
-          fixed++;
+          changes.add(
+            () => _db.updateTrackStatus(
+              track.id,
+              'complete',
+              filePath: ownPath,
+              keepDownloadedAt: keepDownloadedAt,
+            ),
+          );
         }
         continue;
       }
@@ -741,25 +762,39 @@ for video) to keep a complete backup.
       final candidate = _pickCandidate(mediaFiles, track, claimed);
       if (candidate != null) {
         claimed.add(p.normalize(candidate));
-        await _db.updateTrackStatus(track.id, 'complete', filePath: candidate);
-        fixed++;
-      } else if (track.status == 'downloading') {
-        await _db.resetInterruptedTrack(track.id);
-        fixed++;
-      } else if (track.status == 'complete' && !unreadable) {
-        await _db.updateTrackStatus(
-          track.id,
-          'pending',
-          clearFilePath: true,
-          clearDownloadedAt: true,
+        changes.add(
+          () => _db.updateTrackStatus(
+            track.id,
+            'complete',
+            filePath: candidate,
+            keepDownloadedAt: keepDownloadedAt,
+          ),
         );
-        fixed++;
+      } else if (track.status == 'downloading') {
+        changes.add(() => _db.resetInterruptedTrack(track.id));
+      } else if (track.status == 'complete' && !unreadable) {
+        changes.add(
+          () => _db.updateTrackStatus(
+            track.id,
+            'pending',
+            clearFilePath: true,
+            clearDownloadedAt: true,
+          ),
+        );
       }
+    }
+    if (changes.isNotEmpty) {
+      await _db.transaction(() async {
+        for (final change in changes) {
+          await change();
+        }
+      });
+      fixed += changes.length;
     }
 
     if (cleanup && !unreadable) {
       tracks = await _db.getTracksForPlaylist(playlist.id);
-      fixed += await _renameToTrackNumbers(playlist, tracks);
+      fixed += await _renameToTrackNumbers(playlist, tracks, listing: listing);
       tracks = await _db.getTracksForPlaylist(playlist.id);
       fixed += await _cleanupFolder(playlist, tracks);
     }
@@ -789,31 +824,31 @@ for video) to keep a complete backup.
   /// A media file in the playlist folder that a pending [track] may adopt
   /// instead of downloading again (for example after a crash between the
   /// download and the database update).
+  ///
+  /// Costs one folder listing. Only when a file with the track's number is
+  /// there are the other tracks looked at: a listed candidate exists, so it
+  /// is taken when no other track records it as its file.
   Future<String?> findAdoptableMediaFile(Playlist playlist, Track track) async {
     final dir = Directory(playlist.outputPath);
     if (!await dir.exists()) return null;
-    final tracks = await _db.getTracksForPlaylist(playlist.id);
-    final claimed = <String>{
-      for (final t in tracks)
-        if (t.id != track.id &&
-            t.filePath != null &&
-            File(t.filePath!).existsSync())
-          p.normalize(t.filePath!),
-    };
     final files = <_CandidateFile>[];
     await for (final entity in dir.list()) {
       if (entity is! File) continue;
       final name = p.basename(entity.path);
+      final match = _indexPrefixPattern.firstMatch(name);
+      if (match == null || int.tryParse(match[1]!) != track.index) continue;
       if (isTransientFile(name) ||
           !mediaExtensions.contains(p.extension(name).toLowerCase())) {
         continue;
       }
-      final match = _indexPrefixPattern.firstMatch(name);
-      final index = match == null ? null : int.tryParse(match[1]!);
-      if (index != null) {
-        files.add(_CandidateFile(index: index, path: entity.path));
-      }
+      files.add(_CandidateFile(index: track.index, path: entity.path));
     }
+    if (files.isEmpty) return null;
+    final tracks = await _db.getTracksForPlaylist(playlist.id);
+    final claimed = <String>{
+      for (final t in tracks)
+        if (t.id != track.id && t.filePath != null) p.normalize(t.filePath!),
+    };
     return _pickCandidate(files, track, claimed);
   }
 
@@ -823,31 +858,38 @@ for video) to keep a complete backup.
   /// playlist order. A rename never replaces an existing file.
   Future<int> _renameToTrackNumbers(
     Playlist playlist,
-    List<Track> tracks,
-  ) async {
-    var renamed = 0;
+    List<Track> tracks, {
+    required _FolderListing listing,
+  }) async {
     final total = tracks.length;
+    final moved = <int, String>{};
     for (final track in tracks) {
       final path = track.filePath;
       if (path == null || !p.equals(p.dirname(path), playlist.outputPath)) {
         continue;
       }
-      if (!await File(path).exists()) continue;
+      if (!await listing.exists(path)) continue;
       final name = p.basename(path);
       final rest = name.replaceFirst(_indexPrefixPattern, '');
       final desired = '${paddedIndex(track.index, total)}_$rest';
       if (desired == name) continue;
       final target = p.join(playlist.outputPath, desired);
-      if (await File(target).exists()) continue;
+      if (listing.mayExist(target) && await File(target).exists()) continue;
       try {
         await File(path).rename(target);
-        await _db.updateTrackFields(track.id, filePath: target);
-        renamed++;
+        listing
+          ..remove(path)
+          ..add(target);
+        moved[track.id] = target;
       } catch (_) {
         // Best effort; the file keeps working under its current name.
       }
     }
-    return renamed;
+    // One transaction for all of them. A crash before it leaves files whose
+    // recorded path is gone; their new names carry the track's number, so
+    // the next repair links them again.
+    await _db.updateTrackFilePaths(moved);
+    return moved.length;
   }
 
   /// Media files WoolyTube downloads, imports or plays.
@@ -924,7 +966,7 @@ for video) to keep a complete backup.
     if (!await dir.exists()) return 0;
 
     final files = <File>[
-      for (final entity in dir.listSync())
+      await for (final entity in dir.list())
         if (entity is File) entity,
     ];
     final finalStems = <String>{
@@ -993,17 +1035,23 @@ for video) to keep a complete backup.
     final folder = playlist.outputPath;
     final byIndex = {for (final t in tracks) t.index: t};
     var changed = 0;
-    for (final entity in Directory(folder).listSync()) {
-      if (entity is! File) continue;
+    final adopted = <int, String?>{};
+    final images = <File>[
+      await for (final entity in Directory(folder).list())
+        if (entity is File &&
+            _imageExtensions.contains(p.extension(entity.path).toLowerCase()))
+          entity,
+    ];
+    for (final entity in images) {
       final name = p.basename(entity.path);
-      if (!_imageExtensions.contains(p.extension(name).toLowerCase())) continue;
       final match = _indexPrefixPattern.firstMatch(name);
       final index = match == null ? null : int.tryParse(match[1]!);
       if (index == null) continue;
       final track = byIndex[index];
       try {
         if (track != null &&
-            existingThumbnailPath(track.thumbnailPath) == null) {
+            !adopted.containsKey(track.id) &&
+            !await thumbnailFileExists(track.thumbnailPath)) {
           final stem = LibraryLayout.trackThumbnailStem(
             folder,
             track.videoId,
@@ -1013,7 +1061,8 @@ for video) to keep a complete backup.
           await Directory(p.dirname(target)).create(recursive: true);
           await _ensureNoMedia(p.dirname(target));
           await moveFile(entity.path, target);
-          await _db.updateTrackThumbnailPath(track.id, target);
+          noteThumbnailWritten(target);
+          adopted[track.id] = target;
         } else if (track != null) {
           // The track already has a cover; keep this one out of the way.
           await moveAside(folder, entity.path);
@@ -1025,6 +1074,7 @@ for video) to keep a complete backup.
         // Best effort
       }
     }
+    await _db.updateTrackThumbnailPaths(adopted);
     return changed;
   }
 
@@ -1366,9 +1416,11 @@ for video) to keep a complete backup.
           final stale = File('$stem$ext');
           if (stale.path != target && await stale.exists()) {
             await stale.delete();
+            noteThumbnailRemoved(stale.path);
           }
         }
         await moveFile(staged.path, target);
+        noteThumbnailWritten(target);
         return target;
       }
       if (embeddedThumbnailExpected) {
@@ -1384,8 +1436,10 @@ for video) to keep a complete backup.
       // Artwork is optional.
     }
     // Keep an earlier cover of this video, but not a local file's cover.
-    final existing = existingThumbnailPath(track.thumbnailPath);
-    if (existing != null && !track.isLocalReplacement) return existing;
+    final existing = track.thumbnailPath;
+    if (!track.isLocalReplacement && await thumbnailFileExists(existing)) {
+      return existing;
+    }
     return null;
   }
 
@@ -1406,8 +1460,10 @@ for video) to keep a complete backup.
     await Directory(folder).create(recursive: true);
     await moveFile(path, target);
     await _db.updateTrackFields(trackId, filePath: target);
-    final thumb = existingThumbnailPath(track.thumbnailPath);
-    if (thumb != null && !p.isWithin(folder, thumb)) {
+    final thumb = track.thumbnailPath;
+    if (thumb != null &&
+        await thumbnailFileExists(thumb) &&
+        !p.isWithin(folder, thumb)) {
       final stem = LibraryLayout.trackThumbnailStem(
         folder,
         track.videoId,
@@ -1418,6 +1474,8 @@ for video) to keep a complete backup.
         await Directory(p.dirname(stem)).create(recursive: true);
         await _ensureNoMedia(p.dirname(stem));
         await moveFile(thumb, thumbTarget);
+        noteThumbnailRemoved(thumb);
+        noteThumbnailWritten(thumbTarget);
         await _db.updateTrackThumbnailPath(trackId, thumbTarget);
       } catch (_) {
         // The cover stays where it is and still works.
@@ -1689,12 +1747,15 @@ for video) to keep a complete backup.
         await _db.insertTracks(tracks);
       }
 
+      // Segments go to the row made from the same sidecar entry (by the
+      // index it was given): a video listed twice has its own segments in
+      // each entry.
       final importedTracks = await _db.getTracksForPlaylist(playlistId);
-      final discoveredByVideoId = <String, DiscoveredTrack>{
-        for (final dt in discovered.tracks) dt.videoId: dt,
+      final entryByIndex = <int, DiscoveredTrack>{
+        for (var i = 0; i < rows.length; i++) indices[i]: rows[i].track,
       };
       for (final track in importedTracks) {
-        final discoveredTrack = discoveredByVideoId[track.videoId];
+        final discoveredTrack = entryByIndex[track.index];
         if (discoveredTrack == null) continue;
         final segments =
             discoveredTrack.sponsorBlockSegments
@@ -1743,7 +1804,7 @@ for video) to keep a complete backup.
     return candidate;
   }
 
-  DiscoveredPlaylist? _parseMetadata(
+  static DiscoveredPlaylist? _parseMetadata(
     String folderPath,
     Map<String, dynamic> json,
   ) {
@@ -1817,7 +1878,9 @@ for video) to keep a complete backup.
     );
   }
 
-  List<DiscoveredSponsorBlockSegment> _parseSegments(List<dynamic>? raw) {
+  static List<DiscoveredSponsorBlockSegment> _parseSegments(
+    List<dynamic>? raw,
+  ) {
     if (raw == null) return const [];
     final result = <DiscoveredSponsorBlockSegment>[];
     for (final item in raw) {
@@ -1854,4 +1917,210 @@ for video) to keep a complete backup.
     }
     return result;
   }
+}
+
+/// The files of one folder, listed once, so checking whether a track's file
+/// is there costs a set lookup instead of a disk access.
+class _FolderListing {
+  _FolderListing(String folder) : _folder = p.normalize(folder);
+
+  final String _folder;
+  final _exact = <String>{};
+  final _lower = <String>{};
+
+  void add(String path) {
+    final normalized = p.normalize(path);
+    _exact.add(normalized);
+    _lower.add(normalized.toLowerCase());
+  }
+
+  void remove(String path) {
+    final normalized = p.normalize(path);
+    _exact.remove(normalized);
+    _lower.remove(normalized.toLowerCase());
+  }
+
+  bool _inFolder(String normalized) => p.dirname(normalized) == _folder;
+
+  /// False only when [path] lies in the folder and was not listed (in any
+  /// letter case).
+  bool mayExist(String path) {
+    final normalized = p.normalize(path);
+    if (!_inFolder(normalized)) return true;
+    return _lower.contains(normalized.toLowerCase());
+  }
+
+  /// Whether the file at [path] exists. Files in the folder are answered
+  /// from the listing; only a name that differs from a listed one in letter
+  /// case, or a file elsewhere, is checked on disk.
+  Future<bool> exists(String path) async {
+    final normalized = p.normalize(path);
+    if (_inFolder(normalized)) {
+      if (_exact.contains(normalized)) return true;
+      if (!_lower.contains(normalized.toLowerCase())) return false;
+    }
+    return File(path).exists();
+  }
+}
+
+/// Everything needed to write one playlist's sidecar and `.m3u8`, in a form
+/// that can be sent to a worker isolate.
+class SidecarJob {
+  const SidecarJob({
+    required this.playlist,
+    required this.tracks,
+    required this.segmentsByTrack,
+    required this.metaPath,
+    required this.playlistFilePath,
+    required this.knownHashes,
+    required this.tempSuffix,
+  });
+
+  final Playlist playlist;
+  final List<Track> tracks;
+  final Map<int, List<SponsorBlockSegment>> segmentsByTrack;
+  final String metaPath;
+  final String playlistFilePath;
+
+  /// Hash of what was last written at each path, if known.
+  final Map<String, int?> knownHashes;
+  final String tempSuffix;
+}
+
+/// The sidecar JSON of a playlist.
+String buildSidecarJson(
+  Playlist playlist,
+  List<Track> tracks,
+  Map<int, List<SponsorBlockSegment>> segmentsByTrack,
+) {
+  String? relative(String? path) =>
+      MetadataService.fileNameRelativeTo(playlist.outputPath, path);
+  final tracksJson = <Map<String, dynamic>>[];
+  for (final t in tracks) {
+    final segments = segmentsByTrack[t.id] ?? const <SponsorBlockSegment>[];
+    tracksJson.add({
+      'index': t.index,
+      'videoId': t.videoId,
+      'title': t.title,
+      'thumbnailUrl': t.thumbnailUrl,
+      'thumbnailFileName': relative(t.thumbnailPath),
+      'durationSeconds': t.durationSeconds,
+      'status': t.status,
+      'unavailableReason': t.unavailableReason,
+      'isLocalReplacement': t.isLocalReplacement,
+      'alwaysSkip': t.alwaysSkip,
+      'chapters': ChapterData.decode(t.chaptersJson).toJson(),
+      'chaptersEnabled': t.chaptersEnabled,
+      'sponsorBlockCheckedAt':
+          t.sponsorBlockCheckedAt?.toUtc().toIso8601String(),
+      'downloadedAt': t.downloadedAt?.toUtc().toIso8601String(),
+      'replaceRequested': t.replaceRequested,
+      'fileName': relative(t.filePath),
+      'sponsorBlockSegments': [
+        for (final s in segments)
+          {
+            'source': s.source,
+            'uuid': s.uuid,
+            'category': s.category,
+            'actionType': s.actionType,
+            'startMs': s.startMs,
+            'endMs': s.endMs,
+            'votes': s.votes,
+            'locked': s.locked,
+            'description': s.description,
+            'createdAt': s.createdAt.toUtc().toIso8601String(),
+          },
+      ],
+    });
+  }
+
+  final data = {
+    'version': 2,
+    'playlist': {
+      'url': playlist.url,
+      'name': playlist.name,
+      'thumbnailUrl': playlist.thumbnailUrl,
+      'thumbnailFileName': relative(playlist.thumbnailPath),
+      'audioOnly': playlist.audioOnly,
+      'playChapters': playlist.playChapters ?? true,
+      'autoUpdate': playlist.autoUpdate,
+      'updateFrequencyHours': playlist.updateFrequencyHours,
+      'includeThumbnails': playlist.includeThumbnails,
+      'sponsorBlockEnabled': playlist.sponsorBlockEnabled,
+      'sponsorBlockCategories': playlist.sponsorBlockCategories,
+      'sponsorBlockCategoryActions': playlist.sponsorBlockCategoryActions,
+      'lastUpdated': playlist.lastUpdated?.toUtc().toIso8601String(),
+      'createdAt': playlist.createdAt.toUtc().toIso8601String(),
+    },
+    'tracks': tracksJson,
+  };
+  return const JsonEncoder.withIndent('  ').convert(data);
+}
+
+/// Builds and writes a playlist's sidecar and `.m3u8` (see [SidecarJob]).
+/// A file whose content is unchanged is not rewritten; when its last hash
+/// is not known, the file on disk is compared. Returns the hash of each
+/// file's current content. Runs on any isolate.
+Future<Map<String, int>> writeSidecarFiles(SidecarJob job) async {
+  final contents = {
+    job.metaPath: buildSidecarJson(
+      job.playlist,
+      job.tracks,
+      job.segmentsByTrack,
+    ),
+    job.playlistFilePath: MetadataService.buildPlaylistFile(
+      job.playlist,
+      job.tracks,
+    ),
+  };
+  final hashes = <String, int>{};
+  for (final entry in contents.entries) {
+    final path = entry.key;
+    final content = entry.value;
+    final hash = contentHash(content);
+    final target = File(path);
+    final known = job.knownHashes[path];
+    var unchanged = false;
+    if (known == hash) {
+      unchanged = await target.exists();
+    } else if (known == null) {
+      // Not written by this process yet (for example after a restart):
+      // compare with what is on disk instead of rewriting every file.
+      try {
+        unchanged =
+            await target.exists() && await target.readAsString() == content;
+      } catch (_) {
+        unchanged = false;
+      }
+    }
+    if (!unchanged) {
+      final tmpFile = File('$path.tmp.${job.tempSuffix}');
+      try {
+        await tmpFile.writeAsString(content);
+        await tmpFile.rename(path);
+      } catch (_) {
+        try {
+          if (await tmpFile.exists()) await tmpFile.delete();
+        } catch (_) {
+          // The folder cleanup removes leftover temp files later.
+        }
+        rethrow;
+      }
+    }
+    hashes[path] = hash;
+  }
+  return hashes;
+}
+
+/// A content hash of [content]: two independent 30-bit hashes (FNV-1a and
+/// a polynomial one) side by side, the same on every isolate and run.
+int contentHash(String content) {
+  var fnv = 0x811c9dc5;
+  var poly = content.length & 0x3FFFFFFF;
+  for (var i = 0; i < content.length; i++) {
+    final unit = content.codeUnitAt(i);
+    fnv = ((fnv ^ unit) * 0x01000193) & 0x3FFFFFFF;
+    poly = (poly * 31 + unit) & 0x3FFFFFFF;
+  }
+  return (fnv << 30) | poly;
 }

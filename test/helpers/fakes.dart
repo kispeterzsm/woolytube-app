@@ -193,8 +193,14 @@ class FakeYtDlpService extends YtDlpService {
     required int progress,
   }) async {}
 
+  /// Runs when the service stops the download notification; a test can
+  /// return a future to hold the end of a run there.
+  Future<void> Function()? onStopDownloadService;
+
   @override
-  Future<void> stopDownloadService() async {}
+  Future<void> stopDownloadService() async {
+    await onStopDownloadService?.call();
+  }
 }
 
 /// Writes `<targetStem>.jpg` like the native extractor when the media file

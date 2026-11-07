@@ -205,6 +205,18 @@ class $PlaylistsTable extends Playlists
     type: DriftSqlType.string,
     requiredDuringInsert: true,
   );
+  static const VerificationMeta _lastUpdateAttemptMeta = const VerificationMeta(
+    'lastUpdateAttempt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> lastUpdateAttempt =
+      GeneratedColumn<DateTime>(
+        'last_update_attempt',
+        aliasedName,
+        true,
+        type: DriftSqlType.dateTime,
+        requiredDuringInsert: false,
+      );
   @override
   List<GeneratedColumn> get $columns => [
     playChapters,
@@ -223,6 +235,7 @@ class $PlaylistsTable extends Playlists
     lastUpdated,
     createdAt,
     outputPath,
+    lastUpdateAttempt,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -364,6 +377,15 @@ class $PlaylistsTable extends Playlists
     } else if (isInserting) {
       context.missing(_outputPathMeta);
     }
+    if (data.containsKey('last_update_attempt')) {
+      context.handle(
+        _lastUpdateAttemptMeta,
+        lastUpdateAttempt.isAcceptableOrUnknown(
+          data['last_update_attempt']!,
+          _lastUpdateAttemptMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -449,6 +471,10 @@ class $PlaylistsTable extends Playlists
             DriftSqlType.string,
             data['${effectivePrefix}output_path'],
           )!,
+      lastUpdateAttempt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}last_update_attempt'],
+      ),
     );
   }
 
@@ -475,6 +501,12 @@ class Playlist extends DataClass implements Insertable<Playlist> {
   final DateTime? lastUpdated;
   final DateTime createdAt;
   final String outputPath;
+
+  /// When an update (manual or scheduled) last started checking this
+  /// playlist, successful or not. The scheduled worker takes the playlists
+  /// it tried longest ago first, so one playlist that never finishes in
+  /// time cannot keep the others from ever being updated.
+  final DateTime? lastUpdateAttempt;
   const Playlist({
     this.playChapters,
     required this.id,
@@ -492,6 +524,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     this.lastUpdated,
     required this.createdAt,
     required this.outputPath,
+    this.lastUpdateAttempt,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -522,6 +555,9 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     }
     map['created_at'] = Variable<DateTime>(createdAt);
     map['output_path'] = Variable<String>(outputPath);
+    if (!nullToAbsent || lastUpdateAttempt != null) {
+      map['last_update_attempt'] = Variable<DateTime>(lastUpdateAttempt);
+    }
     return map;
   }
 
@@ -555,6 +591,10 @@ class Playlist extends DataClass implements Insertable<Playlist> {
               : Value(lastUpdated),
       createdAt: Value(createdAt),
       outputPath: Value(outputPath),
+      lastUpdateAttempt:
+          lastUpdateAttempt == null && nullToAbsent
+              ? const Value.absent()
+              : Value(lastUpdateAttempt),
     );
   }
 
@@ -588,6 +628,9 @@ class Playlist extends DataClass implements Insertable<Playlist> {
       lastUpdated: serializer.fromJson<DateTime?>(json['lastUpdated']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
       outputPath: serializer.fromJson<String>(json['outputPath']),
+      lastUpdateAttempt: serializer.fromJson<DateTime?>(
+        json['lastUpdateAttempt'],
+      ),
     );
   }
   @override
@@ -614,6 +657,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
       'lastUpdated': serializer.toJson<DateTime?>(lastUpdated),
       'createdAt': serializer.toJson<DateTime>(createdAt),
       'outputPath': serializer.toJson<String>(outputPath),
+      'lastUpdateAttempt': serializer.toJson<DateTime?>(lastUpdateAttempt),
     };
   }
 
@@ -634,6 +678,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     Value<DateTime?> lastUpdated = const Value.absent(),
     DateTime? createdAt,
     String? outputPath,
+    Value<DateTime?> lastUpdateAttempt = const Value.absent(),
   }) => Playlist(
     playChapters: playChapters.present ? playChapters.value : this.playChapters,
     id: id ?? this.id,
@@ -654,6 +699,10 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     lastUpdated: lastUpdated.present ? lastUpdated.value : this.lastUpdated,
     createdAt: createdAt ?? this.createdAt,
     outputPath: outputPath ?? this.outputPath,
+    lastUpdateAttempt:
+        lastUpdateAttempt.present
+            ? lastUpdateAttempt.value
+            : this.lastUpdateAttempt,
   );
   Playlist copyWithCompanion(PlaylistsCompanion data) {
     return Playlist(
@@ -700,6 +749,10 @@ class Playlist extends DataClass implements Insertable<Playlist> {
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
       outputPath:
           data.outputPath.present ? data.outputPath.value : this.outputPath,
+      lastUpdateAttempt:
+          data.lastUpdateAttempt.present
+              ? data.lastUpdateAttempt.value
+              : this.lastUpdateAttempt,
     );
   }
 
@@ -721,7 +774,8 @@ class Playlist extends DataClass implements Insertable<Playlist> {
           ..write('sponsorBlockCategoryActions: $sponsorBlockCategoryActions, ')
           ..write('lastUpdated: $lastUpdated, ')
           ..write('createdAt: $createdAt, ')
-          ..write('outputPath: $outputPath')
+          ..write('outputPath: $outputPath, ')
+          ..write('lastUpdateAttempt: $lastUpdateAttempt')
           ..write(')'))
         .toString();
   }
@@ -744,6 +798,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     lastUpdated,
     createdAt,
     outputPath,
+    lastUpdateAttempt,
   );
   @override
   bool operator ==(Object other) =>
@@ -765,7 +820,8 @@ class Playlist extends DataClass implements Insertable<Playlist> {
               this.sponsorBlockCategoryActions &&
           other.lastUpdated == this.lastUpdated &&
           other.createdAt == this.createdAt &&
-          other.outputPath == this.outputPath);
+          other.outputPath == this.outputPath &&
+          other.lastUpdateAttempt == this.lastUpdateAttempt);
 }
 
 class PlaylistsCompanion extends UpdateCompanion<Playlist> {
@@ -785,6 +841,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
   final Value<DateTime?> lastUpdated;
   final Value<DateTime> createdAt;
   final Value<String> outputPath;
+  final Value<DateTime?> lastUpdateAttempt;
   const PlaylistsCompanion({
     this.playChapters = const Value.absent(),
     this.id = const Value.absent(),
@@ -802,6 +859,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     this.lastUpdated = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.outputPath = const Value.absent(),
+    this.lastUpdateAttempt = const Value.absent(),
   });
   PlaylistsCompanion.insert({
     this.playChapters = const Value.absent(),
@@ -820,6 +878,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     this.lastUpdated = const Value.absent(),
     required DateTime createdAt,
     required String outputPath,
+    this.lastUpdateAttempt = const Value.absent(),
   }) : url = Value(url),
        name = Value(name),
        createdAt = Value(createdAt),
@@ -841,6 +900,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     Expression<DateTime>? lastUpdated,
     Expression<DateTime>? createdAt,
     Expression<String>? outputPath,
+    Expression<DateTime>? lastUpdateAttempt,
   }) {
     return RawValuesInsertable({
       if (playChapters != null) 'play_chapters': playChapters,
@@ -863,6 +923,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
       if (lastUpdated != null) 'last_updated': lastUpdated,
       if (createdAt != null) 'created_at': createdAt,
       if (outputPath != null) 'output_path': outputPath,
+      if (lastUpdateAttempt != null) 'last_update_attempt': lastUpdateAttempt,
     });
   }
 
@@ -883,6 +944,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     Value<DateTime?>? lastUpdated,
     Value<DateTime>? createdAt,
     Value<String>? outputPath,
+    Value<DateTime?>? lastUpdateAttempt,
   }) {
     return PlaylistsCompanion(
       playChapters: playChapters ?? this.playChapters,
@@ -903,6 +965,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
       lastUpdated: lastUpdated ?? this.lastUpdated,
       createdAt: createdAt ?? this.createdAt,
       outputPath: outputPath ?? this.outputPath,
+      lastUpdateAttempt: lastUpdateAttempt ?? this.lastUpdateAttempt,
     );
   }
 
@@ -961,6 +1024,9 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     if (outputPath.present) {
       map['output_path'] = Variable<String>(outputPath.value);
     }
+    if (lastUpdateAttempt.present) {
+      map['last_update_attempt'] = Variable<DateTime>(lastUpdateAttempt.value);
+    }
     return map;
   }
 
@@ -982,7 +1048,8 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
           ..write('sponsorBlockCategoryActions: $sponsorBlockCategoryActions, ')
           ..write('lastUpdated: $lastUpdated, ')
           ..write('createdAt: $createdAt, ')
-          ..write('outputPath: $outputPath')
+          ..write('outputPath: $outputPath, ')
+          ..write('lastUpdateAttempt: $lastUpdateAttempt')
           ..write(')'))
         .toString();
   }
@@ -2939,6 +3006,7 @@ typedef $$PlaylistsTableCreateCompanionBuilder =
       Value<DateTime?> lastUpdated,
       required DateTime createdAt,
       required String outputPath,
+      Value<DateTime?> lastUpdateAttempt,
     });
 typedef $$PlaylistsTableUpdateCompanionBuilder =
     PlaylistsCompanion Function({
@@ -2958,6 +3026,7 @@ typedef $$PlaylistsTableUpdateCompanionBuilder =
       Value<DateTime?> lastUpdated,
       Value<DateTime> createdAt,
       Value<String> outputPath,
+      Value<DateTime?> lastUpdateAttempt,
     });
 
 final class $$PlaylistsTableReferences
@@ -3070,6 +3139,11 @@ class $$PlaylistsTableFilterComposer
 
   ColumnFilters<String> get outputPath => $composableBuilder(
     column: $table.outputPath,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get lastUpdateAttempt => $composableBuilder(
+    column: $table.lastUpdateAttempt,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -3187,6 +3261,11 @@ class $$PlaylistsTableOrderingComposer
     column: $table.outputPath,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<DateTime> get lastUpdateAttempt => $composableBuilder(
+    column: $table.lastUpdateAttempt,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$PlaylistsTableAnnotationComposer
@@ -3268,6 +3347,11 @@ class $$PlaylistsTableAnnotationComposer
     builder: (column) => column,
   );
 
+  GeneratedColumn<DateTime> get lastUpdateAttempt => $composableBuilder(
+    column: $table.lastUpdateAttempt,
+    builder: (column) => column,
+  );
+
   Expression<T> tracksRefs<T extends Object>(
     Expression<T> Function($$TracksTableAnnotationComposer a) f,
   ) {
@@ -3339,6 +3423,7 @@ class $$PlaylistsTableTableManager
                 Value<DateTime?> lastUpdated = const Value.absent(),
                 Value<DateTime> createdAt = const Value.absent(),
                 Value<String> outputPath = const Value.absent(),
+                Value<DateTime?> lastUpdateAttempt = const Value.absent(),
               }) => PlaylistsCompanion(
                 playChapters: playChapters,
                 id: id,
@@ -3356,6 +3441,7 @@ class $$PlaylistsTableTableManager
                 lastUpdated: lastUpdated,
                 createdAt: createdAt,
                 outputPath: outputPath,
+                lastUpdateAttempt: lastUpdateAttempt,
               ),
           createCompanionCallback:
               ({
@@ -3376,6 +3462,7 @@ class $$PlaylistsTableTableManager
                 Value<DateTime?> lastUpdated = const Value.absent(),
                 required DateTime createdAt,
                 required String outputPath,
+                Value<DateTime?> lastUpdateAttempt = const Value.absent(),
               }) => PlaylistsCompanion.insert(
                 playChapters: playChapters,
                 id: id,
@@ -3393,6 +3480,7 @@ class $$PlaylistsTableTableManager
                 lastUpdated: lastUpdated,
                 createdAt: createdAt,
                 outputPath: outputPath,
+                lastUpdateAttempt: lastUpdateAttempt,
               ),
           withReferenceMapper:
               (p0) =>

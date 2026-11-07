@@ -43,8 +43,28 @@ class LibraryGate {
           : 'A scheduled update is running in the background. '
               'Try again in a few minutes.';
 
-  /// Enters the gate, or returns the reason it is busy.
-  Future<String?> tryEnter(String operation) async {
+  /// Operations that only take a moment (checking a playlist folder when its
+  /// page opens, the startup repair). An action the owner started waits for
+  /// them instead of being refused.
+  static const shortOperations = {'playlist check', 'startup check'};
+
+  /// How long an owner-started action waits for a [shortOperations] entry.
+  static const userWait = Duration(seconds: 5);
+
+  /// Enters the gate, or returns the reason it is busy. With [wait], a
+  /// running short operation (see [shortOperations]) in this engine is
+  /// waited for, up to [wait].
+  Future<String?> tryEnter(
+    String operation, {
+    Duration wait = Duration.zero,
+  }) async {
+    if (wait > Duration.zero) {
+      final waited = Stopwatch()..start();
+      while (shortOperations.contains(_activeOperation) &&
+          waited.elapsed < wait) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+    }
     final active = _activeOperation;
     if (active != null) {
       return 'Wait until the current $active finishes.';
@@ -79,9 +99,14 @@ class LibraryGate {
     }
   }
 
-  /// Runs [action] inside the gate, or throws [LibraryBusyException].
-  Future<T> run<T>(String operation, Future<T> Function() action) async {
-    final busy = await tryEnter(operation);
+  /// Runs [action] inside the gate, or throws [LibraryBusyException]. See
+  /// [tryEnter] for [wait].
+  Future<T> run<T>(
+    String operation,
+    Future<T> Function() action, {
+    Duration wait = Duration.zero,
+  }) async {
+    final busy = await tryEnter(operation, wait: wait);
     if (busy != null) throw LibraryBusyException(busy);
     try {
       return await action();
