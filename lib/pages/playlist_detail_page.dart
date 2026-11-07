@@ -885,32 +885,39 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
       padding: const EdgeInsets.fromLTRB(12, 4, 8, 4),
       child: Row(
         children: [
-          // Shrinks with very large text instead of pushing the toggles off.
-          Flexible(
-            flex: 3,
-            child: FittedBox(
-              fit: BoxFit.scaleDown,
-              child: FilledButton.icon(
-                key: const ValueKey('playlist-detail-play'),
-                onPressed: canPlay ? () => _playAll(playTracks) : null,
-                icon: const Icon(Icons.play_arrow),
-                label: Text(filtering ? 'Play results' : 'Play'),
-              ),
-            ),
-          ),
-          const SizedBox(width: 4),
+          // Play and Update on the left, the toggles pinned to the right.
           Expanded(
-            flex: 2,
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: _UpdateControl(
-                playlistId: widget.playlistId,
-                starting: _isUpdating,
-                onUpdate: _startUpdate,
-                onStopCheck: _stopCheck,
-                onStopDownload: _confirmCancelDownload,
-                onLeaveQueue: _leaveQueue,
-              ),
+            child: Row(
+              children: [
+                // Shrinks with very large text instead of pushing the toggles off.
+                Flexible(
+                  flex: 3,
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: FilledButton.icon(
+                      key: const ValueKey('playlist-detail-play'),
+                      onPressed: canPlay ? () => _playAll(playTracks) : null,
+                      icon: const Icon(Icons.play_arrow),
+                      label: Text(filtering ? 'Play results' : 'Play'),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Flexible(
+                  flex: 2,
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: _UpdateControl(
+                      playlistId: widget.playlistId,
+                      starting: _isUpdating,
+                      onUpdate: _startUpdate,
+                      onStopCheck: _stopCheck,
+                      onStopDownload: _confirmCancelDownload,
+                      onLeaveQueue: _leaveQueue,
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
           _ModeChip(
