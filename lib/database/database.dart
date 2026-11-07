@@ -901,23 +901,40 @@ class AppDatabase extends _$AppDatabase {
   /// example a cancel that arrives while the file is being saved) is left
   /// alone. The local-file flag is kept: an interrupted download replaced
   /// nothing.
+  ///
+  /// A track marked removed from YouTube whose manual retry was interrupted
+  /// goes back to 'unavailable' with its removal message, not to the queue:
+  /// the mark always means "no file and not retried by updates".
   Future<void> resetInterruptedTrack(
     int trackId, {
     bool onlyIfDownloading = false,
   }) async {
+    await transaction(() async {
+      final track = await getTrack(trackId);
+      if (track == null) return;
+      if (onlyIfDownloading && track.status != 'downloading') return;
+      final removed = track.unavailableReason == removedFromYouTubeReason;
+      await (update(tracks)..where((t) => t.id.equals(trackId))).write(
+        TracksCompanion(
+          status: Value(removed ? 'unavailable' : 'pending'),
+          filePath: const Value(null),
+          downloadedAt: const Value(null),
+          lastError: removed ? const Value.absent() : const Value(null),
+        ),
+      );
+    });
+  }
+
+  /// Ends a failed manual retry of a track marked removed from YouTube: it
+  /// stays 'unavailable' with its removal message, whatever the retry
+  /// failed with (a bot check must not put it back into every update).
+  Future<void> restoreRemovedFromYouTube(int trackId) async {
     await (update(tracks)..where(
       (t) =>
-          onlyIfDownloading
-              ? t.id.equals(trackId) & t.status.equals('downloading')
-              : t.id.equals(trackId),
-    )).write(
-      const TracksCompanion(
-        status: Value('pending'),
-        filePath: Value(null),
-        downloadedAt: Value(null),
-        lastError: Value(null),
-      ),
-    );
+          t.id.equals(trackId) &
+          t.unavailableReason.equals(removedFromYouTubeReason) &
+          t.status.isNotIn(const ['complete']),
+    )).write(const TracksCompanion(status: Value('unavailable')));
   }
 
   Future<List<SponsorBlockSegment>> getSegmentsForTrack(int trackId) =>

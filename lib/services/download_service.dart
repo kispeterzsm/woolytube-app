@@ -320,6 +320,7 @@ class DownloadService {
 
   StreamSubscription? _ytdlpProgressSub;
   bool _isDownloading = false;
+  bool _finishing = false;
   bool _cancelRequested = false;
   Completer<void> _cancelSignal = Completer<void>();
   Completer<void>? _runCompleter;
@@ -781,6 +782,11 @@ class DownloadService {
   /// Returns true when a new file was saved, false when the owner stopped
   /// it (nothing changed then). Throws with the reason when it failed.
   Future<bool> downloadTrack(Playlist playlist, Track track) async {
+    // A run that is only tidying up ends within moments; wait for it rather
+    // than refuse.
+    while (_isDownloading && _finishing) {
+      await runFinished;
+    }
     // A caller must never report success for a download that never ran.
     if (_isDownloading) {
       throw StateError('A download is already in progress.');
@@ -888,33 +894,42 @@ class DownloadService {
     }
   }
 
+  /// Ends a run. The service counts as busy until the teardown (stopping
+  /// the progress feed and the foreground service, releasing the gate) is
+  /// done, so a request arriving meanwhile is queued instead of colliding
+  /// with the gate, and [runFinished] resolves only for this run.
   Future<void> _finishRun({required bool entered}) async {
-    _isDownloading = false;
+    final completer = _runCompleter;
+    _finishing = true;
     _activeTrackId = null;
     _activeTrackIsReplacement = false;
-    _activePlaylist = null;
-    _resetRunState();
-    await _ytdlpProgressSub?.cancel();
-    _ytdlpProgressSub = null;
-    if (_reportingStarted) {
-      _reportingStarted = false;
-      try {
-        await _ytdlp.stopDownloadService();
-      } catch (e) {
-        _log.warn('Failed to stop download foreground service: $e');
+    try {
+      await _ytdlpProgressSub?.cancel();
+      _ytdlpProgressSub = null;
+      if (_reportingStarted) {
+        _reportingStarted = false;
+        try {
+          await _ytdlp.stopDownloadService();
+        } catch (e) {
+          _log.warn('Failed to stop download foreground service: $e');
+        }
       }
-    }
-    if (entered) {
-      try {
-        await _gate.exit();
-      } catch (e) {
-        _log.warn('Failed to release download lock: $e');
+      if (entered) {
+        try {
+          await _gate.exit();
+        } catch (e) {
+          _log.warn('Failed to release download lock: $e');
+        }
       }
+    } finally {
+      _isDownloading = false;
+      _finishing = false;
+      _activePlaylist = null;
+      _resetRunState();
+      if (identical(_runCompleter, completer)) _runCompleter = null;
+      if (completer != null && !completer.isCompleted) completer.complete();
+      _startNextQueued();
     }
-    final completer = _runCompleter;
-    _runCompleter = null;
-    if (completer != null && !completer.isCompleted) completer.complete();
-    _startNextQueued();
   }
 
   void _startNextQueued() {
@@ -1172,7 +1187,11 @@ class DownloadService {
       _log.error('$trackLabel Could not save "${track.title}": $errorMsg');
       _lastFailure = errorMsg;
       if (!replaceExisting) {
-        await _db.updateTrackStatus(track.id, 'error', error: errorMsg);
+        if (track.unavailableReason == removedFromYouTubeReason) {
+          await _db.restoreRemovedFromYouTube(track.id);
+        } else {
+          await _db.updateTrackStatus(track.id, 'error', error: errorMsg);
+        }
       }
       return _TrackDownloadResult.failed;
     } finally {
@@ -1201,6 +1220,16 @@ class DownloadService {
         await _db.markTrackRemovedFromYouTube(track.id, errorMsg);
         _log.warn('$trackLabel Removed from YouTube: "${track.title}"');
         return _TrackDownloadResult.removed;
+      }
+      if (track.unavailableReason == removedFromYouTubeReason) {
+        // A manual retry of a removed video failed for another reason (a
+        // bot check, the network): it keeps its mark and stays out of the
+        // updates; the caller shows this error.
+        await _db.restoreRemovedFromYouTube(track.id);
+        _log.error(
+          '$trackLabel Retry of removed "${track.title}" failed: $errorMsg',
+        );
+        return _TrackDownloadResult.failed;
       }
       await _db.updateTrackStatus(track.id, 'error', error: errorMsg);
       _log.error('$trackLabel Failed "${track.title}": $errorMsg');

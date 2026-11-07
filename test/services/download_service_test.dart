@@ -1249,6 +1249,51 @@ void main() {
       expect((await db.getPlaylist(playlist.id)).lastUpdated, isNull);
     });
 
+    test('a retry that fails or is stopped keeps the removed mark', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        videoId: 'gone-1',
+        status: 'unavailable',
+        unavailableReason: removedFromYouTubeReason,
+      );
+      await db.markTrackRemovedFromYouTube(track.id, guidelines);
+
+      // A bot check during the retry.
+      ytdlp.downloadError = PlatformException(
+        code: 'DOWNLOAD_ERROR',
+        message: "ERROR: [youtube] gone-1: Sign in to confirm you're not a bot",
+      );
+      await expectLater(
+        service.downloadTrack(playlist, track),
+        throwsA(isA<StateError>()),
+      );
+      var updated = (await db.getTrack(track.id))!;
+      expect(updated.status, 'unavailable');
+      expect(updated.unavailableReason, removedFromYouTubeReason);
+      expect(updated.lastError, guidelines);
+
+      // Stopped during the retry.
+      ytdlp.downloadError = null;
+      ytdlp.downloadCompleter = Completer<void>();
+      ytdlp.downloadStarted = Completer<void>();
+      final running = service.downloadTrack(playlist, updated);
+      await ytdlp.downloadStarted!.future;
+      expect((await db.getTrack(track.id))!.status, 'downloading');
+      await service.cancelActiveDownloads();
+      expect(await running, isFalse);
+      updated = (await db.getTrack(track.id))!;
+      expect(updated.status, 'unavailable');
+      expect(updated.unavailableReason, removedFromYouTubeReason);
+
+      // A killed process leaves it 'downloading'; the repair restores it.
+      await db.updateTrackStatus(track.id, 'downloading');
+      await db.resetInterruptedTrack(track.id);
+      expect((await db.getTrack(track.id))!.status, 'unavailable');
+      expect(await db.getPendingTracks(playlist.id), isEmpty);
+    });
+
     test('a bot check is not mistaken for a removal', () async {
       final playlist = await insertTestPlaylist(db, outputPath: folder);
       final track = await insertTestTrack(db, playlistId: playlist.id);
@@ -1359,6 +1404,79 @@ void main() {
       await service.runFinished;
       expect(ytdlp.calls.map((c) => c.videoId), ['a', 'b']);
       expect(service.queuedPlaylistIds, isEmpty);
+    });
+
+    test('a request while a run tidies up is queued, not refused', () async {
+      final first = await insertTestPlaylist(db, outputPath: folder);
+      await insertTestTrack(db, playlistId: first.id, videoId: 'a');
+      final secondFolder = p.join(libraryDir, 'Second');
+      await Directory(secondFolder).create(recursive: true);
+      final second = await insertTestPlaylist(
+        db,
+        url: 'https://www.youtube.com/playlist?list=second',
+        name: 'Second',
+        outputPath: secondFolder,
+      );
+      await insertTestTrack(db, playlistId: second.id, videoId: 'b');
+      final stopEntered = Completer<void>();
+      final stopHeld = Completer<void>();
+      ytdlp.onStopDownloadService = () {
+        if (!stopEntered.isCompleted) stopEntered.complete();
+        return stopHeld.future;
+      };
+      final events = <DownloadProgress>[];
+      final sub = service.progressStream.listen(events.add);
+
+      final running = service.downloadPlaylist(first);
+      await stopEntered.future;
+      var finished = false;
+      unawaited(service.runFinished.then((_) => finished = true));
+
+      expect(service.isDownloading, isTrue);
+      expect(await service.downloadPlaylist(second), DownloadStart.queued);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(finished, isFalse);
+
+      ytdlp.onStopDownloadService = null;
+      stopHeld.complete();
+      await running;
+      for (var i = 0; i < 50 && ytdlp.calls.length < 2; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      await service.runFinished;
+      await sub.cancel();
+
+      expect(finished, isTrue);
+      expect(ytdlp.calls.map((c) => c.videoId), ['a', 'b']);
+      expect(events.where((e) => e.status == 'error'), isEmpty);
+    });
+
+    test('a single track asked for during the tidy-up waits for it', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      await insertTestTrack(db, playlistId: playlist.id, videoId: 'a');
+      final retry = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 2,
+        videoId: 'b',
+        status: 'complete',
+      );
+      final stopEntered = Completer<void>();
+      final stopHeld = Completer<void>();
+      ytdlp.onStopDownloadService = () {
+        if (!stopEntered.isCompleted) stopEntered.complete();
+        return stopHeld.future;
+      };
+
+      final running = service.downloadPlaylist(playlist);
+      await stopEntered.future;
+      ytdlp.onStopDownloadService = null;
+      final single = service.downloadTrack(playlist, retry);
+      stopHeld.complete();
+      await running;
+
+      expect(await single, isTrue);
+      expect(ytdlp.calls.map((c) => c.videoId), ['a', 'b']);
     });
 
     test('a playlist deleted during its download stops it', () async {
