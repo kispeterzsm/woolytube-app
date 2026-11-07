@@ -52,15 +52,21 @@ class MediaChapter {
   );
 
   Duration get duration => Duration(milliseconds: endMs - startMs);
-  Map<String, dynamic> toJson() => {
+
+  /// Fields still at the value [parse] would read back are left out, so a
+  /// chapter nobody recognized or edited is stored exactly as before song
+  /// recognition existed (smaller sidecars, nothing for older versions or
+  /// the PC tool to trip over). [impliedOrigin] is the origin [parse] infers
+  /// for this chapter's list when the key is missing.
+  Map<String, dynamic> toJson({ChapterOrigin? impliedOrigin}) => {
     'id': id,
     'title': title,
     'startMs': startMs,
     'endMs': endMs,
-    'origin': origin.name,
-    'manuallyEdited': manuallyEdited,
-    'alternativeTitles': alternativeTitles,
-    'reviewReasons': reviewReasons,
+    if (origin != impliedOrigin) 'origin': origin.name,
+    if (manuallyEdited) 'manuallyEdited': true,
+    if (alternativeTitles.isNotEmpty) 'alternativeTitles': alternativeTitles,
+    if (reviewReasons.isNotEmpty) 'reviewReasons': reviewReasons,
   };
 
   static List<MediaChapter> parse(
@@ -207,17 +213,37 @@ class ChapterData {
     recognitionEpoch: recognitionEpoch + 1,
     lastRecognitionRunId: lastRecognitionRunId,
   );
-  Map<String, dynamic> toJson() => {
-    'downloaded': downloaded.map((c) => c.toJson()).toList(),
-    'custom': custom?.map((c) => c.toJson()).toList(),
-    'checkedAt': checkedAt?.toUtc().toIso8601String(),
-    'durationMs': durationMs,
-    'valid': valid,
-    'shuffleChapters': shuffleChapters,
-    'undoChapters': undoChapters?.map((c) => c.toJson()).toList(),
-    'recognitionEpoch': recognitionEpoch,
-    'lastRecognitionRunId': lastRecognitionRunId,
-  };
+
+  /// Main's fields are always written; the recognition fields only when
+  /// they differ from what [fromJson] assumes when they are missing.
+  Map<String, dynamic> toJson() {
+    final originalIds = {for (final c in downloaded) c.id};
+    List<Map<String, dynamic>> edited(List<MediaChapter> chapters) => [
+      for (final c in chapters)
+        c.toJson(
+          impliedOrigin:
+              originalIds.contains(c.id)
+                  ? ChapterOrigin.original
+                  : ChapterOrigin.user,
+        ),
+    ];
+    return {
+      'downloaded': [
+        for (final c in downloaded)
+          c.toJson(impliedOrigin: ChapterOrigin.original),
+      ],
+      'custom': custom == null ? null : edited(custom!),
+      'checkedAt': checkedAt?.toUtc().toIso8601String(),
+      'durationMs': durationMs,
+      'valid': valid,
+      'shuffleChapters': shuffleChapters,
+      if (undoChapters != null) 'undoChapters': edited(undoChapters!),
+      if (recognitionEpoch != 0) 'recognitionEpoch': recognitionEpoch,
+      if (lastRecognitionRunId != null)
+        'lastRecognitionRunId': lastRecognitionRunId,
+    };
+  }
+
   String encode() => jsonEncode(toJson());
 
   /// Recently decoded values. Playback, the notification and every list row
