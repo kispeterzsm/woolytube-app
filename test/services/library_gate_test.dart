@@ -210,4 +210,31 @@ void main() {
     expect(await lockFile().exists(), isTrue);
     expect(await lock.isHeldByOther(DownloadLock.foregroundOwner), isTrue);
   });
+
+  test('an action waits for a short check instead of failing', () async {
+    final gate = LibraryGate.unlocked();
+    expect(await gate.tryEnter('playlist check'), isNull);
+    // Without waiting, it is refused at once.
+    expect(await gate.tryEnter('rename'), isNotNull);
+
+    unawaited(
+      Future<void>.delayed(
+        const Duration(milliseconds: 100),
+      ).then((_) => gate.exit()),
+    );
+    expect(
+      await gate.tryEnter('rename', wait: const Duration(seconds: 2)),
+      isNull,
+    );
+    await gate.exit();
+
+    // A long operation is not waited for.
+    expect(await gate.tryEnter('download'), isNull);
+    final watch = Stopwatch()..start();
+    expect(
+      await gate.tryEnter('rename', wait: const Duration(seconds: 2)),
+      isNotNull,
+    );
+    expect(watch.elapsed, lessThan(const Duration(seconds: 1)));
+  });
 }

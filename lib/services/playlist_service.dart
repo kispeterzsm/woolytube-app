@@ -91,6 +91,12 @@ class PlaylistService {
        _settings = settings,
        _gate = gate ?? LibraryGate.unlocked();
 
+  /// Runs [action] inside the library gate. A short check that holds the
+  /// gate (a playlist page linking its files) is waited for instead of
+  /// refusing the owner's action.
+  Future<T> _locked<T>(String operation, Future<T> Function() action) =>
+      _gate.run(operation, action, wait: LibraryGate.userWait);
+
   Stream<List<Playlist>> watchAllPlaylists() => _db.watchAllPlaylists();
 
   /// Per playlist: total, downloaded, unavailable and failed track counts.
@@ -321,7 +327,7 @@ class PlaylistService {
   Future<void> populateTracksFromInfo(
     int playlistId,
     Map<String, dynamic> playlistInfo,
-  ) => _gate.run('playlist update', () async {
+  ) => _locked('playlist update', () async {
     final entries = playlistInfo['entries'] as List<dynamic>? ?? [];
     await _metadata.reconcilePlaylist(await _db.getPlaylist(playlistId));
     await _insertNewEntries(
@@ -401,7 +407,7 @@ class PlaylistService {
     );
 
     if (audioOnly != null && audioOnly != playlist.audioOnly) {
-      await _gate.run(
+      await _locked(
         'format switch',
         () => _switchMode(playlist, audioOnly: audioOnly, fields: fields),
       );
@@ -700,7 +706,7 @@ class PlaylistService {
       }
       // Re-read inside the gate: the caller's copy may predate a format
       // switch, and the sync renames files in the current folder.
-      return await _gate.run('playlist update', () async {
+      return await _locked('playlist update', () async {
         final current = await _db.getPlaylistOrNull(playlist.id);
         if (current == null) {
           throw StateError('"${playlist.name}" was deleted.');
@@ -1133,7 +1139,7 @@ class PlaylistService {
       await _settings?.addDismissedImportUrls([playlist.url]);
       return;
     }
-    await _gate.run('playlist deletion', () async {
+    await _locked('playlist deletion', () async {
       final playlist = await _db.getPlaylist(id);
       final tracks = await _db.getTracksForPlaylist(id);
       final others = [
@@ -1222,7 +1228,7 @@ class PlaylistService {
     if (fileName == null || fileName.trim().isEmpty) {
       return _overrideTrack(trackId: trackId, title: title, fileName: null);
     }
-    return _gate.run(
+    return _locked(
       'rename',
       () => _overrideTrack(trackId: trackId, title: title, fileName: fileName),
     );
@@ -1313,7 +1319,7 @@ class PlaylistService {
     String? sourceFileName,
   }) async {
     try {
-      return await _gate.run(
+      return await _locked(
         'force insert',
         () => _forceInsert(
           playlistId: playlistId,
@@ -1513,7 +1519,7 @@ class PlaylistService {
     required int trackId,
     required String sourcePath,
     required String sourceFileName,
-  }) => _gate.run(
+  }) => _locked(
     'replacement',
     () => _replaceWithLocalFile(
       trackId: trackId,

@@ -487,7 +487,7 @@ class DownloadService {
     final failureReasons = <String>[];
 
     try {
-      final busy = await _gate.tryEnter('download');
+      final busy = await _gate.tryEnter('download', wait: LibraryGate.userWait);
       if (busy != null) {
         _log.warn('Playlist download skipped: $busy');
         _emit(
@@ -774,7 +774,7 @@ class DownloadService {
     var entered = false;
 
     try {
-      final busy = await _gate.tryEnter('download');
+      final busy = await _gate.tryEnter('download', wait: LibraryGate.userWait);
       if (busy != null) {
         _log.warn('Track download skipped: $busy');
         throw StateError(busy);
