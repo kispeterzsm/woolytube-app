@@ -277,6 +277,18 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
         },
       ),
       tile(
+        key: const ValueKey('track-actions-lyrics'),
+        icon: Icons.lyrics_outlined,
+        title: lyricsMenuTitle(playlist?.lyricsMode),
+        subtitle: lyricsMenuSubtitle(playlist?.lyricsMode),
+        onTap: () {
+          close();
+          Navigator.of(
+            context,
+          ).push(MaterialPageRoute(builder: (_) => LyricsPage(track: track)));
+        },
+      ),
+      tile(
         key: const ValueKey('track-actions-skip-segments'),
         icon: Icons.bookmarks,
         title: 'Skip segments…',

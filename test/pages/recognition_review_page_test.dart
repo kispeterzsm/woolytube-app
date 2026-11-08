@@ -18,6 +18,7 @@ import '../helpers/recognition_fakes.dart';
 import '../helpers/test_database.dart';
 import '../services/playback_fakes.dart';
 import 'chapter_editor_fakes.dart';
+import 'lyrics_fakes.dart';
 
 Future<void> settle(WidgetTester tester) async {
   for (var i = 0; i < 20; i++) {
@@ -176,6 +177,68 @@ void main() {
       expect(preview.disposed, isTrue);
       // Let transient UI timers (snack bars, transitions) run out before the
       // framework checks for leaks.
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 10));
+    });
+  });
+
+  testWidgets('applying fetches lyrics for the new chapters when the '
+      'playlist has lyrics on', (tester) async {
+    tester.view.physicalSize = const Size(1200, 3200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.runAsync(() async {
+      final db = openTestDatabase();
+      addTearDown(db.close);
+      final dir = await Directory.systemTemp.createTemp('woolytube-review-');
+      addTearDown(() => dir.delete(recursive: true));
+      final media = await File(
+        '${dir.path}/00001_mix.m4a',
+      ).writeAsBytes([1, 2, 3]);
+      final playlist = await insertTestPlaylist(
+        db,
+        outputPath: dir.path,
+        lyricsMode: 'lyrics',
+      );
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        status: 'complete',
+        filePath: media.path,
+        durationSeconds: 180,
+      );
+      final playback = PlaybackService(db, player: FakePlayer());
+      addTearDown(playback.dispose);
+      final recognition = fakeRecognitionService(db, dir);
+      addTearDown(recognition.dispose);
+      final lyrics = FakeLyricsService(db);
+      final run = fakeRun(track.id, [
+        proposal('a', 'Artist — A', 0, 90000),
+        proposal('b', 'Artist — B', 90000, 180000),
+      ], fileKey: (await SongRecognitionService.currentFileKey(track))!);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            databaseProvider.overrideWithValue(db),
+            playbackServiceProvider.overrideWithValue(playback),
+            songRecognitionServiceProvider.overrideWithValue(recognition),
+            chapterPreviewPlayerFactoryProvider.overrideWithValue(
+              FakePreviewFactory().call,
+            ),
+            waveformServiceProvider.overrideWithValue(fakeWaveforms()),
+            lyricsServiceProvider.overrideWithValue(lyrics),
+          ],
+          child: MaterialApp(
+            home: RecognitionReviewPage(track: track, run: run),
+          ),
+        ),
+      );
+      await settle(tester);
+      await tester.tap(find.byKey(const ValueKey('apply-proposals')));
+      await settle(tester);
+
+      expect(lyrics.calls, ['fetch ${track.id}']);
       await tester.pumpWidget(const SizedBox());
       await tester.pump(const Duration(seconds: 10));
     });
