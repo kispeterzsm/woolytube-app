@@ -277,44 +277,6 @@ void main() {
     expect(await db.getSegmentsForTrack(kept.id), hasLength(1));
   });
 
-  test('watches the videos Save to Temporary is not offered for', () async {
-    final regular = await insertTestPlaylist(db, url: 'https://example.com/a');
-    await insertTestTrack(db, playlistId: regular.id, videoId: 'regular');
-    final audio = await insertTestPlaylist(
-      db,
-      url: 'https://example.com/audio',
-      audioOnly: true,
-    );
-    await insertTestTrack(
-      db,
-      playlistId: audio.id,
-      videoId: 'audio',
-      status: 'complete',
-      filePath: '/x/00001_audio.m4a',
-    );
-    final ids = <Set<String>>[];
-    final sub = db.watchTemporarySaveBlockedVideoIds().listen(ids.add);
-    await pumpEventQueue();
-    final temporary = await insertTestPlaylist(
-      db,
-      url: 'woolytube:temporary',
-      isTemporary: true,
-    );
-    await insertTestTrack(db, playlistId: temporary.id, videoId: 'saved');
-    await insertTestTrack(
-      db,
-      playlistId: regular.id,
-      index: 2,
-      videoId: 'video',
-      status: 'complete',
-      filePath: '/x/00002_video.mp4',
-    );
-    await pumpEventQueue();
-    await sub.cancel();
-    expect(ids.first, isEmpty);
-    expect(ids.last, {'saved', 'video'});
-  });
-
   test('finds a playlist with the video downloaded as video', () async {
     final audio = await insertTestPlaylist(
       db,

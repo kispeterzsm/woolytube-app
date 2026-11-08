@@ -545,6 +545,118 @@ void main() {
     );
     expect(item.id, isNot(albums.first.items.first.id));
   });
+
+  group('a whole file whose stored length is 0', () {
+    test('has no known length, so a seek is not clamped to 0', () async {
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 10,
+        videoId: 'local-mix',
+        status: 'complete',
+        filePath: '/tmp/local-mix.mp3',
+        durationSeconds: 0,
+      );
+      final item = PlaybackItem(track);
+      expect(item.duration, isNull);
+      expect(
+        item.sourcePosition(const Duration(minutes: 30)),
+        const Duration(minutes: 30),
+      );
+      expect(item.sourcePosition(const Duration(seconds: -5)), Duration.zero);
+      // A known length still clamps.
+      final known = PlaybackItem(
+        track.copyWith(durationSeconds: const Value(60)),
+      );
+      expect(
+        known.sourcePosition(const Duration(minutes: 30)),
+        const Duration(seconds: 60),
+      );
+    });
+  });
+
+  group('chapters marked Always skip', () {
+    Future<Track> trackWith(Set<String> skipped) async {
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 20,
+        videoId: 'skips',
+        status: 'complete',
+        filePath: '/tmp/skips.m4a',
+        durationSeconds: 60,
+      );
+      return track.copyWith(
+        chaptersJson: Value(
+          ChapterData(
+            downloaded: List.generate(
+              3,
+              (i) => MediaChapter(
+                id: 'c$i',
+                title: 'Song $i',
+                startMs: i * 20000,
+                endMs: (i + 1) * 20000,
+              ),
+            ),
+            skippedChapterIds: skipped,
+          ).encode(),
+        ),
+      );
+    }
+
+    test('are left out of automatic playback', () async {
+      final track = await trackWith({'c1'});
+      expect(chapterPlaybackItems(track, playlist).map((i) => i.chapter!.id), [
+        'c0',
+        'c2',
+      ]);
+      // Played whole, the file is one item (the player jumps over the
+      // skipped ranges).
+      expect(
+        chapterPlaybackItems(track, playlist, whole: true).single.chapter,
+        isNull,
+      );
+    });
+
+    test(
+      'a file with every chapter skipped is passed over unless tapped',
+      () async {
+        final track = await trackWith({'c0', 'c1', 'c2'});
+        expect(chapterPlaybackItems(track, playlist), isEmpty);
+        expect(
+          chapterPlaybackItems(
+            track,
+            playlist,
+            selected: true,
+          ).map((i) => i.chapter!.id),
+          ['c0', 'c1', 'c2'],
+        );
+      },
+    );
+
+    test(
+      'rebuilding pending albums drops a file that became all skipped',
+      () async {
+        final q = AlbumPlaybackQueue(random: Random(1));
+        q.start(albums, shuffled: false);
+        final skipped = await trackWith({'c0', 'c1', 'c2'});
+        final target = albums[2].trackId;
+        q.rebuildPendingAlbums(
+          (album) =>
+              album.trackId == target
+                  ? PlaybackAlbum(
+                    chapterPlaybackItems(
+                      skipped.copyWith(id: target),
+                      playlist,
+                    ),
+                  )
+                  : null,
+        );
+        expect(q.items.where((i) => i.track.id == target), isEmpty);
+        expect(_drain(q), isNot(contains(target)));
+      },
+    );
+  });
 }
 
 /// A playlist of [count] single-file tracks, in order.

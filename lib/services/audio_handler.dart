@@ -226,7 +226,13 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
       ]);
       return [
         for (var i = 0; i < tracks.length; i++)
-          for (final item in chapterPlaybackItems(tracks[i], playlist))
+          // Chapters marked Always skip are listed too: picking one plays
+          // it, like tapping it in the app.
+          for (final item in chapterPlaybackItems(
+            tracks[i],
+            playlist,
+            includeSkipped: true,
+          ))
             MediaItem(
               id: item.id,
               title: item.displayTrack.title,

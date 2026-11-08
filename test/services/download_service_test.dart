@@ -991,7 +991,7 @@ void main() {
       expect(await File(updated.filePath!).exists(), isTrue);
     });
 
-    test('custom chapters survive a redownload', () async {
+    test('custom chapters and their skip marks survive a redownload', () async {
       final playlist = await insertTestPlaylist(
         db,
         outputPath: folder,
@@ -1009,6 +1009,7 @@ void main() {
                   endMs: 30000,
                 ),
               ],
+              skippedChapterIds: {'mine'},
             ).encode(),
       );
       ytdlp.infoFor =
@@ -1028,6 +1029,7 @@ void main() {
       expect(data.custom!.map((c) => c.title), ['My part']);
       expect(data.downloaded.map((c) => c.title), ['Intro', 'Song']);
       expect(data.active.map((c) => c.title), ['My part']);
+      expect(data.isSkipped('mine'), isTrue);
     });
 
     test(

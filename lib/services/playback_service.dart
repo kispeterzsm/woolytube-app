@@ -386,6 +386,22 @@ class PlaybackService
   Future<void> _videoTrackTransition = Future.value();
   List<_SkipSegment> _activeSegments = [];
 
+  /// Queue items the user picked although they are marked Always skip (a
+  /// tapped chapter, or every chapter of a tapped file whose chapters are
+  /// all skipped). Stepping to them again (Next, Previous, a gapless
+  /// boundary) still plays them. Reset when a new queue starts.
+  final Set<String> _chosenItemIds = {};
+
+  /// One range per chapter of the current file marked Always skip.
+  List<_SkipSegment> _skippedChapterRanges = const [];
+
+  /// A skipped chapter range the user seeked into on purpose; it plays.
+  _SkipSegment? _skipExemptChapterSegment;
+
+  /// [_skippedChapterRanges] without the exempt one, adjacent ranges joined.
+  /// Jumped over like SponsorBlock segments while the file plays whole.
+  List<_SkipSegment> _skippedChapterSegments = const [];
+
   /// The playlist's visible segments on the file's timeline, kept so a
   /// chapter change can re-filter them without a database query.
   List<PlaybackSponsorBlockSegment> _visibleSegments = const [];
@@ -660,6 +676,9 @@ class PlaybackService
     _pendingSkipTarget = null;
     _skipOrigin = null;
     _resumeAfterEdit = null;
+    _chosenItemIds
+      ..clear()
+      ..addAll(_skippedItemIdsOf(groups, selected));
     final first = _albumQueue.start(
       groups,
       trackId: trackId,
@@ -686,6 +705,21 @@ class PlaybackService
       reportMessage('Could not play "${first.track.title}"');
       await _advance();
     }
+  }
+
+  /// The items of [selected]'s album that are marked Always skip: they are in
+  /// the queue only because the user picked them.
+  Iterable<String> _skippedItemIdsOf(
+    List<PlaybackAlbum> groups,
+    Track? selected,
+  ) {
+    if (selected == null) return const [];
+    final album = groups.where((g) => g.trackId == selected.id).firstOrNull;
+    if (album == null) return const [];
+    final data = ChapterData.decode(album.items.first.track.chaptersJson);
+    return album.items
+        .where((i) => i.chapter != null && data.isSkipped(i.chapter!.id))
+        .map((i) => i.id);
   }
 
   /// Builds the playback groups for [tracks] from fresh database rows, reading
@@ -715,18 +749,26 @@ class PlaybackService
       if (fresh == null || playlist == null || !isTrackPlayable(fresh)) {
         continue;
       }
+      final selected = track.id == trackId;
       var items = chapterPlaybackItems(
         fresh,
         playlist,
-        whole: whole && track.id == trackId,
+        whole: whole && selected,
+        selected: selected,
       );
-      if (chapterId != null && track.id == trackId) {
+      if (chapterId != null && selected) {
+        // A tapped chapter plays even when it is marked Always skip; the
+        // file's other skipped chapters are still passed over.
+        final data = ChapterData.decode(fresh.chaptersJson);
         items =
-            ChapterData.decode(
-              fresh.chaptersJson,
-            ).active.map((c) => PlaybackItem(fresh, c)).toList();
+            data.active
+                .where((c) => c.id == chapterId || !data.isSkipped(c.id))
+                .map((c) => PlaybackItem(fresh, c))
+                .toList();
         if (!items.any((i) => i.chapter?.id == chapterId)) return const [];
       }
+      // Every chapter of it is marked Always skip.
+      if (items.isEmpty) continue;
       groups.add(PlaybackAlbum(items));
     }
     return groups;
@@ -772,9 +814,11 @@ class PlaybackService
     final playlist = await _db.getPlaylist(fresh.playlistId);
     var items = chapterPlaybackItems(fresh, playlist);
     if (chapterId != null) {
+      // A chapter marked Always skip is refused like a skipped file.
+      final data = ChapterData.decode(fresh.chaptersJson);
       items =
-          ChapterData.decode(fresh.chaptersJson).active
-              .where((c) => c.id == chapterId)
+          data.active
+              .where((c) => c.id == chapterId && !data.isSkipped(c.id))
               .map((c) => PlaybackItem(fresh, c))
               .toList();
     }
@@ -969,9 +1013,14 @@ class PlaybackService
 
   /// Re-reads a queued item from the database. Returns null when the track is
   /// no longer automatically playable, its file was replaced, or its chapter
-  /// no longer exists; otherwise the item carries the chapter's current bounds
-  /// rather than the ones captured when the queue was built.
-  Future<PlaybackItem?> _freshPlaybackItem(PlaybackItem item) async {
+  /// no longer exists or is marked Always skip (unless [chosen], or it is in
+  /// [_chosenItemIds]: the user picked that chapter); otherwise the item
+  /// carries the chapter's current bounds rather than the ones captured when
+  /// the queue was built.
+  Future<PlaybackItem?> _freshPlaybackItem(
+    PlaybackItem item, {
+    bool chosen = false,
+  }) async {
     final fresh = await _db.getTrack(item.track.id);
     // A sync that places a new video above this one renames its file; that
     // is the same recording under a new name. Only a new download (a new
@@ -983,10 +1032,14 @@ class PlaybackService
     }
     final queuedChapter = item.chapter;
     if (queuedChapter == null) return PlaybackItem(fresh);
+    final data = ChapterData.decode(fresh.chaptersJson);
+    if (!chosen &&
+        !_chosenItemIds.contains(item.id) &&
+        data.isSkipped(queuedChapter.id)) {
+      return null;
+    }
     final chapter =
-        ChapterData.decode(
-          fresh.chaptersJson,
-        ).active.where((c) => c.id == queuedChapter.id).firstOrNull;
+        data.active.where((c) => c.id == queuedChapter.id).firstOrNull;
     return chapter == null ? null : PlaybackItem(fresh, chapter);
   }
 
@@ -1033,6 +1086,7 @@ class PlaybackService
     _queueEnded = false;
     _boundaryHandled = false;
     _isSeekingPastSegment = false;
+    _setSkipExemptChapter(null);
     _resumeAtSource = null;
     _pendingSkipTarget = null;
     _skipOrigin = null;
@@ -1482,6 +1536,7 @@ class PlaybackService
     if (item == null) {
       _currentPlaylist.add(null);
       _activeSegments = const [];
+      _clearSkippedChapterSegments();
       _visibleSegments = const [];
       _sponsorBlockSegments.add(const []);
       if (_detectedVideo.value != null) _detectedVideo.add(null);
@@ -1513,7 +1568,10 @@ class PlaybackService
       }
       final snapshot = _albumQueue.snapshot();
       final target = _albumQueue.jumpToChapter(trackId, chapterId);
-      final fresh = target == null ? null : await _freshPlaybackItem(target);
+      final fresh =
+          target == null
+              ? null
+              : await _freshPlaybackItem(target, chosen: true);
       final path = fresh == null ? null : _resolveTrackFile(fresh.track);
       if (fresh == null || path == null) {
         _restoreQueue(snapshot);
@@ -1527,6 +1585,7 @@ class PlaybackService
         return;
       }
       played = result == _LoadResult.opened;
+      if (played) _chosenItemIds.add(fresh.id);
     });
     return played;
   }
@@ -1583,6 +1642,7 @@ class PlaybackService
     bool clearPendingMark = true,
   }) async {
     if (clearPendingMark) _pendingSegmentMarkStart.add(null);
+    await _loadSkippedChapterSegments(track);
     final playlist = await _playlistForTrack(track);
     if (playlist == null || !playlist.sponsorBlockEnabled) {
       _activeSegments = const [];
@@ -1641,6 +1701,45 @@ class PlaybackService
           .map((segment) => _SkipSegment(segment.startMs, segment.endMs))
           .toList(),
     );
+  }
+
+  /// Reads the chapters of [track] marked Always skip from the database (the
+  /// given row may be older than the last skip change).
+  Future<void> _loadSkippedChapterSegments(Track track) async {
+    final row = await _db.getTrack(track.id);
+    final data = ChapterData.decode((row ?? track).chaptersJson);
+    final ranges = [
+      for (final c in data.active)
+        if (data.isSkipped(c.id)) _SkipSegment(c.startMs, c.endMs),
+    ];
+    final exempt = _skipExemptChapterSegment;
+    _skippedChapterRanges = ranges;
+    // Keep playing a skipped chapter the user chose while its range stays.
+    _setSkipExemptChapter(
+      exempt == null
+          ? null
+          : ranges
+              .where(
+                (s) => s.startMs <= exempt.startMs && s.endMs >= exempt.endMs,
+              )
+              .firstOrNull,
+    );
+  }
+
+  void _clearSkippedChapterSegments() {
+    _skippedChapterRanges = const [];
+    _setSkipExemptChapter(null);
+  }
+
+  /// Exempts [range] (one of [_skippedChapterRanges], or none) and rebuilds
+  /// the ranges that are jumped over. Only that chapter plays: a skipped
+  /// chapter right after it is still jumped over.
+  void _setSkipExemptChapter(_SkipSegment? range) {
+    _skipExemptChapterSegment = range;
+    _skippedChapterSegments = _mergeSegments([
+      for (final r in _skippedChapterRanges)
+        if (!identical(r, range)) r,
+    ]);
   }
 
   /// Publishes the visible segments on the current item's own timeline.
@@ -1705,12 +1804,18 @@ class PlaybackService
         !_player.state.playing) {
       return;
     }
-    if (_activeSegments.isEmpty) return;
+    // Skipped chapters only matter while the file plays whole; as chapters
+    // they are left out of the queue, and one that plays was chosen.
+    final skippedChapters =
+        currentItem?.chapter == null
+            ? _skippedChapterSegments
+            : const <_SkipSegment>[];
+    if (_activeSegments.isEmpty && skippedChapters.isEmpty) return;
 
     final durationMs =
         currentItem?.chapter?.endMs ?? _player.state.duration.inMilliseconds;
     final positionMs = position.inMilliseconds;
-    for (final segment in _activeSegments) {
+    for (final segment in [..._activeSegments, ...skippedChapters]) {
       if (positionMs < segment.startMs || positionMs >= segment.endMs) {
         continue;
       }
@@ -1806,7 +1911,7 @@ class PlaybackService
     if (!await _requestFocus()) return;
     try {
       // Play after the end restarts the item (and lets it advance again).
-      if (_itemEnded) await seekTo(Duration.zero);
+      if (_itemEnded) await _seek(Duration.zero, chosen: false);
       _completionHandled = false;
       await _player.play();
     } catch (_) {
@@ -1826,10 +1931,15 @@ class PlaybackService
     }
   }
 
+  /// A seek by the user: one into a chapter marked Always skip plays it.
   @override
-  Future<void> seekTo(Duration position) async {
+  Future<void> seekTo(Duration position) => _seek(position, chosen: true);
+
+  /// Seeks the current item. [chosen] says the user picked [position]; an
+  /// internal restart ([chosen] false) jumps over skipped chapters again.
+  Future<void> _seek(Duration position, {required bool chosen}) async {
     final item = currentItem;
-    final target = item?.sourcePosition(position) ?? position;
+    final target = _seekTarget(item, position);
     final relative = item?.relativePosition(target) ?? target;
     _completionHandled = false;
     _itemEnded = false;
@@ -1845,8 +1955,57 @@ class PlaybackService
     }
     // Show the target at once; the player confirms it afterwards.
     _setPosition(relative, immediate: true);
+    if (item?.chapter == null) {
+      if (chosen) {
+        _exemptSkippedChapterAt(target);
+      } else {
+        _setSkipExemptChapter(null);
+      }
+    }
+    if (!await _waitUntilSeekable()) return;
     await _player.seek(target);
     _setPosition(relative, immediate: true);
+  }
+
+  /// Where [position] (on [item]'s own timeline) is in the file. A whole
+  /// file is clamped to the length the player reports, never to the stored
+  /// length, which can be missing or wrong (0 for some local files).
+  Duration _seekTarget(PlaybackItem? item, Duration position) {
+    if (item == null) return position;
+    if (item.chapter != null) return item.sourcePosition(position);
+    final ms = max(0, position.inMilliseconds);
+    final real =
+        _loadedTrackId != null && !_loading
+            ? _player.state.duration.inMilliseconds
+            : 0;
+    return Duration(milliseconds: real > 0 ? min(ms, real) : ms);
+  }
+
+  /// A seek right after a file was opened is dropped by the player while it
+  /// still loads it (it has no length yet). Waits briefly for the length.
+  /// False when another file was opened meanwhile.
+  Future<bool> _waitUntilSeekable() async {
+    if (_player.state.duration > Duration.zero) return true;
+    final generation = _generation;
+    try {
+      await _player.stream.duration
+          .firstWhere((d) => d > Duration.zero)
+          .timeout(const Duration(seconds: 2));
+    } catch (_) {
+      // Seek anyway: some media never report a length.
+    }
+    return generation == _generation;
+  }
+
+  /// A seek into a chapter marked Always skip while the file plays whole is
+  /// a choice to hear it, so that chapter is not jumped over this time.
+  void _exemptSkippedChapterAt(Duration target) {
+    final ms = target.inMilliseconds;
+    _setSkipExemptChapter(
+      _skippedChapterRanges
+          .where((s) => ms >= s.startMs && ms < s.endMs)
+          .firstOrNull,
+    );
   }
 
   Future<SegmentMarkResult> markLocalSegmentBoundary(String category) async {
@@ -1936,7 +2095,7 @@ class PlaybackService
     return _transition(() async {
       _pendingPrevious--;
       if (_pendingSkipTarget == null && position.inSeconds > 3) {
-        await seekTo(Duration.zero);
+        await _seek(Duration.zero, chosen: false);
         return;
       }
       if (_pendingPrevious > 0) {
@@ -1945,7 +2104,7 @@ class PlaybackService
       }
       if (await _advance(forward: false) == _AdvanceResult.nothingLeft &&
           _loadedTrackId != null) {
-        await seekTo(Duration.zero);
+        await _seek(Duration.zero, chosen: false);
       }
     });
   }
@@ -2086,6 +2245,7 @@ class PlaybackService
     _setPosition(Duration.zero, immediate: true);
     _setDuration(Duration.zero);
     _activeSegments = const [];
+    _clearSkippedChapterSegments();
     _visibleSegments = const [];
     _sponsorBlockSegments.add(const []);
     _pendingSegmentMarkStart.add(null);

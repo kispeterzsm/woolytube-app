@@ -10,6 +10,7 @@ import 'package:woolytube/database/database.dart';
 import 'package:woolytube/services/chapter_service.dart';
 import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/recognition/audio_window_decoder.dart';
+import 'package:woolytube/services/recognition/decoder_accuracy.dart';
 import 'package:woolytube/services/recognition/shazam_client.dart';
 import 'package:woolytube/services/recognition/shazam_signature.dart';
 import 'package:woolytube/services/recognition/song_recognition_service.dart';
@@ -704,8 +705,10 @@ void main() {
         '26000-600000.json',
       ),
     );
+    final stored = jsonDecode(await cached.readAsString()) as Map;
+    expect(stored['decoderVersion'], decoderAccuracyVersion);
     final intervals = [
-      for (final s in jsonDecode(await cached.readAsString()) as List)
+      for (final s in stored['intervals'] as List)
         ((s[0] as num).toDouble(), (s[1] as num).toDouble()),
     ];
     expect(intervals.length, 1);
@@ -843,6 +846,189 @@ void main() {
       ChapterData.decode((await db.getTrack(track.id))!.chaptersJson).custom,
       isEmpty,
     );
+  });
+
+  group('decoder accuracy version', () {
+    /// Rewrites the run, lookups and quiet gaps cached for [of] the way
+    /// builds before decoder versions stored them.
+    Future<void> makeVersion1(Track of) async {
+      final folder = (await _runDirs(
+        dir,
+      )).singleWhere((d) => p.basename(d.path).startsWith('${of.id}-'));
+      final run = File(p.join(folder.path, 'run.json'));
+      final json = jsonDecode(await run.readAsString()) as Map;
+      expect(json['decoderVersion'], decoderAccuracyVersion);
+      json.remove('decoderVersion');
+      await run.writeAsString(jsonEncode(json));
+      await for (final f in Directory(p.join(folder.path, 'samples')).list()) {
+        final file = f as File;
+        final lookup = jsonDecode(await file.readAsString()) as Map;
+        expect(lookup['decoderVersion'], decoderAccuracyVersion);
+        lookup.remove('decoderVersion');
+        await file.writeAsString(jsonEncode(lookup));
+      }
+      var silences = 0;
+      await for (final f in Directory(p.join(folder.path, 'silences')).list()) {
+        final file = f as File;
+        final stored = jsonDecode(await file.readAsString()) as Map;
+        await file.writeAsString(jsonEncode(stored['intervals']));
+        silences++;
+      }
+      expect(silences, greaterThan(0));
+    }
+
+    Future<Track> mp3Track(
+      List<int> bytes, {
+      String name = '00002_mix.mp3',
+    }) async {
+      final media = await File(p.join(dir.path, name)).writeAsBytes(bytes);
+      return insertTestTrack(
+        db,
+        playlistId: track.playlistId,
+        index: 2,
+        videoId: 'video-mp3',
+        status: 'complete',
+        filePath: media.path,
+        durationSeconds: 300,
+      );
+    }
+
+    test('an MP3 scan from the old decoder is stale and nothing it cached '
+        'is reused', () async {
+      final mp3 = await mp3Track(List.filled(4096, 7));
+      final first = await service.scan(mp3);
+      expect(first.decoderVersion, decoderAccuracyVersion);
+      expect((await service.loadRun(mp3))!.decoderOutdated, isFalse);
+      await makeVersion1(mp3);
+
+      final old = (await service.loadRun(mp3))!;
+      expect(old.decoderVersion, 1);
+      expect(old.decoderOutdated, isTrue);
+      expect(old.runId, first.runId);
+      // Review edits keep it stale: the version is stored unchanged.
+      await service.saveRun(old.copyWith(proposals: const []), mp3);
+      final edited = (await service.loadRun(mp3))!;
+      expect(edited.decoderOutdated, isTrue);
+      expect(edited.proposals, isEmpty);
+
+      // Recognize again decodes and looks up every window anew, and
+      // measures the quiet gaps again.
+      final lookups = recognizer.calls.length;
+      final decodes = decoder.decodeCalls;
+      final again = await service.scan(mp3);
+      expect(recognizer.calls.length - lookups, 6);
+      expect(decoder.decodeCalls - decodes, greaterThan(6));
+      expect(again.decoderVersion, decoderAccuracyVersion);
+      expect(again.proposals.last.startMs, 130900);
+      final loaded = (await service.loadRun(mp3))!;
+      expect(loaded.runId, again.runId);
+      expect(loaded.decoderOutdated, isFalse);
+
+      // What it stored now carries the version, so a third scan reuses it.
+      final lookups2 = recognizer.calls.length;
+      final decodes2 = decoder.decodeCalls;
+      await service.scan(mp3);
+      expect(recognizer.calls.length, lookups2);
+      expect(decoder.decodeCalls, decodes2);
+    });
+
+    test('a scan of another format from the old decoder stays valid and '
+        'its lookups are reused', () async {
+      await service.scan(track);
+      await makeVersion1(track);
+      final old = (await service.loadRun(track))!;
+      expect(old.decoderVersion, 1);
+      expect(old.decoderOutdated, isFalse);
+
+      final lookups = recognizer.calls.length;
+      final decodes = decoder.decodeCalls;
+      final again = await service.scan(track);
+      expect(recognizer.calls.length, lookups);
+      expect(decoder.decodeCalls, decodes);
+      expect(again.proposals.last.startMs, 130900);
+    });
+
+    test('an MP3 is told by its content, whatever its name', () async {
+      // ID3v2 tag of 20 bytes, then an MPEG-1 layer III frame header.
+      final tagged = await mp3Track([
+        0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, 20, //
+        ...List.filled(20, 0),
+        0xff, 0xfb, 0x90, 0x64, ...List.filled(4000, 0),
+      ], name: '00002_mix.bin');
+      await service.scan(tagged);
+      await makeVersion1(tagged);
+      expect((await service.loadRun(tagged))!.decoderOutdated, isTrue);
+    });
+
+    test('content sniffing', () async {
+      Future<bool> sniff(String name, List<int> bytes) async {
+        final file = File(p.join(dir.path, name));
+        await file.writeAsBytes(bytes);
+        return isMpegAudioFile(file.path);
+      }
+
+      // A bare MPEG-1 and an MPEG-2 layer III frame.
+      expect(await sniff('a', [0xff, 0xfb, 0x90, 0x64]), isTrue);
+      expect(await sniff('b', [0xff, 0xf3, 0x48, 0xc4]), isTrue);
+      // ID3v2 with a footer (flag 0x10): 10 + 5 + 10 bytes before the frame.
+      expect(
+        await sniff('c', [
+          0x49, 0x44, 0x33, 4, 0, 0x10, 0, 0, 0, 5, //
+          ...List.filled(15, 0),
+          0xff, 0xfb, 0x90, 0x64,
+        ]),
+        isTrue,
+      );
+      // AAC in ADTS has a sync word but layer 0.
+      expect(await sniff('d.aac', [0xff, 0xf1, 0x50, 0x80]), isFalse);
+      // MP4 and WebM/Matroska.
+      expect(
+        await sniff('e.m4a', [0, 0, 0, 0x20, 0x66, 0x74, 0x79, 0x70]),
+        isFalse,
+      );
+      expect(await sniff('f.webm', [0x1a, 0x45, 0xdf, 0xa3]), isFalse);
+      expect(await sniff('g.opus', 'OggS'.codeUnits), isFalse);
+      // An ID3 tag over something that is not MP3.
+      expect(
+        await sniff('h', [0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, 0, 0xff, 0xf1]),
+        isFalse,
+      );
+      // The name alone is enough for .mp3; a missing file is not MP3.
+      expect(await sniff('i.MP3', const []), isTrue);
+      expect(await isMpegAudioFile(p.join(dir.path, 'missing.m4a')), isFalse);
+    });
+
+    test('runs without a version read as version 1', () {
+      final run = RecognitionRun(
+        runId: 'r',
+        trackId: 1,
+        fileKey: 'k',
+        epoch: 0,
+        durationMs: 1000,
+        completedAt: DateTime.utc(2026),
+        sampleCount: 1,
+        matchedSamples: 0,
+        proposals: const [],
+      );
+      expect(run.decoderVersion, decoderAccuracyVersion);
+      final json = run.toJson();
+      expect(json['decoderVersion'], decoderAccuracyVersion);
+      expect(
+        RecognitionRun.fromJson(jsonDecode(jsonEncode(json))).decoderVersion,
+        decoderAccuracyVersion,
+      );
+      json.remove('decoderVersion');
+      expect(RecognitionRun.fromJson(json).decoderVersion, 1);
+      // Never stored: it is worked out again on every load.
+      expect(
+        run.copyWith(decoderOutdated: true).toJson().keys,
+        isNot(contains('decoderOutdated')),
+      );
+      expect(decoderVersionTrusted(null, mpegAudio: true), isFalse);
+      expect(decoderVersionTrusted(1, mpegAudio: true), isFalse);
+      expect(decoderVersionTrusted(2, mpegAudio: true), isTrue);
+      expect(decoderVersionTrusted(null, mpegAudio: false), isTrue);
+    });
   });
 
   group('YtDlpScanForegroundNotifier', () {

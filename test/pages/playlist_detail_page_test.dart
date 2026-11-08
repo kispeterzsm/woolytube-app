@@ -1,20 +1,16 @@
 import 'dart:async';
 
-import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rxdart/rxdart.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/pages/playlist_detail_page.dart';
 import 'package:woolytube/pages/playlist_settings_page.dart';
 import 'package:woolytube/providers/playback_providers.dart';
 import 'package:woolytube/providers/providers.dart';
-import 'package:woolytube/services/app_settings_service.dart';
 import 'package:woolytube/services/chapters.dart';
-import 'package:woolytube/services/download_network_policy.dart';
 import 'package:woolytube/services/download_service.dart';
 import 'package:woolytube/services/library_gate.dart';
 import 'package:woolytube/services/metadata_service.dart';
@@ -37,9 +33,6 @@ void main() {
   late BehaviorSubject<List<int>> queued;
   late BehaviorSubject<List<Track>> upNext;
 
-  /// What the temporary playlist holds, as the track menu sees it.
-  late Set<String> temporaryVideoIds;
-
   setUp(() async {
     resetPlaylistOpenChecks();
     db = openTestDatabase();
@@ -53,7 +46,6 @@ void main() {
     syncing = BehaviorSubject<Set<int>>.seeded(const {});
     queued = BehaviorSubject<List<int>>.seeded(const []);
     upNext = BehaviorSubject<List<Track>>.seeded(const []);
-    temporaryVideoIds = {};
   });
 
   tearDown(() async {
@@ -82,9 +74,6 @@ void main() {
     ),
     syncingPlaylistsProvider.overrideWith((ref) => syncing.stream),
     downloadQueueProvider.overrideWith((ref) => queued.stream),
-    temporarySaveBlockedVideoIdsProvider.overrideWith(
-      (ref) => Stream.value(temporaryVideoIds),
-    ),
   ];
 
   List<Override> overrides(
@@ -553,7 +542,6 @@ void main() {
       'Replace with a file from this phone',
       'Download a new copy',
       'YouTube',
-      'Save to Temporary playlist',
       'Open on YouTube',
       'Share link',
       'Copy video ID',
@@ -1097,9 +1085,7 @@ void main() {
       expect(find.text('Temporary playlist cleared'), findsOneWidget);
     });
 
-    testWidgets('a video can be removed from it, not saved to it again', (
-      tester,
-    ) async {
+    testWidgets('a video can be removed from it', (tester) async {
       useTallScreen(tester);
       final track = await insertTestTrack(
         db,
@@ -1112,10 +1098,6 @@ void main() {
 
       await tester.tap(find.byKey(ValueKey('track-more-${track.id}')));
       await tester.pumpAndSettle();
-      expect(
-        find.byKey(const ValueKey('track-actions-save-temporary')),
-        findsNothing,
-      );
       await tester.tap(
         find.byKey(const ValueKey('track-actions-remove-temporary')),
       );
@@ -1196,75 +1178,7 @@ void main() {
     });
   });
 
-  testWidgets('a video of another playlist can be saved to Temporary', (
-    tester,
-  ) async {
-    useTallScreen(tester);
-    SharedPreferences.setMockInitialValues({});
-    final track = await insertTestTrack(
-      db,
-      playlistId: playlist.id,
-      videoId: 'abcdefghijk',
-      title: 'Keeper',
-      thumbnailUrl: 'https://example.com/t.jpg',
-      durationSeconds: 90,
-    );
-    final temporary = await insertTestPlaylist(
-      db,
-      url: 'woolytube:temporary',
-      name: 'Temporary',
-      isTemporary: true,
-    );
-    final saved = await insertTestTrack(
-      db,
-      playlistId: temporary.id,
-      videoId: 'abcdefghijk',
-      title: 'Keeper',
-    );
-    playlists.temporaryResult = (
-      playlist: temporary,
-      track: saved,
-      added: true,
-    );
-    final settings = AppSettingsService();
-    await pumpPage(
-      tester,
-      tracks: [track],
-      extra: [
-        appSettingsServiceProvider.overrideWithValue(settings),
-        downloadNetworkPolicyProvider.overrideWithValue(
-          DownloadNetworkPolicy(
-            settings,
-            checkConnectivity: () async => [ConnectivityResult.wifi],
-          ),
-        ),
-      ],
-    );
-
-    await tester.tap(find.byKey(ValueKey('track-more-${track.id}')));
-    await tester.pumpAndSettle();
-    expect(
-      find.byKey(const ValueKey('track-actions-remove-temporary')),
-      findsNothing,
-    );
-    await tester.tap(
-      find.byKey(const ValueKey('track-actions-save-temporary')),
-    );
-    await tester.pumpAndSettle();
-
-    expect(playlists.temporaryEntries, [
-      {
-        'id': 'abcdefghijk',
-        'title': 'Keeper',
-        'thumbnail': 'https://example.com/t.jpg',
-        'duration': 90,
-      },
-    ]);
-    expect(downloads.downloadPlaylistCalls, 1);
-    expect(find.text('Saved "Keeper" to Temporary.'), findsOneWidget);
-  });
-
-  testWidgets('a video already in Temporary is not offered again', (
+  testWidgets('the track menu does not offer saving to Temporary', (
     tester,
   ) async {
     useTallScreen(tester);
@@ -1275,7 +1189,6 @@ void main() {
       status: 'complete',
       filePath: '/tmp/keeper.m4a',
     );
-    temporaryVideoIds = {'abcdefghijk'};
     await pumpPage(tester, tracks: [track]);
 
     await tester.tap(find.byKey(ValueKey('track-more-${track.id}')));
@@ -1285,6 +1198,7 @@ void main() {
       find.byKey(const ValueKey('track-actions-save-temporary')),
       findsNothing,
     );
+    expect(find.text('Save to Temporary playlist'), findsNothing);
   });
 
   testWidgets('the jump entry is hidden when nothing failed', (tester) async {
@@ -1620,8 +1534,6 @@ class _Playlists implements PlaylistService {
   final cancelSyncCalls = <int>[];
   final cleared = <int>[];
   final removedTracks = <(int, Set<int>)>[];
-  final temporaryEntries = <Map<String, dynamic>>[];
-  ({Playlist playlist, Track track, bool added})? temporaryResult;
 
   /// When set, removals fail like a busy library, before the player is
   /// told.
@@ -1646,14 +1558,6 @@ class _Playlists implements PlaylistService {
     if (busy != null) throw LibraryBusyException(busy!);
     await beforeDelete?.call();
     removedTracks.add((playlistId, trackIds.toSet()));
-  }
-
-  @override
-  Future<({Playlist playlist, Track track, bool added})> addToTemporary(
-    Map<String, dynamic> entry,
-  ) async {
-    temporaryEntries.add(entry);
-    return temporaryResult!;
   }
 
   final trackQualities = <(int, int?)>[];

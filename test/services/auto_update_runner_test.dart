@@ -282,7 +282,13 @@ void main() {
       recorder.downloadGates[1] = Completer<void>();
       final runner = runnerFor(recorder);
       final run = runner.run([_playlist(1), _playlist(2)]);
-      await pumpEventQueue();
+      // The run does real database work first; wait until it is downloading
+      // instead of for a fixed number of event-loop turns.
+      final deadline = DateTime.now().add(const Duration(seconds: 10));
+      while (!recorder.events.contains('download 1 checked=true') &&
+          DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
       expect(recorder.events.last, 'download 1 checked=true');
 
       await runner.requestStop();

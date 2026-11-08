@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:woolytube/database/database.dart';
@@ -1109,6 +1110,271 @@ void main() {
       final roundTrip = ChapterData.fromJson(parsed.toJson());
       expect(roundTrip.custom![1].manuallyEdited, isTrue);
       expect(roundTrip.recognitionEpoch, 0);
+    });
+  });
+
+  group('Always skip and saving from the editor', () {
+    Future<ChapterData> data() async =>
+        ChapterData.decode((await db.getTrack(track.id))!.chaptersJson);
+
+    const youtube = [
+      MediaChapter(
+        id: 'youtube-0-0',
+        title: 'First',
+        startMs: 0,
+        endMs: 30000,
+        origin: ChapterOrigin.original,
+      ),
+      MediaChapter(
+        id: 'youtube-1-30000',
+        title: 'Second',
+        startMs: 30000,
+        endMs: 60000,
+        origin: ChapterOrigin.original,
+      ),
+    ];
+
+    test('a followed YouTube chapter is skipped without a custom copy, and '
+        'the mark is no undo step', () async {
+      await db.writeTrackChapters(
+        track.id,
+        const ChapterData(downloaded: youtube, durationMs: 60000),
+      );
+      await service.setChapterSkip(track, 'youtube-1-30000', true);
+      var stored = await data();
+      expect(stored.custom, isNull);
+      expect(stored.undoChapters, isNull);
+      expect(stored.skippedChapterIds, {'youtube-1-30000'});
+      expect(stored.unskipped.map((c) => c.id), ['youtube-0-0']);
+      // The sidecar carries it.
+      final sidecar =
+          jsonDecode(
+                await File('${dir.path}/woolytube_meta.json').readAsString(),
+              )
+              as Map<String, dynamic>;
+      final entry = (sidecar['tracks'] as List).single as Map;
+      expect((entry['chapters'] as Map)['skippedChapterIds'], [
+        'youtube-1-30000',
+      ]);
+
+      await service.setChapterSkip(track, 'youtube-1-30000', false);
+      stored = await data();
+      expect(stored.skippedChapterIds, isEmpty);
+    });
+
+    test('edits drop the marks of chapters that are gone, but undo brings a '
+        'deleted chapter back with its mark', () async {
+      await db.writeTrackChapters(
+        track.id,
+        const ChapterData(downloaded: youtube, durationMs: 60000),
+      );
+      await service.setChapterSkip(track, 'youtube-0-0', true);
+      await service.setChapterSkip(track, 'youtube-1-30000', true);
+      await service.setChapterSkip(track, 'stale', true);
+
+      await service.delete(track, 'youtube-0-0');
+      var stored = await data();
+      // The deleted chapter stays marked for the one undo step.
+      expect(stored.skippedChapterIds, {'youtube-0-0', 'youtube-1-30000'});
+
+      await service.undo(track);
+      stored = await data();
+      expect(stored.custom, isNull);
+      expect(stored.unskipped, isEmpty);
+
+      await service.delete(track, 'youtube-0-0');
+      await service.rename(track, 'youtube-1-30000', 'Renamed');
+      stored = await data();
+      // Two edits later only the surviving chapter is still marked.
+      expect(stored.skippedChapterIds, {'youtube-1-30000'});
+    });
+
+    test('a known length of 0 counts as unknown', () async {
+      final local = track.copyWith(
+        durationSeconds: const Value(0),
+        isLocalReplacement: false,
+      );
+      expect(ChapterService.knownDurationMs(local), isNull);
+      expect(ChapterService.knownDurationMs(local, durationMs: 0), isNull);
+      expect(
+        ChapterService.knownDurationMs(local, durationMs: 4300000),
+        4300000,
+      );
+      final stored = local.copyWith(
+        chaptersJson: const Value('{"downloaded":[],"durationMs":0}'),
+      );
+      expect(ChapterService.knownDurationMs(stored), isNull);
+    });
+
+    group('replaceActive', () {
+      const reviewed = [
+        MediaChapter(
+          id: 'auto-a',
+          title: 'Guess A',
+          startMs: 0,
+          endMs: 20000,
+          origin: ChapterOrigin.auto,
+          alternativeTitles: ['Other A'],
+          reviewReasons: ['Name: low confidence', 'Timing: guessed'],
+        ),
+        MediaChapter(
+          id: 'auto-b',
+          title: 'Guess B',
+          startMs: 20000,
+          endMs: 40000,
+          origin: ChapterOrigin.auto,
+          reviewReasons: ['Name: low confidence', 'Timing: guessed'],
+        ),
+        MediaChapter(
+          id: 'auto-c',
+          title: 'Guess C',
+          startMs: 40000,
+          endMs: 60000,
+          origin: ChapterOrigin.auto,
+          reviewReasons: ['Timing: guessed'],
+        ),
+      ];
+
+      setUp(
+        () => db.writeTrackChapters(
+          track.id,
+          const ChapterData(
+            downloaded: youtube,
+            custom: reviewed,
+            durationMs: 60000,
+          ),
+        ),
+      );
+
+      test('saves the whole list as one undo step', () async {
+        final changed = await service.replaceActive(track, [
+          // Renamed only.
+          reviewed[0].copyWith(title: '  Real A '),
+          // End moved (and the next start with it).
+          reviewed[1].copyWith(endMs: 35000),
+          reviewed[2].copyWith(startMs: 35000),
+          // Split off at the end by the user.
+          const MediaChapter(
+            id: 'local-1',
+            title: 'Chapter 4',
+            startMs: 60000,
+            endMs: 61000,
+            origin: ChapterOrigin.auto,
+          ),
+        ], durationMs: 61500);
+        expect(changed, isTrue);
+        final stored = await data();
+        final active = stored.active;
+        expect(active.map((c) => c.id), [
+          'auto-a',
+          'auto-b',
+          'auto-c',
+          'local-1',
+        ]);
+        expect(active[0].title, 'Real A');
+        expect(active[0].origin, ChapterOrigin.auto);
+        expect(active[0].alternativeTitles, ['Other A']);
+        expect(active[0].manuallyEdited, isTrue);
+        // A rename resolves the name note only.
+        expect(active[0].reviewReasons, ['Timing: guessed']);
+        // A moved end changes no start: both notes stay.
+        expect(active[1].manuallyEdited, isTrue);
+        expect(active[1].reviewReasons, [
+          'Name: low confidence',
+          'Timing: guessed',
+        ]);
+        // A moved start resolves the timing note.
+        expect(active[2].reviewReasons, isEmpty);
+        expect(active[2].manuallyEdited, isTrue);
+        // New ids are the user's own.
+        expect(active[3].origin, ChapterOrigin.user);
+        expect(active[3].manuallyEdited, isFalse);
+        expect(stored.durationMs, 61500);
+
+        await service.undo(track);
+        final undone = await data();
+        expect(
+          undone.active.map((c) => (c.id, c.title, c.startMs, c.endMs)),
+          reviewed.map((c) => (c.id, c.title, c.startMs, c.endMs)),
+        );
+      });
+
+      test('an unchanged list writes nothing', () async {
+        final before = (await db.getTrack(track.id))!.chaptersJson;
+        expect(
+          await service.replaceActive(track, [
+            for (final c in reviewed.reversed)
+              MediaChapter(
+                id: c.id,
+                title: c.title,
+                startMs: c.startMs,
+                endMs: c.endMs,
+              ),
+          ]),
+          isFalse,
+        );
+        expect((await db.getTrack(track.id))!.chaptersJson, before);
+        expect((await data()).undoChapters, isNull);
+      });
+
+      test('an untouched chapter stays unedited', () async {
+        await service.replaceActive(track, [
+          reviewed[0],
+          reviewed[1].copyWith(title: 'Real B'),
+          reviewed[2],
+        ]);
+        final active = (await data()).active;
+        expect(active[0].manuallyEdited, isFalse);
+        expect(active[0].reviewReasons, reviewed[0].reviewReasons);
+        expect(active[1].manuallyEdited, isTrue);
+        expect(active[2].manuallyEdited, isFalse);
+      });
+
+      test('refuses overlaps, empty titles and ends past the file', () async {
+        await expectLater(
+          service.replaceActive(track, [
+            reviewed[0].copyWith(endMs: 25000),
+            reviewed[1],
+          ]),
+          throwsFormatException,
+        );
+        await expectLater(
+          service.replaceActive(track, [reviewed[0].copyWith(title: '  ')]),
+          throwsFormatException,
+        );
+        await expectLater(
+          service.replaceActive(track, [
+            reviewed[0],
+            reviewed[1],
+            reviewed[2].copyWith(endMs: 70000),
+          ], durationMs: 60000),
+          throwsFormatException,
+        );
+        final stored = await data();
+        expect(stored.active.map((c) => c.id), ['auto-a', 'auto-b', 'auto-c']);
+        expect(stored.undoChapters, isNull);
+      });
+
+      test('an empty list removes every chapter, undoably', () async {
+        expect(await service.replaceActive(track, const []), isTrue);
+        expect((await data()).active, isEmpty);
+        await service.undo(track);
+        expect((await data()).active, hasLength(3));
+      });
+
+      test('keeps the marks of chapters that stay', () async {
+        await service.setChapterSkip(track, 'auto-b', true);
+        await service.setChapterSkip(track, 'auto-c', true);
+        await service.replaceActive(track, [
+          reviewed[0],
+          reviewed[1].copyWith(endMs: 60000),
+        ]);
+        final stored = await data();
+        expect(stored.isSkipped('auto-b'), isTrue);
+        // Removed now, but undo could bring it back.
+        expect(stored.isSkipped('auto-c'), isTrue);
+        expect(stored.unskipped.map((c) => c.id), ['auto-a']);
+      });
     });
   });
 }

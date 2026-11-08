@@ -570,21 +570,6 @@ class AppDatabase extends _$AppDatabase {
               .get())
           .firstOrNull;
 
-  /// The video ids "Save to Temporary" is not offered for: those already in
-  /// the temporary playlist, and those already downloaded as video in another
-  /// playlist (saving them would only make a second copy).
-  Stream<Set<String>> watchTemporarySaveBlockedVideoIds() => customSelect(
-        'SELECT t.video_id AS video_id FROM tracks t '
-        'JOIN playlists p ON p.id = t.playlist_id '
-        'WHERE p.is_temporary = 1 '
-        "OR (p.audio_only = 0 AND t.status = 'complete' "
-        'AND t.file_path IS NOT NULL)',
-        readsFrom: {tracks, playlists},
-      )
-      .watch()
-      .map((rows) => {for (final row in rows) row.read<String>('video_id')})
-      .distinct((a, b) => a.length == b.length && a.containsAll(b));
-
   /// A playlist other than the temporary one that has [videoId] downloaded
   /// as video, or null.
   Future<Playlist?> playlistWithVideoCopy(String videoId) async {

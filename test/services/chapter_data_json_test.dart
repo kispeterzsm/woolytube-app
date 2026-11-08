@@ -186,4 +186,72 @@ void main() {
       'endMs': 1000,
     });
   });
+
+  group('Always skip marks', () {
+    test('are stored by id, sorted, and left out when there are none', () {
+      const none = ChapterData(downloaded: youtube);
+      expect(none.toJson().containsKey('skippedChapterIds'), isFalse);
+
+      final marked = none
+          .withChapterSkip('youtube-1-60000', true)
+          .withChapterSkip('youtube-0-0', true);
+      // Followed YouTube chapters are marked without a custom copy.
+      expect(marked.custom, isNull);
+      expect(marked.toJson()['skippedChapterIds'], [
+        'youtube-0-0',
+        'youtube-1-60000',
+      ]);
+
+      final back = ChapterData.decode(marked.encode());
+      expect(back.skippedChapterIds, {'youtube-0-0', 'youtube-1-60000'});
+      expect(back.isSkipped('youtube-0-0'), isTrue);
+      expect(back.encode(), marked.encode());
+
+      final cleared = back
+          .withChapterSkip('youtube-0-0', false)
+          .withChapterSkip('youtube-1-60000', false);
+      expect(cleared.toJson().containsKey('skippedChapterIds'), isFalse);
+    });
+
+    test('setting a mark that is already set changes nothing', () {
+      final marked = const ChapterData(
+        downloaded: youtube,
+      ).withChapterSkip('youtube-0-0', true);
+      expect(
+        identical(marked.withChapterSkip('youtube-0-0', true), marked),
+        isTrue,
+      );
+    });
+
+    test('unskipped leaves out the marked chapters', () {
+      final marked = const ChapterData(
+        downloaded: youtube,
+      ).withChapterSkip('youtube-0-0', true);
+      expect(marked.unskipped.map((c) => c.id), ['youtube-1-60000']);
+      expect(marked.active, hasLength(2));
+    });
+
+    test('carried by copyWith, dropped when the file is replaced', () {
+      final marked = const ChapterData(
+        downloaded: youtube,
+      ).withChapterSkip('youtube-0-0', true);
+      expect(marked.copyWith(shuffleChapters: true).skippedChapterIds, {
+        'youtube-0-0',
+      });
+      expect(marked.invalidate().skippedChapterIds, isEmpty);
+    });
+
+    test('a malformed list is ignored', () {
+      final data = ChapterData.fromJson({
+        ...const ChapterData(downloaded: youtube).toJson(),
+        'skippedChapterIds': 'youtube-0-0',
+      });
+      expect(data.skippedChapterIds, isEmpty);
+      final mixed = ChapterData.fromJson({
+        ...const ChapterData(downloaded: youtube).toJson(),
+        'skippedChapterIds': ['youtube-0-0', 3, null],
+      });
+      expect(mixed.skippedChapterIds, {'youtube-0-0'});
+    });
+  });
 }

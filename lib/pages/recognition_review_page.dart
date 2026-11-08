@@ -1,16 +1,19 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../database/database.dart';
+import '../providers/chapter_editor_providers.dart';
 import '../providers/playback_providers.dart';
 import '../providers/providers.dart';
+import '../services/chapter_preview_player.dart';
 import '../services/chapter_service.dart';
 import '../services/chapters.dart';
-import '../services/playback_service.dart';
 import '../services/recognition/chapter_estimator.dart';
 import '../services/recognition/song_recognition_service.dart';
+import 'chapter_editor_page.dart';
 
 /// Lets the user check, fix and apply the chapters a recognition scan
 /// proposed. Nothing touches the track's chapters until Apply.
@@ -36,13 +39,19 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
       if (p.endMs > p.startMs) p,
   ];
   bool _busy = false;
-  PlaybackService? _previewPlayer;
-  Timer? _previewStop;
+
+  /// Plays stretches of the file on its own, away from the main queue.
+  /// Made on first use and kept until the page closes.
+  ChapterPreviewPlayer? _preview;
+
+  /// The preview card shows from the first preview until Stop.
+  bool _previewShown = false;
 
   @override
   void dispose() {
-    _previewStop?.cancel();
-    _previewPlayer?.endChapterEditing();
+    final preview = _preview;
+    _preview = null;
+    if (preview != null) unawaited(preview.dispose());
     super.dispose();
   }
 
@@ -81,37 +90,115 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
     }
   }
 
-  Future<void> _preview(int startMs, {int? endMs}) async {
-    final player = ref.read(playbackServiceProvider);
-    if (_previewPlayer == null) {
-      final tracks = await ref
-          .read(databaseProvider)
-          .getTracksForPlaylist(widget.track.playlistId);
-      // Keeps the queue: the file plays now and the queue goes on after it.
-      await player.beginChapterEditing(widget.track, tracks);
-      if (!mounted) {
-        player.endChapterEditing();
-        return;
-      }
-      _previewPlayer = player;
+  ChapterPreviewPlayer? _previewPlayer() {
+    final existing = _preview;
+    if (existing != null) return existing;
+    final path = resolveTrackMediaPath(widget.track);
+    if (path == null) {
+      _showMessage('The file is missing, so it cannot be played.');
+      return null;
     }
-    await player.seekTo(Duration(milliseconds: startMs.clamp(0, 1 << 40)));
-    await player.resume();
-    _previewStop?.cancel();
-    if (endMs != null && endMs > startMs) {
-      _previewStop = Timer(Duration(milliseconds: endMs - startMs), () {
-        _previewPlayer?.pause();
-      });
+    return _preview = ref.read(chapterPreviewPlayerFactoryProvider)(path);
+  }
+
+  /// Plays [startMs] to [endMs] of the file and stops there. The main
+  /// player is paused, its queue untouched.
+  Future<void> _playPreview(int startMs, {int? endMs}) async {
+    final preview = _previewPlayer();
+    if (preview == null) return;
+    setState(() => _previewShown = true);
+    try {
+      await preview.playRange(max(0, startMs), endMs: endMs);
+    } on StateError catch (e) {
+      _showMessage(
+        e.message == 'Could not open the file'
+            ? 'Could not open the file to play it.'
+            : e.message,
+      );
     }
-    if (mounted) setState(() {});
+  }
+
+  Future<void> _togglePreview() async {
+    final preview = _preview;
+    if (preview == null) return;
+    try {
+      await (preview.isPlaying ? preview.pause() : preview.play());
+    } on StateError catch (e) {
+      _showMessage(e.message);
+    }
   }
 
   Future<void> _stopPreview() async {
-    _previewStop?.cancel();
-    final player = _previewPlayer;
-    _previewPlayer = null;
-    player?.endChapterEditing();
-    if (mounted) setState(() {});
+    final preview = _preview;
+    if (mounted) setState(() => _previewShown = false);
+    await preview?.pause();
+  }
+
+  /// Opens the chapter editor on the proposals. Its result replaces them
+  /// here; nothing reaches the file until Apply.
+  Future<void> _openEditor({String? focusId}) async {
+    await _stopPreview();
+    if (!mounted) return;
+    final run = widget.run;
+    final saved = await Navigator.of(context, rootNavigator: true).push<bool>(
+      MaterialPageRoute(
+        builder:
+            (_) => ChapterEditorPage(
+              track: widget.track,
+              initial: [for (final p in _proposals) p.toChapter()],
+              durationMs: run.durationMs > 0 ? run.durationMs : null,
+              focusChapterId: focusId,
+              title: 'Adjust proposals',
+              saveLabel: 'Done',
+              notesById: {
+                for (final p in _proposals)
+                  if (p.notes.isNotEmpty) p.id: p.notes,
+              },
+              onSave: (chapters, _) async {
+                await _takeEditorResult(chapters);
+                return true;
+              },
+            ),
+      ),
+    );
+    if (saved == true) {
+      _showMessage(
+        'Proposals updated. Nothing changes on the file until you apply.',
+      );
+    }
+  }
+
+  /// Proposals kept by id take the new title and times; new ids are
+  /// chapters the user added; missing ids were removed.
+  Future<void> _takeEditorResult(List<MediaChapter> chapters) async {
+    final byId = {for (final p in _proposals) p.id: p};
+    final next = [
+      for (final c in chapters)
+        byId[c.id]?.adjusted(
+              title: c.title,
+              startMs: c.startMs,
+              endMs: c.endMs,
+            ) ??
+            ChapterProposal.manual(
+              id: c.id,
+              title: c.title,
+              startMs: c.startMs,
+              endMs: c.endMs,
+            ),
+    ];
+    if (mounted) {
+      setState(
+        () =>
+            _proposals
+              ..clear()
+              ..addAll(next),
+      );
+    } else {
+      _proposals
+        ..clear()
+        ..addAll(next);
+    }
+    await _persist();
   }
 
   Future<void> _rename(int index) async {
@@ -174,6 +261,10 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
     if (run.trackId != fresh.id || current.recognitionEpoch != run.epoch) {
       throw await _staleReason(fresh);
     }
+    // Its timings came from a decoder that misplaced this file's audio.
+    if (run.decoderOutdated) {
+      throw StateError(RecognitionRun.decoderOutdatedMessage);
+    }
     if (current.lastRecognitionRunId == run.runId) {
       _showMessage('These proposals were already applied to this file.');
       return;
@@ -219,18 +310,21 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
 
   @override
   Widget build(BuildContext context) {
-    final playing = ref.watch(isPlayingProvider).valueOrNull ?? false;
-    final position = ref.watch(positionProvider).valueOrNull ?? Duration.zero;
-    final unrecognized = _proposals.where((p) => !p.recognized).length;
+    final unrecognized =
+        _proposals.where((p) => !p.recognized && !p.addedByUser).length;
     final flagged = _proposals.where((p) => p.notes.isNotEmpty).length;
     final theme = Theme.of(context);
+    final outdated = widget.run.decoderOutdated;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Recognized songs'),
         actions: [
           TextButton(
             key: const ValueKey('apply-proposals'),
-            onPressed: _busy || _proposals.isEmpty ? null : () => _run(_apply),
+            onPressed:
+                _busy || _proposals.isEmpty || outdated
+                    ? null
+                    : () => _run(_apply),
             child: Text('Apply (${_proposals.length})'),
           ),
         ],
@@ -242,89 +336,187 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
                 )
                 : null,
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          Text(widget.track.title, style: theme.textTheme.titleLarge),
-          const SizedBox(height: 8),
-          Text(
-            '${widget.run.matchedSamples} of ${widget.run.sampleCount} samples '
-            'recognized · ${_proposals.length} proposed chapters',
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'These are suggestions, not changes to your file. A consistent match '
-            'supports a title but does not prove it; listen before you apply. '
-            'Applying keeps chapters you made or edited and replaces earlier '
-            'automatic ones.',
-          ),
-          if (unrecognized > 0 || flagged > 0)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Text(
-                [
-                  if (unrecognized > 0)
-                    '$unrecognized unrecognized section${unrecognized == 1 ? '' : 's'}',
-                  if (flagged > 0) '$flagged with review notes',
-                ].join(' · '),
-                style: TextStyle(color: theme.colorScheme.tertiary),
-              ),
-            ),
-          if (_previewPlayer != null)
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                child: Row(
+      body: ValueListenableBuilder<double>(
+        valueListenable: audioPlayerOverlayHeightNotifier,
+        builder: (context, overlay, _) {
+          final previewing = _previewShown && _preview != null;
+          // The preview controls stay pinned under the list, so they are
+          // reachable while scrolling through the proposals.
+          return Column(
+            children: [
+              Expanded(
+                child: ListView(
+                  padding: EdgeInsets.fromLTRB(
+                    16,
+                    16,
+                    16,
+                    16 + (previewing ? 0 : overlay),
+                  ),
                   children: [
-                    IconButton(
-                      tooltip: playing ? 'Pause' : 'Play',
-                      icon: Icon(playing ? Icons.pause : Icons.play_arrow),
-                      onPressed: () => _previewPlayer?.togglePlayPause(),
+                    Text(widget.track.title, style: theme.textTheme.titleLarge),
+                    if (outdated)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(
+                          RecognitionRun.decoderOutdatedMessage,
+                          key: const ValueKey('review-decoder-outdated'),
+                          style: TextStyle(color: theme.colorScheme.error),
+                        ),
+                      ),
+                    const SizedBox(height: 8),
+                    Text(
+                      '${widget.run.matchedSamples} of ${widget.run.sampleCount} samples '
+                      'recognized · ${_proposals.length} proposed chapters',
                     ),
-                    Expanded(
-                      child: Text(
-                        'Preview · ${chapterTimestamp(position.inMilliseconds)}',
+                    const SizedBox(height: 8),
+                    const Text(
+                      'These are suggestions, not changes to your file. A consistent match '
+                      'supports a title but does not prove it; listen before you apply. '
+                      'Applying keeps chapters you made or edited and replaces earlier '
+                      'automatic ones.',
+                    ),
+                    if (unrecognized > 0 || flagged > 0)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(
+                          [
+                            if (unrecognized > 0)
+                              '$unrecognized unrecognized section${unrecognized == 1 ? '' : 's'}',
+                            if (flagged > 0) '$flagged with review notes',
+                          ].join(' · '),
+                          style: TextStyle(color: theme.colorScheme.tertiary),
+                        ),
+                      ),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 12),
+                      child: Align(
+                        alignment: AlignmentDirectional.centerStart,
+                        child: FilledButton.tonalIcon(
+                          key: const ValueKey('review-open-editor'),
+                          onPressed:
+                              _busy || _proposals.isEmpty
+                                  ? null
+                                  : () => _openEditor(),
+                          icon: const Icon(Icons.tune),
+                          label: const Text('Fine-tune in editor'),
+                        ),
                       ),
                     ),
-                    TextButton(
-                      onPressed: _stopPreview,
-                      child: const Text('Stop preview'),
-                    ),
+                    const SizedBox(height: 8),
+                    if (_proposals.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.all(16),
+                        child: Text('Nothing left to apply.'),
+                      ),
+                    for (var i = 0; i < _proposals.length; i++)
+                      _ProposalCard(
+                        key: ValueKey('proposal-$i-${_proposals[i].id}'),
+                        proposal: _proposals[i],
+                        busy: _busy,
+                        canMerge: i + 1 < _proposals.length,
+                        onPlay:
+                            () => _playPreview(
+                              _proposals[i].startMs,
+                              endMs: _proposals[i].endMs,
+                            ),
+                        // Across the start: the end of the song before, then this one.
+                        onBoundary:
+                            () => _playPreview(
+                              _proposals[i].startMs - 4000,
+                              endMs: _proposals[i].startMs + 6000,
+                            ),
+                        onAdjust: () => _openEditor(focusId: _proposals[i].id),
+                        onRename: () => _run(() => _rename(i)),
+                        onMerge: () => _run(() => _mergeWithNext(i)),
+                        onDelete: () => _run(() => _delete(i)),
+                      ),
                   ],
                 ),
               ),
-            ),
-          const SizedBox(height: 8),
-          if (_proposals.isEmpty)
-            const Padding(
-              padding: EdgeInsets.all(16),
-              child: Text('Nothing left to apply.'),
-            ),
-          for (var i = 0; i < _proposals.length; i++)
-            _ProposalCard(
-              key: ValueKey('proposal-$i-${_proposals[i].id}'),
-              proposal: _proposals[i],
-              busy: _busy,
-              canMerge: i + 1 < _proposals.length,
-              onPlay:
-                  () => _run(
-                    () => _preview(
-                      _proposals[i].startMs,
-                      endMs: _proposals[i].endMs,
-                    ),
+              if (previewing)
+                Padding(
+                  padding: EdgeInsets.fromLTRB(12, 0, 12, 8 + overlay),
+                  child: _PreviewCard(
+                    preview: _preview!,
+                    onToggle: _togglePreview,
+                    onStop: _stopPreview,
                   ),
-              onBoundary:
-                  () => _run(
-                    () => _preview(
-                      _proposals[i].startMs - 5000,
-                      endMs: _proposals[i].startMs + 15000,
-                    ),
-                  ),
-              onRename: () => _run(() => _rename(i)),
-              onMerge: () => _run(() => _mergeWithNext(i)),
-              onDelete: () => _run(() => _delete(i)),
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// What the page's preview player is doing, with play/pause and Stop.
+class _PreviewCard extends StatelessWidget {
+  const _PreviewCard({
+    required this.preview,
+    required this.onToggle,
+    required this.onStop,
+  });
+
+  final ChapterPreviewPlayer preview;
+  final VoidCallback onToggle;
+  final VoidCallback onStop;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      key: const ValueKey('review-preview'),
+      margin: const EdgeInsets.only(top: 12),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        child: Row(
+          children: [
+            StreamBuilder<bool>(
+              stream: preview.playingStream,
+              initialData: preview.isPlaying,
+              builder: (context, snapshot) {
+                final playing = snapshot.data ?? false;
+                return IconButton(
+                  tooltip: playing ? 'Pause' : 'Play',
+                  icon: Icon(playing ? Icons.pause : Icons.play_arrow),
+                  onPressed: onToggle,
+                );
+              },
             ),
-        ],
+            Expanded(
+              child: StreamBuilder<int>(
+                stream: preview.positionMsStream,
+                initialData: preview.positionMs,
+                builder:
+                    (context, _) => StreamBuilder<PreviewRange?>(
+                      stream: preview.activeRangeStream,
+                      initialData: preview.activeRange,
+                      builder: (context, range) {
+                        final r = range.data;
+                        final end = r?.endMs;
+                        return Text(
+                          [
+                            'Preview · ${chapterTimestamp(preview.positionMs ~/ 100 * 100)}',
+                            if (r != null && end != null)
+                              'until ${chapterTimestamp(end)}',
+                          ].join(' '),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontFeatures: [FontFeature.tabularFigures()],
+                          ),
+                        );
+                      },
+                    ),
+              ),
+            ),
+            TextButton(
+              key: const ValueKey('review-preview-stop'),
+              onPressed: onStop,
+              child: const Text('Stop preview'),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -336,6 +528,7 @@ class _ProposalCard extends StatelessWidget {
   final bool canMerge;
   final VoidCallback onPlay;
   final VoidCallback onBoundary;
+  final VoidCallback onAdjust;
   final VoidCallback onRename;
   final VoidCallback onMerge;
   final VoidCallback onDelete;
@@ -347,6 +540,7 @@ class _ProposalCard extends StatelessWidget {
     required this.canMerge,
     required this.onPlay,
     required this.onBoundary,
+    required this.onAdjust,
     required this.onRename,
     required this.onMerge,
     required this.onDelete,
@@ -356,6 +550,7 @@ class _ProposalCard extends StatelessWidget {
     'quiet-transition' => 'quiet transition',
     'reference-offset' => 'catalog offset',
     'sample-bracket' => 'between samples',
+    ChapterProposal.manualBoundary => 'set by you',
     _ => 'file start',
   };
 
@@ -375,7 +570,7 @@ class _ProposalCard extends StatelessWidget {
                     proposal.title,
                     style: theme.textTheme.titleMedium?.copyWith(
                       color:
-                          proposal.recognized
+                          proposal.recognized || proposal.addedByUser
                               ? null
                               : theme.colorScheme.tertiary,
                     ),
@@ -418,9 +613,11 @@ class _ProposalCard extends StatelessWidget {
               ' · ${chapterTimestamp(proposal.endMs - proposal.startMs)}',
             ),
             Text(
-              '${proposal.sampleCount} detection${proposal.sampleCount == 1 ? '' : 's'}'
-              ' · start from $_method'
-              '${proposal.referenceSpreadMs == null ? '' : ' · spread ${proposal.referenceSpreadMs} ms'}',
+              proposal.addedByUser
+                  ? 'Added by you'
+                  : '${proposal.sampleCount} detection${proposal.sampleCount == 1 ? '' : 's'}'
+                      ' · ${proposal.boundaryMethod == ChapterProposal.manualBoundary ? 'start set by you' : 'start from $_method'}'
+                      '${proposal.referenceSpreadMs == null ? '' : ' · spread ${proposal.referenceSpreadMs} ms'}',
               style: theme.textTheme.bodySmall,
             ),
             for (final note in proposal.notes)
@@ -430,7 +627,7 @@ class _ProposalCard extends StatelessWidget {
                   color: theme.colorScheme.tertiary,
                 ),
               ),
-            Row(
+            Wrap(
               children: [
                 TextButton.icon(
                   onPressed: busy ? null : onPlay,
@@ -441,6 +638,12 @@ class _ProposalCard extends StatelessWidget {
                   onPressed: busy ? null : onBoundary,
                   icon: const Icon(Icons.skip_previous, size: 18),
                   label: const Text('Boundary'),
+                ),
+                TextButton.icon(
+                  key: ValueKey('proposal-adjust-${proposal.id}'),
+                  onPressed: busy ? null : onAdjust,
+                  icon: const Icon(Icons.tune, size: 18),
+                  label: const Text('Adjust'),
                 ),
               ],
             ),

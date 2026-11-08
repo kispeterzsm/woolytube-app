@@ -12,11 +12,16 @@ class PlaybackItem {
           ? 'track:${track.id}:${track.playlistId}'
           : 'chapter:${track.id}:${track.playlistId}:${chapter!.id}';
   int get startMs => chapter?.startMs ?? 0;
-  Duration? get duration =>
-      chapter?.duration ??
-      (track.durationSeconds == null
-          ? null
-          : Duration(seconds: track.durationSeconds!));
+
+  /// Null when unknown. A stored length of 0 (local replacement files) is
+  /// unknown too, not an empty file.
+  Duration? get duration {
+    final chapter = this.chapter;
+    if (chapter != null) return chapter.duration;
+    final seconds = track.durationSeconds;
+    return seconds == null || seconds <= 0 ? null : Duration(seconds: seconds);
+  }
+
   Track get displayTrack =>
       chapter == null
           ? track
@@ -55,20 +60,35 @@ class PlaybackItem {
   }
 }
 
+/// The items [track] plays as: its chapters, or the whole file.
+///
+/// Chapters marked Always skip are left out, so automatic playback passes
+/// over them; a file whose chapters are all skipped gives no items at all,
+/// like a file marked Always skip. [selected] (the user tapped this file)
+/// keeps such a file: it then plays its chapters anyway. [includeSkipped]
+/// lists every chapter, for lists the user picks from (a pick plays even a
+/// skipped chapter).
 List<PlaybackItem> chapterPlaybackItems(
   Track track,
   Playlist playlist, {
   bool whole = false,
+  bool selected = false,
+  bool includeSkipped = false,
 }) {
   // Decide on the cheap flags first so most tracks never decode JSON.
   if (whole || !(track.chaptersEnabled ?? playlist.playChapters ?? true)) {
     return [PlaybackItem(track)];
   }
-  final chapters = ChapterData.decode(track.chaptersJson).active;
+  final data = ChapterData.decode(track.chaptersJson);
+  final chapters = data.active;
   if (chapters.isEmpty) return [PlaybackItem(track)];
-  return chapters.map((chapter) => PlaybackItem(track, chapter)).toList();
+  var kept = includeSkipped ? chapters : data.unskipped;
+  if (kept.isEmpty && selected) kept = chapters;
+  return kept.map((chapter) => PlaybackItem(track, chapter)).toList();
 }
 
+/// The chapters of one file that play one after another. Never build one
+/// without items: [trackId] reads the first.
 class PlaybackAlbum {
   final List<PlaybackItem> items;
   PlaybackAlbum(Iterable<PlaybackItem> items) : items = List.of(items);

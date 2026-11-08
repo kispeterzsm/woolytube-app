@@ -485,4 +485,156 @@ void main() {
       await tester.pump(const Duration(seconds: 10));
     });
   });
+
+  /// Opens the chapters page of a track in [fileName] with a saved run made
+  /// before decoder versions existed (version 1), applied when [applied],
+  /// then runs [body].
+  Future<void> withVersion1Run(
+    WidgetTester tester, {
+    required String fileName,
+    required bool applied,
+    required Future<void> Function(AppDatabase db, Track track) body,
+  }) async {
+    tester.view.physicalSize = const Size(1200, 3200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.runAsync(() async {
+      final db = openTestDatabase();
+      addTearDown(db.close);
+      final dir = await Directory.systemTemp.createTemp('woolytube-chapters-');
+      addTearDown(() => dir.delete(recursive: true));
+      final media = await File('${dir.path}/$fileName').writeAsBytes([1, 2, 3]);
+      final playlist = await insertTestPlaylist(db, outputPath: dir.path);
+      var track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        status: 'complete',
+        filePath: media.path,
+        durationSeconds: 180,
+      );
+      if (applied) {
+        await db.writeTrackChapters(
+          track.id,
+          const ChapterData(
+            custom: [
+              MediaChapter(
+                id: 'a-0-90000',
+                title: 'Artist — A',
+                startMs: 0,
+                endMs: 90000,
+                origin: ChapterOrigin.auto,
+              ),
+              MediaChapter(
+                id: 'b-90000-180000',
+                title: 'Artist — B',
+                startMs: 90000,
+                endMs: 180000,
+                origin: ChapterOrigin.auto,
+              ),
+            ],
+            undoChapters: [],
+            undoFollowsDownloaded: true,
+            durationMs: 180000,
+            lastRecognitionRunId: 'run1',
+          ),
+        );
+        track = (await db.getTrack(track.id))!;
+      }
+      final playback = PlaybackService(db, player: FakePlayer());
+      addTearDown(playback.dispose);
+      final recognition = fakeRecognitionService(db, dir);
+      addTearDown(recognition.dispose);
+      final json =
+          fakeRun(
+              track.id,
+              [
+                proposal('a', 'Artist — A', 0, 90000),
+                proposal('b', 'Artist — B', 90000, 180000),
+              ],
+              fileKey: (await SongRecognitionService.currentFileKey(track))!,
+            ).toJson()
+            ..remove('decoderVersion');
+      await recognition.saveRun(RecognitionRun.fromJson(json), track);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            databaseProvider.overrideWithValue(db),
+            playbackServiceProvider.overrideWithValue(playback),
+            songRecognitionServiceProvider.overrideWithValue(recognition),
+          ],
+          child: MaterialApp(home: ChaptersPage(track: track)),
+        ),
+      );
+      await settle(tester);
+      await body(db, track);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 10));
+    });
+  }
+
+  testWidgets('an MP3 scan from the old decoder asks for a new scan', (
+    tester,
+  ) async {
+    await withVersion1Run(
+      tester,
+      fileName: '00001_mix.mp3',
+      applied: false,
+      body: (db, track) async {
+        final hint = find.byKey(const ValueKey('recognition-run-hint'));
+        expect(
+          tester.widget<Text>(hint).data,
+          RecognitionRun.decoderOutdatedMessage,
+        );
+        expect(
+          RecognitionRun.decoderOutdatedMessage,
+          contains('Recognize again for exact timings.'),
+        );
+        expect(find.byKey(const ValueKey('review-proposals')), findsNothing);
+        expect(find.text('Recognize again'), findsOneWidget);
+      },
+    );
+  });
+
+  testWidgets('chapters applied from an old MP3 scan stay, with a hint', (
+    tester,
+  ) async {
+    await withVersion1Run(
+      tester,
+      fileName: '00001_mix.mp3',
+      applied: true,
+      body: (db, track) async {
+        final hint = find.byKey(const ValueKey('recognition-run-hint'));
+        expect(
+          tester.widget<Text>(hint).data,
+          'The automatic chapters from the last scan were made with an '
+          'older, less accurate scan of MP3 files, so their timings can be '
+          'off by several seconds. Recognize again for exact timings.',
+        );
+        expect(find.textContaining('· Auto'), findsNWidgets(2));
+        final data = ChapterData.decode(
+          (await db.getTrack(track.id))!.chaptersJson,
+        );
+        expect(data.active.map((c) => c.id), ['a-0-90000', 'b-90000-180000']);
+        expect(find.text('Recognize again'), findsOneWidget);
+      },
+    );
+  });
+
+  testWidgets('an old scan of another format is still offered for review', (
+    tester,
+  ) async {
+    await withVersion1Run(
+      tester,
+      fileName: '00001_mix.m4a',
+      applied: false,
+      body: (db, track) async {
+        expect(
+          find.byKey(const ValueKey('recognition-run-hint')),
+          findsNothing,
+        );
+        expect(find.text('Review 2 proposals'), findsOneWidget);
+      },
+    );
+  });
 }

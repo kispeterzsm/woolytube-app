@@ -13,6 +13,7 @@ import '../metadata_service.dart';
 import '../ytdlp_service.dart';
 import 'audio_window_decoder.dart';
 import 'chapter_estimator.dart';
+import 'decoder_accuracy.dart';
 import 'shazam_client.dart';
 import 'shazam_signature.dart';
 import 'silence_detector.dart';
@@ -80,6 +81,16 @@ class RecognitionRun {
   final int matchedSamples;
   final List<ChapterProposal> proposals;
 
+  /// The [decoderAccuracyVersion] of the scan. Runs saved before versions
+  /// existed read as 1.
+  final int decoderVersion;
+
+  /// Set by [SongRecognitionService.loadRun], never stored: the run was
+  /// made by a decoder that placed this file's audio wrongly (an MP3 before
+  /// version 2), so its timings can be seconds off. Such a run is not
+  /// applied; Recognize again makes an exact one.
+  final bool decoderOutdated;
+
   const RecognitionRun({
     required this.runId,
     required this.trackId,
@@ -90,9 +101,20 @@ class RecognitionRun {
     required this.sampleCount,
     required this.matchedSamples,
     required this.proposals,
+    this.decoderVersion = decoderAccuracyVersion,
+    this.decoderOutdated = false,
   });
 
-  RecognitionRun copyWith({List<ChapterProposal>? proposals}) => RecognitionRun(
+  /// Plain-language reason shown for a [decoderOutdated] run.
+  static const decoderOutdatedMessage =
+      'These proposals were made with an older, less accurate scan of MP3 '
+      'files, so their timings can be off by several seconds. Recognize '
+      'again for exact timings.';
+
+  RecognitionRun copyWith({
+    List<ChapterProposal>? proposals,
+    bool? decoderOutdated,
+  }) => RecognitionRun(
     runId: runId,
     trackId: trackId,
     fileKey: fileKey,
@@ -102,6 +124,8 @@ class RecognitionRun {
     sampleCount: sampleCount,
     matchedSamples: matchedSamples,
     proposals: proposals ?? this.proposals,
+    decoderVersion: decoderVersion,
+    decoderOutdated: decoderOutdated ?? this.decoderOutdated,
   );
 
   Map<String, dynamic> toJson() => {
@@ -114,6 +138,7 @@ class RecognitionRun {
     'sampleCount': sampleCount,
     'matchedSamples': matchedSamples,
     'proposals': proposals.map((c) => c.toJson()).toList(),
+    'decoderVersion': decoderVersion,
   };
 
   factory RecognitionRun.fromJson(Map<String, dynamic> json) => RecognitionRun(
@@ -129,6 +154,7 @@ class RecognitionRun {
         (json['proposals'] as List)
             .map((c) => ChapterProposal.fromJson(c as Map<String, dynamic>))
             .toList(),
+    decoderVersion: (json['decoderVersion'] as num?)?.toInt() ?? 1,
   );
 }
 
@@ -230,6 +256,9 @@ class YtDlpScanForegroundNotifier implements ScanForegroundNotifier {
 /// failed scan resumes where it stopped and a finished scan can be re-run
 /// without network use. Quiet gaps are only measured where the recognized
 /// song changes, which is the only place the estimator uses them.
+/// Cached lookups and quiet gaps carry the [decoderAccuracyVersion] that
+/// measured them; those an older decoder placed wrongly for this file are
+/// measured again rather than reused.
 ///
 /// When Shazam rate-limits a lookup, the scan waits (a growing backoff, or
 /// longer when Retry-After asks for it) and retries the same sample, giving
@@ -362,7 +391,12 @@ class SongRecognitionService {
         jsonDecode(await file.readAsString()) as Map<String, dynamic>,
       );
       // Only a run made from exactly this file content belongs here.
-      return run.fileKey == p.basename(dir) ? run : null;
+      if (run.fileKey != p.basename(dir)) return null;
+      final trusted = decoderVersionTrusted(
+        run.decoderVersion,
+        mpegAudio: await isMpegAudioFile(path),
+      );
+      return trusted ? run : run.copyWith(decoderOutdated: true);
     } catch (_) {
       return null;
     }
@@ -440,6 +474,9 @@ class SongRecognitionService {
           (await _db.getTrack(track.id))?.chaptersJson,
         ).recognitionEpoch;
     final durationMs = await _durationMs(track, path);
+    // Lookups and quiet gaps an older decoder measured in the wrong place
+    // are measured again instead of reused.
+    final mpegAudio = await isMpegAudioFile(path);
     final dir = Directory(await _runDirectory(track, path));
     await _pruneStaleCaches(track, dir);
     await dir.create(recursive: true);
@@ -466,6 +503,12 @@ class SongRecognitionService {
           try {
             raw =
                 jsonDecode(await cached.readAsString()) as Map<String, dynamic>;
+            if (!decoderVersionTrusted(
+              (raw['decoderVersion'] as num?)?.toInt(),
+              mpegAudio: mpegAudio,
+            )) {
+              raw = null;
+            }
           } catch (_) {
             raw = null;
           }
@@ -494,6 +537,7 @@ class SongRecognitionService {
             'sampleStartMs': startMs,
             'sampleDurationMs': windowSeconds * 1000,
             'recordedAt': DateTime.now().toUtc().toIso8601String(),
+            'decoderVersion': decoderAccuracyVersion,
             'response': result.raw,
           };
           await cached.writeAsString(jsonEncode(raw));
@@ -528,7 +572,13 @@ class SongRecognitionService {
           total: 0,
         ),
       );
-      final quiet = await _quietIntervals(path, dir, samples, durationMs);
+      final quiet = await _quietIntervals(
+        path,
+        dir,
+        samples,
+        durationMs,
+        mpegAudio: mpegAudio,
+      );
 
       _emit(
         RecognitionProgress(
@@ -553,6 +603,7 @@ class SongRecognitionService {
         sampleCount: samples.length,
         matchedSamples: samples.where((s) => s.result.recognized).length,
         proposals: proposals,
+        decoderVersion: decoderAccuracyVersion,
       );
       await File(
         p.join(dir.path, 'run.json'),
@@ -738,8 +789,9 @@ class SongRecognitionService {
     String path,
     Directory dir,
     List<RecognitionSample> samples,
-    int durationMs,
-  ) async {
+    int durationMs, {
+    required bool mpegAudio,
+  }) async {
     // Brackets where the recognized song changes, widened so gaps that
     // straddle the edge still merge like they would in a whole-file pass.
     final ranges = <(int, int)>[];
@@ -776,10 +828,10 @@ class SongRecognitionService {
       List<QuietInterval>? intervals;
       if (await cached.exists()) {
         try {
-          intervals = [
-            for (final s in jsonDecode(await cached.readAsString()) as List)
-              ((s[0] as num).toDouble(), (s[1] as num).toDouble()),
-          ];
+          intervals = _readQuietCache(
+            jsonDecode(await cached.readAsString()),
+            mpegAudio: mpegAudio,
+          );
         } catch (_) {
           intervals = null;
         }
@@ -787,9 +839,12 @@ class SongRecognitionService {
       if (intervals == null) {
         intervals = await _detectSilence(path, from, to);
         await cached.writeAsString(
-          jsonEncode([
-            for (final s in intervals) [s.$1, s.$2],
-          ]),
+          jsonEncode({
+            'decoderVersion': decoderAccuracyVersion,
+            'intervals': [
+              for (final s in intervals) [s.$1, s.$2],
+            ],
+          }),
         );
       }
       result.addAll(intervals);
@@ -804,6 +859,30 @@ class SongRecognitionService {
     }
     result.sort((a, b) => a.$1.compareTo(b.$1));
     return result;
+  }
+
+  /// The quiet intervals of a cached silence result, or null when the
+  /// decoder that measured them placed this file's audio wrongly. Results
+  /// stored before decoder versions existed are a bare list of
+  /// `[start, end]` pairs and count as version 1.
+  static List<QuietInterval>? _readQuietCache(
+    Object? json, {
+    required bool mpegAudio,
+  }) {
+    final int? version;
+    final List list;
+    if (json is Map) {
+      version = (json['decoderVersion'] as num?)?.toInt();
+      list = json['intervals'] as List;
+    } else {
+      version = null;
+      list = json as List;
+    }
+    if (!decoderVersionTrusted(version, mpegAudio: mpegAudio)) return null;
+    return [
+      for (final s in list)
+        ((s[0] as num).toDouble(), (s[1] as num).toDouble()),
+    ];
   }
 
   /// Quiet intervals in [fromMs, toMs), decoded in chunks of at most

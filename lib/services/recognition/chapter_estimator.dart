@@ -33,7 +33,8 @@ class ChapterProposal {
   final int? referenceStartMs;
   final int? referenceSpreadMs;
 
-  /// 'file-start', 'reference-offset', 'quiet-transition' or 'sample-bracket'.
+  /// 'file-start', 'reference-offset', 'quiet-transition', 'sample-bracket'
+  /// or 'manual' (the user set the start in the chapter editor).
   final String boundaryMethod;
   final (int, int)? selectedQuietIntervalMs;
   final (int, int)? nearestSilenceMs;
@@ -69,12 +70,47 @@ class ChapterProposal {
     this.edited = false,
   });
 
+  /// A chapter the user added in the chapter editor (no detections).
+  factory ChapterProposal.manual({
+    required String id,
+    required String title,
+    required int startMs,
+    required int endMs,
+  }) => ChapterProposal(
+    id: id,
+    title: title,
+    startMs: startMs,
+    endMs: endMs,
+    trackKey: null,
+    referenceId: null,
+    sampleCount: 0,
+    referenceSampleCount: 0,
+    referenceStartMs: null,
+    referenceSpreadMs: null,
+    boundaryMethod: manualBoundary,
+    selectedQuietIntervalMs: null,
+    nearestSilenceMs: null,
+    distanceFromSilenceEndMs: null,
+    consistentReference: false,
+    notes: const [],
+    firstSampleMs: startMs,
+    lastSampleMs: endMs,
+    edited: true,
+  );
+
+  static const manualBoundary = 'manual';
+
   bool get recognized => trackKey != null;
+
+  /// Added by the user rather than found by the scan.
+  bool get addedByUser =>
+      boundaryMethod == manualBoundary && trackKey == null && sampleCount == 0;
 
   ChapterProposal copyWith({
     String? title,
     int? startMs,
     int? endMs,
+    String? boundaryMethod,
     List<String>? notes,
     bool? edited,
   }) => ChapterProposal(
@@ -88,7 +124,7 @@ class ChapterProposal {
     referenceSampleCount: referenceSampleCount,
     referenceStartMs: referenceStartMs,
     referenceSpreadMs: referenceSpreadMs,
-    boundaryMethod: boundaryMethod,
+    boundaryMethod: boundaryMethod ?? this.boundaryMethod,
     selectedQuietIntervalMs: selectedQuietIntervalMs,
     nearestSilenceMs: nearestSilenceMs,
     distanceFromSilenceEndMs: distanceFromSilenceEndMs,
@@ -106,6 +142,30 @@ class ChapterProposal {
     edited: true,
     notes: notes.where((note) => !_nameNotes.contains(note)).toList(),
   );
+
+  /// This proposal as the chapter editor left it. A new title counts as a
+  /// rename; a moved start was set by the user, so the notes doubting the
+  /// old start no longer apply. Any change marks it edited.
+  ChapterProposal adjusted({
+    required String title,
+    required int startMs,
+    required int endMs,
+  }) {
+    final trimmed = title.trim();
+    if (trimmed == this.title &&
+        startMs == this.startMs &&
+        endMs == this.endMs) {
+      return this;
+    }
+    var next = trimmed == this.title ? this : renamed(trimmed);
+    if (startMs != this.startMs) {
+      next = next.copyWith(
+        boundaryMethod: manualBoundary,
+        notes: next.notes.where(_nameNotes.contains).toList(),
+      );
+    }
+    return next.copyWith(startMs: startMs, endMs: endMs, edited: true);
+  }
 
   /// The chapter this proposal becomes when applied. Review reasons keep the
   /// prefixes the chapter service uses to clear them on rename or retiming.

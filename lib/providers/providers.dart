@@ -584,13 +584,6 @@ final visiblePlaylistsProvider = Provider<AsyncValue<List<Playlist>>>((ref) {
   );
 });
 
-/// The video ids "Save to Temporary" is not offered for (already in it, or
-/// already downloaded as video elsewhere).
-final temporarySaveBlockedVideoIdsProvider =
-    StreamProvider.autoDispose<Set<String>>(
-      (ref) => ref.watch(databaseProvider).watchTemporarySaveBlockedVideoIds(),
-    );
-
 /// Playlists whose update is asking YouTube for the playlist right now (see
 /// [PlaylistService.syncingPlaylistIds]); the download that follows shows in
 /// [downloadProgressProvider].

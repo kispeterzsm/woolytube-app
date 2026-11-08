@@ -13,13 +13,14 @@ import '../services/playlist_service.dart';
 import '../services/recognition/song_recognition_service.dart';
 import '../widgets/mobile_data_download_guard.dart';
 import '../widgets/settings_section_header.dart';
+import 'chapter_editor_page.dart';
 import 'recognition_review_page.dart';
 
 /// How one file plays: as the playlist says, as chapters or as one track.
 enum _PlayAs { playlistDefault, chapters, wholeFile }
 
-/// A video's chapters: how it plays, the chapter list, and editing (by
-/// typing times or by marking them while listening).
+/// A video's chapters: how it plays, the chapter list, per-chapter queueing
+/// and Always skip, and editing them in the chapter editor while listening.
 class ChaptersPage extends ConsumerStatefulWidget {
   final Track track;
   const ChaptersPage({super.key, required this.track});
@@ -31,9 +32,6 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
   late final Stream<Track?> _trackRow;
   late final Stream<Playlist?> _playlistRow;
 
-  /// Set while the owner marks chapters on the full-file timeline.
-  PlaybackService? _editingPlayer;
-  int? _markStart;
   bool _busy = false;
 
   /// The last completed recognition scan for this file, if any.
@@ -53,12 +51,6 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
           (p) => p.id.equals(widget.track.playlistId),
         )).watchSingleOrNull();
     unawaited(_loadRecognitionRun());
-  }
-
-  @override
-  void dispose() {
-    _editingPlayer?.endChapterEditing();
-    super.dispose();
   }
 
   PlaybackService get _player => ref.read(playbackServiceProvider);
@@ -97,7 +89,6 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
   }
 
   Future<void> _play(Track track, {MediaChapter? chapter}) async {
-    _stopMarking();
     final tracks = await ref
         .read(databaseProvider)
         .getTracksForPlaylist(track.playlistId);
@@ -118,43 +109,15 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
     final current = player.currentItem;
     if (current != null && current.track.id == track.id) {
       if (current.chapter == null) {
-        _stopMarking();
         await player.seekTo(Duration(milliseconds: chapter.startMs));
         if (!player.isPlaying) await player.resume();
         return;
       }
       if (await player.playChapterOfCurrentFile(track.id, chapter.id)) {
-        _stopMarking();
         return;
       }
     }
     await _play(track, chapter: chapter);
-  }
-
-  Future<void> _startMarking(Track track) async {
-    final player = _player;
-    final tracks = await ref
-        .read(databaseProvider)
-        .getTracksForPlaylist(track.playlistId);
-    // Keeps the queue: the file plays now and the queue goes on after it.
-    await player.beginChapterEditing(track, tracks);
-    if (!mounted) {
-      player.endChapterEditing();
-      return;
-    }
-    setState(() {
-      _editingPlayer = player;
-      _markStart = null;
-    });
-  }
-
-  void _stopMarking() {
-    _editingPlayer?.endChapterEditing();
-    if (!mounted) return;
-    setState(() {
-      _editingPlayer = null;
-      _markStart = null;
-    });
   }
 
   /// The file's length if it is known without opening it.
@@ -169,55 +132,88 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
     );
   }
 
-  /// Opens the chapter dialog and saves the result. Returns the saved
-  /// chapter, or null when cancelled or impossible. The page only shows
-  /// itself busy while saving, not while the dialog is open.
-  Future<MediaChapter?> _edit(
-    Track track, {
-    MediaChapter? chapter,
-    int? startMs,
-    int? endMs,
-  }) async {
-    if (_busy) return null;
+  /// Opens the typed-times dialog for [chapter] and saves the result.
+  Future<void> _editTimes(Track track, MediaChapter chapter) async {
+    if (_busy) return;
     final durationMs = _durationOf(track);
     if (durationMs == null || durationMs <= 0) {
       _showMessage(
-        'The length of this file is not known yet. Play it once, or use '
-        'Mark while listening, then add chapters.',
+        'The length of this file is not known yet. Use Adjust boundaries '
+        'instead: it opens the file.',
       );
-      return null;
+      return;
     }
     final data = ChapterData.decode(track.chaptersJson);
-    var start = startMs;
-    var end = endMs;
-    if (chapter == null && start == null) {
-      // A new chapter starts where the last one ends.
-      final lastEnd = data.active.fold<int>(
-        0,
-        (latest, c) => c.endMs > latest ? c.endMs : latest,
-      );
-      start = lastEnd < durationMs ? lastEnd : 0;
-      end = durationMs;
-    }
     final result = await showDialog<MediaChapter>(
       context: context,
       builder:
           (_) => ChapterEditDialog(
             chapter: chapter,
-            startMs: start,
-            endMs: end,
             durationMs: durationMs,
             chapters: data.active,
           ),
     );
-    if (result == null || !mounted) return null;
-    var saved = false;
+    if (result == null || !mounted) return;
     await _run(() async {
       await _chapters.save(track, result, durationMs: durationMs);
       await _afterEdit(track);
-      saved = true;
     });
-    return saved ? result : null;
+  }
+
+  /// Opens the chapter editor on the current list (from any source) and
+  /// saves its result as one change that Undo takes back.
+  Future<void> _openEditor(Track track, {String? focusChapterId}) async {
+    if (_busy) return;
+    final data = ChapterData.decode(track.chaptersJson);
+    // Read now: the editor saves while this page is covered.
+    final chapters = _chapters;
+    final player = _player;
+    final saved = await Navigator.of(context, rootNavigator: true).push<bool>(
+      MaterialPageRoute(
+        builder:
+            (_) => ChapterEditorPage(
+              track: track,
+              initial: data.active,
+              durationMs: _durationOf(track),
+              focusChapterId: focusChapterId,
+              title: data.active.isEmpty ? 'Create chapters' : 'Edit chapters',
+              saveLabel: 'Save',
+              notesById: {
+                for (final c in data.active)
+                  if (c.reviewReasons.isNotEmpty) c.id: c.reviewReasons,
+              },
+              onSave: (list, durationMs) async {
+                final changed = await chapters.replaceActive(
+                  track,
+                  list,
+                  durationMs: durationMs,
+                );
+                if (changed) {
+                  try {
+                    await player.trackChaptersChanged(track);
+                  } catch (_) {}
+                }
+                return changed;
+              },
+            ),
+      ),
+    );
+    if (saved == true) {
+      _showMessage('Chapters saved. Undo last chapter change takes it back.');
+    }
+  }
+
+  Future<void> _rename(Track track, MediaChapter chapter) async {
+    final title = await showDialog<String>(
+      context: context,
+      builder: (_) => _RenameDialog(initial: chapter.title),
+    );
+    final trimmed = title?.trim() ?? '';
+    if (trimmed.isEmpty || trimmed == chapter.title || !mounted) return;
+    await _run(() async {
+      await _chapters.rename(track, chapter.id, trimmed);
+      await _afterEdit(track);
+    });
   }
 
   Future<void> _delete(Track track, MediaChapter chapter) async {
@@ -330,34 +326,102 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
     await _afterEdit(track);
   }
 
-  Future<void> _addToUpNext(Track track, MediaChapter chapter) async {
-    final added = await _player.addToUpNextQueue(track, chapterId: chapter.id);
-    if (added) await _player.startUpNextQueueIfIdle();
+  Future<void> _queue(
+    Track track,
+    MediaChapter chapter, {
+    required bool next,
+  }) async {
+    final player = _player;
+    final added =
+        next
+            ? await player.playNext(track, chapterId: chapter.id)
+            : await player.addToUpNextQueue(track, chapterId: chapter.id);
+    if (added) await player.startUpNextQueueIfIdle();
     _showMessage(
-      added ? 'Added to Up next' : 'This chapter cannot be added to Up next',
+      !added
+          ? 'This chapter cannot be queued'
+          : next
+          ? 'Plays next: "${chapter.title}"'
+          : 'Added to queue: "${chapter.title}"',
     );
   }
 
-  /// "Mark start", then "End chapter here": the dialog opens with both
-  /// times, and after saving the next chapter starts where this one ended.
-  Future<void> _mark(Track track) async {
-    final player = _editingPlayer;
-    if (player == null || _busy) return;
-    final now = player.sourcePosition.inMilliseconds;
-    final start = _markStart;
-    if (start == null) {
-      setState(() => _markStart = now);
-      return;
-    }
-    final wasPlaying = player.isPlaying;
-    await player.pause();
-    if (!mounted) return;
-    setState(() => _markStart = null);
-    final saved = await _edit(track, startMs: start, endMs: now);
-    if (!mounted) return;
-    // Cancelled: the start mark stays, so the end can be marked again.
-    setState(() => _markStart = saved?.endMs ?? start);
-    if (wasPlaying && identical(_editingPlayer, player)) await player.resume();
+  Future<void> _setSkip(Track track, MediaChapter chapter, bool skip) async {
+    await _chapters.setChapterSkip(track, chapter.id, skip);
+    await _afterEdit(track);
+  }
+
+  /// The per-chapter options, laid out like the track options sheet.
+  void _showChapterActions(
+    Track track,
+    MediaChapter chapter, {
+    required bool playable,
+  }) {
+    bool? skipOverride;
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF2A2A2A),
+      isScrollControlled: true,
+      showDragHandle: true,
+      useSafeArea: true,
+      builder:
+          (sheetContext) => StatefulBuilder(
+            builder: (sheetContext, setSheetState) {
+              final data = ChapterData.decode(track.chaptersJson);
+              final skipped = skipOverride ?? data.isSkipped(chapter.id);
+              void close() => Navigator.pop(sheetContext);
+              return ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.85,
+                ),
+                child: _ChapterActionsSheet(
+                  chapter: chapter,
+                  skipped: skipped,
+                  playable: playable,
+                  onPlay: () {
+                    close();
+                    _run(() => _playChapter(track, chapter));
+                  },
+                  onPlayNext: () {
+                    close();
+                    _run(() => _queue(track, chapter, next: true));
+                  },
+                  onAddToQueue: () {
+                    close();
+                    _run(() => _queue(track, chapter, next: false));
+                  },
+                  onSkipChanged: (value) async {
+                    setSheetState(() => skipOverride = value);
+                    try {
+                      await _setSkip(track, chapter, value);
+                    } catch (e) {
+                      if (sheetContext.mounted) {
+                        setSheetState(() => skipOverride = !value);
+                      }
+                      _showMessage('Could not save: $e');
+                    }
+                  },
+                  onAdjust: () {
+                    close();
+                    _openEditor(track, focusChapterId: chapter.id);
+                  },
+                  onRename: () {
+                    close();
+                    _rename(track, chapter);
+                  },
+                  onEditTimes: () {
+                    close();
+                    _editTimes(track, chapter);
+                  },
+                  onDelete: () {
+                    close();
+                    _run(() => _delete(track, chapter));
+                  },
+                ),
+              );
+            },
+          ),
+    );
   }
 
   void _showInfo() {
@@ -374,8 +438,13 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                 'With shuffle on, all chapters of a video play before the '
                 'next video is picked. Shuffle chapters mixes their order '
                 'too.\n\n'
-                'Mark while listening plays the file: tap Mark start where '
-                'a chapter begins and End chapter here where it ends.\n\n'
+                'Edit chapters opens the editor: pick a boundary, listen on '
+                'both sides of it and drag the waveform or nudge it until it '
+                'sits exactly where the song changes. Split here adds a '
+                'boundary where the file is playing.\n\n'
+                'Each chapter\'s menu can play it next, add it to the queue '
+                'or mark it Always skip, so autoplay and shuffle pass over '
+                'it.\n\n'
                 'Changes reach songs that have not started yet. If this '
                 'video is playing now, they apply the next time it starts.',
               ),
@@ -445,7 +514,6 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
   }
 
   Future<void> _openReview(Track track, RecognitionRun run) async {
-    _stopMarking();
     final applied = await Navigator.of(context).push<int>(
       MaterialPageRoute(
         builder: (_) => RecognitionReviewPage(track: track, run: run),
@@ -473,10 +541,6 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
 
   @override
   Widget build(BuildContext context) {
-    final currentId = ref.watch(
-      currentTrackProvider.select((value) => value.valueOrNull?.id),
-    );
-    final marking = _editingPlayer != null && currentId == widget.track.id;
     return StreamBuilder<Track?>(
       stream: _trackRow,
       builder: (context, trackSnapshot) {
@@ -486,19 +550,14 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
           builder: (context, playlistSnapshot) {
             final playlistChapters =
                 playlistSnapshot.data?.playChapters ?? true;
-            return _buildPage(context, track, playlistChapters, marking);
+            return _buildPage(context, track, playlistChapters);
           },
         );
       },
     );
   }
 
-  Widget _buildPage(
-    BuildContext context,
-    Track track,
-    bool playlistChapters,
-    bool marking,
-  ) {
+  Widget _buildPage(BuildContext context, Track track, bool playlistChapters) {
     final data = ChapterData.decode(track.chaptersJson);
     final playable = track.status == 'complete' && track.filePath != null;
     final canFetch =
@@ -531,17 +590,6 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                 )
                 : null,
       ),
-      bottomNavigationBar:
-          marking
-              ? _MarkingPanel(
-                player: _editingPlayer!,
-                markStart: _markStart,
-                busy: _busy,
-                onMark: () => _mark(track),
-                onDiscard: () => setState(() => _markStart = null),
-                onDone: _stopMarking,
-              )
-              : null,
       body: ValueListenableBuilder<double>(
         valueListenable: audioPlayerOverlayHeightNotifier,
         builder:
@@ -590,7 +638,7 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                     icon: Icons.info_outline,
                     text:
                         'This file was replaced, so its old chapters no longer '
-                        'fit. Add or mark new chapters for it.',
+                        'fit. Tap Create chapters to make new ones.',
                   ),
                 const SettingsSectionHeader('Play as'),
                 Padding(
@@ -666,49 +714,59 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                       ),
                       const SizedBox(width: 8),
                       if (data.active.isNotEmpty)
-                        _SourceChip(custom: data.custom != null),
+                        Flexible(
+                          child: _SourceChip(custom: data.custom != null),
+                        ),
                       const Spacer(),
-                      IconButton(
-                        key: const ValueKey('chapters-add'),
-                        tooltip: 'Add chapter',
-                        onPressed:
-                            _busy || !playable ? null : () => _edit(track),
-                        icon: const Icon(Icons.add),
-                      ),
-                      PopupMenuButton<String>(
-                        key: const ValueKey('chapters-more'),
-                        tooltip: 'More',
-                        enabled: !_busy,
-                        onSelected: (value) {
-                          switch (value) {
-                            case 'mark':
-                              _run(() => _startMarking(track));
-                            case 'fetch':
-                              _fetchFromYouTube(track);
-                            case 'revert':
-                              _revertToYouTube(track, data);
-                          }
-                        },
-                        itemBuilder:
-                            (_) => [
-                              PopupMenuItem(
-                                value: 'mark',
-                                enabled: playable && !marking,
-                                child: const Text('Mark while listening'),
-                              ),
-                              if (canFetch)
+                      if (canFetch)
+                        PopupMenuButton<String>(
+                          key: const ValueKey('chapters-more'),
+                          tooltip: 'More',
+                          enabled: !_busy,
+                          onSelected: (value) {
+                            switch (value) {
+                              case 'fetch':
+                                _fetchFromYouTube(track);
+                              case 'revert':
+                                _revertToYouTube(track, data);
+                            }
+                          },
+                          itemBuilder:
+                              (_) => [
                                 const PopupMenuItem(
                                   value: 'fetch',
                                   child: Text('Fetch from YouTube'),
                                 ),
-                              if (canRevert && canFetch)
-                                const PopupMenuItem(
-                                  value: 'revert',
-                                  child: Text('Use YouTube chapters again'),
-                                ),
-                            ],
-                      ),
+                                if (canRevert)
+                                  const PopupMenuItem(
+                                    value: 'revert',
+                                    child: Text('Use YouTube chapters again'),
+                                  ),
+                              ],
+                        )
+                      else
+                        const SizedBox(height: 48),
                     ],
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+                  child: Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: FilledButton.tonalIcon(
+                      key: const ValueKey('chapters-edit'),
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size(0, 48),
+                      ),
+                      onPressed:
+                          _busy || !playable ? null : () => _openEditor(track),
+                      icon: Icon(data.active.isEmpty ? Icons.add : Icons.tune),
+                      label: Text(
+                        data.active.isEmpty
+                            ? 'Create chapters'
+                            : 'Edit chapters',
+                      ),
+                    ),
                   ),
                 ),
                 if (data.undoChapters != null)
@@ -737,10 +795,11 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                     padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
                     child: Text(
                       canFetch
-                          ? 'No chapters yet. Fetch them from YouTube, or add '
-                              'your own with + or Mark while listening.'
-                          : 'No chapters yet. Add your own with + or Mark '
-                              'while listening.',
+                          ? 'No chapters yet. Fetch them from YouTube, or tap '
+                              'Create chapters to make your own while '
+                              'listening.'
+                          : 'No chapters yet. Tap Create chapters to make '
+                              'your own while listening.',
                       style: const TextStyle(color: Color(0xFF999999)),
                     ),
                   ),
@@ -753,23 +812,16 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                           key: ValueKey('chapter-${chapter.id}'),
                           number: i + 1,
                           chapter: chapter,
-                          enabled: !_busy && playable,
-                          onTap:
-                              () => _run(() async {
-                                final player = _editingPlayer;
-                                if (marking && player != null) {
-                                  // Marking: jump there on the timeline.
-                                  await player.seekTo(
-                                    Duration(milliseconds: chapter.startMs),
-                                  );
-                                } else {
-                                  await _playChapter(track, chapter);
-                                }
-                              }),
-                          onEdit: () => _edit(track, chapter: chapter),
-                          onAddToUpNext:
-                              () => _run(() => _addToUpNext(track, chapter)),
-                          onDelete: () => _run(() => _delete(track, chapter)),
+                          skipped: data.isSkipped(chapter.id),
+                          playable: playable,
+                          enabled: !_busy,
+                          onTap: () => _run(() => _playChapter(track, chapter)),
+                          onMore:
+                              () => _showChapterActions(
+                                track,
+                                chapter,
+                                playable: playable,
+                              ),
                         ),
                     ],
                   ),
@@ -831,6 +883,8 @@ class _SourceChip extends StatelessWidget {
       ),
       child: Text(
         custom ? 'Your own' : 'From YouTube',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
         style: const TextStyle(color: Color(0xFFBBBBBB), fontSize: 12),
       ),
     );
@@ -945,9 +999,18 @@ class _RecognitionSection extends ConsumerWidget {
         data.active.any(
           (c) => run.proposals.any((p) => c.id.startsWith('${p.id}-')),
         );
+    // A run an older decoder measured in the wrong place is never offered
+    // for review, applied or not; chapters already applied from it stay.
     final runHint =
         run == null || scan != null
             ? null
+            : run.decoderOutdated
+            ? runShown
+                ? 'The automatic chapters from the last scan were made with '
+                    'an older, less accurate scan of MP3 files, so their '
+                    'timings can be off by several seconds. Recognize again '
+                    'for exact timings.'
+                : RecognitionRun.decoderOutdatedMessage
             : stale
             ? applied && !runShown
                 ? 'These results were taken back. Recognize again rebuilds '
@@ -1088,20 +1151,22 @@ class _ChapterRow extends StatelessWidget {
     super.key,
     required this.number,
     required this.chapter,
+    required this.skipped,
+    required this.playable,
     required this.enabled,
     required this.onTap,
-    required this.onEdit,
-    required this.onAddToUpNext,
-    required this.onDelete,
+    required this.onMore,
   });
 
   final int number;
   final MediaChapter chapter;
+
+  /// Marked Always skip: autoplay passes over it.
+  final bool skipped;
+  final bool playable;
   final bool enabled;
   final VoidCallback onTap;
-  final VoidCallback onEdit;
-  final VoidCallback onAddToUpNext;
-  final VoidCallback onDelete;
+  final VoidCallback onMore;
 
   @override
   Widget build(BuildContext context) {
@@ -1123,172 +1188,129 @@ class _ChapterRow extends StatelessWidget {
         ),
       ),
       title: Text(chapter.title, maxLines: 2, overflow: TextOverflow.ellipsis),
-      subtitle: Text(
-        '${chapterTimestamp(chapter.startMs)} – '
-        '${chapterTimestamp(chapter.endMs)} · '
-        '${chapterTimestamp(chapter.duration.inMilliseconds)}'
-        '$origin${review == null ? '' : '\n$review'}',
+      subtitle: Text.rich(
+        TextSpan(
+          children: [
+            if (skipped)
+              const TextSpan(
+                text: 'Always skip · ',
+                style: TextStyle(color: Color(0xFFE57373)),
+              ),
+            TextSpan(
+              text:
+                  '${chapterTimestamp(chapter.startMs)} – '
+                  '${chapterTimestamp(chapter.endMs)} · '
+                  '${chapterTimestamp(chapter.duration.inMilliseconds)}'
+                  '$origin${review == null ? '' : '\n$review'}',
+            ),
+          ],
+        ),
       ),
       isThreeLine: review != null,
-      enabled: enabled,
+      enabled: enabled && playable,
       onTap: onTap,
-      trailing: PopupMenuButton<String>(
+      trailing: IconButton(
         tooltip: 'Chapter options',
-        enabled: enabled,
-        onSelected: (value) {
-          switch (value) {
-            case 'edit':
-              onEdit();
-            case 'queue':
-              onAddToUpNext();
-            case 'delete':
-              onDelete();
-          }
-        },
-        itemBuilder:
-            (_) => const [
-              PopupMenuItem(value: 'edit', child: Text('Edit')),
-              PopupMenuItem(value: 'queue', child: Text('Add to Up next')),
-              PopupMenuItem(value: 'delete', child: Text('Delete')),
-            ],
+        onPressed: enabled ? onMore : null,
+        icon: const Icon(Icons.more_vert),
       ),
     );
   }
 }
 
-/// The marking timeline. Only this panel follows the playing position, so
-/// the rest of the page does not rebuild several times a second.
-class _MarkingPanel extends ConsumerStatefulWidget {
-  const _MarkingPanel({
-    required this.player,
-    required this.markStart,
-    required this.busy,
-    required this.onMark,
-    required this.onDiscard,
-    required this.onDone,
+const _sheetTitleStyle = TextStyle(color: Colors.white);
+const _sheetSubtitleStyle = TextStyle(color: Color(0xFF888888));
+
+/// Play, queue, Always skip and editing for one chapter.
+class _ChapterActionsSheet extends StatelessWidget {
+  const _ChapterActionsSheet({
+    required this.chapter,
+    required this.skipped,
+    required this.playable,
+    required this.onPlay,
+    required this.onPlayNext,
+    required this.onAddToQueue,
+    required this.onSkipChanged,
+    required this.onAdjust,
+    required this.onRename,
+    required this.onEditTimes,
+    required this.onDelete,
   });
 
-  final PlaybackService player;
-  final int? markStart;
-  final bool busy;
-  final VoidCallback onMark;
-  final VoidCallback onDiscard;
-  final VoidCallback onDone;
-
-  @override
-  ConsumerState<_MarkingPanel> createState() => _MarkingPanelState();
-}
-
-class _MarkingPanelState extends ConsumerState<_MarkingPanel> {
-  /// While dragging, the slider shows the finger, not the player.
-  double? _dragMs;
-
-  /// After a seek, the target is shown until the player's position gets
-  /// there, so the thumb does not jump back for a moment.
-  double? _heldMs;
-  DateTime? _heldAt;
-
-  bool _holding(double positionMs) {
-    final held = _heldMs, at = _heldAt;
-    if (held == null || at == null) return false;
-    if ((positionMs - held).abs() < 1500) return false;
-    return DateTime.now().difference(at) < const Duration(seconds: 2);
-  }
+  final MediaChapter chapter;
+  final bool skipped;
+  final bool playable;
+  final VoidCallback onPlay;
+  final VoidCallback onPlayNext;
+  final VoidCallback onAddToQueue;
+  final ValueChanged<bool> onSkipChanged;
+  final VoidCallback onAdjust;
+  final VoidCallback onRename;
+  final VoidCallback onEditTimes;
+  final VoidCallback onDelete;
 
   @override
   Widget build(BuildContext context) {
-    final position =
-        ref.watch(positionProvider).valueOrNull ?? widget.player.sourcePosition;
-    var duration = ref.watch(durationProvider).valueOrNull ?? Duration.zero;
-    if (duration <= Duration.zero) duration = widget.player.sourceDuration;
-    final playing = ref.watch(isPlayingProvider).valueOrNull ?? false;
-    final maxMs =
-        duration.inMilliseconds > 0 ? duration.inMilliseconds.toDouble() : 1.0;
-    final positionMs = position.inMilliseconds.toDouble();
-    final shownMs = (_dragMs ?? (_holding(positionMs) ? _heldMs! : positionMs))
-        .clamp(0.0, maxMs);
-    final markStart = widget.markStart;
+    Widget tile({
+      required Key key,
+      required IconData icon,
+      required String title,
+      String? subtitle,
+      Color iconColor = Colors.white70,
+      VoidCallback? onTap,
+    }) {
+      return ListTile(
+        key: key,
+        leading: Icon(
+          icon,
+          color: onTap == null ? const Color(0xFF666666) : iconColor,
+        ),
+        title: Text(title, style: _sheetTitleStyle),
+        subtitle:
+            subtitle == null
+                ? null
+                : Text(
+                  subtitle,
+                  style: _sheetSubtitleStyle,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+        enabled: onTap != null,
+        onTap: onTap,
+      );
+    }
 
-    return Material(
-      color: const Color(0xFF2A2A2A),
-      elevation: 8,
-      child: SafeArea(
-        top: false,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+    const queueColor = Color(0xFF64B5F6);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+          child: Row(
             children: [
-              Row(
-                children: [
-                  const SizedBox(width: 8),
-                  const Expanded(
-                    child: Text(
-                      'Mark while listening',
-                      style: TextStyle(fontWeight: FontWeight.w600),
-                    ),
-                  ),
-                  TextButton(
-                    key: const ValueKey('chapters-marking-done'),
-                    onPressed: widget.onDone,
-                    child: const Text('Done'),
-                  ),
-                ],
-              ),
-              Slider(
-                value: shownMs,
-                max: maxMs,
-                onChangeStart: (v) => setState(() => _dragMs = v),
-                onChanged: (v) => setState(() => _dragMs = v),
-                onChangeEnd: (v) {
-                  setState(() {
-                    _dragMs = null;
-                    _heldMs = v;
-                    _heldAt = DateTime.now();
-                  });
-                  unawaited(
-                    widget.player.seekTo(Duration(milliseconds: v.round())),
-                  );
-                },
-              ),
-              // Times on their own line, so the buttons fit on narrow
-              // phones and with large text.
-              Row(
-                children: [
-                  IconButton(
-                    tooltip: playing ? 'Pause' : 'Play',
-                    onPressed: () => widget.player.togglePlayPause(),
-                    icon: Icon(playing ? Icons.pause : Icons.play_arrow),
-                  ),
-                  Expanded(
-                    child: Text(
-                      '${chapterTimestamp(shownMs.round())} / '
-                      '${chapterTimestamp(duration.inMilliseconds)}'
-                      '${markStart == null ? '' : ' · starts at ${chapterTimestamp(markStart)}'}',
-                      style: const TextStyle(fontSize: 13),
+              const Icon(Icons.bookmark_outline, color: Colors.white70),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      chapter.title,
+                      key: const ValueKey('chapter-actions-title'),
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
-                  ),
-                ],
-              ),
-              Align(
-                alignment: AlignmentDirectional.centerEnd,
-                child: Wrap(
-                  alignment: WrapAlignment.end,
-                  spacing: 8,
-                  children: [
-                    if (markStart != null)
-                      TextButton(
-                        onPressed: widget.busy ? null : widget.onDiscard,
-                        child: const Text('Discard'),
-                      ),
-                    FilledButton(
-                      key: const ValueKey('chapters-mark'),
-                      onPressed: widget.busy ? null : widget.onMark,
-                      child: Text(
-                        markStart == null ? 'Mark start' : 'End chapter here',
-                      ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '${chapterTimestamp(chapter.startMs)} – '
+                      '${chapterTimestamp(chapter.endMs)} · '
+                      '${chapterTimestamp(chapter.duration.inMilliseconds)}',
+                      style: _sheetSubtitleStyle,
                     ),
                   ],
                 ),
@@ -1296,9 +1318,137 @@ class _MarkingPanelState extends ConsumerState<_MarkingPanel> {
             ],
           ),
         ),
-      ),
+        const Divider(height: 1, color: Color(0xFF3A3A3A)),
+        Flexible(
+          child: ListView(
+            key: const ValueKey('chapter-actions-list'),
+            shrinkWrap: true,
+            padding: const EdgeInsets.only(bottom: 16),
+            children: [
+              tile(
+                key: const ValueKey('chapter-actions-play'),
+                icon: Icons.play_arrow,
+                title: 'Play',
+                subtitle:
+                    skipped
+                        ? 'Plays it even though it is skipped'
+                        : 'Plays from this chapter on',
+                onTap: playable ? onPlay : null,
+              ),
+              tile(
+                key: const ValueKey('chapter-actions-play-next'),
+                icon: Icons.playlist_play,
+                iconColor: queueColor,
+                title: 'Play next',
+                subtitle:
+                    skipped
+                        ? 'Turn off Always skip to queue it'
+                        : 'Plays right after the current song',
+                onTap: playable && !skipped ? onPlayNext : null,
+              ),
+              tile(
+                key: const ValueKey('chapter-actions-add-to-queue'),
+                icon: Icons.queue_music,
+                iconColor: queueColor,
+                title: 'Add to queue',
+                subtitle:
+                    skipped
+                        ? 'Turn off Always skip to queue it'
+                        : 'Plays after everything in Up next',
+                onTap: playable && !skipped ? onAddToQueue : null,
+              ),
+              SwitchListTile(
+                key: const ValueKey('chapter-actions-always-skip'),
+                secondary: Icon(
+                  Icons.skip_next,
+                  color: skipped ? const Color(0xFFE57373) : Colors.white70,
+                ),
+                title: const Text('Always skip', style: _sheetTitleStyle),
+                subtitle: const Text(
+                  'Autoplay and shuffle pass over it; tap it to play it '
+                  'anyway',
+                  style: _sheetSubtitleStyle,
+                ),
+                value: skipped,
+                onChanged: onSkipChanged,
+              ),
+              const Divider(height: 1, color: Color(0xFF3A3A3A)),
+              tile(
+                key: const ValueKey('chapter-actions-adjust'),
+                icon: Icons.tune,
+                title: 'Adjust boundaries…',
+                subtitle: 'Move its start and end while listening',
+                onTap: playable ? onAdjust : null,
+              ),
+              tile(
+                key: const ValueKey('chapter-actions-rename'),
+                icon: Icons.edit,
+                title: 'Rename…',
+                onTap: onRename,
+              ),
+              tile(
+                key: const ValueKey('chapter-actions-edit-times'),
+                icon: Icons.schedule,
+                title: 'Edit times…',
+                subtitle: 'Type the exact start and end',
+                onTap: onEditTimes,
+              ),
+              tile(
+                key: const ValueKey('chapter-actions-delete'),
+                icon: Icons.delete_outline,
+                iconColor: const Color(0xFFE57373),
+                title: 'Delete',
+                subtitle: 'Leaves a gap; Undo brings it back',
+                onTap: onDelete,
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
+}
+
+class _RenameDialog extends StatefulWidget {
+  const _RenameDialog({required this.initial});
+
+  final String initial;
+
+  @override
+  State<_RenameDialog> createState() => _RenameDialogState();
+}
+
+class _RenameDialogState extends State<_RenameDialog> {
+  late final _controller = TextEditingController(text: widget.initial);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Rename chapter'),
+    content: TextField(
+      key: const ValueKey('chapter-rename'),
+      controller: _controller,
+      autofocus: true,
+      textCapitalization: TextCapitalization.sentences,
+      decoration: const InputDecoration(labelText: 'Title'),
+      onSubmitted: (value) => Navigator.pop(context, value.trim()),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: () => Navigator.pop(context, _controller.text.trim()),
+        child: const Text('Save'),
+      ),
+    ],
+  );
 }
 
 class ChapterEditDialog extends StatefulWidget {

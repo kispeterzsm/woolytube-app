@@ -36,13 +36,6 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
                     ),
                   ) ??
                   track;
-              // Not offered when the video is in Temporary or already
-              // downloaded as video; unknown until loaded counts as blocked.
-              final saveToTemporaryBlocked = sheetRef.watch(
-                temporarySaveBlockedVideoIdsProvider.select(
-                  (ids) => ids.valueOrNull?.contains(live.videoId) ?? true,
-                ),
-              );
               return StatefulBuilder(
                 builder: (sheetContext, setSheetState) {
                   final alwaysSkip = alwaysSkipOverride ?? live.alwaysSkip;
@@ -63,7 +56,6 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
                             children: _trackActionTiles(
                               sheetContext,
                               live,
-                              saveToTemporaryBlocked: saveToTemporaryBlocked,
                               alwaysSkip: alwaysSkip,
                               onAlwaysSkipChanged: (value) async {
                                 setSheetState(() => alwaysSkipOverride = value);
@@ -102,7 +94,6 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
   List<Widget> _trackActionTiles(
     BuildContext sheetContext,
     Track track, {
-    required bool saveToTemporaryBlocked,
     required bool alwaysSkip,
     required ValueChanged<bool> onAlwaysSkipChanged,
   }) {
@@ -131,11 +122,6 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
         !track.isLocalReplacement &&
         !isDownloading;
     final inTemporaryPlaylist = playlist?.isTemporary ?? false;
-    final canSaveToTemporary =
-        playlist != null &&
-        !inTemporaryPlaylist &&
-        isYouTubeVideo &&
-        !saveToTemporaryBlocked;
 
     void close() => Navigator.pop(sheetContext);
 
@@ -282,7 +268,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
         key: const ValueKey('track-actions-chapters'),
         icon: Icons.list_alt,
         title: 'Chapters…',
-        subtitle: 'Play, mark and edit chapters',
+        subtitle: 'Play, edit and skip chapters',
         onTap: () {
           close();
           Navigator.of(
@@ -412,17 +398,6 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
         ),
       if (isYouTubeVideo) ...[
         const _SheetSection('YouTube'),
-        if (canSaveToTemporary)
-          tile(
-            key: const ValueKey('track-actions-save-temporary'),
-            icon: Icons.watch_later_outlined,
-            title: 'Save to Temporary playlist',
-            subtitle: 'Download this video for watching offline',
-            onTap: () {
-              close();
-              unawaited(_saveToTemporary(track));
-            },
-          ),
         tile(
           key: const ValueKey('track-actions-open-youtube'),
           icon: Icons.open_in_new,
@@ -1030,24 +1005,6 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
     );
     if (confirmed != true || !mounted) return;
     await _startTrackDownload(track);
-  }
-
-  /// Saves this video (as a video, whatever this playlist downloads) to the
-  /// temporary playlist and downloads it.
-  Future<void> _saveToTemporary(Track track) async {
-    final messenger = ScaffoldMessenger.of(context);
-    String message;
-    try {
-      message = await saveVideoToTemporary(context, ref, {
-        'id': track.videoId,
-        'title': track.title,
-        'thumbnail': track.thumbnailUrl,
-        'duration': track.durationSeconds,
-      });
-    } catch (e) {
-      message = 'Could not save: ${_errorText(e)}';
-    }
-    messenger.showSnackBar(SnackBar(content: Text(message)));
   }
 
   /// Takes a video out of the temporary playlist and deletes its file.

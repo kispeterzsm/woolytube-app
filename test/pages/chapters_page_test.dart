@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:woolytube/database/database.dart';
+import 'package:woolytube/pages/chapter_editor_page.dart';
 import 'package:woolytube/pages/chapters_page.dart';
+import 'package:woolytube/providers/chapter_editor_providers.dart';
 import 'package:woolytube/providers/playback_providers.dart';
 import 'package:woolytube/providers/providers.dart';
 import 'package:woolytube/services/chapter_playback.dart';
@@ -14,19 +17,30 @@ import 'package:woolytube/services/playback_service.dart';
 import 'package:woolytube/services/ytdlp_service.dart';
 
 import '../helpers/test_database.dart';
+import 'chapter_editor_fakes.dart';
 
 void main() {
   late AppDatabase db;
   late _Player player;
+  late FakePreviewFactory previews;
+  late Directory dir;
+  late String mediaPath;
 
   setUp(() {
     db = openTestDatabase();
     player = _Player();
+    previews = FakePreviewFactory();
+    ChapterEditorPage.resetSessionChoices();
+    // The editor plays the real file, so it has to exist.
+    dir = Directory.systemTemp.createTempSync('woolytube-chapters-page-');
+    mediaPath = '${dir.path}/mix.mp3';
+    File(mediaPath).writeAsBytesSync([1, 2, 3]);
   });
 
   tearDown(() async {
     await player.close();
     await db.close();
+    dir.deleteSync(recursive: true);
   });
 
   const youTubeChapters = ChapterData(
@@ -56,7 +70,7 @@ void main() {
       index: 2,
       title: 'Long mix',
       status: 'complete',
-      filePath: '/music/mix',
+      filePath: mediaPath,
       durationSeconds: durationSeconds,
       isLocalReplacement: isLocalReplacement,
       chaptersJson: chapters?.encode(),
@@ -73,6 +87,8 @@ void main() {
           databaseProvider.overrideWithValue(db),
           playbackServiceProvider.overrideWithValue(player),
           chapterServiceProvider.overrideWithValue(_Chapters(db)),
+          chapterPreviewPlayerFactoryProvider.overrideWithValue(previews.call),
+          waveformServiceProvider.overrideWithValue(fakeWaveforms()),
         ],
         child: MaterialApp(
           theme: ThemeData.dark(),
@@ -91,100 +107,6 @@ void main() {
 
   Future<ChapterData> storedChapters(int id) async =>
       ChapterData.decode((await db.getTrack(id))!.chaptersJson);
-
-  testWidgets('marking keeps the queue and starts the next chapter where the '
-      'last one ended', (tester) async {
-    final track = await addTrack();
-    await pumpPage(tester, track);
-
-    await tester.tap(find.byKey(const ValueKey('chapters-more')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Mark while listening'));
-    await tester.pumpAndSettle();
-
-    expect(player.editing, track.id);
-    expect(player.editingQueue!.map((t) => t.title), ['Other', 'Long mix']);
-    expect(player.playedTracks, isEmpty);
-
-    player.sourcePositionValue = const Duration(seconds: 10);
-    await tester.tap(find.byKey(const ValueKey('chapters-mark')));
-    await tester.pumpAndSettle();
-    expect(find.textContaining('starts at 0:10'), findsOneWidget);
-
-    player.sourcePositionValue = const Duration(seconds: 70);
-    await tester.tap(find.text('End chapter here'));
-    await tester.pumpAndSettle();
-    expect(find.text('Add chapter'), findsOneWidget);
-    await tester.enterText(find.byKey(const ValueKey('chapter-title')), 'One');
-    await tester.tap(find.text('Save'));
-    await tester.pumpAndSettle();
-
-    final saved = await storedChapters(track.id);
-    expect(saved.active.single.title, 'One');
-    expect(saved.active.single.startMs, 10000);
-    expect(saved.active.single.endMs, 70000);
-    expect(player.chaptersChanged, [track.id]);
-    // The next chapter is already started at the end of this one.
-    expect(find.textContaining('starts at 1:10'), findsOneWidget);
-
-    await tester.tap(find.byKey(const ValueKey('chapters-marking-done')));
-    await tester.pumpAndSettle();
-    expect(player.editing, isNull);
-    await unmount(tester);
-  });
-
-  testWidgets('cancelling "End chapter here" keeps the start mark and goes '
-      'on playing', (tester) async {
-    final track = await addTrack();
-    await pumpPage(tester, track);
-    await tester.tap(find.byKey(const ValueKey('chapters-more')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Mark while listening'));
-    await tester.pumpAndSettle();
-
-    player.sourcePositionValue = const Duration(seconds: 10);
-    await tester.tap(find.byKey(const ValueKey('chapters-mark')));
-    await tester.pumpAndSettle();
-    player
-      ..playing = true
-      ..sourcePositionValue = const Duration(seconds: 70);
-    await tester.tap(find.text('End chapter here'));
-    await tester.pumpAndSettle();
-    expect(player.pauses, 1);
-    await tester.tap(find.text('Cancel'));
-    await tester.pumpAndSettle();
-
-    expect(find.textContaining('starts at 0:10'), findsOneWidget);
-    expect(find.text('End chapter here'), findsOneWidget);
-    expect(player.resumes, 1);
-    expect((await storedChapters(track.id)).active, isEmpty);
-    await unmount(tester);
-  });
-
-  testWidgets('the marking panel fits a narrow phone', (tester) async {
-    final track = await addTrack();
-    await pumpPage(tester, track);
-    await tester.tap(find.byKey(const ValueKey('chapters-more')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Mark while listening'));
-    await tester.pumpAndSettle();
-    player.sourcePositionValue = const Duration(minutes: 1, seconds: 10);
-    await tester.tap(find.byKey(const ValueKey('chapters-mark')));
-    await tester.pumpAndSettle();
-
-    tester.view.physicalSize = const Size(320, 2000);
-    await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
-    expect(find.text('End chapter here'), findsOneWidget);
-    expect(find.text('Discard'), findsOneWidget);
-    // The times keep a readable width instead of being squeezed between
-    // the buttons.
-    expect(
-      tester.getSize(find.textContaining('starts at 1:10')).width,
-      greaterThan(200),
-    );
-    await unmount(tester);
-  });
 
   testWidgets('"Play as" saves the choice and explains the default', (
     tester,
@@ -234,6 +156,9 @@ void main() {
   testWidgets('Undo still brings a deleted chapter back after leaving the '
       'page', (tester) async {
     final track = await addTrack(chapters: youTubeChapters);
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
     final navigatorKey = GlobalKey<NavigatorState>();
     await tester.pumpWidget(
       ProviderScope(
@@ -317,49 +242,218 @@ void main() {
     await unmount(tester);
   });
 
-  testWidgets('adding a chapter to a file of unknown length explains why it '
-      'cannot, before any typing', (tester) async {
+  Future<void> openChapterOptions(WidgetTester tester, String id) async {
+    await tester.tap(
+      find.descendant(
+        of: find.byKey(ValueKey('chapter-$id')),
+        matching: find.byTooltip('Chapter options'),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
+  /// Ends a preview the editor started, so frames stop and the tree
+  /// settles.
+  Future<void> finishPreview(WidgetTester tester) async {
+    await tester.pump(const Duration(milliseconds: 200));
+    previews.last.finish();
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('Edit chapters opens the editor on the YouTube chapters and '
+      'saves the result as one change Undo takes back', (tester) async {
+    final track = await addTrack(chapters: youTubeChapters);
+    await pumpPage(tester, track);
+
+    expect(find.text('Edit chapters'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('chapters-edit')));
+    await tester.pumpAndSettle();
+    expect(find.byType(ChapterEditorPage), findsOneWidget);
+    expect(find.text('Boundary 2 of 3'), findsOneWidget);
+    expect(previews.last.filePath, mediaPath);
+
+    await tester.tap(find.byKey(const ValueKey('editor-nudge-1000')));
+    await finishPreview(tester);
+    await tester.tap(find.byKey(const ValueKey('editor-save')));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(ChapterEditorPage), findsNothing);
+    expect(
+      find.text('Chapters saved. Undo last chapter change takes it back.'),
+      findsOneWidget,
+    );
+    final saved = await storedChapters(track.id);
+    expect(saved.active.map((c) => (c.id, c.startMs, c.endMs)), [
+      ('a', 0, 61000),
+      ('b', 61000, 180000),
+    ]);
+    expect(saved.active.every((c) => c.manuallyEdited), isTrue);
+    expect(player.chaptersChanged, [track.id]);
+    expect(previews.last.disposed, isTrue);
+
+    await tester.tap(find.byKey(const ValueKey('chapters-undo')));
+    await tester.pumpAndSettle();
+    final undone = await storedChapters(track.id);
+    expect(undone.custom, isNull);
+    expect(undone.active.first.endMs, 60000);
+    await unmount(tester);
+  });
+
+  testWidgets('Create chapters works on a file of unknown length', (
+    tester,
+  ) async {
     final track = await addTrack(
       isLocalReplacement: true,
       durationSeconds: null,
     );
     await pumpPage(tester, track);
+    expect(find.textContaining('Tap Create chapters'), findsOneWidget);
 
-    await tester.tap(find.byKey(const ValueKey('chapters-add')));
+    await tester.tap(find.text('Create chapters'));
     await tester.pumpAndSettle();
-    expect(find.byType(ChapterEditDialog), findsNothing);
-    expect(
-      find.textContaining('length of this file is not known'),
-      findsOneWidget,
-    );
+    expect(find.text('No chapters yet'), findsOneWidget);
+    // The preview player measured the file.
+    await tester.tap(find.byKey(const ValueKey('editor-start-scratch')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('editor-save')));
+    await tester.pumpAndSettle();
+
+    final saved = await storedChapters(track.id);
+    expect(saved.active.map((c) => (c.title, c.startMs, c.endMs)), [
+      ('Chapter 1', 0, 180000),
+    ]);
+    expect(saved.active.single.origin, ChapterOrigin.user);
     await unmount(tester);
   });
 
-  testWidgets('a new chapter is prefilled after the last one', (tester) async {
-    final track = await addTrack(
-      chapters: youTubeChapters.withCustom([
-        const MediaChapter(id: 'c', title: 'First', startMs: 0, endMs: 50000),
-      ]),
-    );
+  testWidgets('a chapter can be played next, queued and marked Always skip', (
+    tester,
+  ) async {
+    final track = await addTrack(chapters: youTubeChapters);
     await pumpPage(tester, track);
 
-    await tester.tap(find.byKey(const ValueKey('chapters-add')));
+    await openChapterOptions(tester, 'b');
+    expect(find.byKey(const ValueKey('chapter-actions-title')), findsOneWidget);
+    await tester.tap(find.text('Play next'));
     await tester.pumpAndSettle();
+    expect(player.queued, [(track.id, 'b', true)]);
+    expect(player.idleStarts, 1);
+    expect(find.text('Plays next: "Song"'), findsOneWidget);
+
+    await openChapterOptions(tester, 'b');
+    await tester.tap(find.text('Add to queue'));
+    await tester.pumpAndSettle();
+    expect(player.queued.last, (track.id, 'b', false));
+
+    await openChapterOptions(tester, 'b');
+    await tester.tap(find.byKey(const ValueKey('chapter-actions-always-skip')));
+    await tester.pumpAndSettle();
+    final stored = await storedChapters(track.id);
+    expect(stored.isSkipped('b'), isTrue);
+    // A setting, not an edit: the YouTube chapters are still followed.
+    expect(stored.custom, isNull);
+    expect(player.chaptersChanged, [track.id]);
+    expect(find.text('Turn off Always skip to queue it'), findsNWidgets(2));
     expect(
       tester
-          .widget<TextField>(find.byKey(const ValueKey('chapter-start')))
-          .controller!
-          .text,
-      '0:50',
+          .widget<ListTile>(
+            find.byKey(const ValueKey('chapter-actions-play-next')),
+          )
+          .enabled,
+      isFalse,
     );
+    // Play still plays it: the user chose it.
+    expect(
+      tester
+          .widget<ListTile>(find.byKey(const ValueKey('chapter-actions-play')))
+          .enabled,
+      isTrue,
+    );
+
+    await tester.tapAt(const Offset(400, 20));
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('chapter-b')),
+        matching: find.textContaining('Always skip'),
+      ),
+      findsOneWidget,
+    );
+
+    await openChapterOptions(tester, 'b');
+    await tester.tap(find.byKey(const ValueKey('chapter-actions-always-skip')));
+    await tester.pumpAndSettle();
+    expect((await storedChapters(track.id)).isSkipped('b'), isFalse);
+    await unmount(tester);
+  });
+
+  testWidgets('Adjust boundaries opens the editor on that chapter', (
+    tester,
+  ) async {
+    final track = await addTrack(chapters: youTubeChapters);
+    await pumpPage(tester, track);
+
+    await openChapterOptions(tester, 'b');
+    await tester.tap(find.text('Adjust boundaries…'));
+    await tester.pumpAndSettle();
+    expect(find.text('Boundary 2 of 3'), findsOneWidget);
+    expect(find.text('Starts'), findsOneWidget);
+
+    // Unchanged: back leaves without asking.
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.byType(ChapterEditorPage), findsNothing);
+    expect(player.chaptersChanged, isEmpty);
+    await unmount(tester);
+  });
+
+  testWidgets('a chapter can be renamed and its times typed', (tester) async {
+    final track = await addTrack(chapters: youTubeChapters);
+    await pumpPage(tester, track);
+
+    await openChapterOptions(tester, 'a');
+    await tester.tap(find.text('Edit times…'));
+    await tester.pumpAndSettle();
+    expect(find.byType(ChapterEditDialog), findsOneWidget);
     expect(
       tester
           .widget<TextField>(find.byKey(const ValueKey('chapter-end')))
           .controller!
           .text,
-      '3:00',
+      '1:00',
     );
-    await tester.tap(find.text('Cancel'));
+    await tester.enterText(find.byKey(const ValueKey('chapter-end')), '0:50');
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect((await storedChapters(track.id)).active.first.endMs, 50000);
+
+    await openChapterOptions(tester, 'b');
+    await tester.tap(find.text('Rename…'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('chapter-rename')),
+      'Tune',
+    );
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    final renamed = (await storedChapters(track.id)).active.last;
+    expect(renamed.title, 'Tune');
+    expect(renamed.manuallyEdited, isTrue);
+    expect(player.chaptersChanged, [track.id, track.id]);
+    await unmount(tester);
+  });
+
+  testWidgets('the chapter list fits a narrow phone', (tester) async {
+    final track = await addTrack(
+      chapters: youTubeChapters.withChapterSkip('b', true),
+    );
+    await pumpPage(tester, track);
+    tester.view.physicalSize = const Size(320, 2000);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    await openChapterOptions(tester, 'b');
+    expect(tester.takeException(), isNull);
+    await tester.tapAt(const Offset(160, 20));
     await tester.pumpAndSettle();
     await unmount(tester);
   });
@@ -381,11 +475,13 @@ class _Player implements PlaybackService {
   int resumes = 0;
   final seeks = <Duration>[];
   final chapterJumps = <(int, String)>[];
-  int? editing;
-  List<Track>? editingQueue;
   Duration sourcePositionValue = Duration.zero;
   final chaptersChanged = <int>[];
   final playedTracks = <(int, String?, int)>[];
+
+  /// (track id, chapter id, first) per Play next / Add to queue.
+  final queued = <(int, String?, bool)>[];
+  int idleStarts = 0;
 
   Future<void> close() => _current.close();
 
@@ -425,18 +521,24 @@ class _Player implements PlaybackService {
   }
 
   @override
-  Future<void> beginChapterEditing(
-    Track track, [
-    List<Track>? playlistTracks,
-  ]) async {
-    editing = track.id;
-    editingQueue = playlistTracks;
-    current = track;
-    _current.add(track);
+  Future<bool> playNext(Track track, {String? chapterId}) =>
+      addToUpNextQueue(track, chapterId: chapterId, first: true);
+
+  @override
+  Future<bool> addToUpNextQueue(
+    Track track, {
+    String? chapterId,
+    bool first = false,
+  }) async {
+    queued.add((track.id, chapterId, first));
+    return true;
   }
 
   @override
-  void endChapterEditing() => editing = null;
+  Future<bool> startUpNextQueueIfIdle() async {
+    idleStarts++;
+    return false;
+  }
 
   @override
   Future<void> trackChaptersChanged(Track track) async {

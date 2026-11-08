@@ -96,6 +96,7 @@ void main() {
           checkedAt: DateTime.utc(2024, 2, 3, 4, 5, 6),
           durationMs: 200000,
           shuffleChapters: true,
+          skippedChapterIds: const {'mine'},
         ).encode();
     final song = await insertTestTrack(
       db,
@@ -244,6 +245,37 @@ void main() {
         reason: before.videoId,
       );
     }
+  });
+
+  test('a stored length of 0 imports as unknown', () async {
+    final playlist = await insertTestPlaylist(
+      db,
+      url: 'https://www.youtube.com/playlist?list=PLzero',
+      name: 'Round Trip',
+      outputPath: folder,
+    );
+    await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      videoId: 'local',
+      title: 'Local mix',
+      filePath: await write(p.join(folder, '00001_Local mix.mp3')),
+      durationSeconds: 0,
+      status: 'complete',
+      isLocalReplacement: true,
+    );
+    await metadata.writeMetadata(
+      await db.getPlaylist(playlist.id),
+      await db.getTracksForPlaylist(playlist.id),
+    );
+
+    final fresh = openTestDatabase();
+    addTearDown(fresh.close);
+    final restore = MetadataService(fresh);
+    final found = await restore.scanDirectory(tempDir.path);
+    final newId = await restore.importPlaylist(found.single);
+    final imported = await fresh.getTracksForPlaylist(newId);
+    expect(imported.single.durationSeconds, isNull);
   });
 
   test('an old version-1 sidecar still imports, with skip as the segment '

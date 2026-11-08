@@ -165,6 +165,12 @@ class ChapterData {
   final int recognitionEpoch;
   final String? lastRecognitionRunId;
 
+  /// Chapters that automatic playback passes over ("Always skip"), by id.
+  /// Kept apart from the chapter lists so followed YouTube chapters can be
+  /// skipped without copying them into [custom], and so it is not a chapter
+  /// edit (undo leaves it alone). Ids no longer in [active] are ignored.
+  final Set<String> skippedChapterIds;
+
   const ChapterData({
     this.downloaded = const [],
     this.custom,
@@ -176,9 +182,29 @@ class ChapterData {
     this.undoFollowsDownloaded = false,
     this.recognitionEpoch = 0,
     this.lastRecognitionRunId,
+    this.skippedChapterIds = const {},
   });
 
   List<MediaChapter> get active => valid ? (custom ?? downloaded) : const [];
+
+  bool isSkipped(String chapterId) => skippedChapterIds.contains(chapterId);
+
+  /// [active] without the chapters marked Always skip.
+  List<MediaChapter> get unskipped =>
+      skippedChapterIds.isEmpty
+          ? active
+          : active.where((c) => !isSkipped(c.id)).toList();
+
+  ChapterData withChapterSkip(String chapterId, bool skip) {
+    if (isSkipped(chapterId) == skip) return this;
+    return copyWith(
+      skippedChapterIds:
+          skip
+              ? {...skippedChapterIds, chapterId}
+              : skippedChapterIds.where((id) => id != chapterId).toSet(),
+    );
+  }
+
   ChapterData withCustom(List<MediaChapter>? chapters) =>
       copyWith(custom: chapters);
   ChapterData withShuffleChapters(bool enabled) =>
@@ -195,6 +221,7 @@ class ChapterData {
     bool? undoFollowsDownloaded,
     int? recognitionEpoch,
     String? lastRecognitionRunId,
+    Set<String>? skippedChapterIds,
   }) => ChapterData(
     downloaded: downloaded ?? this.downloaded,
     custom:
@@ -210,7 +237,14 @@ class ChapterData {
     undoFollowsDownloaded: undoFollowsDownloaded ?? this.undoFollowsDownloaded,
     recognitionEpoch: recognitionEpoch ?? this.recognitionEpoch,
     lastRecognitionRunId: lastRecognitionRunId ?? this.lastRecognitionRunId,
+    skippedChapterIds:
+        skippedChapterIds == null
+            ? this.skippedChapterIds
+            : Set.unmodifiable(skippedChapterIds),
   );
+
+  /// The file was replaced: its chapters no longer apply, and neither do
+  /// the skip marks made for them.
   ChapterData invalidate() => ChapterData(
     downloaded: downloaded,
     custom: custom,
@@ -251,6 +285,8 @@ class ChapterData {
       if (recognitionEpoch != 0) 'recognitionEpoch': recognitionEpoch,
       if (lastRecognitionRunId != null)
         'lastRecognitionRunId': lastRecognitionRunId,
+      if (skippedChapterIds.isNotEmpty)
+        'skippedChapterIds': [...skippedChapterIds]..sort(),
     };
   }
 
@@ -312,6 +348,11 @@ class ChapterData {
               ? value['recognitionEpoch'] as int
               : 0,
       lastRecognitionRunId: value['lastRecognitionRunId'] as String?,
+      skippedChapterIds: Set.unmodifiable(
+        value['skippedChapterIds'] is List
+            ? (value['skippedChapterIds'] as List).whereType<String>()
+            : const <String>[],
+      ),
     );
   }
 

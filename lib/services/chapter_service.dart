@@ -89,6 +89,26 @@ class ChapterService {
     await persist(track.playlistId);
   }
 
+  /// Marks one chapter "Always skip" (or not). Automatic playback passes
+  /// over a skipped chapter; tapping it still plays it. This is a setting,
+  /// not a chapter edit, so it leaves the undo step alone. Works for followed
+  /// YouTube chapters too, without copying them into a custom list.
+  ///
+  /// Call `PlaybackService.trackChaptersChanged(track)` afterwards.
+  Future<void> setChapterSkip(Track track, String chapterId, bool skip) async {
+    var changed = false;
+    await db.transaction(() async {
+      final fresh = await db.getTrack(track.id);
+      if (fresh == null) return;
+      final old = ChapterData.decode(fresh.chaptersJson);
+      final next = old.withChapterSkip(chapterId, skip);
+      if (identical(old, next)) return;
+      await db.writeTrackChapters(track.id, next);
+      changed = true;
+    });
+    if (changed) await persist(track.playlistId);
+  }
+
   static bool _needsChapterInfo(Track track) {
     final old = ChapterData.decode(track.chaptersJson);
     return track.status == 'complete' &&
@@ -288,6 +308,13 @@ class ChapterService {
     int? durationMs,
   }) {
     entries.sort((a, b) => a.startMs.compareTo(b.startMs));
+    // Skip marks follow chapter ids. Marks of chapters that are gone are
+    // dropped, except those in the undo snapshot, so Undo brings a removed
+    // chapter back with its mark.
+    final keptIds = {
+      for (final c in entries) c.id,
+      for (final c in old.active) c.id,
+    };
     // Built in full rather than with copyWith: after the file was replaced,
     // the old check time and length must not carry over, so the new file
     // still gets its chapter info fetched.
@@ -302,6 +329,9 @@ class ChapterService {
       undoFollowsDownloaded: old.custom == null,
       recognitionEpoch: old.recognitionEpoch,
       lastRecognitionRunId: old.lastRecognitionRunId,
+      skippedChapterIds: Set.unmodifiable(
+        old.skippedChapterIds.where(keptIds.contains),
+      ),
     );
   }
 
@@ -347,13 +377,84 @@ class ChapterService {
   /// The length of [track]'s file in milliseconds as far as it is known
   /// without opening it: [durationMs] (for example from the player), the
   /// stored chapter info, or the YouTube length of a downloaded video.
+  /// Zero or negative lengths count as unknown (a local replacement file
+  /// can have a stored length of 0).
   static int? knownDurationMs(Track track, {int? durationMs}) {
+    int? positive(int? ms) => ms != null && ms > 0 ? ms : null;
     final data = ChapterData.decode(track.chaptersJson);
-    return durationMs ??
-        (data.valid ? data.durationMs : null) ??
-        (track.isLocalReplacement || track.durationSeconds == null
+    final seconds = track.durationSeconds;
+    return positive(durationMs) ??
+        (data.valid ? positive(data.durationMs) : null) ??
+        (track.isLocalReplacement || seconds == null || seconds <= 0
             ? null
-            : track.durationSeconds! * 1000);
+            : seconds * 1000);
+  }
+
+  /// Saves [chapters] as the file's whole chapter list in one step (one
+  /// Undo takes it all back), as the chapter editor produces it.
+  ///
+  /// A chapter whose id is already in the list keeps its origin and
+  /// alternative titles; it counts as edited when its title or timing
+  /// changed, and the review notes that change resolves are dropped (like
+  /// [save]). New ids are the user's own chapters. [durationMs] is the
+  /// file's real length when known (for example from the preview player).
+  /// Returns false, writing nothing, when nothing changed.
+  Future<bool> replaceActive(
+    Track track,
+    List<MediaChapter> chapters, {
+    int? durationMs,
+  }) => _change(track, (old, fresh) {
+    final previous = {for (final c in old.active) c.id: c};
+    final sameAsBefore =
+        chapters.length == old.active.length &&
+        chapters.every((c) {
+          final p = previous[c.id];
+          return p != null &&
+              p.title == c.title.trim() &&
+              p.startMs == c.startMs &&
+              p.endMs == c.endMs;
+        });
+    if (sameAsBefore) return old;
+    final duration = knownDurationMs(fresh, durationMs: durationMs);
+    final saved = [
+      for (final chapter in chapters)
+        _savedChapter(chapter, previous[chapter.id]),
+    ];
+    return _edited(old, saved, durationMs: duration);
+  });
+
+  /// [chapter] as it is stored after an edit, given the [previous] version
+  /// with the same id (null for a new chapter).
+  static MediaChapter _savedChapter(
+    MediaChapter chapter,
+    MediaChapter? previous,
+  ) {
+    final title = chapter.title.trim();
+    if (previous == null) {
+      return MediaChapter(
+        id: chapter.id,
+        title: title,
+        startMs: chapter.startMs,
+        endMs: chapter.endMs,
+      );
+    }
+    final renamed = title != previous.title;
+    final moved = chapter.startMs != previous.startMs;
+    final edited = renamed || moved || chapter.endMs != previous.endMs;
+    return previous.copyWith(
+      title: title,
+      startMs: chapter.startMs,
+      endMs: chapter.endMs,
+      manuallyEdited: previous.manuallyEdited || edited,
+      reviewReasons:
+          previous.reviewReasons
+              .where(
+                (reason) =>
+                    !(reason.startsWith('Name:') && renamed) &&
+                    !(reason.startsWith('Timing:') && moved),
+              )
+              .toList(),
+    );
   }
 
   Future<void> rename(Track track, String id, String title) async {

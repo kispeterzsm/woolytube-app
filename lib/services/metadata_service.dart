@@ -279,6 +279,9 @@ class MetadataService {
         // recognition results timed to a local file are stale.
         undoChapters: keepCustom ? old.undoChapters : null,
         undoFollowsDownloaded: keepCustom && old.undoFollowsDownloaded,
+        // Skip marks go with the chapters they name (ids that no longer
+        // exist are ignored).
+        skippedChapterIds: keepCustom ? old.skippedChapterIds : const {},
         recognitionEpoch:
             wasLocal ? old.recognitionEpoch + 1 : old.recognitionEpoch,
         lastRecognitionRunId: old.lastRecognitionRunId,
@@ -1796,7 +1799,9 @@ for video) to keep a complete backup.
             title: dt.title,
             thumbnailUrl: Value(dt.thumbnailUrl),
             thumbnailPath: Value(row.thumbnailPath),
-            durationSeconds: Value(dt.durationSeconds),
+            durationSeconds: Value(
+              (dt.durationSeconds ?? 0) > 0 ? dt.durationSeconds : null,
+            ),
             status: Value(statuses[i]),
             unavailableReason: Value(dt.unavailableReason),
             isLocalReplacement: Value(dt.isLocalReplacement),
