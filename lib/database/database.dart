@@ -40,6 +40,18 @@ class Playlists extends Table {
   /// it tried longest ago first, so one playlist that never finishes in
   /// time cannot keep the others from ever being updated.
   DateTimeColumn get lastUpdateAttempt => dateTime().nullable()();
+
+  /// Position on the home page: lower comes first, ties by id. Only the
+  /// app's own order; it is not part of the metadata files.
+  IntColumn get sortOrder => integer().withDefault(const Constant(0))();
+
+  /// Highest video height to download (720 = up to 720p); null = the best
+  /// available. Ignored for audio-only playlists.
+  IntColumn get videoQuality => integer().nullable()();
+
+  /// The app's own "Temporary" playlist, which has no YouTube playlist
+  /// behind it.
+  BoolColumn get isTemporary => boolean().withDefault(const Constant(false))();
 }
 
 class Tracks extends Table {
@@ -73,6 +85,14 @@ class Tracks extends Table {
   /// current file stays in use until the new one is completely on disk.
   BoolColumn get replaceRequested =>
       boolean().withDefault(const Constant(false))();
+
+  /// Video quality for this track alone: null inherits the playlist's,
+  /// 0 = the best available, N = up to N p.
+  IntColumn get videoQuality => integer().nullable()();
+
+  /// The height cap the current file was downloaded under: 0 = no cap,
+  /// null = unknown (downloaded before caps existed, or audio).
+  IntColumn get downloadedMaxHeight => integer().nullable()();
 }
 
 class SponsorBlockSegments extends Table {
@@ -146,7 +166,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 14;
+  int get schemaVersion => 15;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -245,6 +265,20 @@ class AppDatabase extends _$AppDatabase {
       if (from < 14) {
         await _deleteOrphanedTracks();
       }
+      if (from < 15) {
+        await migrator.addColumn(playlists, playlists.sortOrder);
+        await migrator.addColumn(playlists, playlists.videoQuality);
+        await migrator.addColumn(playlists, playlists.isTemporary);
+        await migrator.addColumn(tracks, tracks.videoQuality);
+        await migrator.addColumn(tracks, tracks.downloadedMaxHeight);
+        // The playlist trigger now ignores changes to the home order.
+        await customStatement(
+          'DROP TRIGGER IF EXISTS trg_rev_playlists_update',
+        );
+        await _createRevisionTracking();
+        // Keeps today's order (rows came back by id).
+        await customStatement('UPDATE playlists SET sort_order = id');
+      }
     },
   );
 
@@ -290,9 +324,12 @@ class AppDatabase extends _$AppDatabase {
       'trg_rev_playlists_insert':
           'AFTER INSERT ON playlists BEGIN '
           '${bump('NEW.id')} END',
-      // A changed update-attempt stamp does not change the metadata file.
+      // Neither a changed update-attempt stamp nor the home order changes
+      // the metadata file. `UPDATE OF` names the columns when the trigger
+      // is created, so a migration that adds a playlist column must drop
+      // and recreate this trigger.
       'trg_rev_playlists_update':
-          'AFTER UPDATE ON playlists WHEN '
+          'AFTER UPDATE OF $_revisionPlaylistColumns ON playlists WHEN '
           'NEW.last_update_attempt IS OLD.last_update_attempt OR '
           'NEW.name IS NOT OLD.name OR NEW.url IS NOT OLD.url OR '
           'NEW.output_path IS NOT OLD.output_path OR '
@@ -308,6 +345,14 @@ class AppDatabase extends _$AppDatabase {
       );
     }
   }
+
+  /// Every playlist column except the home order (see
+  /// `trg_rev_playlists_update`).
+  String get _revisionPlaylistColumns => playlists.$columns
+      .map((column) => column.name)
+      .where((name) => name != playlists.sortOrder.name)
+      .map((name) => '"$name"')
+      .join(', ');
 
   /// Removes tracks whose playlist no longer exists, with their skip
   /// segments and revision counters. App versions before foreign keys were
@@ -434,10 +479,33 @@ class AppDatabase extends _$AppDatabase {
   }
 
   // Playlist queries
-  Future<List<Playlist>> getAllPlaylists() => select(playlists).get();
+  /// Every playlist in the home page order.
+  Future<List<Playlist>> getAllPlaylists() => _playlistsInOrder().get();
 
   Stream<List<Playlist>> watchAllPlaylists() =>
-      select(playlists).watch().distinct(listsEqual);
+      _playlistsInOrder().watch().distinct(listsEqual);
+
+  SimpleSelectStatement<$PlaylistsTable, Playlist> _playlistsInOrder() =>
+      select(playlists)..orderBy([
+        (p) => OrderingTerm.asc(p.sortOrder),
+        (p) => OrderingTerm.asc(p.id),
+      ]);
+
+  /// Saves the home page order: the playlist with id `orderedIds[i]` gets
+  /// position i. Only rows whose position changes are written.
+  Future<void> setPlaylistOrder(List<int> orderedIds) => transaction(() async {
+    final current = {
+      for (final row
+          in await (selectOnly(playlists)
+            ..addColumns([playlists.id, playlists.sortOrder])).get())
+        row.read(playlists.id)!: row.read(playlists.sortOrder)!,
+    };
+    for (var i = 0; i < orderedIds.length; i++) {
+      final id = orderedIds[i];
+      if (!current.containsKey(id) || current[id] == i) continue;
+      await updatePlaylistFields(id, PlaylistsCompanion(sortOrder: Value(i)));
+    }
+  });
 
   Future<Playlist> getPlaylist(int id) =>
       (select(playlists)..where((p) => p.id.equals(id))).getSingle();
@@ -453,8 +521,18 @@ class AppDatabase extends _$AppDatabase {
         PlaylistsCompanion(lastUpdateAttempt: Value(at)),
       );
 
-  Future<int> insertPlaylist(PlaylistsCompanion playlist) =>
-      into(playlists).insert(playlist);
+  /// Inserts a playlist; without a [PlaylistsCompanion.sortOrder] it goes
+  /// to the end of the home page order.
+  Future<int> insertPlaylist(PlaylistsCompanion playlist) async {
+    if (!playlist.sortOrder.present) {
+      final last = playlists.sortOrder.max();
+      final row = await (selectOnly(playlists)..addColumns([last])).getSingle();
+      playlist = playlist.copyWith(
+        sortOrder: Value((row.read(last) ?? -1) + 1),
+      );
+    }
+    return into(playlists).insert(playlist);
+  }
 
   Future<bool> updatePlaylist(PlaylistsCompanion playlist) =>
       update(playlists).replace(playlist);
@@ -481,6 +559,63 @@ class AppDatabase extends _$AppDatabase {
     }
     await (delete(tracks)..where((t) => t.playlistId.equals(id))).go();
     return (delete(playlists)..where((p) => p.id.equals(id))).go();
+  });
+
+  /// The app's own "Temporary" playlist, or null before it is first used.
+  Future<Playlist?> getTemporaryPlaylist() async =>
+      (await (select(playlists)
+                ..where((p) => p.isTemporary.equals(true))
+                ..orderBy([(p) => OrderingTerm.asc(p.id)])
+                ..limit(1))
+              .get())
+          .firstOrNull;
+
+  /// The video ids "Save to Temporary" is not offered for: those already in
+  /// the temporary playlist, and those already downloaded as video in another
+  /// playlist (saving them would only make a second copy).
+  Stream<Set<String>> watchTemporarySaveBlockedVideoIds() => customSelect(
+        'SELECT t.video_id AS video_id FROM tracks t '
+        'JOIN playlists p ON p.id = t.playlist_id '
+        'WHERE p.is_temporary = 1 '
+        "OR (p.audio_only = 0 AND t.status = 'complete' "
+        'AND t.file_path IS NOT NULL)',
+        readsFrom: {tracks, playlists},
+      )
+      .watch()
+      .map((rows) => {for (final row in rows) row.read<String>('video_id')})
+      .distinct((a, b) => a.length == b.length && a.containsAll(b));
+
+  /// A playlist other than the temporary one that has [videoId] downloaded
+  /// as video, or null.
+  Future<Playlist?> playlistWithVideoCopy(String videoId) async {
+    final rows =
+        await customSelect(
+          'SELECT p.id AS id FROM tracks t '
+          'JOIN playlists p ON p.id = t.playlist_id '
+          "WHERE t.video_id = ? AND p.is_temporary = 0 AND p.audio_only = 0 "
+          "AND t.status = 'complete' AND t.file_path IS NOT NULL "
+          'ORDER BY p.sort_order, p.id LIMIT 1',
+          variables: [Variable.withString(videoId)],
+          readsFrom: {tracks, playlists},
+        ).get();
+    if (rows.isEmpty) return null;
+    return getPlaylistOrNull(rows.first.read<int>('id'));
+  }
+
+  /// Removes the tracks [trackIds] together with their segments.
+  Future<void> deleteTracks(List<int> trackIds) => transaction(() async {
+    const chunkSize = 500;
+    for (var start = 0; start < trackIds.length; start += chunkSize) {
+      final chunk = trackIds.sublist(
+        start,
+        start + chunkSize > trackIds.length
+            ? trackIds.length
+            : start + chunkSize,
+      );
+      await (delete(sponsorBlockSegments)
+        ..where((s) => s.trackId.isIn(chunk))).go();
+      await (delete(tracks)..where((t) => t.id.isIn(chunk))).go();
+    }
   });
 
   Future<Playlist?> getPlaylistByUrl(String url) =>
@@ -674,19 +809,30 @@ class AppDatabase extends _$AppDatabase {
             ..orderBy([(t) => OrderingTerm.asc(t.index)]))
           .get();
 
+  /// The track's own video quality: null follows the playlist, 0 = the
+  /// best, N = up to N p.
+  Future<void> setTrackVideoQuality(int trackId, int? quality) =>
+      (update(tracks)..where(
+        (t) => t.id.equals(trackId),
+      )).write(TracksCompanion(videoQuality: Value(quality)));
+
   Future<void> setTrackReplaceRequested(int trackId, bool requested) =>
       (update(tracks)..where(
         (t) => t.id.equals(trackId),
       )).write(TracksCompanion(replaceRequested: Value(requested)));
 
   /// Records a finished download that is now the track's file.
+  /// [downloadedMaxHeight] is the height cap it was downloaded under (0 =
+  /// none, null = unknown or audio).
   Future<void> markTrackDownloaded(
     int trackId, {
     required String filePath,
     required String? thumbnailPath,
+    int? downloadedMaxHeight,
   }) => (update(tracks)..where((t) => t.id.equals(trackId))).write(
     TracksCompanion(
       status: const Value('complete'),
+      downloadedMaxHeight: Value(downloadedMaxHeight),
       filePath: Value(filePath),
       thumbnailPath: Value(thumbnailPath),
       isLocalReplacement: const Value(false),
@@ -729,8 +875,9 @@ class AppDatabase extends _$AppDatabase {
   /// longest ago first (never tried first).
   Future<List<Playlist>> getPlaylistsDueForUpdate({DateTime? now}) async {
     final all =
-        await (select(playlists)
-          ..where((p) => p.autoUpdate.equals(true))).get();
+        await (select(playlists)..where(
+          (p) => p.autoUpdate.equals(true) & p.isTemporary.equals(false),
+        )).get();
     final current = now ?? DateTime.now();
     final due =
         all.where((p) {

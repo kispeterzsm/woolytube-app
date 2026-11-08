@@ -14,6 +14,7 @@ import 'media_thumbnail_service.dart';
 import 'metadata_service.dart';
 import 'notification_service.dart';
 import 'sponsorblock_service.dart';
+import 'video_quality.dart';
 
 /// What a running download is doing right now.
 enum DownloadPhase {
@@ -340,6 +341,15 @@ class DownloadService {
   final _queueController = StreamController<List<int>>.broadcast();
   final _queue = <({int playlistId, bool sourceChecked})>[];
 
+  /// Playlists asked to download while they were already downloading. The
+  /// running pass chose its work when it started, so each gets one more
+  /// pass right after it, which picks up what was added meanwhile.
+  final _rerunRequested = <int>{};
+
+  /// While above zero, queued playlists wait, and new requests queue
+  /// instead of starting (see [runWithDownloadStopped]).
+  int _queueHolds = 0;
+
   StreamSubscription? _ytdlpProgressSub;
   bool _isDownloading = false;
   bool _finishing = false;
@@ -493,12 +503,13 @@ class DownloadService {
     bool sourceChecked = true,
     bool Function()? shouldStop,
   }) async {
-    if (_isDownloading) {
+    if (_isDownloading || _queueHolds > 0) {
       final inQueue = _queue.indexWhere((e) => e.playlistId == playlist.id);
       if (_activePlaylist?.id == playlist.id || inQueue >= 0) {
         if (inQueue >= 0 && sourceChecked && !_queue[inQueue].sourceChecked) {
           _queue[inQueue] = (playlistId: playlist.id, sourceChecked: true);
         }
+        if (inQueue < 0) _rerunRequested.add(playlist.id);
         return DownloadStart.alreadyQueued;
       }
       _queue.add((playlistId: playlist.id, sourceChecked: sourceChecked));
@@ -610,7 +621,8 @@ class DownloadService {
         }
         // Deleting a playlist (keeping its files) does not wait for its
         // download; stop instead of downloading files nobody keeps.
-        if (await _db.getPlaylistOrNull(playlist.id) == null) {
+        final latest = await _db.getPlaylistOrNull(playlist.id);
+        if (latest == null) {
           _log.info('"${playlist.name}" was deleted; stopping its download');
           playlistDeleted = true;
           break;
@@ -618,6 +630,9 @@ class DownloadService {
         final item = work[i];
         _position = i + 1;
         await _gate.refresh();
+        // The run chose its work when it started; read the track again so
+        // a quality set on it meanwhile is used.
+        final track = await _db.getTrack(item.track.id) ?? item.track;
 
         final result = await _downloadTrackFile(
           playlist: playlist,
@@ -626,6 +641,8 @@ class DownloadService {
           trackLabel: '[${i + 1}/${work.length}] ${item.track.title}',
           reuseExistingFile: !item.replace,
           replaceExisting: item.replace,
+          // A quality chosen while the run goes applies to the next track.
+          maxHeight: effectiveMaxHeight(latest, track),
         );
         switch (result) {
           case _TrackDownloadResult.downloaded:
@@ -862,6 +879,7 @@ class DownloadService {
         trackLabel: '[${fresh.index}/$totalTracks] ${fresh.title}',
         reuseExistingFile: false,
         replaceExisting: replace,
+        maxHeight: effectiveMaxHeight(playlist, fresh),
       );
 
       if (result != _TrackDownloadResult.downloaded) {
@@ -986,6 +1004,7 @@ class DownloadService {
               '${escapeOutputTemplateLiteral(staging.path)}/'
               'reupload_%(title).${titleByteLimit}B.%(ext)s',
           trackLabel: trackLabel,
+          maxHeight: effectiveMaxHeight(playlist, fresh),
         );
       } catch (e) {
         failure = _cleanErrorMessage(e);
@@ -1042,6 +1061,7 @@ class DownloadService {
   /// with the gate, and [runFinished] resolves only for this run.
   Future<void> _finishRun({required bool entered}) async {
     final completer = _runCompleter;
+    final finishedPlaylistId = _activePlaylist?.id;
     _finishing = true;
     _activeTrackId = null;
     _activeTrackIsReplacement = false;
@@ -1070,12 +1090,26 @@ class DownloadService {
       _resetRunState();
       if (identical(_runCompleter, completer)) _runCompleter = null;
       if (completer != null && !completer.isCompleted) completer.complete();
+      if (finishedPlaylistId != null &&
+          _rerunRequested.remove(finishedPlaylistId) &&
+          !_cancelRequested &&
+          !_queue.any((e) => e.playlistId == finishedPlaylistId)) {
+        // Ahead of the queue: the user just asked for it.
+        _queue.insert(0, (
+          playlistId: finishedPlaylistId,
+          sourceChecked: false,
+        ));
+        _setQueue();
+      }
       _startNextQueued();
     }
   }
 
   void _startNextQueued() {
-    if (_queue.isEmpty || _isDownloading || _progressController.isClosed) {
+    if (_queue.isEmpty ||
+        _isDownloading ||
+        _queueHolds > 0 ||
+        _progressController.isClosed) {
       return;
     }
     final next = _queue.removeAt(0);
@@ -1170,6 +1204,7 @@ class DownloadService {
     required String trackLabel,
     required bool reuseExistingFile,
     required bool replaceExisting,
+    required int? maxHeight,
   }) async {
     final indexStr = MetadataService.paddedIndex(track.index, totalTracks);
     _currentTitle = track.title;
@@ -1256,6 +1291,7 @@ class DownloadService {
           metadataAlbum: playlist.name,
           outputTemplate: outputTemplate,
           trackLabel: trackLabel,
+          maxHeight: maxHeight,
         );
       } catch (e) {
         failure = _cleanErrorMessage(e);
@@ -1307,6 +1343,7 @@ class DownloadService {
         stagedMedia: staged,
         thumbnails: _thumbnails,
         embeddedThumbnailExpected: playlist.includeThumbnails,
+        downloadedMaxHeight: playlist.audioOnly ? null : (maxHeight ?? 0),
       );
       if (updatedTrack == null) {
         _lastFailure = 'The track was removed during the download';
@@ -1416,10 +1453,16 @@ class DownloadService {
   /// returns to the queue; a track that was being replaced keeps its file.
   /// Playlists waiting in the queue are dropped too: Stop means stop.
   Future<void> cancelActiveDownloads() async {
+    _rerunRequested.clear();
     if (_queue.isNotEmpty) {
       _queue.clear();
       _setQueue();
     }
+    await _cancelRun();
+  }
+
+  /// Stops the running download, if any, and leaves the queue alone.
+  Future<void> _cancelRun() async {
     if (!_isDownloading) return;
     _cancelRequested = true;
     if (!_cancelSignal.isCompleted) _cancelSignal.complete();
@@ -1445,8 +1488,64 @@ class DownloadService {
     }
   }
 
+  /// Runs [action], which changes the files of [playlistId], while that
+  /// playlist does not download.
+  ///
+  /// When another playlist is downloading, nothing is touched and a
+  /// [LibraryBusyException] is thrown: its download holds the library until
+  /// it ends, so [action] could not run anyway. Otherwise [playlistId]
+  /// leaves the queue, and its running download is stopped and waited for
+  /// up to [timeout] (a [LibraryBusyException] when it does not stop in
+  /// time). Other queued playlists keep their places but start only after
+  /// [action], so they cannot take the library first. A download of
+  /// [playlistId] that was stopped starts again afterwards, ahead of them,
+  /// when [resume] is true or [action] failed.
+  Future<T> runWithDownloadStopped<T>(
+    int playlistId,
+    Future<T> Function() action, {
+    bool resume = false,
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    if (_isDownloading && _activePlaylist?.id != playlistId) {
+      throw const LibraryBusyException(
+        'Wait until the current download finishes.',
+      );
+    }
+    final wasQueued = removeFromQueue(playlistId);
+    final wasRunning = _isDownloading;
+    var succeeded = false;
+    _queueHolds++;
+    try {
+      if (wasRunning) {
+        await _cancelRun();
+        try {
+          await runFinished.timeout(timeout);
+        } on TimeoutException {
+          if (_isDownloading && _activePlaylist?.id == playlistId) {
+            throw const LibraryBusyException(
+              'Could not stop the download. Try again.',
+            );
+          }
+        }
+      }
+      final result = await action();
+      succeeded = true;
+      return result;
+    } finally {
+      _queueHolds--;
+      if ((wasRunning || wasQueued) &&
+          (resume || !succeeded) &&
+          !_queue.any((e) => e.playlistId == playlistId)) {
+        _queue.insert(0, (playlistId: playlistId, sourceChecked: false));
+        _setQueue();
+      }
+      _startNextQueued();
+    }
+  }
+
   /// Takes [playlistId] out of the queue. Returns whether it was queued.
   bool removeFromQueue(int playlistId) {
+    _rerunRequested.remove(playlistId);
     final before = _queue.length;
     _queue.removeWhere((e) => e.playlistId == playlistId);
     if (_queue.length == before) return false;
@@ -1508,6 +1607,7 @@ class DownloadService {
     required String metadataAlbum,
     required String outputTemplate,
     required String trackLabel,
+    int? maxHeight,
   }) async {
     var downloadSubtitles =
         !audioOnly && await _settings.getDownloadSubtitles();
@@ -1532,6 +1632,7 @@ class DownloadService {
           downloadSubtitles: downloadSubtitles,
           subtitleLanguages: subtitleLanguages,
           outputTemplate: outputTemplate,
+          maxHeight: maxHeight,
         );
         return;
       } catch (e) {

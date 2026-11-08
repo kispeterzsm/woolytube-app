@@ -551,6 +551,42 @@ final playlistTrackCountsStreamProvider =
       return ref.watch(playlistServiceProvider).watchPlaylistTrackCounts();
     });
 
+/// The playlists the home page, its search and the reorder page show, in
+/// the home order: all of them, except the temporary playlist while it has
+/// no videos.
+final visiblePlaylistsProvider = Provider<AsyncValue<List<Playlist>>>((ref) {
+  final playlists = ref.watch(playlistsProvider);
+  int? temporaryId;
+  for (final playlist in playlists.valueOrNull ?? const <Playlist>[]) {
+    if (playlist.isTemporary) {
+      temporaryId = playlist.id;
+      break;
+    }
+  }
+  if (temporaryId == null) return playlists;
+  // Only whether it is empty: download progress does not rebuild the home
+  // page.
+  final hasVideos = ref.watch(
+    playlistTrackCountsStreamProvider.select(
+      (counts) => (counts.valueOrNull?[temporaryId]?.total ?? 0) > 0,
+    ),
+  );
+  if (hasVideos) return playlists;
+  return playlists.whenData(
+    (list) => [
+      for (final playlist in list)
+        if (!playlist.isTemporary) playlist,
+    ],
+  );
+});
+
+/// The video ids "Save to Temporary" is not offered for (already in it, or
+/// already downloaded as video elsewhere).
+final temporarySaveBlockedVideoIdsProvider =
+    StreamProvider.autoDispose<Set<String>>(
+      (ref) => ref.watch(databaseProvider).watchTemporarySaveBlockedVideoIds(),
+    );
+
 /// Playlists whose update is asking YouTube for the playlist right now (see
 /// [PlaylistService.syncingPlaylistIds]); the download that follows shows in
 /// [downloadProgressProvider].

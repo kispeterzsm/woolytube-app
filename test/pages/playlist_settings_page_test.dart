@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:drift/drift.dart' show Value;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -10,7 +12,9 @@ import 'package:woolytube/pages/sponsorblock_settings_page.dart';
 import 'package:woolytube/providers/chapter_fetch_jobs.dart';
 import 'package:woolytube/providers/playback_providers.dart';
 import 'package:woolytube/providers/providers.dart';
+import 'package:woolytube/services/app_settings_service.dart';
 import 'package:woolytube/services/chapter_service.dart';
+import 'package:woolytube/services/download_network_policy.dart';
 import 'package:woolytube/services/download_service.dart';
 import 'package:woolytube/services/library_gate.dart';
 import 'package:woolytube/services/playback_service.dart';
@@ -109,6 +113,38 @@ void main() {
     expect(find.text('Tools'), findsOneWidget);
     expect(find.text('Force Insert'), findsNothing);
     expect(find.text('Add a file from this phone'), findsOneWidget);
+  });
+
+  testWidgets('the temporary playlist has no YouTube link, format, updates '
+      'or delete', (tester) async {
+    final playlist = await insertTestPlaylist(
+      db,
+      url: 'woolytube:temporary',
+      name: 'Temporary',
+      outputPath: tempDir.path,
+      autoUpdate: false,
+      videoQuality: 720,
+      isTemporary: true,
+    );
+    await pumpStack(tester, playlist.id);
+
+    for (final key in [
+      'playlist-open-youtube',
+      'playlist-audio-only',
+      'playlist-auto-update',
+      'playlist-update-frequency',
+      'delete-playlist-button',
+    ]) {
+      expect(find.byKey(ValueKey(key)), findsNothing, reason: key);
+    }
+    expect(find.text('Updates'), findsNothing);
+    expect(find.text('Danger zone'), findsNothing);
+    expect(find.byKey(const ValueKey('playlist-name-field')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('playlist-video-quality')),
+      findsOneWidget,
+    );
+    expect(find.text('Up to 720p'), findsOneWidget);
   });
 
   testWidgets('a switch saves at once, from anywhere on its row, and reaches '
@@ -500,6 +536,129 @@ void main() {
     expect(stored.includeThumbnails, isFalse);
   });
 
+  group('video quality', () {
+    final wifi = [
+      downloadNetworkPolicyProvider.overrideWithValue(
+        DownloadNetworkPolicy(
+          AppSettingsService(),
+          checkConnectivity: () async => [ConnectivityResult.wifi],
+        ),
+      ),
+    ];
+
+    testWidgets('is offered for video playlists only', (tester) async {
+      final audio = await insertTestPlaylist(
+        db,
+        url: 'audio',
+        outputPath: tempDir.path,
+        audioOnly: true,
+      );
+      await pumpStack(tester, audio.id);
+      expect(
+        find.byKey(const ValueKey('playlist-video-quality')),
+        findsNothing,
+      );
+
+      final video = await insertTestPlaylist(
+        db,
+        url: 'video',
+        outputPath: tempDir.path,
+      );
+      await pumpStack(tester, video.id);
+      expect(
+        find.byKey(const ValueKey('playlist-video-quality')),
+        findsOneWidget,
+      );
+      expect(find.text('Best available'), findsOneWidget);
+    });
+
+    testWidgets('a new quality is saved at once; without downloaded videos '
+        'nothing is asked', (tester) async {
+      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+      await pumpStack(tester, playlist.id, overrides: wifi);
+
+      await tapRow(tester, 'playlist-video-quality');
+      await tester.tap(find.byKey(const ValueKey('video-quality-option-720')));
+      await tester.pumpAndSettle();
+
+      expect((await db.getPlaylist(playlist.id)).videoQuality, 720);
+      expect(find.text('Up to 720p'), findsOneWidget);
+      expect(playlists.qualityChecks, [(null, 720)]);
+      expect(
+        find.byKey(const ValueKey('video-quality-redownload-dialog')),
+        findsNothing,
+      );
+      expect(player.settingsChanged, [playlist.id]);
+    });
+
+    testWidgets('choosing Best saves no cap', (tester) async {
+      final playlist = await insertTestPlaylist(
+        db,
+        outputPath: tempDir.path,
+        videoQuality: 480,
+      );
+      await pumpStack(tester, playlist.id, overrides: wifi);
+
+      await tapRow(tester, 'playlist-video-quality');
+      await tester.tap(find.byKey(const ValueKey('video-quality-option-best')));
+      await tester.pumpAndSettle();
+
+      expect((await db.getPlaylist(playlist.id)).videoQuality, isNull);
+      expect(playlists.qualityChecks, [(480, null)]);
+    });
+
+    testWidgets('"Only new downloads" keeps the files', (tester) async {
+      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        status: 'complete',
+        filePath: '${tempDir.path}/00001_A.mp4',
+      );
+      playlists.affected = [track];
+      await pumpStack(tester, playlist.id, overrides: wifi);
+
+      await tapRow(tester, 'playlist-video-quality');
+      await tester.tap(find.byKey(const ValueKey('video-quality-option-480')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Download 1 video again at 480p?'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('video-quality-keep')));
+      await tester.pumpAndSettle();
+
+      expect((await db.getPlaylist(playlist.id)).videoQuality, 480);
+      expect(playlists.redownloads, isEmpty);
+      expect(downloads.started, isEmpty);
+      expect((await db.getTrack(track.id))!.replaceRequested, isFalse);
+    });
+
+    testWidgets('"Download again" asks for new copies and starts the '
+        'download', (tester) async {
+      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        status: 'complete',
+        filePath: '${tempDir.path}/00001_A.mp4',
+      );
+      playlists.affected = [track];
+      await pumpStack(tester, playlist.id, overrides: wifi);
+
+      await tapRow(tester, 'playlist-video-quality');
+      await tester.tap(find.byKey(const ValueKey('video-quality-option-720')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('video-quality-redownload')));
+      await tester.pumpAndSettle();
+
+      expect(playlists.redownloads, [
+        [track.id],
+      ]);
+      expect((await db.getTrack(track.id))!.replaceRequested, isTrue);
+      expect(downloads.started, [(playlist.id, false)]);
+      expect(find.text('Downloading 1 video again'), findsOneWidget);
+    });
+  });
+
   testWidgets('a name that cannot be saved after leaving is reported', (
     tester,
   ) async {
@@ -566,6 +725,41 @@ class _Playlists implements PlaylistService {
   final deletedIds = <int>[];
   final deleteFilesFlags = <bool>[];
   Exception? failWith;
+
+  /// What [tracksAffectedByQualityChange] answers, and the (old, new) caps
+  /// it was asked about.
+  List<Track> affected = const [];
+  final qualityChecks = <(int?, int?)>[];
+  final redownloads = <List<int>>[];
+
+  @override
+  Future<void> setPlaylistVideoQuality(int id, int? maxHeight) async {
+    final failure = failWith;
+    if (failure != null) throw failure;
+    await db.updatePlaylistFields(
+      id,
+      PlaylistsCompanion(videoQuality: Value(maxHeight)),
+    );
+  }
+
+  @override
+  Future<List<Track>> tracksAffectedByQualityChange(
+    Playlist playlist, {
+    required int? oldMax,
+    required int? newMax,
+    Iterable<Track>? only,
+  }) async {
+    qualityChecks.add((oldMax, newMax));
+    return affected;
+  }
+
+  @override
+  Future<void> requestRedownload(int playlistId, List<int> trackIds) async {
+    redownloads.add(trackIds);
+    for (final id in trackIds) {
+      await db.setTrackReplaceRequested(id, true);
+    }
+  }
 
   @override
   Future<void> updatePlaylistSettings({
@@ -672,6 +866,19 @@ class _Downloads implements DownloadService {
 
   @override
   bool removeFromQueue(int playlistId) => queued.remove(playlistId);
+
+  /// (playlist id, sourceChecked) of each [downloadPlaylist] call.
+  final started = <(int, bool)>[];
+
+  @override
+  Future<DownloadStart> downloadPlaylist(
+    Playlist playlist, {
+    bool sourceChecked = true,
+    bool Function()? shouldStop,
+  }) async {
+    started.add((playlist.id, sourceChecked));
+    return DownloadStart.started;
+  }
 
   @override
   Future<void> cancelActiveDownloads() async {

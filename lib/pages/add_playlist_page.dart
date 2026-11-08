@@ -12,6 +12,7 @@ import '../providers/providers.dart';
 import '../services/add_playlist_defaults.dart';
 import '../services/download_errors.dart';
 import '../services/metadata_service.dart';
+import '../services/video_quality.dart';
 import '../widgets/mobile_data_download_guard.dart';
 import '../widgets/update_frequency_dropdown.dart';
 import 'playlist_detail_page.dart';
@@ -58,6 +59,10 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
   /// Set once the owner touched an option, so the remembered defaults that
   /// load a moment later do not overwrite the choice.
   bool _optionsTouched = false;
+
+  /// Save only the video of the link to the temporary playlist instead of
+  /// adding a playlist (offered when the link names one video).
+  bool _toTemporary = false;
 
   bool _fetching = false;
   bool _adding = false;
@@ -145,6 +150,7 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
       _trackCount = 0;
       _fetchedUrl = null;
       _error = null;
+      _toTemporary = false;
     });
   }
 
@@ -173,6 +179,83 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
       _playlistInfo != null &&
       _fetchedUrl != null &&
       _urlController.text.trim() == _fetchedUrl;
+
+  /// Whether the looked-up link names one video: a single video, or a
+  /// video inside a playlist (`watch?v=X&list=Y`).
+  bool get _namesOneVideo {
+    final info = _playlistInfo;
+    if (info == null) return false;
+    if (info['isPlaylist'] == false) {
+      return (info['entries'] as List<dynamic>?)?.isNotEmpty ?? false;
+    }
+    return youTubeVideoIdFromUrl(_fetchedUrl) != null;
+  }
+
+  bool get _savingToTemporary => _toTemporary && _namesOneVideo;
+
+  bool get _canSaveToTemporary =>
+      !_adding &&
+      !_fetching &&
+      _namesOneVideo &&
+      _fetchedUrl != null &&
+      _urlController.text.trim() == _fetchedUrl;
+
+  /// The entry of the one video the link names, as far as the lookup knows
+  /// it (null when only the playlist around it was read).
+  Map<String, dynamic>? get _knownVideoEntry {
+    final info = _playlistInfo;
+    if (info == null) return null;
+    final entries = info['entries'] as List<dynamic>? ?? const [];
+    if (info['isPlaylist'] == false) {
+      return entries.isEmpty ? null : entries.first as Map<String, dynamic>;
+    }
+    final id = youTubeVideoIdFromUrl(_fetchedUrl);
+    for (final entry in entries) {
+      if (entry is Map<String, dynamic> && entry['id'] == id) return entry;
+    }
+    return null;
+  }
+
+  /// Saves the video of the link to the temporary playlist and downloads
+  /// it. The add options do not apply: Temporary keeps its own settings.
+  Future<void> _saveToTemporary() async {
+    if (!_canSaveToTemporary) return;
+    final info = _playlistInfo!;
+    final url = _fetchedUrl!;
+    setState(() {
+      _adding = true;
+      _error = null;
+    });
+    FocusManager.instance.primaryFocus?.unfocus();
+    final ytdlp = ref.read(ytdlpServiceProvider);
+    final messenger = ScaffoldMessenger.of(context);
+    String message;
+    try {
+      Map<String, dynamic> entry;
+      if (info['isPlaylist'] == false) {
+        entry = Map.of(_knownVideoEntry!);
+        final thumbnail = entry['thumbnail'] as String?;
+        if (thumbnail == null || thumbnail.isEmpty) {
+          entry['thumbnail'] = info['thumbnail'];
+        }
+      } else {
+        // Only the video, not the playlist around it (`--no-playlist`).
+        entry = videoEntryFromInfo(await ytdlp.getVideoInfo(url));
+      }
+      if (!mounted) return;
+      message = await saveVideoToTemporary(context, ref, entry);
+    } catch (e) {
+      if (!mounted) return;
+      final reason = e is StateError ? e.message : '$e';
+      setState(() {
+        _error = "Couldn't save the video: ${friendlyDownloadError(reason)}";
+        _adding = false;
+      });
+      return;
+    }
+    if (mounted) Navigator.of(context).pop();
+    messenger.showSnackBar(SnackBar(content: Text(message)));
+  }
 
   Future<void> _paste() async {
     String? text;
@@ -230,6 +313,7 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
         _playlistThumbnail = info['thumbnail'] as String?;
         _trackCount = info['count'] as int? ?? 0;
         _fetching = false;
+        _toTemporary = false;
       });
     } catch (e) {
       if (!mounted || generation != _fetchGeneration) return;
@@ -451,19 +535,32 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
                 ],
                 if (hasPreview) ...[
                   const SizedBox(height: 4),
-                  _buildPreview(),
-                  if (existing != null) ...[
+                  if (_namesOneVideo) ...[
+                    _buildDestination(),
                     const SizedBox(height: 12),
-                    _buildExistingNotice(existing),
                   ],
-                  const SizedBox(height: 16),
-                  _buildOptions(),
+                  _buildPreview(),
+                  if (!_savingToTemporary) ...[
+                    if (existing != null) ...[
+                      const SizedBox(height: 12),
+                      _buildExistingNotice(existing),
+                    ],
+                    const SizedBox(height: 16),
+                    _buildOptions(),
+                  ],
                 ],
               ],
             ),
       ),
       bottomNavigationBar:
-          hasPreview ? _buildAddButton(enabled: _canAdd(existing)) : null,
+          hasPreview
+              ? _buildAddButton(
+                enabled:
+                    _savingToTemporary
+                        ? _canSaveToTemporary
+                        : _canAdd(existing),
+              )
+              : null,
     );
   }
 
@@ -601,9 +698,62 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
     );
   }
 
+  /// Add the link as a playlist, or save just its video to Temporary.
+  Widget _buildDestination() {
+    final isPlaylist = _playlistInfo?['isPlaylist'] as bool? ?? true;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SegmentedButton<bool>(
+          key: const ValueKey('add-playlist-destination'),
+          segments: [
+            ButtonSegment(
+              value: false,
+              icon: const Icon(Icons.playlist_add),
+              label: Text(isPlaylist ? 'Whole playlist' : 'As a playlist'),
+            ),
+            const ButtonSegment(
+              value: true,
+              icon: Icon(Icons.watch_later_outlined),
+              label: Text('Temporary'),
+            ),
+          ],
+          selected: {_toTemporary},
+          showSelectedIcon: false,
+          onSelectionChanged:
+              _adding
+                  ? null
+                  : (selection) => setState(() {
+                    _toTemporary = selection.first;
+                    _error = null;
+                  }),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          _toTemporary
+              ? 'Saves just this video in your Temporary playlist, to watch '
+                  'offline and remove when done.'
+              : isPlaylist
+              ? 'Adds the whole playlist and keeps it up to date.'
+              : 'Adds the video as a playlist of its own.',
+          style: const TextStyle(color: _muted, fontSize: 12),
+        ),
+      ],
+    );
+  }
+
   Widget _buildPreview() {
     final isPlaylist = _playlistInfo?['isPlaylist'] as bool? ?? true;
-    final cover = _playlistThumbnail;
+    final temporary = _savingToTemporary;
+    final video = temporary ? _knownVideoEntry : null;
+    final videoId = youTubeVideoIdFromUrl(_fetchedUrl);
+    final cover =
+        !temporary
+            ? _playlistThumbnail
+            : (video?['thumbnail'] as String?) ??
+                (videoId == null
+                    ? _playlistThumbnail
+                    : 'https://i.ytimg.com/vi/$videoId/hqdefault.jpg');
     final coverWidth = 128.0;
     final cacheWidth =
         (coverWidth * MediaQuery.devicePixelRatioOf(context)).round();
@@ -640,33 +790,39 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
               const SizedBox(width: 12),
               Expanded(
                 child: Text(
-                  isPlaylist
+                  temporary
+                      ? (video?['title'] as String? ?? 'The video in this link')
+                      : isPlaylist
                       ? '$_trackCount video${_trackCount == 1 ? '' : 's'}'
                       : 'A single video, added as a playlist with one track',
-                  style: const TextStyle(color: _muted, fontSize: 14),
+                  style: TextStyle(
+                    color: temporary ? Colors.white : _muted,
+                    fontSize: 14,
+                  ),
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 12),
-          TextField(
-            key: const ValueKey('add-playlist-name-field'),
-            controller: _nameController,
-            enabled: !_adding,
-            onChanged: (_) => setState(() {}),
-            textCapitalization: TextCapitalization.sentences,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 16,
-              fontWeight: FontWeight.w600,
+          if (!temporary) const SizedBox(height: 12),
+          if (!temporary)
+            TextField(
+              key: const ValueKey('add-playlist-name-field'),
+              controller: _nameController,
+              enabled: !_adding,
+              onChanged: (_) => setState(() {}),
+              textCapitalization: TextCapitalization.sentences,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
+              decoration: InputDecoration(
+                labelText: 'Name',
+                labelStyle: const TextStyle(color: _muted),
+                fillColor: const Color(0xFF333333),
+                errorText: _nameValid ? null : 'Enter a name',
+              ),
             ),
-            decoration: InputDecoration(
-              labelText: 'Name',
-              labelStyle: const TextStyle(color: _muted),
-              fillColor: const Color(0xFF333333),
-              errorText: _nameValid ? null : 'Enter a name',
-            ),
-          ),
         ],
       ),
     );
@@ -802,6 +958,7 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
   }
 
   Widget _buildAddButton({required bool enabled}) {
+    final temporary = _savingToTemporary;
     return ValueListenableBuilder<double>(
       valueListenable: audioPlayerOverlayHeightNotifier,
       builder:
@@ -810,8 +967,15 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
             child: Padding(
               padding: EdgeInsets.fromLTRB(16, 8, 16, 12 + overlayHeight),
               child: FilledButton(
-                key: const ValueKey('add-playlist-button'),
-                onPressed: enabled ? _addPlaylist : null,
+                key: ValueKey(
+                  temporary
+                      ? 'add-playlist-to-temporary'
+                      : 'add-playlist-button',
+                ),
+                onPressed:
+                    enabled
+                        ? (temporary ? _saveToTemporary : _addPlaylist)
+                        : null,
                 style: FilledButton.styleFrom(
                   minimumSize: const Size.fromHeight(52),
                   shape: RoundedRectangleBorder(
@@ -820,10 +984,10 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
                 ),
                 child:
                     _adding
-                        ? const Row(
+                        ? Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            SizedBox(
+                            const SizedBox(
                               width: 18,
                               height: 18,
                               child: CircularProgressIndicator(
@@ -831,13 +995,13 @@ class _AddPlaylistPageState extends ConsumerState<AddPlaylistPage> {
                                 color: Colors.white,
                               ),
                             ),
-                            SizedBox(width: 12),
-                            Text('Adding…'),
+                            const SizedBox(width: 12),
+                            Text(temporary ? 'Saving…' : 'Adding…'),
                           ],
                         )
-                        : const Text(
-                          'Add & download',
-                          style: TextStyle(
+                        : Text(
+                          temporary ? 'Save to Temporary' : 'Add & download',
+                          style: const TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.w600,
                           ),

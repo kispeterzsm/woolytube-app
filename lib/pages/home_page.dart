@@ -22,6 +22,7 @@ import '../widgets/playlist_card.dart';
 import 'add_playlist_page.dart';
 import 'playlist_detail_page.dart';
 import 'playlist_settings_page.dart';
+import 'reorder_playlists_page.dart';
 import 'settings_page.dart';
 
 /// Room the floating "Add playlist" button needs below the last card, so it
@@ -85,6 +86,15 @@ class _HomePageState extends ConsumerState<HomePage> {
             style: TextStyle(fontWeight: FontWeight.w600, fontSize: 20),
           ),
           actions: [
+            if (!_showSearch &&
+                (ref.watch(visiblePlaylistsProvider).valueOrNull?.length ?? 0) >
+                    1)
+              IconButton(
+                key: const ValueKey('home-reorder-playlists'),
+                icon: const Icon(Icons.swap_vert),
+                tooltip: 'Reorder playlists',
+                onPressed: _navigateToReorder,
+              ),
             IconButton(
               icon: Icon(_showSearch ? Icons.search_off : Icons.search),
               tooltip: _showSearch ? 'Close search' : 'Search',
@@ -139,7 +149,7 @@ class _HomePageState extends ConsumerState<HomePage> {
   // Library
 
   Widget _buildLibrary() {
-    final playlistsAsync = ref.watch(playlistsProvider);
+    final playlistsAsync = ref.watch(visiblePlaylistsProvider);
     final pendingImports = ref.watch(pendingImportsProvider);
     final notices = _buildNotices(pendingImports);
 
@@ -204,7 +214,13 @@ class _HomePageState extends ConsumerState<HomePage> {
                           onUpdate: () => _startUpdate(playlist),
                           onCancel: _confirmCancelDownload,
                           onSettings: () => _navigateToSettings(playlist),
-                          onOpenOnYouTube: () => _openOnYouTube(playlist),
+                          // No YouTube playlist is behind the temporary one.
+                          onOpenOnYouTube:
+                              playlist.isTemporary
+                                  ? null
+                                  : () => _openOnYouTube(playlist),
+                          onReorder:
+                              playlists.length > 1 ? _navigateToReorder : null,
                         );
                       },
                     ),
@@ -435,9 +451,10 @@ class _HomePageState extends ConsumerState<HomePage> {
         downloadService.activePlaylistId == playlist.id) {
       return;
     }
-    if (downloadService.isDownloading) {
+    if (downloadService.isDownloading && !playlist.isTemporary) {
       // Asking YouTube is refused while a download runs; say so plainly
-      // instead of failing after the network check.
+      // instead of failing after the network check. The temporary playlist
+      // asks YouTube nothing: its download waits in the queue.
       messenger.showSnackBar(
         const SnackBar(
           content: Text(
@@ -606,6 +623,12 @@ class _HomePageState extends ConsumerState<HomePage> {
     );
   }
 
+  void _navigateToReorder() {
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => const ReorderPlaylistsPage()));
+  }
+
   void _navigateToAppSettings() {
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -634,6 +657,7 @@ class _PlaylistCardItem extends ConsumerWidget {
     required this.onCancel,
     required this.onSettings,
     required this.onOpenOnYouTube,
+    this.onReorder,
   });
 
   final Playlist playlist;
@@ -642,7 +666,8 @@ class _PlaylistCardItem extends ConsumerWidget {
   final VoidCallback onUpdate;
   final VoidCallback onCancel;
   final VoidCallback onSettings;
-  final VoidCallback onOpenOnYouTube;
+  final VoidCallback? onOpenOnYouTube;
+  final VoidCallback? onReorder;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -713,6 +738,7 @@ class _PlaylistCardItem extends ConsumerWidget {
       onCancel: onCancel,
       onSettings: onSettings,
       onOpenOnYouTube: onOpenOnYouTube,
+      onReorder: onReorder,
     );
   }
 }
@@ -901,6 +927,7 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
   @override
   Widget build(BuildContext context) {
     final playlistsAsync = ref.watch(playlistsProvider);
+    final visibleAsync = ref.watch(visiblePlaylistsProvider);
     final tracksAsync = ref.watch(allTracksProvider);
     final normalized = normalizeTrackSearchQuery(widget.query);
 
@@ -923,7 +950,7 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
         normalized.isEmpty
             ? const <Playlist>[]
             : [
-              for (final p in playlists)
+              for (final p in visibleAsync.valueOrNull ?? playlists)
                 if (p.name.toLowerCase().contains(normalized)) p,
             ];
     final filtered = _filter(tracks, normalized);

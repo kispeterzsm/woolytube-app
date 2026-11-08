@@ -17,9 +17,11 @@ import '../services/library_gate.dart';
 import '../services/playback_service.dart';
 import '../services/playlist_service.dart';
 import '../services/sponsorblock_categories.dart';
+import '../services/video_quality.dart';
 import '../widgets/mobile_data_download_guard.dart';
 import '../widgets/settings_section_header.dart';
 import '../widgets/update_frequency_dropdown.dart';
+import '../widgets/video_quality_picker.dart';
 import 'sponsorblock_settings_page.dart';
 
 /// One playlist's settings. Every change is saved at once (the name when
@@ -284,6 +286,81 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
         updateFrequencyHours: hours,
       ),
     );
+  }
+
+  /// Saves a new video quality at once, then offers to download again the
+  /// files it would change.
+  Future<void> _chooseVideoQuality() async {
+    final playlist = _playlist;
+    if (playlist == null || _busy) return;
+    final picked = await showVideoQualityPicker(
+      context,
+      current: playlist.videoQuality,
+    );
+    if (picked == null || !mounted) return;
+    final maxHeight = picked.value;
+    if (maxHeight == playlist.videoQuality) return;
+    final saved = await _update(
+      playlist.copyWith(videoQuality: Value(maxHeight)),
+      (playlists) => playlists.setPlaylistVideoQuality(playlist.id, maxHeight),
+    );
+    if (!saved || !mounted) return;
+
+    final List<Track> affected;
+    try {
+      affected = await _playlists.tracksAffectedByQualityChange(
+        playlist,
+        oldMax: playlist.videoQuality,
+        newMax: maxHeight,
+      );
+    } catch (_) {
+      return;
+    }
+    if (affected.isEmpty || !mounted) return;
+    final again = await confirmQualityRedownload(
+      context,
+      count: affected.length,
+      maxHeight: maxHeight,
+    );
+    if (!again || !mounted) return;
+    try {
+      await _playlists.requestRedownload(playlist.id, [
+        for (final track in affected) track.id,
+      ]);
+    } catch (e) {
+      _showMessage('Could not save: ${_errorText(e)}');
+      return;
+    }
+    if (!mounted) return;
+    final videos =
+        '${affected.length} ${affected.length == 1 ? 'video' : 'videos'}';
+    final unavailable = ref.read(ytDlpInitErrorProvider);
+    if (unavailable != null) {
+      _showMessage('Downloads are unavailable: $unavailable');
+      return;
+    }
+    if (!await confirmManualDownload(
+      context,
+      ref.read(downloadNetworkPolicyProvider),
+    )) {
+      _showMessage('The $videos download again at the next update.');
+      return;
+    }
+    final Playlist fresh;
+    try {
+      fresh = await _db.getPlaylist(playlist.id);
+    } catch (_) {
+      return;
+    }
+    // Queued when another download runs; a run of this playlist does
+    // another pass for them right after.
+    unawaited(
+      ref
+          .read(downloadServiceProvider)
+          .downloadPlaylist(fresh, sourceChecked: false)
+          .catchError((Object _) => DownloadStart.started),
+    );
+    _showMessage('Downloading $videos again');
   }
 
   Future<void> _openSkipSegments() async {
@@ -587,6 +664,7 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
       legacyCategories: playlist.sponsorBlockCategories,
     );
     final nameValid = _nameController.text.trim().isNotEmpty;
+    final temporary = playlist.isTemporary;
     return PopScope(
       // Back saves a name that is still being edited.
       onPopInvokedWithResult: (didPop, _) {
@@ -630,46 +708,52 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
                       onTapOutside: (_) => _nameFocus.unfocus(),
                     ),
                   ),
-                  ListTile(
-                    key: const ValueKey('playlist-open-youtube'),
-                    leading: const Icon(Icons.open_in_new),
-                    title: const Text('Open on YouTube'),
-                    subtitle: Text(
-                      playlist.url,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                  // The temporary playlist has no YouTube playlist, and it
+                  // only downloads videos the owner saved on purpose.
+                  if (!temporary)
+                    ListTile(
+                      key: const ValueKey('playlist-open-youtube'),
+                      leading: const Icon(Icons.open_in_new),
+                      title: const Text('Open on YouTube'),
+                      subtitle: Text(
+                        playlist.url,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      onTap: _openPlaylistOnYouTube,
+                      trailing: IconButton(
+                        tooltip: 'Copy link',
+                        icon: const Icon(Icons.copy, size: 20),
+                        onPressed: _copyLink,
+                      ),
                     ),
-                    onTap: _openPlaylistOnYouTube,
-                    trailing: IconButton(
-                      tooltip: 'Copy link',
-                      icon: const Icon(Icons.copy, size: 20),
-                      onPressed: _copyLink,
-                    ),
-                  ),
                   const SettingsSectionHeader('Downloads'),
-                  ListTile(
-                    key: const ValueKey('playlist-audio-only'),
-                    leading: const Icon(Icons.music_note_outlined),
-                    title: const Text('Audio only'),
-                    subtitle: Text(
-                      playlist.audioOnly
-                          ? 'Downloads sound only (m4a)'
-                          : 'Off: downloads videos',
+                  if (!temporary)
+                    ListTile(
+                      key: const ValueKey('playlist-audio-only'),
+                      leading: const Icon(Icons.music_note_outlined),
+                      title: const Text('Audio only'),
+                      subtitle: Text(
+                        playlist.audioOnly
+                            ? 'Downloads sound only (m4a)'
+                            : 'Off: downloads videos',
+                      ),
+                      enabled: !busy,
+                      onTap: () => _setAudioOnly(!playlist.audioOnly),
+                      trailing:
+                          _switchingFormat
+                              ? const SizedBox(
+                                width: 24,
+                                height: 24,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                              : Switch(
+                                value: playlist.audioOnly,
+                                onChanged: busy ? null : _setAudioOnly,
+                              ),
                     ),
-                    enabled: !busy,
-                    onTap: () => _setAudioOnly(!playlist.audioOnly),
-                    trailing:
-                        _switchingFormat
-                            ? const SizedBox(
-                              width: 24,
-                              height: 24,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                            : Switch(
-                              value: playlist.audioOnly,
-                              onChanged: busy ? null : _setAudioOnly,
-                            ),
-                  ),
                   SwitchListTile(
                     key: const ValueKey('playlist-include-thumbnails'),
                     secondary: const Icon(Icons.image_outlined),
@@ -687,38 +771,50 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
                               ),
                             ),
                   ),
-                  const SettingsSectionHeader('Updates'),
-                  SwitchListTile(
-                    key: const ValueKey('playlist-auto-update'),
-                    secondary: const Icon(Icons.update),
-                    title: const Text('Check for new videos automatically'),
-                    subtitle: const Text(
-                      'New videos in the YouTube playlist download in the '
-                      'background',
+                  if (!playlist.audioOnly)
+                    ListTile(
+                      key: const ValueKey('playlist-video-quality'),
+                      leading: const Icon(Icons.high_quality_outlined),
+                      title: const Text('Video quality'),
+                      subtitle: Text(videoQualityLabel(playlist.videoQuality)),
+                      enabled: !busy,
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: _chooseVideoQuality,
                     ),
-                    value: playlist.autoUpdate,
-                    onChanged:
-                        busy
-                            ? null
-                            : (value) => _update(
-                              playlist.copyWith(autoUpdate: value),
-                              (playlists) => playlists.updatePlaylistSettings(
-                                id: playlist.id,
-                                autoUpdate: value,
+                  if (!temporary) ...[
+                    const SettingsSectionHeader('Updates'),
+                    SwitchListTile(
+                      key: const ValueKey('playlist-auto-update'),
+                      secondary: const Icon(Icons.update),
+                      title: const Text('Check for new videos automatically'),
+                      subtitle: const Text(
+                        'New videos in the YouTube playlist download in the '
+                        'background',
+                      ),
+                      value: playlist.autoUpdate,
+                      onChanged:
+                          busy
+                              ? null
+                              : (value) => _update(
+                                playlist.copyWith(autoUpdate: value),
+                                (playlists) => playlists.updatePlaylistSettings(
+                                  id: playlist.id,
+                                  autoUpdate: value,
+                                ),
                               ),
-                            ),
-                  ),
-                  ListTile(
-                    key: const ValueKey('playlist-update-frequency'),
-                    leading: const SizedBox(width: 24),
-                    title: const Text('How often'),
-                    subtitle: Text(
-                      updateFrequencyLabel(playlist.updateFrequencyHours),
                     ),
-                    enabled: playlist.autoUpdate && !busy,
-                    trailing: const Icon(Icons.chevron_right),
-                    onTap: _chooseUpdateFrequency,
-                  ),
+                    ListTile(
+                      key: const ValueKey('playlist-update-frequency'),
+                      leading: const SizedBox(width: 24),
+                      title: const Text('How often'),
+                      subtitle: Text(
+                        updateFrequencyLabel(playlist.updateFrequencyHours),
+                      ),
+                      enabled: playlist.autoUpdate && !busy,
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: _chooseUpdateFrequency,
+                    ),
+                  ],
                   const SettingsSectionHeader('Playback'),
                   SwitchListTile(
                     key: const ValueKey('playlist-play-chapters'),
@@ -793,28 +889,33 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
                     enabled: !busy && !_isForceInserting,
                     onTap: _forceInsert,
                   ),
-                  const SettingsSectionHeader('Danger zone', color: _red),
-                  ListTile(
-                    key: const ValueKey('delete-playlist-button'),
-                    leading:
-                        _deleting
-                            ? const SizedBox(
-                              width: 24,
-                              height: 24,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: _red,
-                              ),
-                            )
-                            : const Icon(Icons.delete_outline, color: _red),
-                    title: const Text(
-                      'Delete playlist',
-                      style: TextStyle(color: _red),
+                  // Deleted with its files kept, they would all come back
+                  // the next time a video is saved to it. Its page has
+                  // "Clear all" instead.
+                  if (!temporary) ...[
+                    const SettingsSectionHeader('Danger zone', color: _red),
+                    ListTile(
+                      key: const ValueKey('delete-playlist-button'),
+                      leading:
+                          _deleting
+                              ? const SizedBox(
+                                width: 24,
+                                height: 24,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: _red,
+                                ),
+                              )
+                              : const Icon(Icons.delete_outline, color: _red),
+                      title: const Text(
+                        'Delete playlist',
+                        style: TextStyle(color: _red),
+                      ),
+                      subtitle: const Text('You can choose to keep the files'),
+                      enabled: !busy && !_isForceInserting,
+                      onTap: _delete,
                     ),
-                    subtitle: const Text('You can choose to keep the files'),
-                    enabled: !busy && !_isForceInserting,
-                    onTap: _delete,
-                  ),
+                  ],
                 ],
               ),
         ),

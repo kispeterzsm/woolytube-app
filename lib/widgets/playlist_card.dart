@@ -29,7 +29,7 @@ enum PlaylistCardActivity {
 
 /// One playlist on the home page: cover, name, a short status, and two
 /// buttons, "Update now" and "Playlist settings". A long press opens a menu
-/// with the same actions plus "Open on YouTube".
+/// with the same actions plus "Reorder playlists" and "Open on YouTube".
 class PlaylistCard extends StatelessWidget {
   final Playlist playlist;
 
@@ -59,6 +59,9 @@ class PlaylistCard extends StatelessWidget {
   final VoidCallback? onCancel;
   final VoidCallback? onOpenOnYouTube;
 
+  /// Opens the page that changes the order of the playlists.
+  final VoidCallback? onReorder;
+
   const PlaylistCard({
     super.key,
     required this.playlist,
@@ -75,6 +78,7 @@ class PlaylistCard extends StatelessWidget {
     required this.onSettings,
     this.onCancel,
     this.onOpenOnYouTube,
+    this.onReorder,
   });
 
   static const _surface = Color(0xFF2A2A2A);
@@ -332,9 +336,6 @@ class PlaylistCard extends StatelessWidget {
     );
   }
 
-  /// The cover saved in the playlist folder works offline, so it comes
-  /// first; the YouTube image is the fallback. Both are decoded at the size
-  /// they are shown.
   Widget _buildCover(BuildContext context, double width) {
     final height = width * 9 / 16;
     final cacheWidth = (width * MediaQuery.devicePixelRatioOf(context)).round();
@@ -348,7 +349,10 @@ class PlaylistCard extends StatelessWidget {
           children: [
             ColoredBox(
               color: const Color(0xFF222222),
-              child: _buildImage(cacheWidth),
+              child: PlaylistCoverImage(
+                playlist: playlist,
+                cacheWidth: cacheWidth,
+              ),
             ),
             if (isNowPlaying)
               Positioned(
@@ -374,35 +378,6 @@ class PlaylistCard extends StatelessWidget {
       ),
     );
   }
-
-  Widget _buildImage(int cacheWidth) {
-    final url = playlist.thumbnailUrl;
-    final remote =
-        url != null && url.isNotEmpty
-            ? CachedNetworkImage(
-              imageUrl: url,
-              fit: BoxFit.contain,
-              memCacheWidth: cacheWidth,
-              placeholder: (_, __) => const SizedBox.expand(),
-              errorWidget: (_, __, ___) => _placeholder(),
-            )
-            : _placeholder();
-    final localPath = existingThumbnailPath(playlist.thumbnailPath);
-    if (localPath == null) return remote;
-    return Image(
-      image: ResizeImage(
-        FileImage(File(localPath)),
-        width: cacheWidth,
-        policy: ResizeImagePolicy.fit,
-      ),
-      fit: BoxFit.contain,
-      errorBuilder: (_, __, ___) => remote,
-    );
-  }
-
-  Widget _placeholder() => const Center(
-    child: Icon(Icons.playlist_play, color: Color(0xFF555555), size: 36),
-  );
 
   Future<void> _showMenu(BuildContext context) async {
     HapticFeedback.selectionClick();
@@ -444,6 +419,8 @@ class PlaylistCard extends StatelessWidget {
                     subtitle: Text(
                       _isBusy
                           ? statusText()
+                          : playlist.isTemporary
+                          ? 'Download videos not downloaded yet'
                           : 'Check for new videos and download them',
                     ),
                     enabled: !_isBusy,
@@ -455,6 +432,13 @@ class PlaylistCard extends StatelessWidget {
                   title: const Text('Playlist settings'),
                   onTap: () => Navigator.pop(sheetContext, onSettings),
                 ),
+                if (onReorder != null)
+                  ListTile(
+                    key: const ValueKey('playlist-menu-reorder'),
+                    leading: const Icon(Icons.swap_vert),
+                    title: const Text('Reorder playlists'),
+                    onTap: () => Navigator.pop(sheetContext, onReorder),
+                  ),
                 if (onOpenOnYouTube != null)
                   ListTile(
                     key: const ValueKey('playlist-menu-youtube'),
@@ -469,6 +453,50 @@ class PlaylistCard extends StatelessWidget {
     );
     action?.call();
   }
+}
+
+/// A playlist's cover. The one saved in the playlist folder works offline,
+/// so it comes first; the YouTube image is the fallback. Both are decoded at
+/// [cacheWidth] pixels wide.
+class PlaylistCoverImage extends StatelessWidget {
+  const PlaylistCoverImage({
+    super.key,
+    required this.playlist,
+    required this.cacheWidth,
+  });
+
+  final Playlist playlist;
+  final int cacheWidth;
+
+  @override
+  Widget build(BuildContext context) {
+    final url = playlist.thumbnailUrl;
+    final remote =
+        url != null && url.isNotEmpty
+            ? CachedNetworkImage(
+              imageUrl: url,
+              fit: BoxFit.contain,
+              memCacheWidth: cacheWidth,
+              placeholder: (_, __) => const SizedBox.expand(),
+              errorWidget: (_, __, ___) => _placeholder(),
+            )
+            : _placeholder();
+    final localPath = existingThumbnailPath(playlist.thumbnailPath);
+    if (localPath == null) return remote;
+    return Image(
+      image: ResizeImage(
+        FileImage(File(localPath)),
+        width: cacheWidth,
+        policy: ResizeImagePolicy.fit,
+      ),
+      fit: BoxFit.contain,
+      errorBuilder: (_, __, ___) => remote,
+    );
+  }
+
+  Widget _placeholder() => const Center(
+    child: Icon(Icons.playlist_play, color: Color(0xFF555555), size: 36),
+  );
 }
 
 /// "just now", "5m ago", "3h ago", "2d ago", or the date for older times.

@@ -450,6 +450,25 @@ void main() {
       expect(playback.upNextQueue, isEmpty);
     });
 
+    test('removed tracks leave the queue and Up next', () async {
+      final tracks = await addTracks(4);
+      await playback.playTrack(tracks[0], tracks);
+      await playback.addToUpNextQueue(tracks[3]);
+      await playback.addToUpNextQueue(tracks[2]);
+
+      await playback.tracksRemoved({tracks[1].id, tracks[3].id});
+      expect(playback.currentTrack!.id, tracks[0].id);
+      expect(playback.upNextQueue.map((t) => t.id), [tracks[2].id]);
+      expect(
+        playback.queue.map((t) => t.id),
+        isNot(anyOf(contains(tracks[1].id), contains(tracks[3].id))),
+      );
+
+      // The current song: playback stops.
+      await playback.tracksRemoved({tracks[0].id});
+      expect(playback.currentTrack, isNull);
+    });
+
     test('a deleted playlist does not come back with shuffle while a song '
         'from Up next plays', () async {
       final tracks = await addTracks(3);

@@ -83,6 +83,7 @@ void main() {
       createdAt: DateTime.utc(2023, 1, 2, 3, 4, 5),
       playChapters: false,
       outputPath: folder,
+      videoQuality: 480,
     );
     final chapters =
         ChapterData(
@@ -115,6 +116,8 @@ void main() {
       sponsorBlockCheckedAt: DateTime.utc(2024, 3, 1, 2, 3, 4),
       downloadedAt: DateTime.utc(2024, 3, 1, 1, 2, 3),
       replaceRequested: true,
+      videoQuality: 720,
+      downloadedMaxHeight: 720,
     );
     // A local file still in the other format's folder after a mode switch.
     final elsewhere = await insertTestTrack(
@@ -132,6 +135,8 @@ void main() {
       isLocalReplacement: true,
       chaptersEnabled: false,
       downloadedAt: DateTime.utc(2024, 4, 1),
+      videoQuality: 0,
+      downloadedMaxHeight: 0,
     );
     await insertTestTrack(
       db,
@@ -287,6 +292,10 @@ void main() {
     final track = (await db.getTracksForPlaylist(id)).single;
     expect(track.status, 'complete');
     expect(track.filePath, p.join(folder, '00001_A.m4a'));
+    // Written before video quality existed: the playlist default, unknown.
+    expect(track.videoQuality, isNull);
+    expect(track.downloadedMaxHeight, isNull);
+    expect((await db.getPlaylist(id)).videoQuality, isNull);
     final segment = (await db.getSegmentsForTrack(track.id)).single;
     expect(segment.actionType, 'skip');
     expect(segment.uuid, 'u');
@@ -294,6 +303,90 @@ void main() {
       (await db.getPlaylist(id)).sponsorBlockCategoryActions,
       contains('"sponsor":"autoSkip"'),
     );
+  });
+
+  test('an imported playlist goes to the end of the home order, which the '
+      'sidecar does not carry', () async {
+    final first = await insertTestPlaylist(db, url: 'first', sortOrder: 7);
+    final second = await insertTestPlaylist(db, url: 'second', sortOrder: 3);
+    final source = await insertTestPlaylist(
+      db,
+      url: 'https://www.youtube.com/playlist?list=PLsource',
+      outputPath: folder,
+      audioOnly: true,
+    );
+    await metadata.writeMetadata(source, const []);
+    final sidecar =
+        jsonDecode(
+              await File(p.join(folder, 'woolytube_meta.json')).readAsString(),
+            )
+            as Map<String, dynamic>;
+    expect(
+      (sidecar['playlist'] as Map<String, dynamic>).containsKey('sortOrder'),
+      isFalse,
+    );
+    await db.deletePlaylist(source.id);
+
+    final id = await metadata.importPlaylist(
+      (await metadata.readFolder(folder))!,
+    );
+
+    expect((await db.getPlaylist(id)).sortOrder, 8);
+    expect((await db.getAllPlaylists()).map((p) => p.id), [
+      second.id,
+      first.id,
+      id,
+    ]);
+  });
+
+  test('the temporary playlist imports as the temporary playlist', () async {
+    final source = await insertTestPlaylist(
+      db,
+      url: 'woolytube:temporary',
+      name: 'Temporary',
+      outputPath: folder,
+      autoUpdate: false,
+      videoQuality: 720,
+      isTemporary: true,
+    );
+    await metadata.writeMetadata(source, const []);
+    final file = File(p.join(folder, 'woolytube_meta.json'));
+    final sidecar =
+        jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+    expect((sidecar['playlist'] as Map)['temporary'], isTrue);
+    await db.deletePlaylist(source.id);
+
+    var id = await metadata.importPlaylist(
+      (await metadata.readFolder(folder))!,
+    );
+    var imported = await db.getPlaylist(id);
+    expect(imported.isTemporary, isTrue);
+    expect(imported.videoQuality, 720);
+    expect(imported.autoUpdate, isFalse);
+    await db.deletePlaylist(id);
+
+    // A sidecar written without the mark is still recognised by its link.
+    (sidecar['playlist'] as Map).remove('temporary');
+    await file.writeAsString(jsonEncode(sidecar));
+    id = await metadata.importPlaylist((await metadata.readFolder(folder))!);
+    imported = await db.getPlaylist(id);
+    expect(imported.isTemporary, isTrue);
+  });
+
+  test('other playlists do not write the temporary mark', () async {
+    final source = await insertTestPlaylist(db, outputPath: folder);
+    await metadata.writeMetadata(source, const []);
+    final sidecar =
+        jsonDecode(
+              await File(p.join(folder, 'woolytube_meta.json')).readAsString(),
+            )
+            as Map<String, dynamic>;
+    expect(
+      (sidecar['playlist'] as Map<String, dynamic>).containsKey('temporary'),
+      isFalse,
+    );
+    final read = await metadata.readFolder(folder);
+    expect(read!.isTemporary, isFalse);
   });
 
   test('import gives a repeated index to the entry whose file carries that '

@@ -388,6 +388,18 @@ void main() {
       await database.customStatement(
         'ALTER TABLE playlists DROP COLUMN last_update_attempt',
       );
+      // Added in schema 15 (after the triggers, which name them).
+      for (final (table, column) in [
+        ('playlists', 'sort_order'),
+        ('playlists', 'video_quality'),
+        ('playlists', 'is_temporary'),
+        ('tracks', 'video_quality'),
+        ('tracks', 'downloaded_max_height'),
+      ]) {
+        await database.customStatement(
+          'ALTER TABLE $table DROP COLUMN $column',
+        );
+      }
       await database.customStatement('PRAGMA user_version = 9');
       await database.close();
       database = AppDatabase.forTesting(NativeDatabase(file));

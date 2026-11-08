@@ -43,6 +43,27 @@ void main() {
     },
   );
 
+  test('the video quality cap is sent only for capped video', () async {
+    final service = YtDlpService();
+    Future<Map> send({int? maxHeight, bool audioOnly = false}) async {
+      await service.download(
+        url: 'https://www.youtube.com/watch?v=test',
+        outputPath: '/downloads',
+        audioOnly: audioOnly,
+        maxHeight: maxHeight,
+      );
+      return calls.last.arguments as Map;
+    }
+
+    expect((await send(maxHeight: 720))['maxHeight'], 720);
+    expect((await send()).containsKey('maxHeight'), isFalse);
+    expect((await send(maxHeight: 0)).containsKey('maxHeight'), isFalse);
+    expect(
+      (await send(maxHeight: 720, audioOnly: true)).containsKey('maxHeight'),
+      isFalse,
+    );
+  });
+
   test('large and small playlist answers decode the same', () async {
     final service = YtDlpService();
     Map<String, Object?> listing(int count) => {

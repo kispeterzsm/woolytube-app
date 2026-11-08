@@ -179,12 +179,14 @@ void main() {
         onUpdate: () => calls.add('update'),
         onSettings: () => calls.add('settings'),
         onOpenOnYouTube: () => calls.add('youtube'),
+        onReorder: () => calls.add('reorder'),
       ),
     );
 
     for (final (key, call) in [
       ('playlist-menu-update', 'update'),
       ('playlist-menu-settings', 'settings'),
+      ('playlist-menu-reorder', 'reorder'),
       ('playlist-menu-youtube', 'youtube'),
     ]) {
       await tester.longPress(find.text('Road trip'));
@@ -198,6 +200,32 @@ void main() {
 
     await tester.tap(find.text('Road trip'));
     expect(calls.last, 'open');
+  });
+
+  testWidgets('the menu has no reorder entry without a reorder action', (
+    tester,
+  ) async {
+    final db = openTestDatabase();
+    addTearDown(db.close);
+    final playlist = await insertTestPlaylist(db, name: 'Only one');
+
+    await pumpCard(
+      tester,
+      PlaylistCard(
+        playlist: playlist,
+        onTap: () {},
+        onUpdate: () {},
+        onSettings: () {},
+      ),
+    );
+    await tester.longPress(find.text('Only one'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('playlist-menu-settings')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('playlist-menu-reorder')), findsNothing);
   });
 
   testWidgets('marks the playlist that is playing', (tester) async {

@@ -315,6 +315,8 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         val subtitleLanguages = args["subtitleLanguages"] as? String ?: "en"
         val outputTemplate = args["outputTemplate"] as? String
         val formatOption = args["format"] as? String
+        // Highest video resolution to download; absent means the best.
+        val maxHeight = (args["maxHeight"] as? Number)?.toInt()?.takeIf { it > 0 }
 
         if (url == null || outputPath == null) {
             result.error("INVALID_ARGS", "url and outputPath required", null)
@@ -345,6 +347,7 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     subtitleLanguages,
                     outputTemplate,
                     formatOption,
+                    maxHeight,
                     processId
                 )
                 // Drop the ids before replying so a stopDownloadService call
@@ -561,6 +564,7 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         subtitleLanguages: String,
         outputTemplate: String?,
         formatOption: String?,
+        maxHeight: Int?,
         processId: String
     ) {
         withContext(Dispatchers.Main) {
@@ -587,7 +591,11 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             // Prefer H.264 within those formats. yt-dlp's default order picks
             // AV1 (often 4K) or VP9, which many TVs, car screens, older phones
             // and PCs cannot play; the library must play on any device.
-            request.addOption("-S", "vcodec:h264")
+            // With a cap, also prefer the largest resolution not above it (or
+            // the smallest above it when none is), so a cap never fails a
+            // download. yt-dlp's res sorts by the shorter side, so a vertical
+            // video gets the same sharpness as a landscape one.
+            request.addOption("-S", if (maxHeight != null) "vcodec:h264,res:$maxHeight" else "vcodec:h264")
             // A single-file webm fallback cannot hold embedded artwork; mkv can.
             request.addOption("--remux-video", "webm>mkv")
         }

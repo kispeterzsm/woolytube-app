@@ -8,6 +8,7 @@ import 'sponsorblock_categories.dart';
 import 'chapters.dart';
 import 'library_layout.dart';
 import 'media_thumbnail_service.dart';
+import 'video_quality.dart';
 
 class DiscoveredTrack {
   final int index;
@@ -28,6 +29,12 @@ class DiscoveredTrack {
   final String? fileName;
   final List<DiscoveredSponsorBlockSegment> sponsorBlockSegments;
 
+  /// The track's own video quality (see `Tracks.videoQuality`).
+  final int? videoQuality;
+
+  /// The cap its file was downloaded under (see `Tracks.downloadedMaxHeight`).
+  final int? downloadedMaxHeight;
+
   DiscoveredTrack({
     required this.index,
     required this.videoId,
@@ -46,6 +53,8 @@ class DiscoveredTrack {
     this.replaceRequested = false,
     this.fileName,
     this.sponsorBlockSegments = const [],
+    this.videoQuality,
+    this.downloadedMaxHeight,
   });
 }
 
@@ -93,6 +102,12 @@ class DiscoveredPlaylist {
   final DateTime createdAt;
   final List<DiscoveredTrack> tracks;
 
+  /// Highest video height to download; null = the best.
+  final int? videoQuality;
+
+  /// The app's own "Temporary" playlist (see `Playlists.isTemporary`).
+  final bool isTemporary;
+
   DiscoveredPlaylist({
     required this.folderPath,
     required this.url,
@@ -110,6 +125,8 @@ class DiscoveredPlaylist {
     this.lastUpdated,
     required this.createdAt,
     required this.tracks,
+    this.videoQuality,
+    this.isTemporary = false,
   });
 }
 
@@ -1250,6 +1267,7 @@ for video) to keep a complete backup.
     required File stagedMedia,
     required MediaThumbnailService thumbnails,
     required bool embeddedThumbnailExpected,
+    int? downloadedMaxHeight,
   }) async {
     final fresh = await _db.getTrack(trackId);
     if (fresh == null) return null;
@@ -1299,6 +1317,7 @@ for video) to keep a complete backup.
       trackId,
       filePath: targetPath,
       thumbnailPath: thumbnailPath,
+      downloadedMaxHeight: downloadedMaxHeight,
     );
 
     if (oldExists &&
@@ -1711,6 +1730,8 @@ for video) to keep a complete backup.
           lastUpdated: Value(discovered.lastUpdated),
           createdAt: discovered.createdAt,
           outputPath: discovered.folderPath,
+          videoQuality: Value(discovered.videoQuality),
+          isTemporary: Value(discovered.isTemporary),
         ),
       );
 
@@ -1740,6 +1761,10 @@ for video) to keep a complete backup.
             ),
             sponsorBlockCheckedAt: Value(dt.sponsorBlockCheckedAt),
             replaceRequested: Value(complete && dt.replaceRequested),
+            videoQuality: Value(dt.videoQuality),
+            downloadedMaxHeight: Value(
+              complete ? dt.downloadedMaxHeight : null,
+            ),
           ),
         );
       }
@@ -1804,6 +1829,10 @@ for video) to keep a complete backup.
     return candidate;
   }
 
+  /// A whole number from a sidecar, or null when missing or not a number.
+  static int? _optionalInt(Object? value) =>
+      value is num ? value.toInt() : null;
+
   static DiscoveredPlaylist? _parseMetadata(
     String folderPath,
     Map<String, dynamic> json,
@@ -1847,6 +1876,8 @@ for video) to keep a complete backup.
           sponsorBlockSegments: _parseSegments(
             m['sponsorBlockSegments'] as List<dynamic>?,
           ),
+          videoQuality: _optionalInt(m['videoQuality']),
+          downloadedMaxHeight: _optionalInt(m['downloadedMaxHeight']),
         ),
       );
     }
@@ -1875,6 +1906,8 @@ for video) to keep a complete backup.
       lastUpdated: date(pl['lastUpdated']),
       createdAt: date(pl['createdAt']) ?? DateTime.now(),
       tracks: tracks,
+      videoQuality: _optionalInt(pl['videoQuality']),
+      isTemporary: pl['temporary'] == true || pl['url'] == temporaryPlaylistUrl,
     );
   }
 
@@ -2016,6 +2049,10 @@ String buildSidecarJson(
       'downloadedAt': t.downloadedAt?.toUtc().toIso8601String(),
       'replaceRequested': t.replaceRequested,
       'fileName': relative(t.filePath),
+      // Written only when set, so files without them stay unchanged.
+      if (t.videoQuality != null) 'videoQuality': t.videoQuality,
+      if (t.downloadedMaxHeight != null)
+        'downloadedMaxHeight': t.downloadedMaxHeight,
       'sponsorBlockSegments': [
         for (final s in segments)
           {
@@ -2051,6 +2088,8 @@ String buildSidecarJson(
       'sponsorBlockCategoryActions': playlist.sponsorBlockCategoryActions,
       'lastUpdated': playlist.lastUpdated?.toUtc().toIso8601String(),
       'createdAt': playlist.createdAt.toUtc().toIso8601String(),
+      if (playlist.videoQuality != null) 'videoQuality': playlist.videoQuality,
+      if (playlist.isTemporary) 'temporary': true,
     },
     'tracks': tracksJson,
   };

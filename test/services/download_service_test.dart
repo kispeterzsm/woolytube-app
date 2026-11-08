@@ -1371,7 +1371,198 @@ void main() {
     });
   });
 
+  group('video quality', () {
+    test(
+      'the playlist cap reaches yt-dlp and is recorded on the track',
+      () async {
+        final playlist = await insertTestPlaylist(
+          db,
+          outputPath: folder,
+          videoQuality: 720,
+        );
+        final track = await insertTestTrack(db, playlistId: playlist.id);
+
+        await service.downloadPlaylist(playlist);
+
+        expect(ytdlp.calls.single.maxHeight, 720);
+        expect((await db.getTrack(track.id))!.downloadedMaxHeight, 720);
+      },
+    );
+
+    test("a track's own quality wins over the playlist's", () async {
+      final playlist = await insertTestPlaylist(
+        db,
+        outputPath: folder,
+        videoQuality: 720,
+      );
+      final capped = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 1,
+        videoId: 'a',
+        videoQuality: 480,
+      );
+      final best = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 2,
+        videoId: 'b',
+        videoQuality: 0,
+      );
+
+      await service.downloadPlaylist(playlist);
+
+      expect(
+        {for (final c in ytdlp.calls) c.videoId: c.maxHeight},
+        {'a': 480, 'b': null},
+      );
+      expect((await db.getTrack(capped.id))!.downloadedMaxHeight, 480);
+      // 0 records "no cap", unlike an unknown (null) one.
+      expect((await db.getTrack(best.id))!.downloadedMaxHeight, 0);
+    });
+
+    test('audio-only playlists never send a cap', () async {
+      final playlist = await insertTestPlaylist(
+        db,
+        outputPath: folder,
+        audioOnly: true,
+        videoQuality: 720,
+      );
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        videoQuality: 480,
+      );
+
+      await service.downloadPlaylist(playlist);
+      await service.downloadTrack(playlist, track);
+
+      expect(ytdlp.calls.map((c) => c.maxHeight), [null, null]);
+      expect((await db.getTrack(track.id))!.downloadedMaxHeight, isNull);
+    });
+
+    test('single-track and reupload downloads use the current cap', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final track = await insertTestTrack(db, playlistId: playlist.id);
+      // Changed after the caller read the rows.
+      await db.updatePlaylistFields(
+        playlist.id,
+        const PlaylistsCompanion(videoQuality: Value(480)),
+      );
+
+      await service.downloadTrack(playlist, track);
+      await service.downloadReupload(
+        playlist,
+        track,
+        'https://www.youtube.com/watch?v=reup-1',
+        adopt: (_) async {},
+      );
+
+      expect(ytdlp.calls.map((c) => c.maxHeight), [480, 480]);
+    });
+
+    test('a cap chosen during a run applies to the next track', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 1,
+        videoId: 'a',
+      );
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 2,
+        videoId: 'b',
+      );
+      ytdlp.downloadCompleter = Completer<void>();
+      ytdlp.downloadStarted = Completer<void>();
+
+      final running = service.downloadPlaylist(playlist);
+      await ytdlp.downloadStarted!.future;
+      await db.updatePlaylistFields(
+        playlist.id,
+        const PlaylistsCompanion(videoQuality: Value(360)),
+      );
+      ytdlp.downloadCompleter!.complete();
+      await running;
+
+      expect(ytdlp.calls.map((c) => c.maxHeight), [null, 360]);
+    });
+  });
+
   group('busy service', () {
+    test('asking for the running playlist again downloads what was added '
+        'meanwhile', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 1,
+        videoId: 'a',
+      );
+      ytdlp.downloadCompleter = Completer<void>();
+      ytdlp.downloadStarted = Completer<void>();
+
+      final running = service.downloadPlaylist(playlist);
+      await ytdlp.downloadStarted!.future;
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 2,
+        videoId: 'b',
+      );
+      expect(
+        await service.downloadPlaylist(playlist),
+        DownloadStart.alreadyQueued,
+      );
+      expect(
+        await service.downloadPlaylist(playlist),
+        DownloadStart.alreadyQueued,
+      );
+
+      ytdlp.downloadCompleter!.complete();
+      await running;
+      for (var i = 0; i < 50 && ytdlp.calls.length < 2; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      await service.runFinished;
+
+      // One more pass, for the new track only.
+      expect(ytdlp.calls.map((c) => c.videoId), ['a', 'b']);
+      expect(service.queuedPlaylistIds, isEmpty);
+      expect(service.isDownloading, isFalse);
+    });
+
+    test('stopping drops a requested second pass', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 1,
+        videoId: 'a',
+      );
+      ytdlp.downloadCompleter = Completer<void>();
+      ytdlp.downloadStarted = Completer<void>();
+
+      final running = service.downloadPlaylist(playlist);
+      await ytdlp.downloadStarted!.future;
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 2,
+        videoId: 'b',
+      );
+      await service.downloadPlaylist(playlist);
+      await service.cancelActiveDownloads();
+      await running;
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await service.runFinished;
+
+      expect(ytdlp.calls.map((c) => c.videoId), ['a']);
+      expect(service.isDownloading, isFalse);
+    });
+
     test('a second playlist waits in the queue and then runs', () async {
       final first = await insertTestPlaylist(db, outputPath: folder);
       await insertTestTrack(db, playlistId: first.id, videoId: 'a');

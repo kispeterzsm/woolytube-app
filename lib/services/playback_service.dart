@@ -2132,20 +2132,29 @@ class PlaybackService
   /// Call before playlist [playlistId] is deleted: its songs leave the
   /// queue and "Up next", and when one of them is the current song,
   /// playback stops (its file may be deleted with it).
-  Future<void> playlistRemoved(int playlistId) => _transition(() async {
-    bool fromPlaylist(Track track) => track.playlistId == playlistId;
-    final item = currentItem;
-    if (item != null && fromPlaylist(item.track)) {
-      await _stopNow();
-      return;
-    }
-    _albumQueue.removeTracksWhere(fromPlaylist);
-    final pending = _pendingSkipTarget;
-    if (pending != null && fromPlaylist(pending.item.track)) {
-      _pendingSkipTarget = null;
-    }
-    _publishQueue();
-  });
+  Future<void> playlistRemoved(int playlistId) =>
+      _removeTracksWhere((track) => track.playlistId == playlistId);
+
+  /// Call before the tracks [trackIds] are deleted: they leave the queue
+  /// and "Up next", and when one of them is the current song, playback
+  /// stops (its file is deleted with it).
+  Future<void> tracksRemoved(Set<int> trackIds) =>
+      _removeTracksWhere((track) => trackIds.contains(track.id));
+
+  Future<void> _removeTracksWhere(bool Function(Track track) removed) =>
+      _transition(() async {
+        final item = currentItem;
+        if (item != null && removed(item.track)) {
+          await _stopNow();
+          return;
+        }
+        _albumQueue.removeTracksWhere(removed);
+        final pending = _pendingSkipTarget;
+        if (pending != null && removed(pending.item.track)) {
+          _pendingSkipTarget = null;
+        }
+        _publishQueue();
+      });
 
   // ---------------------------------------------------------------------
   // Remembering settings and the last song.

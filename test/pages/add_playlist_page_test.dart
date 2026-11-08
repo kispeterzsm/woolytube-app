@@ -89,6 +89,11 @@ void main() {
     expect(find.text('4 videos'), findsOneWidget);
     expect(enabled(tester, addButton), isTrue);
     expect(find.text('Add & download'), findsOneWidget);
+    // A whole playlist cannot go to the temporary playlist.
+    expect(
+      find.byKey(const ValueKey('add-playlist-destination')),
+      findsNothing,
+    );
     // The interval sits right under its switch and hides with it.
     expect(find.text('1 day'), findsOneWidget);
     await tester.tap(find.text('Keep up to date'));
@@ -129,6 +134,163 @@ void main() {
       findsOneWidget,
     );
     expect(enabled(tester, addButton), isTrue);
+  });
+
+  testWidgets('a single video can be saved to Temporary instead', (
+    tester,
+  ) async {
+    final db = openTestDatabase();
+    addTearDown(db.close);
+    final downloads = _Downloads();
+    final playlists = _Playlists(db);
+    await pumpPage(
+      tester,
+      _YtDlp(
+        info: {
+          'title': 'Song',
+          'count': 1,
+          'isPlaylist': false,
+          'thumbnail': 'https://example.com/cover.jpg',
+          'entries': [
+            {'id': 'abcdefghijk', 'title': 'Song', 'duration': 60},
+          ],
+        },
+      ),
+      overrides: [
+        ..._services(db, downloads, ConnectivityResult.wifi),
+        playlistServiceProvider.overrideWithValue(playlists),
+      ],
+    );
+    await tester.enterText(urlField, 'https://youtube.com/watch?v=abcdefghijk');
+    await tester.testTextInput.receiveAction(TextInputAction.go);
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('add-playlist-destination')),
+      findsOneWidget,
+    );
+    expect(find.byKey(addButton), findsOneWidget);
+    await tester.tap(find.text('Temporary'));
+    await tester.pumpAndSettle();
+
+    // Temporary has its own settings: the add options are not offered.
+    expect(find.byKey(addButton), findsNothing);
+    expect(nameField, findsNothing);
+    expect(find.text('Keep up to date'), findsNothing);
+    expect(find.text('Save to Temporary'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('add-playlist-to-temporary')));
+    await tester.pumpAndSettle();
+
+    expect(playlists.added, 0);
+    expect(playlists.temporaryEntries.single, {
+      'id': 'abcdefghijk',
+      'title': 'Song',
+      'duration': 60,
+      'thumbnail': 'https://example.com/cover.jpg',
+    });
+    expect(downloads.started, ['Temporary']);
+    expect(find.byType(AddPlaylistPage), findsNothing);
+    expect(find.text('Saved "Song" to Temporary.'), findsOneWidget);
+  });
+
+  testWidgets('a video already downloaded as video is not saved again', (
+    tester,
+  ) async {
+    final db = openTestDatabase();
+    addTearDown(db.close);
+    final library = await insertTestPlaylist(
+      db,
+      name: 'Watch later',
+      url: 'https://example.com/list',
+    );
+    await insertTestTrack(
+      db,
+      playlistId: library.id,
+      videoId: 'abcdefghijk',
+      status: 'complete',
+      filePath: '/x/00001_abcdefghijk.mp4',
+    );
+    final downloads = _Downloads();
+    final playlists = _Playlists(db);
+    await pumpPage(
+      tester,
+      _YtDlp(
+        info: {
+          'title': 'Song',
+          'count': 1,
+          'isPlaylist': false,
+          'entries': [
+            {'id': 'abcdefghijk', 'title': 'Song'},
+          ],
+        },
+      ),
+      overrides: [
+        ..._services(db, downloads, ConnectivityResult.wifi),
+        playlistServiceProvider.overrideWithValue(playlists),
+      ],
+    );
+    await tester.enterText(urlField, 'https://youtube.com/watch?v=abcdefghijk');
+    await tester.testTextInput.receiveAction(TextInputAction.go);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Temporary'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('add-playlist-to-temporary')));
+    await tester.pumpAndSettle();
+
+    expect(playlists.temporaryEntries, isEmpty);
+    expect(downloads.started, isEmpty);
+    expect(
+      find.text('"Song" is already downloaded in Watch later'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('from a video in a playlist link only that video is saved', (
+    tester,
+  ) async {
+    final db = openTestDatabase();
+    addTearDown(db.close);
+    final downloads = _Downloads();
+    final playlists = _Playlists(db);
+    final ytdlp = _YtDlp(
+      info: {
+        'title': 'Mix',
+        'count': 2,
+        'entries': [
+          {'id': 'other000000', 'title': 'Other'},
+          {'id': 'abcdefghijk', 'title': 'Listed'},
+        ],
+      },
+      videoInfo: {'id': 'abcdefghijk', 'title': 'Only me', 'duration': 5},
+    );
+    await pumpPage(
+      tester,
+      ytdlp,
+      overrides: [
+        ..._services(db, downloads, ConnectivityResult.wifi),
+        playlistServiceProvider.overrideWithValue(playlists),
+      ],
+    );
+    const url = 'https://www.youtube.com/watch?v=abcdefghijk&list=PL1';
+    await tester.enterText(urlField, url);
+    await tester.testTextInput.receiveAction(TextInputAction.go);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Whole playlist'), findsOneWidget);
+    await tester.tap(find.text('Temporary'));
+    await tester.pumpAndSettle();
+    expect(find.text('Listed'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('add-playlist-to-temporary')));
+    await tester.pumpAndSettle();
+
+    expect(ytdlp.requestedVideoUrls, [url]);
+    expect(playlists.temporaryEntries.single, {
+      'id': 'abcdefghijk',
+      'title': 'Only me',
+      'duration': 5,
+      'thumbnail': 'https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg',
+    });
+    expect(downloads.started, ['Temporary']);
   });
 
   testWidgets('fetch failures are shown with a friendly message', (
@@ -500,9 +662,18 @@ Future<void> _settle(WidgetTester tester) async {
 }
 
 class _YtDlp implements YtDlpService {
-  _YtDlp({this.info, this.error, this.gate});
+  _YtDlp({this.info, this.error, this.gate, this.videoInfo});
 
   final Map<String, dynamic>? info;
+  final Map<String, dynamic>? videoInfo;
+  final requestedVideoUrls = <String>[];
+
+  @override
+  Future<Map<String, dynamic>> getVideoInfo(String url) async {
+    requestedVideoUrls.add(url);
+    return videoInfo!;
+  }
+
   final Object? error;
   final Completer<void>? gate;
   final requestedUrls = <String>[];
@@ -543,6 +714,8 @@ class _Playlists implements PlaylistService {
     bool sponsorBlockEnabled = true,
     List<String>? sponsorBlockCategories,
     Object? sponsorBlockCategoryActions,
+    bool isTemporary = false,
+    int? videoQuality,
   }) async {
     added++;
     if (gate != null) await gate!.future;
@@ -555,6 +728,31 @@ class _Playlists implements PlaylistService {
     );
     library?.add(await db.getAllPlaylists());
     return playlist.id;
+  }
+
+  final temporaryEntries = <Map<String, dynamic>>[];
+
+  @override
+  Future<({Playlist playlist, Track track, bool added})> addToTemporary(
+    Map<String, dynamic> entry,
+  ) async {
+    temporaryEntries.add(entry);
+    final playlist =
+        await db.getTemporaryPlaylist() ??
+        await insertTestPlaylist(
+          db,
+          url: 'woolytube:temporary',
+          name: 'Temporary',
+          isTemporary: true,
+        );
+    final track = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: temporaryEntries.length,
+      videoId: entry['id'] as String,
+      title: entry['title'] as String,
+    );
+    return (playlist: playlist, track: track, added: true);
   }
 
   @override

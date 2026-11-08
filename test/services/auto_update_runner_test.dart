@@ -37,6 +37,8 @@ Playlist _playlist(
   lastUpdated: lastUpdated,
   createdAt: DateTime(2024),
   outputPath: '/tmp/none',
+  sortOrder: id,
+  isTemporary: false,
 );
 
 /// yt-dlp that starts without a platform channel and counts the start.
@@ -143,6 +145,13 @@ void main() {
 
     test('a playlist with auto-update off is never due', () {
       expect(isDueForAutoUpdate(_playlist(1, autoUpdate: false), now), isFalse);
+    });
+
+    test('the temporary playlist is never due', () {
+      expect(
+        isDueForAutoUpdate(_playlist(1).copyWith(isTemporary: true), now),
+        isFalse,
+      );
     });
 
     test('an hourly playlist stamped 55 minutes ago is due', () {

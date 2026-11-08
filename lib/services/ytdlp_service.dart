@@ -54,6 +54,8 @@ class YtDlpService {
   /// [embedMetadata] writes title/artist/date/URL tags into the file, and
   /// [metadataAlbum]/[metadataTrackNumber] tag it as track N of the playlist
   /// so other players keep the playlist together and in order.
+  /// [maxHeight] caps the video resolution (720 = up to 720p); null takes
+  /// the best. It is ignored for audio.
   Future<void> download({
     required String url,
     required String outputPath,
@@ -67,6 +69,7 @@ class YtDlpService {
     bool downloadSubtitles = false,
     String subtitleLanguages = 'en',
     String? outputTemplate,
+    int? maxHeight,
   }) async {
     await _methodChannel.invokeMethod('download', {
       'url': url,
@@ -82,6 +85,8 @@ class YtDlpService {
       'downloadSubtitles': downloadSubtitles && !audioOnly,
       'subtitleLanguages': subtitleLanguages,
       if (outputTemplate != null) 'outputTemplate': outputTemplate,
+      if (maxHeight != null && maxHeight > 0 && !audioOnly)
+        'maxHeight': maxHeight,
     });
   }
 

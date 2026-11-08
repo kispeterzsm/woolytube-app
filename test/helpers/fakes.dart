@@ -20,6 +20,7 @@ class FakeDownloadCall {
     required this.downloadSubtitles,
     required this.subtitleLanguages,
     required this.outputTemplate,
+    this.maxHeight,
   });
 
   final String url;
@@ -33,6 +34,7 @@ class FakeDownloadCall {
   final bool downloadSubtitles;
   final String subtitleLanguages;
   final String? outputTemplate;
+  final int? maxHeight;
 
   String get videoId => Uri.parse(url).queryParameters['v'] ?? '';
 }
@@ -124,6 +126,7 @@ class FakeYtDlpService extends YtDlpService {
     bool downloadSubtitles = false,
     String subtitleLanguages = 'en',
     String? outputTemplate,
+    int? maxHeight,
   }) async {
     final call = FakeDownloadCall(
       url: url,
@@ -137,6 +140,7 @@ class FakeYtDlpService extends YtDlpService {
       downloadSubtitles: downloadSubtitles,
       subtitleLanguages: subtitleLanguages,
       outputTemplate: outputTemplate,
+      maxHeight: maxHeight,
     );
     calls.add(call);
     final started = downloadStarted;

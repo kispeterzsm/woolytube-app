@@ -36,6 +36,13 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
                     ),
                   ) ??
                   track;
+              // Not offered when the video is in Temporary or already
+              // downloaded as video; unknown until loaded counts as blocked.
+              final saveToTemporaryBlocked = sheetRef.watch(
+                temporarySaveBlockedVideoIdsProvider.select(
+                  (ids) => ids.valueOrNull?.contains(live.videoId) ?? true,
+                ),
+              );
               return StatefulBuilder(
                 builder: (sheetContext, setSheetState) {
                   final alwaysSkip = alwaysSkipOverride ?? live.alwaysSkip;
@@ -56,6 +63,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
                             children: _trackActionTiles(
                               sheetContext,
                               live,
+                              saveToTemporaryBlocked: saveToTemporaryBlocked,
                               alwaysSkip: alwaysSkip,
                               onAlwaysSkipChanged: (value) async {
                                 setSheetState(() => alwaysSkipOverride = value);
@@ -94,6 +102,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
   List<Widget> _trackActionTiles(
     BuildContext sheetContext,
     Track track, {
+    required bool saveToTemporaryBlocked,
     required bool alwaysSkip,
     required ValueChanged<bool> onAlwaysSkipChanged,
   }) {
@@ -114,6 +123,19 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
         !PlaylistService.isForcedInsertVideoId(track.videoId);
     final removedFromYouTube =
         track.unavailableReason == removedFromYouTubeReason;
+    final playlist = _playlist;
+    final canChooseQuality =
+        playlist != null &&
+        !playlist.audioOnly &&
+        isYouTubeVideo &&
+        !track.isLocalReplacement &&
+        !isDownloading;
+    final inTemporaryPlaylist = playlist?.isTemporary ?? false;
+    final canSaveToTemporary =
+        playlist != null &&
+        !inTemporaryPlaylist &&
+        isYouTubeVideo &&
+        !saveToTemporaryBlocked;
 
     void close() => Navigator.pop(sheetContext);
 
@@ -338,6 +360,32 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
             unawaited(_redownloadTrack(track));
           },
         ),
+      if (canChooseQuality)
+        tile(
+          key: const ValueKey('track-actions-video-quality'),
+          icon: Icons.high_quality_outlined,
+          title: 'Video quality',
+          subtitle:
+              track.videoQuality == null
+                  ? 'Playlist default (${videoQualityLabel(playlist.videoQuality)})'
+                  : videoQualityLabel(track.videoQuality),
+          onTap: () {
+            close();
+            unawaited(_chooseTrackVideoQuality(track));
+          },
+        ),
+      if (inTemporaryPlaylist && !isDownloading)
+        tile(
+          key: const ValueKey('track-actions-remove-temporary'),
+          icon: Icons.delete_outline,
+          iconColor: const Color(0xFFE57373),
+          title: 'Remove from Temporary',
+          subtitle: 'Deletes its file',
+          onTap: () {
+            close();
+            unawaited(_removeFromTemporary(track));
+          },
+        ),
       if (canDownloadOriginal)
         tile(
           key: const ValueKey('track-actions-download-original'),
@@ -364,6 +412,17 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
         ),
       if (isYouTubeVideo) ...[
         const _SheetSection('YouTube'),
+        if (canSaveToTemporary)
+          tile(
+            key: const ValueKey('track-actions-save-temporary'),
+            icon: Icons.watch_later_outlined,
+            title: 'Save to Temporary playlist',
+            subtitle: 'Download this video for watching offline',
+            onTap: () {
+              close();
+              unawaited(_saveToTemporary(track));
+            },
+          ),
         tile(
           key: const ValueKey('track-actions-open-youtube'),
           icon: Icons.open_in_new,
@@ -971,6 +1030,149 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
     );
     if (confirmed != true || !mounted) return;
     await _startTrackDownload(track);
+  }
+
+  /// Saves this video (as a video, whatever this playlist downloads) to the
+  /// temporary playlist and downloads it.
+  Future<void> _saveToTemporary(Track track) async {
+    final messenger = ScaffoldMessenger.of(context);
+    String message;
+    try {
+      message = await saveVideoToTemporary(context, ref, {
+        'id': track.videoId,
+        'title': track.title,
+        'thumbnail': track.thumbnailUrl,
+        'duration': track.durationSeconds,
+      });
+    } catch (e) {
+      message = 'Could not save: ${_errorText(e)}';
+    }
+    messenger.showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// Takes a video out of the temporary playlist and deletes its file.
+  Future<void> _removeFromTemporary(Track track) async {
+    final downloads = ref.read(downloadServiceProvider);
+    final downloading =
+        downloads.isDownloading &&
+        downloads.activePlaylistId == widget.playlistId;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder:
+          (ctx) => AlertDialog(
+            backgroundColor: const Color(0xFF2A2A2A),
+            title: const Text(
+              'Remove from Temporary?',
+              style: TextStyle(color: Colors.white),
+            ),
+            content: Text(
+              '"${track.title}" is removed and its file is deleted.'
+              '${downloading ? ' The running download stops for a moment.' : ''}',
+              style: const TextStyle(color: Color(0xFFCCCCCC)),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                key: const ValueKey('remove-temporary-confirm'),
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text(
+                  'Remove',
+                  style: TextStyle(color: Colors.red),
+                ),
+              ),
+            ],
+          ),
+    );
+    if (confirmed != true || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final error = await removeTemporaryVideos(ref, widget.playlistId, {
+      track.id,
+    });
+    messenger.showSnackBar(
+      SnackBar(content: Text(error ?? 'Removed "${track.title}"')),
+    );
+  }
+
+  /// Saves this video's own quality, then offers to download it again when
+  /// its file would change.
+  Future<void> _chooseTrackVideoQuality(Track track) async {
+    final playlist = _playlist;
+    if (playlist == null) return;
+    final picked = await showVideoQualityPicker(
+      context,
+      current: track.videoQuality,
+      forTrack: true,
+      playlistQuality: playlist.videoQuality,
+    );
+    if (picked == null || !mounted || picked.value == track.videoQuality) {
+      return;
+    }
+    void showMessage(String message) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    }
+
+    final playlists = ref.read(playlistServiceProvider);
+    final updated = track.copyWith(videoQuality: Value(picked.value));
+    final List<Track> affected;
+    try {
+      await playlists.setTrackVideoQuality(track.id, picked.value);
+      affected = await playlists.tracksAffectedByQualityChange(
+        playlist,
+        oldMax: effectiveMaxHeight(playlist, track),
+        newMax: effectiveMaxHeight(playlist, updated),
+        only: [updated],
+      );
+    } catch (e) {
+      showMessage('Could not save: ${_errorText(e)}');
+      return;
+    }
+    if (affected.isEmpty || !mounted) return;
+    final newMax = effectiveMaxHeight(playlist, updated);
+    if (!await confirmQualityRedownload(
+          context,
+          count: 1,
+          maxHeight: newMax,
+          singleTrack: true,
+        ) ||
+        !mounted) {
+      return;
+    }
+    final downloads = ref.read(downloadServiceProvider);
+    if (!downloads.isDownloading) {
+      await _startTrackDownload(updated);
+      return;
+    }
+    // Another download runs: the new copy follows it.
+    try {
+      await playlists.requestRedownload(playlist.id, [track.id]);
+    } catch (e) {
+      showMessage('Could not save: ${_errorText(e)}');
+      return;
+    }
+    if (!mounted || explainDownloadsUnavailable(context, ref)) return;
+    if (!await confirmManualDownload(
+      context,
+      ref.read(downloadNetworkPolicyProvider),
+    )) {
+      showMessage('"${track.title}" downloads again at the next update');
+      return;
+    }
+    final fresh = await ref
+        .read(databaseProvider)
+        .getPlaylistOrNull(playlist.id);
+    if (fresh == null) return;
+    unawaited(
+      downloads
+          .downloadPlaylist(fresh, sourceChecked: false)
+          .catchError((Object _) => DownloadStart.started),
+    );
+    showMessage('"${track.title}" downloads again after the current download');
   }
 
   Future<void> _showSkipSegments(Track track) async {

@@ -10,6 +10,7 @@ import 'package:woolytube/services/library_layout.dart';
 import 'package:woolytube/services/log_service.dart';
 import 'package:woolytube/services/metadata_service.dart';
 import 'package:woolytube/services/playlist_service.dart';
+import 'package:woolytube/services/video_quality.dart';
 
 import '../helpers/fakes.dart';
 import '../helpers/test_database.dart';
@@ -38,6 +39,284 @@ void main() {
     if (await tempDir.exists()) {
       await tempDir.delete(recursive: true);
     }
+  });
+
+  group('movePlaylist', () {
+    late List<int> ids;
+
+    setUp(() async {
+      ids = [
+        for (final url in ['a', 'b', 'c', 'd'])
+          (await insertTestPlaylist(db, url: url, outputPath: folder)).id,
+      ];
+    });
+
+    Future<List<int>> order() async => [
+      for (final playlist in await db.getAllPlaylists()) playlist.id,
+    ];
+
+    test('moves a playlist before another one', () async {
+      await service.movePlaylist(ids[3], beforeId: ids[1]);
+      expect(await order(), [ids[0], ids[3], ids[1], ids[2]]);
+
+      await service.movePlaylist(ids[0], beforeId: ids[2]);
+      expect(await order(), [ids[3], ids[1], ids[0], ids[2]]);
+    });
+
+    test('moves a playlist to the end', () async {
+      await service.movePlaylist(ids[0]);
+      expect(await order(), [ids[1], ids[2], ids[3], ids[0]]);
+    });
+
+    test('moving a playlist before itself changes nothing', () async {
+      await service.movePlaylist(ids[2], beforeId: ids[2]);
+      expect(await order(), ids);
+      expect((await db.getAllPlaylists()).map((p) => p.sortOrder), [
+        0,
+        1,
+        2,
+        3,
+      ]);
+    });
+
+    test('a playlist the list does not show keeps its place among the '
+        'others', () async {
+      // The page shows a, c, d (b is hidden) and moves d before c.
+      await service.movePlaylist(ids[3], beforeId: ids[2]);
+      expect(await order(), [ids[0], ids[1], ids[3], ids[2]]);
+    });
+
+    test('moves made one after another all apply', () async {
+      await Future.wait([
+        service.movePlaylist(ids[3], beforeId: ids[0]),
+        service.movePlaylist(ids[2], beforeId: ids[3]),
+      ]);
+      expect(await order(), [ids[2], ids[3], ids[0], ids[1]]);
+    });
+
+    test('does not write the metadata files', () async {
+      await service.movePlaylist(ids[3], beforeId: ids[0]);
+      expect(
+        await File(p.join(folder, 'woolytube_meta.json')).exists(),
+        isFalse,
+      );
+    });
+  });
+
+  group('video quality', () {
+    test('the effective cap follows track, then playlist, never audio', () {
+      int? cap({bool audioOnly = false, int? playlist, int? track}) =>
+          effectiveMaxHeightOf(
+            audioOnly: audioOnly,
+            playlistQuality: playlist,
+            trackQuality: track,
+          );
+      expect(cap(), isNull);
+      expect(cap(playlist: 720), 720);
+      expect(cap(playlist: 720, track: 480), 480);
+      expect(cap(playlist: 720, track: 0), isNull);
+      expect(cap(track: 1080), 1080);
+      expect(cap(audioOnly: true, playlist: 720, track: 480), isNull);
+    });
+
+    test('the resolution is the shorter side of the kept info', () {
+      expect(videoResolutionFromInfo({'width': 1920, 'height': 1080}), 1080);
+      expect(videoResolutionFromInfo({'width': 1080, 'height': 1920}), 1080);
+      expect(videoResolutionFromInfo({'height': 720}), 720);
+      expect(videoResolutionFromInfo({'title': 'x'}), isNull);
+      expect(videoResolutionFromInfo(null), isNull);
+    });
+
+    test('setters save the playlist and track quality', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final track = await insertTestTrack(db, playlistId: playlist.id);
+
+      await service.setPlaylistVideoQuality(playlist.id, 720);
+      await service.setTrackVideoQuality(track.id, 0);
+      expect((await db.getPlaylist(playlist.id)).videoQuality, 720);
+      expect((await db.getTrack(track.id))!.videoQuality, 0);
+
+      await service.setPlaylistVideoQuality(playlist.id, null);
+      await service.setTrackVideoQuality(track.id, null);
+      expect((await db.getPlaylist(playlist.id)).videoQuality, isNull);
+      expect((await db.getTrack(track.id))!.videoQuality, isNull);
+    });
+
+    group('affected tracks', () {
+      late Playlist playlist;
+      var nextIndex = 1;
+
+      setUp(() async {
+        nextIndex = 1;
+        playlist = await insertTestPlaylist(db, outputPath: folder);
+      });
+
+      /// A downloaded video of [resolution] (null: no kept info).
+      Future<Track> downloaded({
+        int? resolution,
+        int? downloadedMaxHeight,
+        int? videoQuality,
+        bool isLocalReplacement = false,
+        String? unavailableReason,
+        String? videoId,
+      }) async {
+        final index = nextIndex++;
+        final id = videoId ?? 'video-$index';
+        final path = p.join(folder, '${index}_Video.mp4');
+        await File(path).writeAsString('media');
+        if (resolution != null) {
+          final info = File(LibraryLayout.infoJsonPath(folder, id));
+          await info.parent.create(recursive: true);
+          await info.writeAsString(
+            jsonEncode({'width': resolution * 16 ~/ 9, 'height': resolution}),
+          );
+        }
+        return insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: index,
+          videoId: id,
+          status: 'complete',
+          filePath: path,
+          downloadedMaxHeight: downloadedMaxHeight,
+          videoQuality: videoQuality,
+          isLocalReplacement: isLocalReplacement,
+          unavailableReason: unavailableReason,
+        );
+      }
+
+      Future<List<int>> affected({
+        required int? oldMax,
+        required int? newMax,
+        Iterable<Track>? only,
+      }) async => [
+        for (final track in await service.tracksAffectedByQualityChange(
+          playlist,
+          oldMax: oldMax,
+          newMax: newMax,
+          only: only,
+        ))
+          track.id,
+      ];
+
+      test('lowering counts files above the new cap or of unknown '
+          'size', () async {
+        final big = await downloaded(resolution: 1080, downloadedMaxHeight: 0);
+        await downloaded(resolution: 480, downloadedMaxHeight: 0);
+        final unknown = await downloaded();
+
+        expect(await affected(oldMax: null, newMax: 720), [big.id, unknown.id]);
+      });
+
+      test('raising counts files downloaded under a lower cap that they '
+          'filled', () async {
+        final capped = await downloaded(
+          resolution: 720,
+          downloadedMaxHeight: 720,
+        );
+        // The video had nothing sharper than 480p.
+        await downloaded(resolution: 480, downloadedMaxHeight: 720);
+        // Downloaded without a cap: already the best.
+        await downloaded(resolution: 720, downloadedMaxHeight: 0);
+        final unknown = await downloaded(resolution: 720);
+
+        expect(await affected(oldMax: 720, newMax: null), [
+          capped.id,
+          unknown.id,
+        ]);
+        expect(await affected(oldMax: 720, newMax: 1080), [
+          capped.id,
+          unknown.id,
+        ]);
+      });
+
+      test('a vertical video counts by its shorter side', () async {
+        final path = p.join(folder, '1_Short.mp4');
+        await File(path).writeAsString('media');
+        final info = File(LibraryLayout.infoJsonPath(folder, 'short'));
+        await info.parent.create(recursive: true);
+        await info.writeAsString(jsonEncode({'width': 720, 'height': 1280}));
+        await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          videoId: 'short',
+          status: 'complete',
+          filePath: path,
+          downloadedMaxHeight: 720,
+        );
+
+        expect(await affected(oldMax: 1080, newMax: 720), isEmpty);
+      });
+
+      test('leaves out tracks YouTube cannot give again, tracks with a '
+          'quality of their own, and missing files', () async {
+        await downloaded(resolution: 1080, isLocalReplacement: true);
+        await downloaded(resolution: 1080, unavailableReason: 'private');
+        await downloaded(
+          resolution: 1080,
+          videoId: '${PlaylistService.forcedInsertVideoIdPrefix}x',
+        );
+        await downloaded(resolution: 1080, videoQuality: 0);
+        final gone = await downloaded(resolution: 1080);
+        await File(gone.filePath!).delete();
+        await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: 99,
+          videoId: 'pending',
+        );
+
+        expect(await affected(oldMax: null, newMax: 720), isEmpty);
+      });
+
+      test('a track change checks only that track, even with its own '
+          'quality', () async {
+        final own = await downloaded(resolution: 1080, videoQuality: 480);
+        await downloaded(resolution: 1080);
+
+        expect(await affected(oldMax: null, newMax: 480, only: [own]), [
+          own.id,
+        ]);
+        expect(await affected(oldMax: 480, newMax: 480, only: [own]), isEmpty);
+      });
+
+      test('audio-only playlists have nothing to change', () async {
+        playlist = await insertTestPlaylist(
+          db,
+          url: 'audio',
+          outputPath: folder,
+          audioOnly: true,
+        );
+        await downloaded(resolution: 1080);
+        expect(await affected(oldMax: null, newMax: 720), isEmpty);
+      });
+    });
+
+    test('requestRedownload queues the tracks for replacement', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final a = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 1,
+        videoId: 'a',
+        status: 'complete',
+        filePath: p.join(folder, '1_a.mp4'),
+      );
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 2,
+        videoId: 'b',
+        status: 'complete',
+        filePath: p.join(folder, '2_b.mp4'),
+      );
+
+      await service.requestRedownload(playlist.id, [a.id]);
+
+      expect((await db.getReplacementRequests(playlist.id)).map((t) => t.id), [
+        a.id,
+      ]);
+    });
   });
 
   test('populates tracks and marks unavailable entries', () async {

@@ -217,6 +217,44 @@ class $PlaylistsTable extends Playlists
         type: DriftSqlType.dateTime,
         requiredDuringInsert: false,
       );
+  static const VerificationMeta _sortOrderMeta = const VerificationMeta(
+    'sortOrder',
+  );
+  @override
+  late final GeneratedColumn<int> sortOrder = GeneratedColumn<int>(
+    'sort_order',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  static const VerificationMeta _videoQualityMeta = const VerificationMeta(
+    'videoQuality',
+  );
+  @override
+  late final GeneratedColumn<int> videoQuality = GeneratedColumn<int>(
+    'video_quality',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _isTemporaryMeta = const VerificationMeta(
+    'isTemporary',
+  );
+  @override
+  late final GeneratedColumn<bool> isTemporary = GeneratedColumn<bool>(
+    'is_temporary',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("is_temporary" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
   @override
   List<GeneratedColumn> get $columns => [
     playChapters,
@@ -236,6 +274,9 @@ class $PlaylistsTable extends Playlists
     createdAt,
     outputPath,
     lastUpdateAttempt,
+    sortOrder,
+    videoQuality,
+    isTemporary,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -386,6 +427,30 @@ class $PlaylistsTable extends Playlists
         ),
       );
     }
+    if (data.containsKey('sort_order')) {
+      context.handle(
+        _sortOrderMeta,
+        sortOrder.isAcceptableOrUnknown(data['sort_order']!, _sortOrderMeta),
+      );
+    }
+    if (data.containsKey('video_quality')) {
+      context.handle(
+        _videoQualityMeta,
+        videoQuality.isAcceptableOrUnknown(
+          data['video_quality']!,
+          _videoQualityMeta,
+        ),
+      );
+    }
+    if (data.containsKey('is_temporary')) {
+      context.handle(
+        _isTemporaryMeta,
+        isTemporary.isAcceptableOrUnknown(
+          data['is_temporary']!,
+          _isTemporaryMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -475,6 +540,20 @@ class $PlaylistsTable extends Playlists
         DriftSqlType.dateTime,
         data['${effectivePrefix}last_update_attempt'],
       ),
+      sortOrder:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.int,
+            data['${effectivePrefix}sort_order'],
+          )!,
+      videoQuality: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}video_quality'],
+      ),
+      isTemporary:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.bool,
+            data['${effectivePrefix}is_temporary'],
+          )!,
     );
   }
 
@@ -507,6 +586,18 @@ class Playlist extends DataClass implements Insertable<Playlist> {
   /// it tried longest ago first, so one playlist that never finishes in
   /// time cannot keep the others from ever being updated.
   final DateTime? lastUpdateAttempt;
+
+  /// Position on the home page: lower comes first, ties by id. Only the
+  /// app's own order; it is not part of the metadata files.
+  final int sortOrder;
+
+  /// Highest video height to download (720 = up to 720p); null = the best
+  /// available. Ignored for audio-only playlists.
+  final int? videoQuality;
+
+  /// The app's own "Temporary" playlist, which has no YouTube playlist
+  /// behind it.
+  final bool isTemporary;
   const Playlist({
     this.playChapters,
     required this.id,
@@ -525,6 +616,9 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     required this.createdAt,
     required this.outputPath,
     this.lastUpdateAttempt,
+    required this.sortOrder,
+    this.videoQuality,
+    required this.isTemporary,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -558,6 +652,11 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     if (!nullToAbsent || lastUpdateAttempt != null) {
       map['last_update_attempt'] = Variable<DateTime>(lastUpdateAttempt);
     }
+    map['sort_order'] = Variable<int>(sortOrder);
+    if (!nullToAbsent || videoQuality != null) {
+      map['video_quality'] = Variable<int>(videoQuality);
+    }
+    map['is_temporary'] = Variable<bool>(isTemporary);
     return map;
   }
 
@@ -595,6 +694,12 @@ class Playlist extends DataClass implements Insertable<Playlist> {
           lastUpdateAttempt == null && nullToAbsent
               ? const Value.absent()
               : Value(lastUpdateAttempt),
+      sortOrder: Value(sortOrder),
+      videoQuality:
+          videoQuality == null && nullToAbsent
+              ? const Value.absent()
+              : Value(videoQuality),
+      isTemporary: Value(isTemporary),
     );
   }
 
@@ -631,6 +736,9 @@ class Playlist extends DataClass implements Insertable<Playlist> {
       lastUpdateAttempt: serializer.fromJson<DateTime?>(
         json['lastUpdateAttempt'],
       ),
+      sortOrder: serializer.fromJson<int>(json['sortOrder']),
+      videoQuality: serializer.fromJson<int?>(json['videoQuality']),
+      isTemporary: serializer.fromJson<bool>(json['isTemporary']),
     );
   }
   @override
@@ -658,6 +766,9 @@ class Playlist extends DataClass implements Insertable<Playlist> {
       'createdAt': serializer.toJson<DateTime>(createdAt),
       'outputPath': serializer.toJson<String>(outputPath),
       'lastUpdateAttempt': serializer.toJson<DateTime?>(lastUpdateAttempt),
+      'sortOrder': serializer.toJson<int>(sortOrder),
+      'videoQuality': serializer.toJson<int?>(videoQuality),
+      'isTemporary': serializer.toJson<bool>(isTemporary),
     };
   }
 
@@ -679,6 +790,9 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     DateTime? createdAt,
     String? outputPath,
     Value<DateTime?> lastUpdateAttempt = const Value.absent(),
+    int? sortOrder,
+    Value<int?> videoQuality = const Value.absent(),
+    bool? isTemporary,
   }) => Playlist(
     playChapters: playChapters.present ? playChapters.value : this.playChapters,
     id: id ?? this.id,
@@ -703,6 +817,9 @@ class Playlist extends DataClass implements Insertable<Playlist> {
         lastUpdateAttempt.present
             ? lastUpdateAttempt.value
             : this.lastUpdateAttempt,
+    sortOrder: sortOrder ?? this.sortOrder,
+    videoQuality: videoQuality.present ? videoQuality.value : this.videoQuality,
+    isTemporary: isTemporary ?? this.isTemporary,
   );
   Playlist copyWithCompanion(PlaylistsCompanion data) {
     return Playlist(
@@ -753,6 +870,13 @@ class Playlist extends DataClass implements Insertable<Playlist> {
           data.lastUpdateAttempt.present
               ? data.lastUpdateAttempt.value
               : this.lastUpdateAttempt,
+      sortOrder: data.sortOrder.present ? data.sortOrder.value : this.sortOrder,
+      videoQuality:
+          data.videoQuality.present
+              ? data.videoQuality.value
+              : this.videoQuality,
+      isTemporary:
+          data.isTemporary.present ? data.isTemporary.value : this.isTemporary,
     );
   }
 
@@ -775,7 +899,10 @@ class Playlist extends DataClass implements Insertable<Playlist> {
           ..write('lastUpdated: $lastUpdated, ')
           ..write('createdAt: $createdAt, ')
           ..write('outputPath: $outputPath, ')
-          ..write('lastUpdateAttempt: $lastUpdateAttempt')
+          ..write('lastUpdateAttempt: $lastUpdateAttempt, ')
+          ..write('sortOrder: $sortOrder, ')
+          ..write('videoQuality: $videoQuality, ')
+          ..write('isTemporary: $isTemporary')
           ..write(')'))
         .toString();
   }
@@ -799,6 +926,9 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     createdAt,
     outputPath,
     lastUpdateAttempt,
+    sortOrder,
+    videoQuality,
+    isTemporary,
   );
   @override
   bool operator ==(Object other) =>
@@ -821,7 +951,10 @@ class Playlist extends DataClass implements Insertable<Playlist> {
           other.lastUpdated == this.lastUpdated &&
           other.createdAt == this.createdAt &&
           other.outputPath == this.outputPath &&
-          other.lastUpdateAttempt == this.lastUpdateAttempt);
+          other.lastUpdateAttempt == this.lastUpdateAttempt &&
+          other.sortOrder == this.sortOrder &&
+          other.videoQuality == this.videoQuality &&
+          other.isTemporary == this.isTemporary);
 }
 
 class PlaylistsCompanion extends UpdateCompanion<Playlist> {
@@ -842,6 +975,9 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
   final Value<DateTime> createdAt;
   final Value<String> outputPath;
   final Value<DateTime?> lastUpdateAttempt;
+  final Value<int> sortOrder;
+  final Value<int?> videoQuality;
+  final Value<bool> isTemporary;
   const PlaylistsCompanion({
     this.playChapters = const Value.absent(),
     this.id = const Value.absent(),
@@ -860,6 +996,9 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     this.createdAt = const Value.absent(),
     this.outputPath = const Value.absent(),
     this.lastUpdateAttempt = const Value.absent(),
+    this.sortOrder = const Value.absent(),
+    this.videoQuality = const Value.absent(),
+    this.isTemporary = const Value.absent(),
   });
   PlaylistsCompanion.insert({
     this.playChapters = const Value.absent(),
@@ -879,6 +1018,9 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     required DateTime createdAt,
     required String outputPath,
     this.lastUpdateAttempt = const Value.absent(),
+    this.sortOrder = const Value.absent(),
+    this.videoQuality = const Value.absent(),
+    this.isTemporary = const Value.absent(),
   }) : url = Value(url),
        name = Value(name),
        createdAt = Value(createdAt),
@@ -901,6 +1043,9 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     Expression<DateTime>? createdAt,
     Expression<String>? outputPath,
     Expression<DateTime>? lastUpdateAttempt,
+    Expression<int>? sortOrder,
+    Expression<int>? videoQuality,
+    Expression<bool>? isTemporary,
   }) {
     return RawValuesInsertable({
       if (playChapters != null) 'play_chapters': playChapters,
@@ -924,6 +1069,9 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
       if (createdAt != null) 'created_at': createdAt,
       if (outputPath != null) 'output_path': outputPath,
       if (lastUpdateAttempt != null) 'last_update_attempt': lastUpdateAttempt,
+      if (sortOrder != null) 'sort_order': sortOrder,
+      if (videoQuality != null) 'video_quality': videoQuality,
+      if (isTemporary != null) 'is_temporary': isTemporary,
     });
   }
 
@@ -945,6 +1093,9 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     Value<DateTime>? createdAt,
     Value<String>? outputPath,
     Value<DateTime?>? lastUpdateAttempt,
+    Value<int>? sortOrder,
+    Value<int?>? videoQuality,
+    Value<bool>? isTemporary,
   }) {
     return PlaylistsCompanion(
       playChapters: playChapters ?? this.playChapters,
@@ -966,6 +1117,9 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
       createdAt: createdAt ?? this.createdAt,
       outputPath: outputPath ?? this.outputPath,
       lastUpdateAttempt: lastUpdateAttempt ?? this.lastUpdateAttempt,
+      sortOrder: sortOrder ?? this.sortOrder,
+      videoQuality: videoQuality ?? this.videoQuality,
+      isTemporary: isTemporary ?? this.isTemporary,
     );
   }
 
@@ -1027,6 +1181,15 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     if (lastUpdateAttempt.present) {
       map['last_update_attempt'] = Variable<DateTime>(lastUpdateAttempt.value);
     }
+    if (sortOrder.present) {
+      map['sort_order'] = Variable<int>(sortOrder.value);
+    }
+    if (videoQuality.present) {
+      map['video_quality'] = Variable<int>(videoQuality.value);
+    }
+    if (isTemporary.present) {
+      map['is_temporary'] = Variable<bool>(isTemporary.value);
+    }
     return map;
   }
 
@@ -1049,7 +1212,10 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
           ..write('lastUpdated: $lastUpdated, ')
           ..write('createdAt: $createdAt, ')
           ..write('outputPath: $outputPath, ')
-          ..write('lastUpdateAttempt: $lastUpdateAttempt')
+          ..write('lastUpdateAttempt: $lastUpdateAttempt, ')
+          ..write('sortOrder: $sortOrder, ')
+          ..write('videoQuality: $videoQuality, ')
+          ..write('isTemporary: $isTemporary')
           ..write(')'))
         .toString();
   }
@@ -1284,6 +1450,27 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
     ),
     defaultValue: const Constant(false),
   );
+  static const VerificationMeta _videoQualityMeta = const VerificationMeta(
+    'videoQuality',
+  );
+  @override
+  late final GeneratedColumn<int> videoQuality = GeneratedColumn<int>(
+    'video_quality',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _downloadedMaxHeightMeta =
+      const VerificationMeta('downloadedMaxHeight');
+  @override
+  late final GeneratedColumn<int> downloadedMaxHeight = GeneratedColumn<int>(
+    'downloaded_max_height',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     chaptersJson,
@@ -1305,6 +1492,8 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
     sponsorBlockCheckedAt,
     lastError,
     replaceRequested,
+    videoQuality,
+    downloadedMaxHeight,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -1467,6 +1656,24 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
         ),
       );
     }
+    if (data.containsKey('video_quality')) {
+      context.handle(
+        _videoQualityMeta,
+        videoQuality.isAcceptableOrUnknown(
+          data['video_quality']!,
+          _videoQualityMeta,
+        ),
+      );
+    }
+    if (data.containsKey('downloaded_max_height')) {
+      context.handle(
+        _downloadedMaxHeightMeta,
+        downloadedMaxHeight.isAcceptableOrUnknown(
+          data['downloaded_max_height']!,
+          _downloadedMaxHeightMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -1561,6 +1768,14 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
             DriftSqlType.bool,
             data['${effectivePrefix}replace_requested'],
           )!,
+      videoQuality: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}video_quality'],
+      ),
+      downloadedMaxHeight: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}downloaded_max_height'],
+      ),
     );
   }
 
@@ -1599,6 +1814,14 @@ class Track extends DataClass implements Insertable<Track> {
   /// of a local replacement, or the other format after a mode switch). The
   /// current file stays in use until the new one is completely on disk.
   final bool replaceRequested;
+
+  /// Video quality for this track alone: null inherits the playlist's,
+  /// 0 = the best available, N = up to N p.
+  final int? videoQuality;
+
+  /// The height cap the current file was downloaded under: 0 = no cap,
+  /// null = unknown (downloaded before caps existed, or audio).
+  final int? downloadedMaxHeight;
   const Track({
     this.chaptersJson,
     this.chaptersEnabled,
@@ -1619,6 +1842,8 @@ class Track extends DataClass implements Insertable<Track> {
     this.sponsorBlockCheckedAt,
     this.lastError,
     required this.replaceRequested,
+    this.videoQuality,
+    this.downloadedMaxHeight,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -1664,6 +1889,12 @@ class Track extends DataClass implements Insertable<Track> {
       map['last_error'] = Variable<String>(lastError);
     }
     map['replace_requested'] = Variable<bool>(replaceRequested);
+    if (!nullToAbsent || videoQuality != null) {
+      map['video_quality'] = Variable<int>(videoQuality);
+    }
+    if (!nullToAbsent || downloadedMaxHeight != null) {
+      map['downloaded_max_height'] = Variable<int>(downloadedMaxHeight);
+    }
     return map;
   }
 
@@ -1718,6 +1949,14 @@ class Track extends DataClass implements Insertable<Track> {
               ? const Value.absent()
               : Value(lastError),
       replaceRequested: Value(replaceRequested),
+      videoQuality:
+          videoQuality == null && nullToAbsent
+              ? const Value.absent()
+              : Value(videoQuality),
+      downloadedMaxHeight:
+          downloadedMaxHeight == null && nullToAbsent
+              ? const Value.absent()
+              : Value(downloadedMaxHeight),
     );
   }
 
@@ -1750,6 +1989,10 @@ class Track extends DataClass implements Insertable<Track> {
       ),
       lastError: serializer.fromJson<String?>(json['lastError']),
       replaceRequested: serializer.fromJson<bool>(json['replaceRequested']),
+      videoQuality: serializer.fromJson<int?>(json['videoQuality']),
+      downloadedMaxHeight: serializer.fromJson<int?>(
+        json['downloadedMaxHeight'],
+      ),
     );
   }
   @override
@@ -1777,6 +2020,8 @@ class Track extends DataClass implements Insertable<Track> {
       ),
       'lastError': serializer.toJson<String?>(lastError),
       'replaceRequested': serializer.toJson<bool>(replaceRequested),
+      'videoQuality': serializer.toJson<int?>(videoQuality),
+      'downloadedMaxHeight': serializer.toJson<int?>(downloadedMaxHeight),
     };
   }
 
@@ -1800,6 +2045,8 @@ class Track extends DataClass implements Insertable<Track> {
     Value<DateTime?> sponsorBlockCheckedAt = const Value.absent(),
     Value<String?> lastError = const Value.absent(),
     bool? replaceRequested,
+    Value<int?> videoQuality = const Value.absent(),
+    Value<int?> downloadedMaxHeight = const Value.absent(),
   }) => Track(
     chaptersJson: chaptersJson.present ? chaptersJson.value : this.chaptersJson,
     chaptersEnabled:
@@ -1829,6 +2076,11 @@ class Track extends DataClass implements Insertable<Track> {
             : this.sponsorBlockCheckedAt,
     lastError: lastError.present ? lastError.value : this.lastError,
     replaceRequested: replaceRequested ?? this.replaceRequested,
+    videoQuality: videoQuality.present ? videoQuality.value : this.videoQuality,
+    downloadedMaxHeight:
+        downloadedMaxHeight.present
+            ? downloadedMaxHeight.value
+            : this.downloadedMaxHeight,
   );
   Track copyWithCompanion(TracksCompanion data) {
     return Track(
@@ -1883,6 +2135,14 @@ class Track extends DataClass implements Insertable<Track> {
           data.replaceRequested.present
               ? data.replaceRequested.value
               : this.replaceRequested,
+      videoQuality:
+          data.videoQuality.present
+              ? data.videoQuality.value
+              : this.videoQuality,
+      downloadedMaxHeight:
+          data.downloadedMaxHeight.present
+              ? data.downloadedMaxHeight.value
+              : this.downloadedMaxHeight,
     );
   }
 
@@ -1907,13 +2167,15 @@ class Track extends DataClass implements Insertable<Track> {
           ..write('downloadedAt: $downloadedAt, ')
           ..write('sponsorBlockCheckedAt: $sponsorBlockCheckedAt, ')
           ..write('lastError: $lastError, ')
-          ..write('replaceRequested: $replaceRequested')
+          ..write('replaceRequested: $replaceRequested, ')
+          ..write('videoQuality: $videoQuality, ')
+          ..write('downloadedMaxHeight: $downloadedMaxHeight')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode => Object.hash(
+  int get hashCode => Object.hashAll([
     chaptersJson,
     chaptersEnabled,
     id,
@@ -1933,7 +2195,9 @@ class Track extends DataClass implements Insertable<Track> {
     sponsorBlockCheckedAt,
     lastError,
     replaceRequested,
-  );
+    videoQuality,
+    downloadedMaxHeight,
+  ]);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -1956,7 +2220,9 @@ class Track extends DataClass implements Insertable<Track> {
           other.downloadedAt == this.downloadedAt &&
           other.sponsorBlockCheckedAt == this.sponsorBlockCheckedAt &&
           other.lastError == this.lastError &&
-          other.replaceRequested == this.replaceRequested);
+          other.replaceRequested == this.replaceRequested &&
+          other.videoQuality == this.videoQuality &&
+          other.downloadedMaxHeight == this.downloadedMaxHeight);
 }
 
 class TracksCompanion extends UpdateCompanion<Track> {
@@ -1979,6 +2245,8 @@ class TracksCompanion extends UpdateCompanion<Track> {
   final Value<DateTime?> sponsorBlockCheckedAt;
   final Value<String?> lastError;
   final Value<bool> replaceRequested;
+  final Value<int?> videoQuality;
+  final Value<int?> downloadedMaxHeight;
   const TracksCompanion({
     this.chaptersJson = const Value.absent(),
     this.chaptersEnabled = const Value.absent(),
@@ -1999,6 +2267,8 @@ class TracksCompanion extends UpdateCompanion<Track> {
     this.sponsorBlockCheckedAt = const Value.absent(),
     this.lastError = const Value.absent(),
     this.replaceRequested = const Value.absent(),
+    this.videoQuality = const Value.absent(),
+    this.downloadedMaxHeight = const Value.absent(),
   });
   TracksCompanion.insert({
     this.chaptersJson = const Value.absent(),
@@ -2020,6 +2290,8 @@ class TracksCompanion extends UpdateCompanion<Track> {
     this.sponsorBlockCheckedAt = const Value.absent(),
     this.lastError = const Value.absent(),
     this.replaceRequested = const Value.absent(),
+    this.videoQuality = const Value.absent(),
+    this.downloadedMaxHeight = const Value.absent(),
   }) : playlistId = Value(playlistId),
        index = Value(index),
        videoId = Value(videoId),
@@ -2044,6 +2316,8 @@ class TracksCompanion extends UpdateCompanion<Track> {
     Expression<DateTime>? sponsorBlockCheckedAt,
     Expression<String>? lastError,
     Expression<bool>? replaceRequested,
+    Expression<int>? videoQuality,
+    Expression<int>? downloadedMaxHeight,
   }) {
     return RawValuesInsertable({
       if (chaptersJson != null) 'chapters_json': chaptersJson,
@@ -2067,6 +2341,9 @@ class TracksCompanion extends UpdateCompanion<Track> {
         'sponsor_block_checked_at': sponsorBlockCheckedAt,
       if (lastError != null) 'last_error': lastError,
       if (replaceRequested != null) 'replace_requested': replaceRequested,
+      if (videoQuality != null) 'video_quality': videoQuality,
+      if (downloadedMaxHeight != null)
+        'downloaded_max_height': downloadedMaxHeight,
     });
   }
 
@@ -2090,6 +2367,8 @@ class TracksCompanion extends UpdateCompanion<Track> {
     Value<DateTime?>? sponsorBlockCheckedAt,
     Value<String?>? lastError,
     Value<bool>? replaceRequested,
+    Value<int?>? videoQuality,
+    Value<int?>? downloadedMaxHeight,
   }) {
     return TracksCompanion(
       chaptersJson: chaptersJson ?? this.chaptersJson,
@@ -2112,6 +2391,8 @@ class TracksCompanion extends UpdateCompanion<Track> {
           sponsorBlockCheckedAt ?? this.sponsorBlockCheckedAt,
       lastError: lastError ?? this.lastError,
       replaceRequested: replaceRequested ?? this.replaceRequested,
+      videoQuality: videoQuality ?? this.videoQuality,
+      downloadedMaxHeight: downloadedMaxHeight ?? this.downloadedMaxHeight,
     );
   }
 
@@ -2177,6 +2458,12 @@ class TracksCompanion extends UpdateCompanion<Track> {
     if (replaceRequested.present) {
       map['replace_requested'] = Variable<bool>(replaceRequested.value);
     }
+    if (videoQuality.present) {
+      map['video_quality'] = Variable<int>(videoQuality.value);
+    }
+    if (downloadedMaxHeight.present) {
+      map['downloaded_max_height'] = Variable<int>(downloadedMaxHeight.value);
+    }
     return map;
   }
 
@@ -2201,7 +2488,9 @@ class TracksCompanion extends UpdateCompanion<Track> {
           ..write('downloadedAt: $downloadedAt, ')
           ..write('sponsorBlockCheckedAt: $sponsorBlockCheckedAt, ')
           ..write('lastError: $lastError, ')
-          ..write('replaceRequested: $replaceRequested')
+          ..write('replaceRequested: $replaceRequested, ')
+          ..write('videoQuality: $videoQuality, ')
+          ..write('downloadedMaxHeight: $downloadedMaxHeight')
           ..write(')'))
         .toString();
   }
@@ -3007,6 +3296,9 @@ typedef $$PlaylistsTableCreateCompanionBuilder =
       required DateTime createdAt,
       required String outputPath,
       Value<DateTime?> lastUpdateAttempt,
+      Value<int> sortOrder,
+      Value<int?> videoQuality,
+      Value<bool> isTemporary,
     });
 typedef $$PlaylistsTableUpdateCompanionBuilder =
     PlaylistsCompanion Function({
@@ -3027,6 +3319,9 @@ typedef $$PlaylistsTableUpdateCompanionBuilder =
       Value<DateTime> createdAt,
       Value<String> outputPath,
       Value<DateTime?> lastUpdateAttempt,
+      Value<int> sortOrder,
+      Value<int?> videoQuality,
+      Value<bool> isTemporary,
     });
 
 final class $$PlaylistsTableReferences
@@ -3144,6 +3439,21 @@ class $$PlaylistsTableFilterComposer
 
   ColumnFilters<DateTime> get lastUpdateAttempt => $composableBuilder(
     column: $table.lastUpdateAttempt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get sortOrder => $composableBuilder(
+    column: $table.sortOrder,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get videoQuality => $composableBuilder(
+    column: $table.videoQuality,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get isTemporary => $composableBuilder(
+    column: $table.isTemporary,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -3266,6 +3576,21 @@ class $$PlaylistsTableOrderingComposer
     column: $table.lastUpdateAttempt,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<int> get sortOrder => $composableBuilder(
+    column: $table.sortOrder,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get videoQuality => $composableBuilder(
+    column: $table.videoQuality,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get isTemporary => $composableBuilder(
+    column: $table.isTemporary,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$PlaylistsTableAnnotationComposer
@@ -3352,6 +3677,19 @@ class $$PlaylistsTableAnnotationComposer
     builder: (column) => column,
   );
 
+  GeneratedColumn<int> get sortOrder =>
+      $composableBuilder(column: $table.sortOrder, builder: (column) => column);
+
+  GeneratedColumn<int> get videoQuality => $composableBuilder(
+    column: $table.videoQuality,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<bool> get isTemporary => $composableBuilder(
+    column: $table.isTemporary,
+    builder: (column) => column,
+  );
+
   Expression<T> tracksRefs<T extends Object>(
     Expression<T> Function($$TracksTableAnnotationComposer a) f,
   ) {
@@ -3424,6 +3762,9 @@ class $$PlaylistsTableTableManager
                 Value<DateTime> createdAt = const Value.absent(),
                 Value<String> outputPath = const Value.absent(),
                 Value<DateTime?> lastUpdateAttempt = const Value.absent(),
+                Value<int> sortOrder = const Value.absent(),
+                Value<int?> videoQuality = const Value.absent(),
+                Value<bool> isTemporary = const Value.absent(),
               }) => PlaylistsCompanion(
                 playChapters: playChapters,
                 id: id,
@@ -3442,6 +3783,9 @@ class $$PlaylistsTableTableManager
                 createdAt: createdAt,
                 outputPath: outputPath,
                 lastUpdateAttempt: lastUpdateAttempt,
+                sortOrder: sortOrder,
+                videoQuality: videoQuality,
+                isTemporary: isTemporary,
               ),
           createCompanionCallback:
               ({
@@ -3463,6 +3807,9 @@ class $$PlaylistsTableTableManager
                 required DateTime createdAt,
                 required String outputPath,
                 Value<DateTime?> lastUpdateAttempt = const Value.absent(),
+                Value<int> sortOrder = const Value.absent(),
+                Value<int?> videoQuality = const Value.absent(),
+                Value<bool> isTemporary = const Value.absent(),
               }) => PlaylistsCompanion.insert(
                 playChapters: playChapters,
                 id: id,
@@ -3481,6 +3828,9 @@ class $$PlaylistsTableTableManager
                 createdAt: createdAt,
                 outputPath: outputPath,
                 lastUpdateAttempt: lastUpdateAttempt,
+                sortOrder: sortOrder,
+                videoQuality: videoQuality,
+                isTemporary: isTemporary,
               ),
           withReferenceMapper:
               (p0) =>
@@ -3560,6 +3910,8 @@ typedef $$TracksTableCreateCompanionBuilder =
       Value<DateTime?> sponsorBlockCheckedAt,
       Value<String?> lastError,
       Value<bool> replaceRequested,
+      Value<int?> videoQuality,
+      Value<int?> downloadedMaxHeight,
     });
 typedef $$TracksTableUpdateCompanionBuilder =
     TracksCompanion Function({
@@ -3582,6 +3934,8 @@ typedef $$TracksTableUpdateCompanionBuilder =
       Value<DateTime?> sponsorBlockCheckedAt,
       Value<String?> lastError,
       Value<bool> replaceRequested,
+      Value<int?> videoQuality,
+      Value<int?> downloadedMaxHeight,
     });
 
 final class $$TracksTableReferences
@@ -3733,6 +4087,16 @@ class $$TracksTableFilterComposer
     builder: (column) => ColumnFilters(column),
   );
 
+  ColumnFilters<int> get videoQuality => $composableBuilder(
+    column: $table.videoQuality,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get downloadedMaxHeight => $composableBuilder(
+    column: $table.downloadedMaxHeight,
+    builder: (column) => ColumnFilters(column),
+  );
+
   $$PlaylistsTableFilterComposer get playlistId {
     final $$PlaylistsTableFilterComposer composer = $composerBuilder(
       composer: this,
@@ -3881,6 +4245,16 @@ class $$TracksTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<int> get videoQuality => $composableBuilder(
+    column: $table.videoQuality,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get downloadedMaxHeight => $composableBuilder(
+    column: $table.downloadedMaxHeight,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   $$PlaylistsTableOrderingComposer get playlistId {
     final $$PlaylistsTableOrderingComposer composer = $composerBuilder(
       composer: this,
@@ -3990,6 +4364,16 @@ class $$TracksTableAnnotationComposer
     builder: (column) => column,
   );
 
+  GeneratedColumn<int> get videoQuality => $composableBuilder(
+    column: $table.videoQuality,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get downloadedMaxHeight => $composableBuilder(
+    column: $table.downloadedMaxHeight,
+    builder: (column) => column,
+  );
+
   $$PlaylistsTableAnnotationComposer get playlistId {
     final $$PlaylistsTableAnnotationComposer composer = $composerBuilder(
       composer: this,
@@ -4090,6 +4474,8 @@ class $$TracksTableTableManager
                 Value<DateTime?> sponsorBlockCheckedAt = const Value.absent(),
                 Value<String?> lastError = const Value.absent(),
                 Value<bool> replaceRequested = const Value.absent(),
+                Value<int?> videoQuality = const Value.absent(),
+                Value<int?> downloadedMaxHeight = const Value.absent(),
               }) => TracksCompanion(
                 chaptersJson: chaptersJson,
                 chaptersEnabled: chaptersEnabled,
@@ -4110,6 +4496,8 @@ class $$TracksTableTableManager
                 sponsorBlockCheckedAt: sponsorBlockCheckedAt,
                 lastError: lastError,
                 replaceRequested: replaceRequested,
+                videoQuality: videoQuality,
+                downloadedMaxHeight: downloadedMaxHeight,
               ),
           createCompanionCallback:
               ({
@@ -4132,6 +4520,8 @@ class $$TracksTableTableManager
                 Value<DateTime?> sponsorBlockCheckedAt = const Value.absent(),
                 Value<String?> lastError = const Value.absent(),
                 Value<bool> replaceRequested = const Value.absent(),
+                Value<int?> videoQuality = const Value.absent(),
+                Value<int?> downloadedMaxHeight = const Value.absent(),
               }) => TracksCompanion.insert(
                 chaptersJson: chaptersJson,
                 chaptersEnabled: chaptersEnabled,
@@ -4152,6 +4542,8 @@ class $$TracksTableTableManager
                 sponsorBlockCheckedAt: sponsorBlockCheckedAt,
                 lastError: lastError,
                 replaceRequested: replaceRequested,
+                videoQuality: videoQuality,
+                downloadedMaxHeight: downloadedMaxHeight,
               ),
           withReferenceMapper:
               (p0) =>

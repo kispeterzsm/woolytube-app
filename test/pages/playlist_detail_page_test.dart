@@ -1,16 +1,20 @@
 import 'dart:async';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rxdart/rxdart.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/pages/playlist_detail_page.dart';
 import 'package:woolytube/pages/playlist_settings_page.dart';
 import 'package:woolytube/providers/playback_providers.dart';
 import 'package:woolytube/providers/providers.dart';
+import 'package:woolytube/services/app_settings_service.dart';
 import 'package:woolytube/services/chapters.dart';
+import 'package:woolytube/services/download_network_policy.dart';
 import 'package:woolytube/services/download_service.dart';
 import 'package:woolytube/services/library_gate.dart';
 import 'package:woolytube/services/metadata_service.dart';
@@ -33,6 +37,9 @@ void main() {
   late BehaviorSubject<List<int>> queued;
   late BehaviorSubject<List<Track>> upNext;
 
+  /// What the temporary playlist holds, as the track menu sees it.
+  late Set<String> temporaryVideoIds;
+
   setUp(() async {
     resetPlaylistOpenChecks();
     db = openTestDatabase();
@@ -46,6 +53,7 @@ void main() {
     syncing = BehaviorSubject<Set<int>>.seeded(const {});
     queued = BehaviorSubject<List<int>>.seeded(const []);
     upNext = BehaviorSubject<List<Track>>.seeded(const []);
+    temporaryVideoIds = {};
   });
 
   tearDown(() async {
@@ -74,6 +82,9 @@ void main() {
     ),
     syncingPlaylistsProvider.overrideWith((ref) => syncing.stream),
     downloadQueueProvider.overrideWith((ref) => queued.stream),
+    temporarySaveBlockedVideoIdsProvider.overrideWith(
+      (ref) => Stream.value(temporaryVideoIds),
+    ),
   ];
 
   List<Override> overrides(
@@ -105,15 +116,19 @@ void main() {
     Stream<DownloadProgress>? progressStream,
     String? initialName,
     bool settle = true,
+    List<Override> extra = const [],
   }) async {
     await tester.pumpWidget(
       ProviderScope(
-        overrides: overrides(
-          tracks,
-          tracksStream: tracksStream,
-          progress: progress,
-          progressStream: progressStream,
-        ),
+        overrides: [
+          ...overrides(
+            tracks,
+            tracksStream: tracksStream,
+            progress: progress,
+            progressStream: progressStream,
+          ),
+          ...extra,
+        ],
         child: MaterialApp(
           home: PlaylistDetailPage(
             playlistId: playlist.id,
@@ -538,6 +553,7 @@ void main() {
       'Replace with a file from this phone',
       'Download a new copy',
       'YouTube',
+      'Save to Temporary playlist',
       'Open on YouTube',
       'Share link',
       'Copy video ID',
@@ -665,6 +681,59 @@ void main() {
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
     expect(find.text('Download a new copy?'), findsNothing);
+  });
+
+  testWidgets('a video can have its own quality; audio tracks cannot', (
+    tester,
+  ) async {
+    useTallScreen(tester);
+    final track = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      title: 'Video',
+      status: 'complete',
+      filePath: '/tmp/video.mp4',
+    );
+    await pumpPage(tester, tracks: [track]);
+
+    await tester.tap(find.byKey(ValueKey('track-more-${track.id}')));
+    await tester.pumpAndSettle();
+    expect(find.text('Playlist default (Best available)'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('track-actions-video-quality')));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('video-quality-option-inherit')),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const ValueKey('video-quality-option-480')));
+    await tester.pumpAndSettle();
+    expect(playlists.trackQualities, [(track.id, 480)]);
+    // Nothing to download again: no question.
+    expect(
+      find.byKey(const ValueKey('video-quality-redownload-dialog')),
+      findsNothing,
+    );
+
+    playlist = await insertTestPlaylist(
+      db,
+      url: 'https://www.youtube.com/playlist?list=audio',
+      audioOnly: true,
+    );
+    final song = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      title: 'Song',
+      status: 'complete',
+      filePath: '/tmp/song.m4a',
+    );
+    await tester.pumpWidget(const SizedBox());
+    await pumpPage(tester, tracks: [song]);
+    await tester.tap(find.byKey(ValueKey('track-more-${song.id}')));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('track-actions-video-quality')),
+      findsNothing,
+    );
   });
 
   testWidgets('Update becomes Stop download, with what the run is doing', (
@@ -982,6 +1051,240 @@ void main() {
     await jump();
     expect(find.byKey(ValueKey('track-row-${tracks[29].id}')), findsOneWidget);
     expect(find.textContaining('Back to the first'), findsOneWidget);
+  });
+
+  group('temporary playlist', () {
+    setUp(() async {
+      playlist = await insertTestPlaylist(
+        db,
+        url: 'woolytube:temporary',
+        name: 'Temporary',
+        autoUpdate: false,
+        videoQuality: 720,
+        isTemporary: true,
+      );
+    });
+
+    testWidgets('its menu has Clear all instead of Open on YouTube', (
+      tester,
+    ) async {
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        title: 'Saved',
+        status: 'complete',
+        filePath: '/tmp/saved.mp4',
+      );
+      await pumpPage(tester, tracks: [track]);
+
+      await tester.tap(find.byKey(const ValueKey('playlist-detail-menu')));
+      await tester.pumpAndSettle();
+      expect(find.text('Open on YouTube'), findsNothing);
+      await tester.tap(
+        find.byKey(const ValueKey('playlist-detail-clear-temporary')),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Removes the video and deletes its file.'),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const ValueKey('clear-temporary-confirm')));
+      await tester.pumpAndSettle();
+
+      expect(downloads.stoppedPlaylists, [playlist.id]);
+      expect(playback.removedPlaylists, [playlist.id]);
+      expect(playlists.cleared, [playlist.id]);
+      expect(find.text('Temporary playlist cleared'), findsOneWidget);
+    });
+
+    testWidgets('a video can be removed from it, not saved to it again', (
+      tester,
+    ) async {
+      useTallScreen(tester);
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        title: 'Saved',
+        status: 'complete',
+        filePath: '/tmp/saved.mp4',
+      );
+      await pumpPage(tester, tracks: [track]);
+
+      await tester.tap(find.byKey(ValueKey('track-more-${track.id}')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('track-actions-save-temporary')),
+        findsNothing,
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('track-actions-remove-temporary')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('remove-temporary-confirm')));
+      await tester.pumpAndSettle();
+
+      expect(downloads.stoppedPlaylists, [playlist.id]);
+      expect(playback.removedTracks, [
+        {track.id},
+      ]);
+      expect(playlists.removedTracks, hasLength(1));
+      expect(playlists.removedTracks.single.$1, playlist.id);
+      expect(playlists.removedTracks.single.$2, {track.id});
+      expect(find.text('Removed "Saved"'), findsOneWidget);
+    });
+
+    testWidgets('removing while another playlist downloads touches nothing', (
+      tester,
+    ) async {
+      useTallScreen(tester);
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        title: 'Saved',
+        status: 'complete',
+        filePath: '/tmp/saved.mp4',
+      );
+      await pumpPage(tester, tracks: [track]);
+      downloads.downloading = playlist.id + 100;
+
+      await tester.tap(find.byKey(ValueKey('track-more-${track.id}')));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('track-actions-remove-temporary')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('remove-temporary-confirm')));
+      await tester.pumpAndSettle();
+
+      expect(downloads.stoppedPlaylists, isEmpty);
+      expect(playback.removedTracks, isEmpty);
+      expect(playlists.removedTracks, isEmpty);
+      expect(
+        find.text('Wait until the current download finishes.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('Clear all leaves the player alone when the library is busy', (
+      tester,
+    ) async {
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        title: 'Saved',
+        status: 'complete',
+        filePath: '/tmp/saved.mp4',
+      );
+      await pumpPage(tester, tracks: [track]);
+      playlists.busy = 'Wait until the current playlist update finishes.';
+
+      await tester.tap(find.byKey(const ValueKey('playlist-detail-menu')));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('playlist-detail-clear-temporary')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('clear-temporary-confirm')));
+      await tester.pumpAndSettle();
+
+      expect(playback.removedPlaylists, isEmpty);
+      expect(playlists.cleared, isEmpty);
+      expect(
+        find.text('Wait until the current playlist update finishes.'),
+        findsOneWidget,
+      );
+    });
+  });
+
+  testWidgets('a video of another playlist can be saved to Temporary', (
+    tester,
+  ) async {
+    useTallScreen(tester);
+    SharedPreferences.setMockInitialValues({});
+    final track = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      videoId: 'abcdefghijk',
+      title: 'Keeper',
+      thumbnailUrl: 'https://example.com/t.jpg',
+      durationSeconds: 90,
+    );
+    final temporary = await insertTestPlaylist(
+      db,
+      url: 'woolytube:temporary',
+      name: 'Temporary',
+      isTemporary: true,
+    );
+    final saved = await insertTestTrack(
+      db,
+      playlistId: temporary.id,
+      videoId: 'abcdefghijk',
+      title: 'Keeper',
+    );
+    playlists.temporaryResult = (
+      playlist: temporary,
+      track: saved,
+      added: true,
+    );
+    final settings = AppSettingsService();
+    await pumpPage(
+      tester,
+      tracks: [track],
+      extra: [
+        appSettingsServiceProvider.overrideWithValue(settings),
+        downloadNetworkPolicyProvider.overrideWithValue(
+          DownloadNetworkPolicy(
+            settings,
+            checkConnectivity: () async => [ConnectivityResult.wifi],
+          ),
+        ),
+      ],
+    );
+
+    await tester.tap(find.byKey(ValueKey('track-more-${track.id}')));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('track-actions-remove-temporary')),
+      findsNothing,
+    );
+    await tester.tap(
+      find.byKey(const ValueKey('track-actions-save-temporary')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(playlists.temporaryEntries, [
+      {
+        'id': 'abcdefghijk',
+        'title': 'Keeper',
+        'thumbnail': 'https://example.com/t.jpg',
+        'duration': 90,
+      },
+    ]);
+    expect(downloads.downloadPlaylistCalls, 1);
+    expect(find.text('Saved "Keeper" to Temporary.'), findsOneWidget);
+  });
+
+  testWidgets('a video already in Temporary is not offered again', (
+    tester,
+  ) async {
+    useTallScreen(tester);
+    final track = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      videoId: 'abcdefghijk',
+      status: 'complete',
+      filePath: '/tmp/keeper.m4a',
+    );
+    temporaryVideoIds = {'abcdefghijk'};
+    await pumpPage(tester, tracks: [track]);
+
+    await tester.tap(find.byKey(ValueKey('track-more-${track.id}')));
+    await tester.pumpAndSettle();
+    expect(find.text('Open on YouTube'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('track-actions-save-temporary')),
+      findsNothing,
+    );
   });
 
   testWidgets('the jump entry is hidden when nothing failed', (tester) async {
@@ -1315,6 +1618,57 @@ class _Metadata implements MetadataService {
 
 class _Playlists implements PlaylistService {
   final cancelSyncCalls = <int>[];
+  final cleared = <int>[];
+  final removedTracks = <(int, Set<int>)>[];
+  final temporaryEntries = <Map<String, dynamic>>[];
+  ({Playlist playlist, Track track, bool added})? temporaryResult;
+
+  /// When set, removals fail like a busy library, before the player is
+  /// told.
+  String? busy;
+
+  @override
+  Future<void> clearPlaylist(
+    int playlistId, {
+    Future<void> Function()? beforeDelete,
+  }) async {
+    if (busy != null) throw LibraryBusyException(busy!);
+    await beforeDelete?.call();
+    cleared.add(playlistId);
+  }
+
+  @override
+  Future<void> removeTracks(
+    int playlistId,
+    Iterable<int> trackIds, {
+    Future<void> Function()? beforeDelete,
+  }) async {
+    if (busy != null) throw LibraryBusyException(busy!);
+    await beforeDelete?.call();
+    removedTracks.add((playlistId, trackIds.toSet()));
+  }
+
+  @override
+  Future<({Playlist playlist, Track track, bool added})> addToTemporary(
+    Map<String, dynamic> entry,
+  ) async {
+    temporaryEntries.add(entry);
+    return temporaryResult!;
+  }
+
+  final trackQualities = <(int, int?)>[];
+
+  @override
+  Future<void> setTrackVideoQuality(int trackId, int? quality) async =>
+      trackQualities.add((trackId, quality));
+
+  @override
+  Future<List<Track>> tracksAffectedByQualityChange(
+    Playlist playlist, {
+    required int? oldMax,
+    required int? newMax,
+    Iterable<Track>? only,
+  }) async => const [];
   final retriedTracks = <int>[];
   final retriedPlaylists = <int>[];
   Object? syncError;
@@ -1351,6 +1705,16 @@ class _Playlists implements PlaylistService {
 
 class _Playback implements PlaybackService {
   int toggleCalls = 0;
+  final removedPlaylists = <int>[];
+  final removedTracks = <Set<int>>[];
+
+  @override
+  Future<void> playlistRemoved(int playlistId) async =>
+      removedPlaylists.add(playlistId);
+
+  @override
+  Future<void> tracksRemoved(Set<int> trackIds) async =>
+      removedTracks.add(trackIds);
   int shuffleToggles = 0;
   int playAllCalls = 0;
   final playTrackIds = <int>[];
@@ -1413,11 +1777,35 @@ class _Playback implements PlaybackService {
 
 class _Downloads implements DownloadService {
   int cancelCalls = 0;
+  final stoppedPlaylists = <int>[];
+
+  /// The playlist downloading, if any.
+  int? downloading;
+
+  @override
+  int? get activePlaylistId => downloading;
+
+  @override
+  Future<T> runWithDownloadStopped<T>(
+    int playlistId,
+    Future<T> Function() action, {
+    bool resume = false,
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    if (downloading != null && downloading != playlistId) {
+      throw const LibraryBusyException(
+        'Wait until the current download finishes.',
+      );
+    }
+    stoppedPlaylists.add(playlistId);
+    return action();
+  }
+
   int downloadPlaylistCalls = 0;
   final removedFromQueue = <int>[];
 
   @override
-  bool get isDownloading => false;
+  bool get isDownloading => downloading != null;
 
   @override
   List<int> get queuedPlaylistIds => const [];

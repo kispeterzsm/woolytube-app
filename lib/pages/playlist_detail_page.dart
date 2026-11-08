@@ -15,6 +15,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../database/database.dart';
+import '../providers/chapter_fetch_jobs.dart';
 import '../providers/playback_providers.dart';
 import '../providers/providers.dart';
 import '../services/chapters.dart';
@@ -25,8 +26,10 @@ import '../services/media_thumbnail_service.dart';
 import '../services/playlist_service.dart';
 import '../services/sponsorblock_service.dart';
 import '../services/track_search.dart';
+import '../services/video_quality.dart';
 import '../widgets/mobile_data_download_guard.dart';
 import '../widgets/tap_to_place_cursor_text_field.dart';
+import '../widgets/video_quality_picker.dart';
 import 'chapters_page.dart';
 import 'playlist_settings_page.dart';
 
@@ -816,6 +819,8 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
                 _jumpToNextProblem();
               case 'retry-removed':
                 unawaited(_retryRemovedTracks());
+              case 'clear':
+                unawaited(_confirmClearTemporary());
               case 'youtube':
                 final url = playlist?.url;
                 if (url != null) launchUrl(Uri.parse(url));
@@ -859,7 +864,20 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
                       contentPadding: EdgeInsets.zero,
                     ),
                   ),
-                if (playlist != null)
+                if (playlist != null &&
+                    playlist.isTemporary &&
+                    view != null &&
+                    view.tracks.isNotEmpty)
+                  const PopupMenuItem(
+                    key: ValueKey('playlist-detail-clear-temporary'),
+                    value: 'clear',
+                    child: ListTile(
+                      leading: Icon(Icons.delete_sweep_outlined),
+                      title: Text('Clear all'),
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                  ),
+                if (playlist != null && !playlist.isTemporary)
                   const PopupMenuItem(
                     value: 'youtube',
                     child: ListTile(
@@ -1141,6 +1159,60 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
     );
   }
 
+  /// Empties the temporary playlist: every video and its files go.
+  Future<void> _confirmClearTemporary() async {
+    final count =
+        ref.read(tracksProvider(widget.playlistId)).valueOrNull?.length ?? 0;
+    final downloads = ref.read(downloadServiceProvider);
+    final downloading =
+        downloads.isDownloading &&
+        downloads.activePlaylistId == widget.playlistId;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder:
+          (ctx) => AlertDialog(
+            backgroundColor: const Color(0xFF2A2A2A),
+            title: const Text(
+              'Clear Temporary?',
+              style: TextStyle(color: Colors.white),
+            ),
+            content: Text(
+              'Removes ${count == 1 ? 'the video' : 'all $count videos'} and '
+              'deletes ${count == 1 ? 'its file' : 'their files'}.'
+              '${downloading ? ' Its running download will be stopped.' : ''}',
+              style: const TextStyle(color: Color(0xFFCCCCCC)),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                key: const ValueKey('clear-temporary-confirm'),
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text(
+                  'Clear all',
+                  style: TextStyle(color: Colors.red),
+                ),
+              ),
+            ],
+          ),
+    );
+    if (confirmed != true || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
+    final error = await removeTemporaryVideos(ref, widget.playlistId);
+    if (error != null) {
+      messenger.showSnackBar(SnackBar(content: Text(error)));
+      return;
+    }
+    messenger.showSnackBar(
+      const SnackBar(content: Text('Temporary playlist cleared')),
+    );
+    // The empty temporary playlist is not shown on the home page.
+    if (mounted) navigator.popUntil((route) => route.isFirst);
+  }
+
   Future<void> _retryRemovedTracks() async {
     final messenger = ScaffoldMessenger.of(context);
     try {
@@ -1174,7 +1246,9 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
     final downloadService = ref.read(downloadServiceProvider);
     final playlistService = ref.read(playlistServiceProvider);
     final db = ref.read(databaseProvider);
-    if (downloadService.isDownloading) {
+    // The temporary playlist asks YouTube nothing, so its download can wait
+    // in the queue.
+    if (downloadService.isDownloading && !playlist.isTemporary) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('A download is already in progress')),
       );
@@ -1792,6 +1866,122 @@ class _UpNextSheetState extends ConsumerState<_UpNextSheet> {
 String _errorText(Object error) =>
     error is StateError ? error.message : '$error';
 
+/// Saves the video described by [entry] (`id`, `title`, and optionally
+/// `thumbnail` and `duration`) to the temporary playlist and starts its
+/// download, asking first on mobile data. Returns the message to show.
+/// Providers are read before the first wait, so the download still starts
+/// when the page that asked is gone.
+Future<String> saveVideoToTemporary(
+  BuildContext context,
+  WidgetRef ref,
+  Map<String, dynamic> entry,
+) async {
+  final playlists = ref.read(playlistServiceProvider);
+  final downloads = ref.read(downloadServiceProvider);
+  final policy = ref.read(downloadNetworkPolicyProvider);
+  final settings = ref.read(appSettingsServiceProvider);
+  final unavailable = ref.read(ytDlpInitErrorProvider);
+  // Saving a video already downloaded as video would only make a copy.
+  final copy = await ref
+      .read(databaseProvider)
+      .playlistWithVideoCopy(entry['id'] as String? ?? '');
+  if (copy != null) {
+    final title = entry['title'] as String? ?? 'This video';
+    return '"$title" is already downloaded in ${copy.name}';
+  }
+  final saved = await playlists.addToTemporary(entry);
+  final title = saved.track.title;
+  if (!saved.added && saved.track.status == 'complete') {
+    return '"$title" is already in Temporary';
+  }
+  final what =
+      saved.added
+          ? 'Saved "$title" to Temporary.'
+          : '"$title" is in Temporary.';
+  if (unavailable != null) {
+    return '$what Downloads are unavailable: $unavailable';
+  }
+  DownloadNowChoice choice;
+  try {
+    choice =
+        context.mounted
+            ? await decideDownloadNow(
+              context,
+              policy,
+              settings: settings,
+              message: "You're on mobile data. Download it now?",
+            )
+            : await decideDownloadNowWithoutAsking(policy);
+  } catch (_) {
+    choice = DownloadNowChoice.later;
+  }
+  switch (choice) {
+    case DownloadNowChoice.now:
+      final waits =
+          downloads.isDownloading &&
+          downloads.activePlaylistId != saved.playlist.id;
+      // A run of Temporary itself picks the new video up right after.
+      unawaited(
+        downloads
+            .downloadPlaylist(saved.playlist, sourceChecked: false)
+            .catchError((Object _) => DownloadStart.started),
+      );
+      return waits ? '$what It downloads after the current download.' : what;
+    case DownloadNowChoice.later:
+      return '$what Tap Update on it to download.';
+    case DownloadNowChoice.offline:
+      return "$what You're offline; tap Update on it later.";
+  }
+}
+
+/// Removes the videos [trackIds] (all of them when null) of the temporary
+/// playlist [playlistId] and deletes their files. What would keep writing to
+/// them stops first: its chapter lookups and its download (a running one is
+/// stopped and resumed afterwards for the videos left, see
+/// [DownloadService.runWithDownloadStopped]). The player is told only once
+/// the library is free, right before the files go. While another playlist
+/// downloads nothing is touched. Returns an error message, or null when
+/// they are gone.
+Future<String?> removeTemporaryVideos(
+  WidgetRef ref,
+  int playlistId, [
+  Set<int>? trackIds,
+]) async {
+  final downloads = ref.read(downloadServiceProvider);
+  final playlists = ref.read(playlistServiceProvider);
+  final playback = ref.read(playbackServiceProvider);
+  final chapterJobs = ref.read(chapterFetchJobsProvider.notifier);
+  Future<void> tellPlayer() async {
+    try {
+      if (trackIds == null) {
+        await playback.playlistRemoved(playlistId);
+      } else {
+        await playback.tracksRemoved(trackIds);
+      }
+    } catch (_) {}
+  }
+
+  try {
+    await downloads.runWithDownloadStopped(playlistId, () async {
+      await chapterJobs.stop(playlistId);
+      if (trackIds == null) {
+        await playlists.clearPlaylist(playlistId, beforeDelete: tellPlayer);
+      } else {
+        await playlists.removeTracks(
+          playlistId,
+          trackIds,
+          beforeDelete: tellPlayer,
+        );
+      }
+    }, resume: trackIds != null);
+  } on LibraryBusyException catch (e) {
+    return e.message;
+  } catch (e) {
+    return 'Could not remove: ${_errorText(e)}';
+  }
+  return null;
+}
+
 /// Shows why nothing can be downloaded when yt-dlp failed to start, and
 /// returns whether that is the case.
 bool explainDownloadsUnavailable(BuildContext context, WidgetRef ref) {
@@ -1830,7 +2020,9 @@ Future<Playlist?> syncAndDownloadPlaylist({
   final current = await db.getPlaylist(playlist.id);
   SyncResult? result;
   try {
-    result = await playlists.syncPlaylist(current);
+    // The temporary playlist has no YouTube playlist: its update only
+    // downloads what is missing.
+    if (!current.isTemporary) result = await playlists.syncPlaylist(current);
   } on SyncCancelledException {
     // The owner pressed Stop while YouTube was being asked: nothing changed
     // and nothing is downloaded.

@@ -12,6 +12,7 @@ export 'metadata_service.dart' show PlaylistExistsException;
 import 'sponsorblock_service.dart';
 import 'media_thumbnail_service.dart' as media_thumbnail_service;
 import 'app_settings_service.dart';
+import 'video_quality.dart';
 
 /// Thrown by [PlaylistService.syncPlaylist] when the owner stopped the
 /// update while YouTube was being asked for the playlist.
@@ -99,6 +100,26 @@ class PlaylistService {
 
   Stream<List<Playlist>> watchAllPlaylists() => _db.watchAllPlaylists();
 
+  Future<void> _ordering = Future.value();
+
+  /// Moves playlist [id] in the home page order to just before [beforeId],
+  /// or to the end when [beforeId] is null. Playlists the home page does
+  /// not show keep their place relative to the others. Only the database
+  /// changes: the order is not part of the metadata files. Moves run one
+  /// after another, each on the order the previous one left.
+  Future<void> movePlaylist(int id, {int? beforeId}) {
+    final move = _ordering.then((_) async {
+      if (beforeId == id) return;
+      final order = [for (final p in await _db.getAllPlaylists()) p.id];
+      if (!order.remove(id)) return;
+      final at = beforeId == null ? -1 : order.indexOf(beforeId);
+      order.insert(at < 0 ? order.length : at, id);
+      await _db.setPlaylistOrder(order);
+    });
+    _ordering = move.catchError((_) {});
+    return move;
+  }
+
   /// Per playlist: total, downloaded, unavailable and failed track counts.
   /// Emits only when a number changes.
   Stream<Map<int, PlaylistCounts>> watchPlaylistTrackCounts() =>
@@ -170,6 +191,8 @@ class PlaylistService {
     bool sponsorBlockEnabled = true,
     List<String> sponsorBlockCategories = defaultSponsorBlockCategories,
     Map<String, SponsorBlockCategoryAction>? sponsorBlockCategoryActions,
+    bool isTemporary = false,
+    int? videoQuality,
   }) async {
     final existing = await _db.getAllPlaylists();
     for (final playlist in existing) {
@@ -218,6 +241,7 @@ class PlaylistService {
           playChapters: Value(playChapters),
           updateFrequencyHours: Value(updateFrequencyHours),
           includeThumbnails: Value(includeThumbnails),
+          isTemporary: isTemporary ? const Value(true) : const Value.absent(),
         ),
       );
       await _writeMetadata(playlistId);
@@ -252,10 +276,245 @@ class PlaylistService {
         ),
         createdAt: DateTime.now(),
         outputPath: choice.path,
+        isTemporary: Value(isTemporary),
+        videoQuality: Value(
+          videoQuality != null && videoQuality > 0 ? videoQuality : null,
+        ),
       ),
     );
 
     return playlistId;
+  }
+
+  /// Name of the temporary playlist when it is created.
+  static const temporaryPlaylistName = 'Temporary';
+
+  /// Video quality the temporary playlist starts with.
+  static const temporaryPlaylistQuality = 720;
+
+  Future<void> _temporaryChanges = Future.value();
+
+  /// Runs [action] after every earlier temporary-playlist change, so two
+  /// quick adds never create two playlists or give two videos one number.
+  Future<T> _serialTemporary<T>(Future<T> Function() action) {
+    final result = _temporaryChanges.then((_) => action());
+    _temporaryChanges = result.then<void>((_) {}, onError: (_) {});
+    return result;
+  }
+
+  /// The app's own "Temporary" playlist for single videos, created (or
+  /// restored from its folder) the first time it is needed. It never asks
+  /// YouTube for a playlist and is never updated on a schedule.
+  Future<Playlist> ensureTemporaryPlaylist() =>
+      _serialTemporary(_ensureTemporaryPlaylist);
+
+  Future<Playlist> _ensureTemporaryPlaylist() async {
+    final existing = await _db.getTemporaryPlaylist();
+    if (existing != null) return existing;
+    int id;
+    try {
+      id = await addPlaylist(
+        url: temporaryPlaylistUrl,
+        name: temporaryPlaylistName,
+        audioOnly: false,
+        autoUpdate: false,
+        isTemporary: true,
+        videoQuality: temporaryPlaylistQuality,
+      );
+    } on PlaylistExistsException {
+      final again = await _db.getTemporaryPlaylist();
+      if (again != null) return again;
+      rethrow;
+    }
+    return _db.getPlaylist(id);
+  }
+
+  /// Adds one video to the temporary playlist, after its last one.
+  ///
+  /// [entry] has the shape of a playlist entry from yt-dlp: `id`, `title`,
+  /// and optionally `thumbnail` and `duration`. A video that is already in
+  /// it is not added again ([added] is false; [track] is the one there).
+  ///
+  /// Only a database row is added, no file is touched, so this works while
+  /// a download (even one of the temporary playlist) is running.
+  Future<({Playlist playlist, Track track, bool added})> addToTemporary(
+    Map<String, dynamic> entry,
+  ) {
+    final videoId = entry['id'] as String? ?? '';
+    if (videoId.isEmpty) {
+      return Future.error(ArgumentError('The video has no id.'));
+    }
+    return _serialTemporary(() async {
+      final playlist = await _ensureTemporaryPlaylist();
+      final tracks = await _db.getTracksForPlaylist(playlist.id);
+      for (final track in tracks) {
+        if (track.videoId == videoId) {
+          return (playlist: playlist, track: track, added: false);
+        }
+      }
+      final index = await _nextUnusedIndex(playlist, tracks);
+      final trackId = await _db.insertTrack(
+        _companionFor(playlist.id, index, entry),
+      );
+      await _writeMetadata(playlist.id);
+      final track = await _db.getTrack(trackId);
+      if (track == null) throw StateError('The video could not be saved.');
+      return (playlist: playlist, track: track, added: true);
+    });
+  }
+
+  /// A number no track and no file of [playlist] has used: higher than
+  /// every track and every numbered file in its folder (or moved aside).
+  /// A number is never given out again while a file with it is left, which
+  /// a new video's download would otherwise take as its own.
+  Future<int> _nextUnusedIndex(Playlist playlist, List<Track> tracks) async {
+    var highest = 0;
+    for (final track in tracks) {
+      if (track.index > highest) highest = track.index;
+    }
+    final numbered = RegExp(r'^(\d+)_');
+    for (final dirPath in [
+      playlist.outputPath,
+      LibraryLayout.replacedDir(playlist.outputPath),
+    ]) {
+      try {
+        final dir = Directory(dirPath);
+        if (!await dir.exists()) continue;
+        await for (final entity in dir.list()) {
+          if (entity is! File) continue;
+          final match = numbered.firstMatch(p.basename(entity.path));
+          final number = match == null ? null : int.tryParse(match.group(1)!);
+          if (number != null && number > highest) highest = number;
+        }
+      } on FileSystemException {
+        // An unreadable folder: the tracks' numbers are all there is.
+      }
+    }
+    return highest + 1;
+  }
+
+  /// Removes the tracks [trackIds] of [playlistId] and deletes their files:
+  /// media, cover, kept video info and older copies moved aside under the
+  /// track's number. Files another track uses are kept. When the playlist
+  /// is left empty, a cover copied from one of its videos goes too.
+  ///
+  /// Meant for the temporary playlist, whose numbers are never reused (a
+  /// YouTube playlist would bring the videos back on its next update).
+  /// Stop a download of the playlist first: like any file deletion this
+  /// waits for no download and throws [LibraryBusyException] while one
+  /// runs. [beforeDelete] runs once the library is free, right before
+  /// anything is deleted, so the player can let go of the files
+  /// ([PlaybackService.tracksRemoved]) only when they really go.
+  Future<void> removeTracks(
+    int playlistId,
+    Iterable<int> trackIds, {
+    Future<void> Function()? beforeDelete,
+  }) async {
+    final ids = trackIds.toSet();
+    if (ids.isEmpty) return;
+    await _locked('video removal', () async {
+      final playlist = await _db.getPlaylist(playlistId);
+      final all = await _db.getAllTracks();
+      final removed = <Track>[];
+      final kept = <String>{};
+      final keptVideoIds = <String>{};
+      for (final track in all) {
+        if (track.playlistId == playlistId && ids.contains(track.id)) {
+          removed.add(track);
+          continue;
+        }
+        for (final path in [track.filePath, track.thumbnailPath]) {
+          if (path != null) kept.add(p.normalize(path));
+        }
+        if (track.playlistId == playlistId) keptVideoIds.add(track.videoId);
+      }
+      if (removed.isEmpty) return;
+      await beforeDelete?.call();
+      final left =
+          all.where((t) => t.playlistId == playlistId).length - removed.length;
+      await _db.deleteTracks([for (final track in removed) track.id]);
+
+      final folder = playlist.outputPath;
+      Future<void> deleteFile(String path) async {
+        if (kept.contains(p.normalize(path)) || !p.isWithin(folder, path)) {
+          return;
+        }
+        try {
+          final file = File(path);
+          if (await file.exists()) await file.delete();
+        } catch (_) {
+          // Keep going; a leftover file is harmless.
+        }
+      }
+
+      final removedNumbers = <int>{};
+      for (final track in removed) {
+        removedNumbers.add(track.index);
+        if (track.filePath != null) await deleteFile(track.filePath!);
+        if (track.thumbnailPath != null) {
+          await deleteFile(track.thumbnailPath!);
+          media_thumbnail_service.noteThumbnailRemoved(track.thumbnailPath);
+        }
+        if (!keptVideoIds.contains(track.videoId)) {
+          await deleteFile(LibraryLayout.infoJsonPath(folder, track.videoId));
+        }
+      }
+      final numbered = RegExp(r'^(\d+)_');
+      try {
+        final replaced = Directory(LibraryLayout.replacedDir(folder));
+        if (await replaced.exists()) {
+          await for (final entity in replaced.list()) {
+            if (entity is! File) continue;
+            final match = numbered.firstMatch(p.basename(entity.path));
+            final number = match == null ? null : int.tryParse(match.group(1)!);
+            if (number != null && removedNumbers.contains(number)) {
+              await deleteFile(entity.path);
+            }
+          }
+        }
+      } on FileSystemException {
+        // Older copies stay; they only take space.
+      }
+
+      final url = playlist.thumbnailUrl;
+      if (left == 0 && (url == null || url.isEmpty)) {
+        // The cover was copied from one of the videos that are gone.
+        final coverStem = LibraryLayout.playlistCoverStem(folder);
+        try {
+          final covers = Directory(LibraryLayout.thumbnailsDir(folder));
+          if (await covers.exists()) {
+            await for (final entity in covers.list()) {
+              if (entity is File &&
+                  p.withoutExtension(entity.path) == coverStem) {
+                await deleteFile(entity.path);
+                media_thumbnail_service.noteThumbnailRemoved(entity.path);
+              }
+            }
+          }
+        } on FileSystemException {
+          // The old cover stays on disk but is no longer shown.
+        }
+        if (playlist.thumbnailPath != null) {
+          await _db.updatePlaylistFields(
+            playlistId,
+            const PlaylistsCompanion(thumbnailPath: Value(null)),
+          );
+        }
+      }
+      await _writeMetadata(playlistId);
+    });
+  }
+
+  /// Removes every video of [playlistId] (see [removeTracks]). The playlist
+  /// itself stays.
+  Future<void> clearPlaylist(
+    int playlistId, {
+    Future<void> Function()? beforeDelete,
+  }) async {
+    final tracks = await _db.getTracksForPlaylist(playlistId);
+    await removeTracks(playlistId, [
+      for (final track in tracks) track.id,
+    ], beforeDelete: beforeDelete);
   }
 
   /// Picks the folder for a playlist named [name]: `<base>/<name>`, or
@@ -699,6 +958,9 @@ class PlaylistService {
   /// is running throws [LibraryBusyException]. [cancelSync] stops it while
   /// YouTube is being asked ([SyncCancelledException]).
   Future<SyncResult> syncPlaylist(Playlist playlist) async {
+    // No YouTube playlist is behind the temporary one; asking for its
+    // made-up address would only fail.
+    if (playlist.isTemporary) return const SyncResult();
     if (_syncing.contains(playlist.id)) {
       throw const LibraryBusyException(
         'This playlist is already being updated.',
@@ -1236,6 +1498,104 @@ class PlaylistService {
   Future<void> requestOriginalDownload(Track track) async {
     await _db.setTrackReplaceRequested(track.id, true);
     await _writeMetadata(track.playlistId);
+  }
+
+  /// Sets the highest video resolution new downloads of [id] use (null = the
+  /// best). Files already downloaded stay until [requestRedownload].
+  Future<void> setPlaylistVideoQuality(int id, int? maxHeight) async {
+    await _db.updatePlaylistFields(
+      id,
+      PlaylistsCompanion(
+        videoQuality: Value(
+          maxHeight != null && maxHeight > 0 ? maxHeight : null,
+        ),
+      ),
+    );
+    await _writeMetadata(id);
+  }
+
+  /// Sets [trackId]'s own video quality: null follows the playlist, 0 = the
+  /// best, N = up to N p. Its file stays until it is downloaded again.
+  Future<void> setTrackVideoQuality(int trackId, int? quality) async {
+    final track = await _db.getTrack(trackId);
+    if (track == null) return;
+    await _db.setTrackVideoQuality(
+      trackId,
+      quality == null ? null : (quality < 0 ? 0 : quality),
+    );
+    await _writeMetadata(track.playlistId);
+  }
+
+  /// The downloaded tracks of [playlist] whose file would change when
+  /// downloaded again because their cap moved from [oldMax] to [newMax]
+  /// (null = the best).
+  ///
+  /// Without [only] this is a change of the playlist's quality, so tracks
+  /// with a quality of their own are left out. Tracks YouTube cannot give
+  /// again (local files, removed videos) never count.
+  Future<List<Track>> tracksAffectedByQualityChange(
+    Playlist playlist, {
+    required int? oldMax,
+    required int? newMax,
+    Iterable<Track>? only,
+  }) async {
+    if (playlist.audioOnly || oldMax == newMax) return const [];
+    final candidates =
+        only?.toList() ??
+        [
+          for (final track in await _db.getTracksForPlaylist(playlist.id))
+            if (track.videoQuality == null) track,
+        ];
+    final affected = <Track>[];
+    for (final track in candidates) {
+      final path = track.filePath;
+      if (track.status != 'complete' ||
+          path == null ||
+          !canDownloadAgain(track) ||
+          !await File(path).exists()) {
+        continue;
+      }
+      final resolution = await _downloadedResolution(playlist, track);
+      if (isAffectedByQualityChange(
+        oldMax: oldMax,
+        newMax: newMax,
+        resolution: resolution,
+        downloadedMaxHeight: track.downloadedMaxHeight,
+      )) {
+        affected.add(track);
+      }
+    }
+    return affected;
+  }
+
+  /// The shorter side of [track]'s downloaded video from its kept
+  /// `.info.json`; null when unknown.
+  Future<int?> _downloadedResolution(Playlist playlist, Track track) async {
+    try {
+      final file = File(
+        LibraryLayout.infoJsonPath(playlist.outputPath, track.videoId),
+      );
+      if (!await file.exists()) return null;
+      final info = jsonDecode(await file.readAsString());
+      return info is Map<String, dynamic>
+          ? videoResolutionFromInfo(info)
+          : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Asks for a new copy of each of [trackIds]: the next download of
+  /// [playlistId] replaces their files, each only once its new copy is
+  /// complete.
+  Future<void> requestRedownload(int playlistId, List<int> trackIds) async {
+    if (trackIds.isEmpty) return;
+    await _db.transaction(() async {
+      for (final id in trackIds) {
+        await _db.setTrackReplaceRequested(id, true);
+      }
+    });
+    await _writeMetadata(playlistId);
   }
 
   /// Changes a track's title and/or the title part of its file name. The

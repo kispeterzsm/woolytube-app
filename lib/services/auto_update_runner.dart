@@ -52,7 +52,8 @@ bool isDueForAutoUpdate(
   DateTime now, {
   Duration tolerance = autoUpdateDueTolerance,
 }) {
-  if (!playlist.autoUpdate) return false;
+  // The temporary playlist has no YouTube playlist to check.
+  if (!playlist.autoUpdate || playlist.isTemporary) return false;
   final lastUpdated = playlist.lastUpdated;
   if (lastUpdated == null) return true;
   final interval = Duration(hours: playlist.updateFrequencyHours);

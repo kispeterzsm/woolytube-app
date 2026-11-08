@@ -234,6 +234,115 @@ void main() {
     ]);
   });
 
+  test('the temporary playlist is never due for an update', () async {
+    final temporary = await insertTestPlaylist(
+      db,
+      url: 'woolytube:temporary',
+      name: 'Temporary',
+      isTemporary: true,
+    );
+    final regular = await insertTestPlaylist(db, url: 'https://example.com/a');
+    final due = await db.getPlaylistsDueForUpdate(now: DateTime(2025));
+    expect(due.map((playlist) => playlist.id), [regular.id]);
+    expect((await db.getTemporaryPlaylist())?.id, temporary.id);
+  });
+
+  test('deleteTracks removes the tracks with their segments', () async {
+    final playlist = await insertTestPlaylist(db);
+    final gone = await insertTestTrack(db, playlistId: playlist.id, index: 1);
+    final kept = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 2,
+      videoId: 'kept',
+    );
+    for (final track in [gone, kept]) {
+      await db.insertSegment(
+        SponsorBlockSegmentsCompanion.insert(
+          trackId: track.id,
+          videoId: track.videoId,
+          source: 'local',
+          category: 'sponsor',
+          startMs: 0,
+          endMs: 10,
+          createdAt: DateTime(2024),
+        ),
+      );
+    }
+
+    await db.deleteTracks([gone.id]);
+    expect(await db.getTrack(gone.id), isNull);
+    expect(await db.getSegmentsForTrack(gone.id), isEmpty);
+    expect(await db.getTrack(kept.id), isNotNull);
+    expect(await db.getSegmentsForTrack(kept.id), hasLength(1));
+  });
+
+  test('watches the videos Save to Temporary is not offered for', () async {
+    final regular = await insertTestPlaylist(db, url: 'https://example.com/a');
+    await insertTestTrack(db, playlistId: regular.id, videoId: 'regular');
+    final audio = await insertTestPlaylist(
+      db,
+      url: 'https://example.com/audio',
+      audioOnly: true,
+    );
+    await insertTestTrack(
+      db,
+      playlistId: audio.id,
+      videoId: 'audio',
+      status: 'complete',
+      filePath: '/x/00001_audio.m4a',
+    );
+    final ids = <Set<String>>[];
+    final sub = db.watchTemporarySaveBlockedVideoIds().listen(ids.add);
+    await pumpEventQueue();
+    final temporary = await insertTestPlaylist(
+      db,
+      url: 'woolytube:temporary',
+      isTemporary: true,
+    );
+    await insertTestTrack(db, playlistId: temporary.id, videoId: 'saved');
+    await insertTestTrack(
+      db,
+      playlistId: regular.id,
+      index: 2,
+      videoId: 'video',
+      status: 'complete',
+      filePath: '/x/00002_video.mp4',
+    );
+    await pumpEventQueue();
+    await sub.cancel();
+    expect(ids.first, isEmpty);
+    expect(ids.last, {'saved', 'video'});
+  });
+
+  test('finds a playlist with the video downloaded as video', () async {
+    final audio = await insertTestPlaylist(
+      db,
+      url: 'https://example.com/audio',
+      audioOnly: true,
+    );
+    await insertTestTrack(
+      db,
+      playlistId: audio.id,
+      videoId: 'v',
+      status: 'complete',
+      filePath: '/x/00001_v.m4a',
+    );
+    expect(await db.playlistWithVideoCopy('v'), isNull);
+    final video = await insertTestPlaylist(db, url: 'https://example.com/b');
+    await insertTestTrack(db, playlistId: video.id, videoId: 'v');
+    expect(await db.playlistWithVideoCopy('v'), isNull);
+    final done = await insertTestPlaylist(db, url: 'https://example.com/c');
+    await insertTestTrack(
+      db,
+      playlistId: done.id,
+      videoId: 'v',
+      status: 'complete',
+      filePath: '/x/00001_v.mp4',
+    );
+    expect((await db.playlistWithVideoCopy('v'))?.id, done.id);
+  });
+
   test('counts tracks per playlist and only emits changed counts', () async {
     final playlist = await insertTestPlaylist(db);
     final complete = await insertTestTrack(
@@ -347,6 +456,76 @@ void main() {
 
     await db.deletePlaylist(playlist.id);
     expect((await db.playlistRevisions()).containsKey(playlist.id), isFalse);
+  });
+
+  test('lists playlists in the home order, ties by id', () async {
+    final a = await insertTestPlaylist(db, url: 'a', sortOrder: 2);
+    final b = await insertTestPlaylist(db, url: 'b', sortOrder: 0);
+    final c = await insertTestPlaylist(db, url: 'c', sortOrder: 2);
+    final d = await insertTestPlaylist(db, url: 'd', sortOrder: 1);
+
+    final expected = [b.id, d.id, a.id, c.id];
+    expect((await db.getAllPlaylists()).map((p) => p.id), expected);
+    expect((await db.watchAllPlaylists().first).map((p) => p.id), expected);
+  });
+
+  test('a new playlist goes to the end of the home order', () async {
+    final first = await insertTestPlaylist(db, url: 'first');
+    final second = await insertTestPlaylist(db, url: 'second');
+    expect(first.sortOrder, 0);
+    expect(second.sortOrder, 1);
+
+    await db.setPlaylistOrder([second.id, first.id]);
+    final third = await insertTestPlaylist(db, url: 'third');
+
+    expect(third.sortOrder, 2);
+    expect((await db.getAllPlaylists()).map((p) => p.id), [
+      second.id,
+      first.id,
+      third.id,
+    ]);
+  });
+
+  test('saving the home order writes only moved playlists and leaves '
+      'their revisions alone', () async {
+    final ids = [
+      for (final url in ['a', 'b', 'c', 'd'])
+        (await insertTestPlaylist(db, url: url)).id,
+    ];
+    await db.customStatement(
+      'CREATE TEMP TABLE order_writes (playlist_id INTEGER)',
+    );
+    await db.customStatement(
+      'CREATE TEMP TRIGGER count_order_writes AFTER UPDATE OF sort_order '
+      'ON playlists BEGIN '
+      'INSERT INTO order_writes VALUES (NEW.id); END',
+    );
+    final revisions = await db.playlistRevisions();
+
+    // Move the last one before the second.
+    await db.setPlaylistOrder([ids[0], ids[3], ids[1], ids[2]]);
+
+    expect((await db.getAllPlaylists()).map((p) => p.id), [
+      ids[0],
+      ids[3],
+      ids[1],
+      ids[2],
+    ]);
+    final written =
+        await db.customSelect('SELECT playlist_id FROM order_writes').get();
+    expect(written.map((row) => row.read<int>('playlist_id')).toSet(), {
+      ids[1],
+      ids[2],
+      ids[3],
+    });
+    expect(await db.playlistRevisions(), revisions);
+
+    // Other changes to a playlist still count.
+    await db.updatePlaylistFields(
+      ids[0],
+      const PlaylistsCompanion(videoQuality: Value(720)),
+    );
+    expect(await db.playlistRevision(ids[0]), greaterThan(revisions[ids[0]]!));
   });
 
   test('a track removed from YouTube leaves the queue until retried', () async {
@@ -790,10 +969,28 @@ void main() {
 
     final track = (await migrated.getTracksForPlaylist(1)).single;
     expect(track.filePath, '/tmp/list/00001_Kept.m4a');
-    expect((await migrated.getPlaylist(1)).lastUpdateAttempt, isNull);
+    expect(track.videoQuality, isNull);
+    expect(track.downloadedMaxHeight, isNull);
+    final playlist = await migrated.getPlaylist(1);
+    expect(playlist.lastUpdateAttempt, isNull);
+    // The home order starts as the order by id.
+    expect(playlist.sortOrder, 1);
+    expect(playlist.videoQuality, isNull);
+    expect(playlist.isTemporary, isFalse);
     final before = await migrated.playlistRevision(1);
     await migrated.updateTrackAlwaysSkip(track.id, true);
-    expect(await migrated.playlistRevision(1), greaterThan(before));
+    final afterTrack = await migrated.playlistRevision(1);
+    expect(afterTrack, greaterThan(before));
+
+    // The recreated playlist trigger ignores only the home order.
+    await migrated.setPlaylistOrder([1]);
+    expect((await migrated.getPlaylist(1)).sortOrder, 0);
+    expect(await migrated.playlistRevision(1), afterTrack);
+    await migrated.updatePlaylistFields(
+      1,
+      const PlaylistsCompanion(name: Value('Renamed')),
+    );
+    expect(await migrated.playlistRevision(1), greaterThan(afterTrack));
   });
 
   test('the duplicate-index repair lets the title decide a tie', () async {

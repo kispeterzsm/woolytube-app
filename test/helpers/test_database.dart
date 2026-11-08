@@ -24,6 +24,9 @@ Future<Playlist> insertTestPlaylist(
   DateTime? createdAt,
   bool? playChapters,
   String outputPath = '/tmp/woolytube-test',
+  int? sortOrder,
+  int? videoQuality,
+  bool isTemporary = false,
 }) async {
   final id = await db.insertPlaylist(
     PlaylistsCompanion.insert(
@@ -42,6 +45,9 @@ Future<Playlist> insertTestPlaylist(
       createdAt: createdAt ?? DateTime(2024),
       playChapters: Value(playChapters),
       outputPath: outputPath,
+      sortOrder: sortOrder == null ? const Value.absent() : Value(sortOrder),
+      videoQuality: Value(videoQuality),
+      isTemporary: Value(isTemporary),
     ),
   );
   return db.getPlaylist(id);
@@ -67,6 +73,8 @@ Future<Track> insertTestTrack(
   bool replaceRequested = false,
   String? chaptersJson,
   bool? chaptersEnabled,
+  int? videoQuality,
+  int? downloadedMaxHeight,
 }) async {
   final id = await db.insertTrack(
     TracksCompanion.insert(
@@ -88,6 +96,8 @@ Future<Track> insertTestTrack(
       replaceRequested: Value(replaceRequested),
       chaptersJson: Value(chaptersJson),
       chaptersEnabled: Value(chaptersEnabled),
+      videoQuality: Value(videoQuality),
+      downloadedMaxHeight: Value(downloadedMaxHeight),
     ),
   );
   return (await db.getTracksForPlaylist(

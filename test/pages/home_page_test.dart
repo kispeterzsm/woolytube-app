@@ -23,12 +23,20 @@ import '../helpers/test_database.dart';
 void main() {
   late AppDatabase db;
   late List<Playlist> playlists;
+
+  /// What the home page lists, when not all of [playlists].
+  List<Playlist>? listed;
+
+  /// Track counts per playlist, added to those of the first playlist.
+  late Map<int, PlaylistCounts> extraCounts;
   late List<Track> tracks;
   late StreamController<DownloadProgress> progress;
   late _Playback playback;
 
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
+    listed = null;
+    extraCounts = {};
     db = openTestDatabase();
     playlists = [
       for (var i = 1; i <= 6; i++)
@@ -71,7 +79,9 @@ void main() {
       ProviderScope(
         overrides: [
           updateServiceProvider.overrideWithValue(_Updates()),
-          playlistsProvider.overrideWith((ref) => Stream.value(playlists)),
+          playlistsProvider.overrideWith(
+            (ref) => Stream.value(listed ?? playlists),
+          ),
           allTracksProvider.overrideWith((ref) => Stream.value(tracks)),
           playlistTrackCountsStreamProvider.overrideWith(
             (ref) => Stream.value({
@@ -80,6 +90,7 @@ void main() {
                 downloaded: 662,
                 unavailable: 2,
               ),
+              ...extraCounts,
             }),
           ),
           syncingPlaylistsProvider.overrideWith(
@@ -185,6 +196,134 @@ void main() {
       ),
       same(otherCard),
     );
+  });
+
+  testWidgets('the reorder button opens the reorder page', (tester) async {
+    await pumpHome(tester);
+
+    final button = find.byKey(const ValueKey('home-reorder-playlists'));
+    expect(button, findsOneWidget);
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Reorder playlists'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('reorder-playlists-list')),
+      findsOneWidget,
+    );
+    for (final playlist in playlists.take(3)) {
+      expect(
+        find.byKey(ValueKey('reorder-playlist-${playlist.id}')),
+        findsOneWidget,
+      );
+    }
+  });
+
+  testWidgets('the card menu opens the reorder page too', (tester) async {
+    await pumpHome(tester);
+
+    await tester.longPress(card(0));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('playlist-menu-reorder')));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('reorder-playlists-list')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('one playlist has nothing to reorder', (tester) async {
+    listed = [playlists.first];
+    await pumpHome(tester);
+
+    expect(card(0), findsOneWidget);
+    expect(find.byKey(const ValueKey('home-reorder-playlists')), findsNothing);
+    await tester.longPress(card(0));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('playlist-menu-settings')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('playlist-menu-reorder')), findsNothing);
+  });
+
+  group('temporary playlist', () {
+    late Playlist temporary;
+
+    setUp(() async {
+      temporary = await insertTestPlaylist(
+        db,
+        url: 'woolytube:temporary',
+        name: 'Temporary',
+        autoUpdate: false,
+        isTemporary: true,
+      );
+    });
+
+    Finder temporaryCard() =>
+        find.byKey(ValueKey('playlist-card-${temporary.id}'));
+
+    testWidgets('is hidden while it has no videos', (tester) async {
+      listed = [temporary, playlists[0], playlists[1]];
+      await pumpHome(tester);
+
+      expect(temporaryCard(), findsNothing);
+      expect(card(0), findsOneWidget);
+
+      // Nor is it offered in the search or on the reorder page.
+      await tester.tap(find.byTooltip('Search'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'Temporary');
+      await tester.pumpAndSettle();
+      expect(find.text('Nothing matches'), findsOneWidget);
+      await tester.tap(find.byTooltip('Close search'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('home-reorder-playlists')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(ValueKey('reorder-playlist-${temporary.id}')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(ValueKey('reorder-playlist-${playlists[0].id}')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('alone and empty, the library counts as empty', (tester) async {
+      listed = [temporary];
+      await pumpHome(tester);
+
+      expect(temporaryCard(), findsNothing);
+      expect(find.text('No playlists yet'), findsOneWidget);
+    });
+
+    testWidgets('with videos it shows, without "Open on YouTube"', (
+      tester,
+    ) async {
+      listed = [temporary, playlists[0]];
+      extraCounts = {
+        temporary.id: const PlaylistCounts(total: 2, downloaded: 1),
+      };
+      await pumpHome(tester);
+
+      expect(temporaryCard(), findsOneWidget);
+      await tester.longPress(temporaryCard());
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('playlist-menu-youtube')), findsNothing);
+      expect(find.text('Download videos not downloaded yet'), findsOneWidget);
+    });
+  });
+
+  testWidgets('the reorder button is hidden while searching', (tester) async {
+    await pumpHome(tester);
+
+    await tester.tap(find.byTooltip('Search'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('home-reorder-playlists')), findsNothing);
   });
 
   testWidgets('the add button and the list stay clear of the player panel', (
