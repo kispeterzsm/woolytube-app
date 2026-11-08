@@ -136,7 +136,11 @@ class _LyricsPickerSheetState extends ConsumerState<LyricsPickerSheet> {
     try {
       final results = await ref
           .read(lyricsServiceProvider)
-          .candidatesFor(query);
+          .candidatesFor(
+            query,
+            trackId: widget.trackId,
+            chapterId: widget.chapterId,
+          );
       if (!mounted || run != _searchRun) return;
       setState(() {
         _results = results;
@@ -329,6 +333,7 @@ class _LyricsPickerSheetState extends ConsumerState<LyricsPickerSheet> {
                       final candidate = results[i];
                       return _CandidateTile(
                         candidate: candidate,
+                        chapter: widget.chapterId != null,
                         expanded: _expanded.contains(candidate.id),
                         enabled: !_saving,
                         onToggle:
@@ -408,6 +413,7 @@ class _LyricsPickerSheetState extends ConsumerState<LyricsPickerSheet> {
 class _CandidateTile extends StatelessWidget {
   const _CandidateTile({
     required this.candidate,
+    required this.chapter,
     required this.expanded,
     required this.enabled,
     required this.onToggle,
@@ -415,6 +421,9 @@ class _CandidateTile extends StatelessWidget {
   });
 
   final LyricsCandidate candidate;
+
+  /// The lyrics are for a chapter, not the whole file.
+  final bool chapter;
   final bool expanded;
   final bool enabled;
   final VoidCallback onToggle;
@@ -423,16 +432,24 @@ class _CandidateTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = candidate;
+    // "4:07 · your file 4:09 · Album": its length against the user's.
     final details = [
-      if (c.album != null && c.album!.trim().isNotEmpty) c.album!.trim(),
       if (c.durationSeconds != null) _clock(c.durationSeconds!.round()),
+      if (c.localSeconds != null)
+        'your ${chapter ? 'chapter' : 'file'} '
+            '${_clock(c.localSeconds!.round())}',
+      if (c.album != null && c.album!.trim().isNotEmpty) c.album!.trim(),
     ].join(' · ');
     final (badge, badgeColor) =
         c.instrumental
             ? ('Instrumental', const Color(0xFFFFB74D))
-            : c.synced
-            ? ('Synced', const Color(0xFF81C784))
-            : ('Plain', _muted);
+            : !c.synced
+            ? ('Plain', _muted)
+            : c.timingFits == true
+            ? ('Synced · fits', const Color(0xFF81C784))
+            : c.timingFits == false
+            ? ('Timing off', const Color(0xFFE57373))
+            : ('Synced', const Color(0xFF81C784));
     final preview = c.plainPreview.trim();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -456,6 +473,7 @@ class _CandidateTile extends StatelessWidget {
                 ),
                 child: Text(
                   badge,
+                  key: ValueKey('lyrics-candidate-${c.id}-badge'),
                   style: TextStyle(color: badgeColor, fontSize: 11),
                 ),
               ),
@@ -464,6 +482,7 @@ class _CandidateTile extends StatelessWidget {
                 Expanded(
                   child: Text(
                     details,
+                    key: ValueKey('lyrics-candidate-${c.id}-details'),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(color: _muted),

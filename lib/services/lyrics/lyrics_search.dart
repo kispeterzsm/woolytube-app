@@ -191,7 +191,11 @@ class LyricsSearch {
       lineNo: first.lineNo,
       lineText: text.toString(),
       highlightRanges: highlights,
-      positionMs: first.startMs == null ? null : doc.offsetMs + first.startMs!,
+      // A timing shift can move a line before the doc's start.
+      positionMs:
+          first.startMs == null
+              ? null
+              : doc.offsetMs + math.max(0, first.startMs!),
       score: span.score,
       kind: LyricsMode.fromDb(doc.kind) ?? LyricsMode.lyrics,
     );

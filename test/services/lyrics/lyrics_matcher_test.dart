@@ -1,4 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:woolytube/services/lyrics/lrclib_client.dart';
+import 'package:woolytube/services/lyrics/lyrics_matcher.dart';
 import 'package:woolytube/services/lyrics/lyrics_models.dart';
 import 'package:woolytube/services/lyrics/title_parser.dart';
 
@@ -207,6 +209,7 @@ void main() {
           track: 'Born to Be a Winner',
           artist: 'Pokemon',
           duration: 200,
+          synced: '[00:12.00] Born to be a winner\n[03:10.00] Last line',
         ),
       ];
       final match = await lrclib.matcher().match(
@@ -219,11 +222,30 @@ void main() {
       );
       expect(match.found, isTrue);
       expect(match.record!.id, 11);
-      // A chapter's start lines up with the song's even when it is shorter.
+      // A chapter's start lines up with the song's even when it is shorter
+      // (a TV size): its lines are cut at the chapter's end later.
       expect(match.synced, isTrue);
       expect(lrclib.paths.first, 'q=POKÉMON Born to Be a Winner');
     },
   );
+
+  test('a chapter ending before the first synced line gets plain lyrics', () {
+    final record =
+        LrclibRecord.fromJson(
+          lrclibRecord(
+            duration: 200,
+            synced: '[01:27.77] Late\n[01:31.17] Later',
+          ),
+        )!;
+    expect(
+      syncedTimingFor(record, localSeconds: 55, chapter: true).fits,
+      isFalse,
+    );
+    expect(
+      syncedTimingFor(record, localSeconds: 120, chapter: true).fits,
+      isTrue,
+    );
+  });
 
   test('a title-only lookup still needs the known artist', () async {
     lrclib.searches['track_name=Wonderful Wonder World'] = [

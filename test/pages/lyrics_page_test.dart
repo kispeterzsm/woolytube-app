@@ -208,6 +208,98 @@ void main() {
     await unmount(tester);
   });
 
+  testWidgets('Timing off? syncs the lines to a tap while it plays', (
+    tester,
+  ) async {
+    final track = await addTrack();
+    await db.replaceLyricsDoc(found(track.id));
+    await pumpPage(tester, track);
+
+    await tester.tap(find.byKey(const ValueKey('lyrics-timing')));
+    await tester.pumpAndSettle();
+    expect(find.text('Times as found'), findsOneWidget);
+
+    // Nothing plays yet: a tap only says what to do.
+    await tester.tap(find.byKey(const ValueKey('lyrics-timing-line-0')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('lyrics-timing-message')), findsOneWidget);
+    expect(lyrics.calls, isEmpty);
+
+    // Play starts the file a little before the first line.
+    await tester.tap(find.byKey(const ValueKey('lyrics-timing-play')));
+    await tester.pumpAndSettle();
+    expect(player.played, [(track.id, null, true)]);
+    expect(player.startAts, [Duration.zero]);
+
+    // "Hey brother" (at 5.0 s) is heard at 7.25 s: every line moves by
+    // 2 s (the tap comes a moment after the line starts).
+    player.at = const Duration(milliseconds: 7250);
+    await tester.tap(find.byKey(const ValueKey('lyrics-timing-line-0')));
+    await tester.pumpAndSettle();
+    expect(lyrics.calls, ['shift ${track.id} null 2000']);
+    expect(find.text('Moved +2.0 s'), findsOneWidget);
+    final doc = (await db.lyricsDocFor(track.id, null))!;
+    expect((await db.lyricsLinesForDoc(doc.id)).map((l) => l.startMs), [
+      7000,
+      11500,
+    ]);
+
+    await tester.tap(find.byKey(const ValueKey('lyrics-timing-earlier')));
+    await tester.pumpAndSettle();
+    expect(lyrics.calls.last, 'shift ${track.id} null 1500');
+
+    await tester.tap(find.byKey(const ValueKey('lyrics-timing-reset')));
+    await tester.pumpAndSettle();
+    expect(lyrics.calls.last, 'shift ${track.id} null 0');
+    expect(find.text('Times as found'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('lyrics-timing-off')));
+    await tester.pumpAndSettle();
+    expect(lyrics.calls.last, 'untimed ${track.id} null');
+    expect(find.byKey(const ValueKey('lyrics-timing-lines')), findsNothing);
+    await unmount(tester);
+  });
+
+  testWidgets('the picker shows each record against the file', (tester) async {
+    final track = await addTrack();
+    await db.replaceLyricsDoc(found(track.id));
+    lyrics.candidates = const [
+      LyricsCandidate(
+        id: 7,
+        artist: 'Avicii',
+        title: 'Hey Brother',
+        album: 'True',
+        durationSeconds: 255,
+        synced: true,
+        instrumental: false,
+        plainPreview: 'Hey brother',
+        localSeconds: 240,
+        timingFits: false,
+      ),
+      LyricsCandidate(
+        id: 9,
+        artist: 'Avicii',
+        title: 'Hey Brother',
+        durationSeconds: 241,
+        synced: true,
+        instrumental: false,
+        plainPreview: 'Hey brother',
+        localSeconds: 240,
+        timingFits: true,
+      ),
+    ];
+    await pumpPage(tester, track);
+
+    await tester.tap(find.byKey(const ValueKey('lyrics-wrong-song')));
+    await tester.pumpAndSettle();
+    expect(lyrics.candidateSlots, [(track.id, null)]);
+    expect(find.text('4:15 · your file 4:00 · True'), findsOneWidget);
+    expect(find.text('4:01 · your file 4:00'), findsOneWidget);
+    expect(find.text('Timing off'), findsOneWidget);
+    expect(find.text('Synced · fits'), findsOneWidget);
+    await unmount(tester);
+  });
+
   testWidgets('Wrong song? searches with the parsed title and stores the '
       'chosen record', (tester) async {
     final track = await addTrack();
@@ -240,7 +332,7 @@ void main() {
     expect(find.text('Avicii – Hey Brother'), findsWidgets);
     expect(find.text('Synced'), findsOneWidget);
     expect(find.text('Instrumental'), findsOneWidget);
-    expect(find.text('True · 4:15'), findsOneWidget);
+    expect(find.text('4:15 · True'), findsOneWidget);
 
     await tester.tap(find.byKey(const ValueKey('lyrics-candidate-7-preview')));
     await tester.pumpAndSettle();
@@ -416,6 +508,21 @@ class _Player implements PlaybackService {
 
   @override
   Future<void> seekTo(Duration position) async => seeks.add(position);
+
+  /// What the player reports as its position in the current item.
+  Duration at = Duration.zero;
+
+  @override
+  Duration get position => at;
+
+  @override
+  Stream<Duration> get positionStream => Stream.value(at);
+
+  @override
+  Stream<bool> get isPlayingStream => Stream.value(playing);
+
+  @override
+  Future<void> pause() async => playing = false;
 
   @override
   Future<void> resume() async => playing = true;

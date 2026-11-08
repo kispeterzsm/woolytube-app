@@ -3457,6 +3457,33 @@ class $LyricsDocsTable extends LyricsDocs
     ),
     defaultValue: const Constant(false),
   );
+  static const VerificationMeta _shiftMsMeta = const VerificationMeta(
+    'shiftMs',
+  );
+  @override
+  late final GeneratedColumn<int> shiftMs = GeneratedColumn<int>(
+    'shift_ms',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  static const VerificationMeta _timingOffMeta = const VerificationMeta(
+    'timingOff',
+  );
+  @override
+  late final GeneratedColumn<bool> timingOff = GeneratedColumn<bool>(
+    'timing_off',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("timing_off" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
   static const VerificationMeta _langMeta = const VerificationMeta('lang');
   @override
   late final GeneratedColumn<String> lang = GeneratedColumn<String>(
@@ -3504,6 +3531,8 @@ class $LyricsDocsTable extends LyricsDocs
     timeScale,
     synced,
     pinned,
+    shiftMs,
+    timingOff,
     lang,
     checkedAt,
     attempts,
@@ -3607,6 +3636,18 @@ class $LyricsDocsTable extends LyricsDocs
         pinned.isAcceptableOrUnknown(data['pinned']!, _pinnedMeta),
       );
     }
+    if (data.containsKey('shift_ms')) {
+      context.handle(
+        _shiftMsMeta,
+        shiftMs.isAcceptableOrUnknown(data['shift_ms']!, _shiftMsMeta),
+      );
+    }
+    if (data.containsKey('timing_off')) {
+      context.handle(
+        _timingOffMeta,
+        timingOff.isAcceptableOrUnknown(data['timing_off']!, _timingOffMeta),
+      );
+    }
     if (data.containsKey('lang')) {
       context.handle(
         _langMeta,
@@ -3696,6 +3737,16 @@ class $LyricsDocsTable extends LyricsDocs
             DriftSqlType.bool,
             data['${effectivePrefix}pinned'],
           )!,
+      shiftMs:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.int,
+            data['${effectivePrefix}shift_ms'],
+          )!,
+      timingOff:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.bool,
+            data['${effectivePrefix}timing_off'],
+          )!,
       lang: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
         data['${effectivePrefix}lang'],
@@ -3750,6 +3801,13 @@ class LyricsDoc extends DataClass implements Insertable<LyricsDoc> {
 
   /// The user chose this; automatic runs never replace it.
   final bool pinned;
+
+  /// The user's timing correction. Already added to the lines' `startMs`;
+  /// kept so a restore from `sourceRef` adds it again. Schema 17.
+  final int shiftMs;
+
+  /// The user chose the lines without times. Schema 17.
+  final bool timingOff;
   final String? lang;
   final DateTime checkedAt;
   final int attempts;
@@ -3767,6 +3825,8 @@ class LyricsDoc extends DataClass implements Insertable<LyricsDoc> {
     required this.timeScale,
     required this.synced,
     required this.pinned,
+    required this.shiftMs,
+    required this.timingOff,
     this.lang,
     required this.checkedAt,
     required this.attempts,
@@ -3797,6 +3857,8 @@ class LyricsDoc extends DataClass implements Insertable<LyricsDoc> {
     map['time_scale'] = Variable<double>(timeScale);
     map['synced'] = Variable<bool>(synced);
     map['pinned'] = Variable<bool>(pinned);
+    map['shift_ms'] = Variable<int>(shiftMs);
+    map['timing_off'] = Variable<bool>(timingOff);
     if (!nullToAbsent || lang != null) {
       map['lang'] = Variable<String>(lang);
     }
@@ -3833,6 +3895,8 @@ class LyricsDoc extends DataClass implements Insertable<LyricsDoc> {
       timeScale: Value(timeScale),
       synced: Value(synced),
       pinned: Value(pinned),
+      shiftMs: Value(shiftMs),
+      timingOff: Value(timingOff),
       lang: lang == null && nullToAbsent ? const Value.absent() : Value(lang),
       checkedAt: Value(checkedAt),
       attempts: Value(attempts),
@@ -3858,6 +3922,8 @@ class LyricsDoc extends DataClass implements Insertable<LyricsDoc> {
       timeScale: serializer.fromJson<double>(json['timeScale']),
       synced: serializer.fromJson<bool>(json['synced']),
       pinned: serializer.fromJson<bool>(json['pinned']),
+      shiftMs: serializer.fromJson<int>(json['shiftMs']),
+      timingOff: serializer.fromJson<bool>(json['timingOff']),
       lang: serializer.fromJson<String?>(json['lang']),
       checkedAt: serializer.fromJson<DateTime>(json['checkedAt']),
       attempts: serializer.fromJson<int>(json['attempts']),
@@ -3880,6 +3946,8 @@ class LyricsDoc extends DataClass implements Insertable<LyricsDoc> {
       'timeScale': serializer.toJson<double>(timeScale),
       'synced': serializer.toJson<bool>(synced),
       'pinned': serializer.toJson<bool>(pinned),
+      'shiftMs': serializer.toJson<int>(shiftMs),
+      'timingOff': serializer.toJson<bool>(timingOff),
       'lang': serializer.toJson<String?>(lang),
       'checkedAt': serializer.toJson<DateTime>(checkedAt),
       'attempts': serializer.toJson<int>(attempts),
@@ -3900,6 +3968,8 @@ class LyricsDoc extends DataClass implements Insertable<LyricsDoc> {
     double? timeScale,
     bool? synced,
     bool? pinned,
+    int? shiftMs,
+    bool? timingOff,
     Value<String?> lang = const Value.absent(),
     DateTime? checkedAt,
     int? attempts,
@@ -3918,6 +3988,8 @@ class LyricsDoc extends DataClass implements Insertable<LyricsDoc> {
     timeScale: timeScale ?? this.timeScale,
     synced: synced ?? this.synced,
     pinned: pinned ?? this.pinned,
+    shiftMs: shiftMs ?? this.shiftMs,
+    timingOff: timingOff ?? this.timingOff,
     lang: lang.present ? lang.value : this.lang,
     checkedAt: checkedAt ?? this.checkedAt,
     attempts: attempts ?? this.attempts,
@@ -3943,6 +4015,8 @@ class LyricsDoc extends DataClass implements Insertable<LyricsDoc> {
       timeScale: data.timeScale.present ? data.timeScale.value : this.timeScale,
       synced: data.synced.present ? data.synced.value : this.synced,
       pinned: data.pinned.present ? data.pinned.value : this.pinned,
+      shiftMs: data.shiftMs.present ? data.shiftMs.value : this.shiftMs,
+      timingOff: data.timingOff.present ? data.timingOff.value : this.timingOff,
       lang: data.lang.present ? data.lang.value : this.lang,
       checkedAt: data.checkedAt.present ? data.checkedAt.value : this.checkedAt,
       attempts: data.attempts.present ? data.attempts.value : this.attempts,
@@ -3965,6 +4039,8 @@ class LyricsDoc extends DataClass implements Insertable<LyricsDoc> {
           ..write('timeScale: $timeScale, ')
           ..write('synced: $synced, ')
           ..write('pinned: $pinned, ')
+          ..write('shiftMs: $shiftMs, ')
+          ..write('timingOff: $timingOff, ')
           ..write('lang: $lang, ')
           ..write('checkedAt: $checkedAt, ')
           ..write('attempts: $attempts')
@@ -3987,6 +4063,8 @@ class LyricsDoc extends DataClass implements Insertable<LyricsDoc> {
     timeScale,
     synced,
     pinned,
+    shiftMs,
+    timingOff,
     lang,
     checkedAt,
     attempts,
@@ -4008,6 +4086,8 @@ class LyricsDoc extends DataClass implements Insertable<LyricsDoc> {
           other.timeScale == this.timeScale &&
           other.synced == this.synced &&
           other.pinned == this.pinned &&
+          other.shiftMs == this.shiftMs &&
+          other.timingOff == this.timingOff &&
           other.lang == this.lang &&
           other.checkedAt == this.checkedAt &&
           other.attempts == this.attempts);
@@ -4027,6 +4107,8 @@ class LyricsDocsCompanion extends UpdateCompanion<LyricsDoc> {
   final Value<double> timeScale;
   final Value<bool> synced;
   final Value<bool> pinned;
+  final Value<int> shiftMs;
+  final Value<bool> timingOff;
   final Value<String?> lang;
   final Value<DateTime> checkedAt;
   final Value<int> attempts;
@@ -4044,6 +4126,8 @@ class LyricsDocsCompanion extends UpdateCompanion<LyricsDoc> {
     this.timeScale = const Value.absent(),
     this.synced = const Value.absent(),
     this.pinned = const Value.absent(),
+    this.shiftMs = const Value.absent(),
+    this.timingOff = const Value.absent(),
     this.lang = const Value.absent(),
     this.checkedAt = const Value.absent(),
     this.attempts = const Value.absent(),
@@ -4062,6 +4146,8 @@ class LyricsDocsCompanion extends UpdateCompanion<LyricsDoc> {
     this.timeScale = const Value.absent(),
     this.synced = const Value.absent(),
     this.pinned = const Value.absent(),
+    this.shiftMs = const Value.absent(),
+    this.timingOff = const Value.absent(),
     this.lang = const Value.absent(),
     required DateTime checkedAt,
     this.attempts = const Value.absent(),
@@ -4083,6 +4169,8 @@ class LyricsDocsCompanion extends UpdateCompanion<LyricsDoc> {
     Expression<double>? timeScale,
     Expression<bool>? synced,
     Expression<bool>? pinned,
+    Expression<int>? shiftMs,
+    Expression<bool>? timingOff,
     Expression<String>? lang,
     Expression<DateTime>? checkedAt,
     Expression<int>? attempts,
@@ -4101,6 +4189,8 @@ class LyricsDocsCompanion extends UpdateCompanion<LyricsDoc> {
       if (timeScale != null) 'time_scale': timeScale,
       if (synced != null) 'synced': synced,
       if (pinned != null) 'pinned': pinned,
+      if (shiftMs != null) 'shift_ms': shiftMs,
+      if (timingOff != null) 'timing_off': timingOff,
       if (lang != null) 'lang': lang,
       if (checkedAt != null) 'checked_at': checkedAt,
       if (attempts != null) 'attempts': attempts,
@@ -4121,6 +4211,8 @@ class LyricsDocsCompanion extends UpdateCompanion<LyricsDoc> {
     Value<double>? timeScale,
     Value<bool>? synced,
     Value<bool>? pinned,
+    Value<int>? shiftMs,
+    Value<bool>? timingOff,
     Value<String?>? lang,
     Value<DateTime>? checkedAt,
     Value<int>? attempts,
@@ -4139,6 +4231,8 @@ class LyricsDocsCompanion extends UpdateCompanion<LyricsDoc> {
       timeScale: timeScale ?? this.timeScale,
       synced: synced ?? this.synced,
       pinned: pinned ?? this.pinned,
+      shiftMs: shiftMs ?? this.shiftMs,
+      timingOff: timingOff ?? this.timingOff,
       lang: lang ?? this.lang,
       checkedAt: checkedAt ?? this.checkedAt,
       attempts: attempts ?? this.attempts,
@@ -4187,6 +4281,12 @@ class LyricsDocsCompanion extends UpdateCompanion<LyricsDoc> {
     if (pinned.present) {
       map['pinned'] = Variable<bool>(pinned.value);
     }
+    if (shiftMs.present) {
+      map['shift_ms'] = Variable<int>(shiftMs.value);
+    }
+    if (timingOff.present) {
+      map['timing_off'] = Variable<bool>(timingOff.value);
+    }
     if (lang.present) {
       map['lang'] = Variable<String>(lang.value);
     }
@@ -4215,6 +4315,8 @@ class LyricsDocsCompanion extends UpdateCompanion<LyricsDoc> {
           ..write('timeScale: $timeScale, ')
           ..write('synced: $synced, ')
           ..write('pinned: $pinned, ')
+          ..write('shiftMs: $shiftMs, ')
+          ..write('timingOff: $timingOff, ')
           ..write('lang: $lang, ')
           ..write('checkedAt: $checkedAt, ')
           ..write('attempts: $attempts')
@@ -6666,6 +6768,8 @@ typedef $$LyricsDocsTableCreateCompanionBuilder =
       Value<double> timeScale,
       Value<bool> synced,
       Value<bool> pinned,
+      Value<int> shiftMs,
+      Value<bool> timingOff,
       Value<String?> lang,
       required DateTime checkedAt,
       Value<int> attempts,
@@ -6685,6 +6789,8 @@ typedef $$LyricsDocsTableUpdateCompanionBuilder =
       Value<double> timeScale,
       Value<bool> synced,
       Value<bool> pinned,
+      Value<int> shiftMs,
+      Value<bool> timingOff,
       Value<String?> lang,
       Value<DateTime> checkedAt,
       Value<int> attempts,
@@ -6797,6 +6903,16 @@ class $$LyricsDocsTableFilterComposer
 
   ColumnFilters<bool> get pinned => $composableBuilder(
     column: $table.pinned,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get shiftMs => $composableBuilder(
+    column: $table.shiftMs,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get timingOff => $composableBuilder(
+    column: $table.timingOff,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -6933,6 +7049,16 @@ class $$LyricsDocsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<int> get shiftMs => $composableBuilder(
+    column: $table.shiftMs,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get timingOff => $composableBuilder(
+    column: $table.timingOff,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<String> get lang => $composableBuilder(
     column: $table.lang,
     builder: (column) => ColumnOrderings(column),
@@ -7020,6 +7146,12 @@ class $$LyricsDocsTableAnnotationComposer
 
   GeneratedColumn<bool> get pinned =>
       $composableBuilder(column: $table.pinned, builder: (column) => column);
+
+  GeneratedColumn<int> get shiftMs =>
+      $composableBuilder(column: $table.shiftMs, builder: (column) => column);
+
+  GeneratedColumn<bool> get timingOff =>
+      $composableBuilder(column: $table.timingOff, builder: (column) => column);
 
   GeneratedColumn<String> get lang =>
       $composableBuilder(column: $table.lang, builder: (column) => column);
@@ -7120,6 +7252,8 @@ class $$LyricsDocsTableTableManager
                 Value<double> timeScale = const Value.absent(),
                 Value<bool> synced = const Value.absent(),
                 Value<bool> pinned = const Value.absent(),
+                Value<int> shiftMs = const Value.absent(),
+                Value<bool> timingOff = const Value.absent(),
                 Value<String?> lang = const Value.absent(),
                 Value<DateTime> checkedAt = const Value.absent(),
                 Value<int> attempts = const Value.absent(),
@@ -7137,6 +7271,8 @@ class $$LyricsDocsTableTableManager
                 timeScale: timeScale,
                 synced: synced,
                 pinned: pinned,
+                shiftMs: shiftMs,
+                timingOff: timingOff,
                 lang: lang,
                 checkedAt: checkedAt,
                 attempts: attempts,
@@ -7156,6 +7292,8 @@ class $$LyricsDocsTableTableManager
                 Value<double> timeScale = const Value.absent(),
                 Value<bool> synced = const Value.absent(),
                 Value<bool> pinned = const Value.absent(),
+                Value<int> shiftMs = const Value.absent(),
+                Value<bool> timingOff = const Value.absent(),
                 Value<String?> lang = const Value.absent(),
                 required DateTime checkedAt,
                 Value<int> attempts = const Value.absent(),
@@ -7173,6 +7311,8 @@ class $$LyricsDocsTableTableManager
                 timeScale: timeScale,
                 synced: synced,
                 pinned: pinned,
+                shiftMs: shiftMs,
+                timingOff: timingOff,
                 lang: lang,
                 checkedAt: checkedAt,
                 attempts: attempts,

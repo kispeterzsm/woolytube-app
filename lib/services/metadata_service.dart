@@ -75,6 +75,12 @@ class DiscoveredLyricsPin {
   final String? matchedArtist;
   final String? matchedTitle;
 
+  /// The user's timing correction (see `LyricsDocDraft.shiftMs`).
+  final int shiftMs;
+
+  /// The user chose the lines without times.
+  final bool timingOff;
+
   const DiscoveredLyricsPin({
     this.chapterId,
     required this.status,
@@ -82,6 +88,8 @@ class DiscoveredLyricsPin {
     this.sourceRef,
     this.matchedArtist,
     this.matchedTitle,
+    this.shiftMs = 0,
+    this.timingOff = false,
   });
 
   static DiscoveredLyricsPin? fromJson(Object? json) {
@@ -97,6 +105,8 @@ class DiscoveredLyricsPin {
       sourceRef: text('sourceRef'),
       matchedArtist: text('matchedArtist'),
       matchedTitle: text('matchedTitle'),
+      shiftMs: json['shiftMs'] is num ? (json['shiftMs'] as num).toInt() : 0,
+      timingOff: json['timingOff'] == true,
     );
   }
 }
@@ -1963,7 +1973,8 @@ for video) to keep a complete backup.
               kept != null &&
               kept.status == pin.status &&
               kept.source == pin.source &&
-              kept.sourceRef == pin.sourceRef;
+              kept.sourceRef == pin.sourceRef &&
+              kept.timingOff == pin.timingOff;
           docs[pin.chapterId] = LyricsDocDraft(
             trackId: track.id,
             chapterId: pin.chapterId,
@@ -1977,9 +1988,15 @@ for video) to keep a complete backup.
             timeScale: sameChoice ? kept.timeScale : 1.0,
             synced: sameChoice && kept.synced,
             pinned: true,
+            shiftMs: pin.shiftMs,
+            timingOff: pin.timingOff,
             lang: sameChoice ? kept.lang : null,
             checkedAt: kept?.checkedAt ?? DateTime.now(),
-            lines: sameChoice ? kept.lines : const [],
+            // The kept lines carry the file's shift; the sidecar's wins.
+            lines:
+                sameChoice
+                    ? shiftLyricsLines(kept.lines, pin.shiftMs - kept.shiftMs)
+                    : const [],
           );
         }
         for (final doc in docs.values) {
@@ -2269,6 +2286,8 @@ String buildSidecarJson(
               'sourceRef': doc.sourceRef,
               'matchedArtist': doc.matchedArtist,
               'matchedTitle': doc.matchedTitle,
+              if (doc.shiftMs != 0) 'shiftMs': doc.shiftMs,
+              if (doc.timingOff) 'timingOff': true,
             },
         ],
     });

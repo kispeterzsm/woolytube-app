@@ -87,6 +87,7 @@ void main() {
       matchedTitle: 'Song',
       synced: true,
       pinned: true,
+      shiftMs: 300,
       checkedAt: checkedAt,
       lines: lines,
     );
@@ -132,6 +133,7 @@ void main() {
         'sourceRef': '77',
         'matchedArtist': 'Artist',
         'matchedTitle': 'Song',
+        'shiftMs': 300,
       },
     ]);
     expect((tracks[1]['lyricsPins'] as List).single['chapterId'], 'c1');
@@ -150,7 +152,11 @@ void main() {
     final restoredKept = (await db.lyricsDocFor(byVideo['kept']!.id, null))!;
     expect(restoredKept.pinned, isTrue);
     expect(restoredKept.synced, isTrue);
-    expect(await db.lyricsLinesForDoc(restoredKept.id), hasLength(2));
+    expect(restoredKept.shiftMs, 300);
+    final keptLines = await db.lyricsLinesForDoc(restoredKept.id);
+    expect(keptLines, hasLength(2));
+    // The file's lines already carry the shift.
+    expect(keptLines.first.startMs, lines.first.startMs);
 
     // The pin without a file is there, without text, for a refetch.
     final restoredLost = (await db.lyricsDocFor(byVideo['lost']!.id, 'c1'))!;

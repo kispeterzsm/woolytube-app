@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' show min;
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
 import 'package:path_provider/path_provider.dart';
@@ -151,6 +152,13 @@ class LyricsDocs extends Table {
 
   /// The user chose this; automatic runs never replace it.
   BoolColumn get pinned => boolean().withDefault(const Constant(false))();
+
+  /// The user's timing correction. Already added to the lines' `startMs`;
+  /// kept so a restore from `sourceRef` adds it again. Schema 17.
+  IntColumn get shiftMs => integer().withDefault(const Constant(0))();
+
+  /// The user chose the lines without times. Schema 17.
+  BoolColumn get timingOff => boolean().withDefault(const Constant(false))();
   TextColumn get lang => text().nullable()();
   DateTimeColumn get checkedAt => dateTime()();
   IntColumn get attempts => integer().withDefault(const Constant(0))();
@@ -230,7 +238,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 16;
+  int get schemaVersion => 17;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -353,6 +361,11 @@ class AppDatabase extends _$AppDatabase {
         await migrator.createTable(lyricsDocs);
         await migrator.createTable(lyricsLines);
         await _createLyricsSearch();
+      }
+      // Below 16 the lyrics tables were just made with these columns.
+      if (from == 16) {
+        await migrator.addColumn(lyricsDocs, lyricsDocs.shiftMs);
+        await migrator.addColumn(lyricsDocs, lyricsDocs.timingOff);
       }
     },
   );
@@ -1411,6 +1424,8 @@ class AppDatabase extends _$AppDatabase {
       timeScale: Value(draft.timeScale),
       synced: Value(draft.synced),
       pinned: Value(draft.pinned),
+      shiftMs: Value(draft.shiftMs),
+      timingOff: Value(draft.timingOff),
       lang: Value(draft.lang),
       checkedAt: Value(draft.checkedAt),
       attempts: Value(draft.attempts),
@@ -1539,6 +1554,28 @@ class AppDatabase extends _$AppDatabase {
   ) => (update(lyricsDocs)..where((d) => d.id.equals(docId))).write(
     LyricsDocsCompanion(checkedAt: Value(checkedAt), attempts: Value(attempts)),
   );
+
+  /// When the last timed line of each of [docIds] starts (doc time);
+  /// docs without timed lines are left out.
+  Future<Map<int, int>> lyricsLastLineStarts(Iterable<int> docIds) async {
+    final ids = docIds.toSet().toList();
+    final result = <int, int>{};
+    for (var i = 0; i < ids.length; i += 500) {
+      final chunk = ids.sublist(i, min(i + 500, ids.length));
+      final rows =
+          await customSelect(
+            'SELECT doc_id, MAX(start_ms) AS last_ms FROM lyrics_lines '
+            'WHERE start_ms IS NOT NULL AND doc_id IN '
+            '(${List.filled(chunk.length, '?').join(', ')}) GROUP BY doc_id',
+            variables: [for (final id in chunk) Variable.withInt(id)],
+            readsFrom: {lyricsLines},
+          ).get();
+      for (final row in rows) {
+        result[row.read<int>('doc_id')] = row.read<int>('last_ms');
+      }
+    }
+    return result;
+  }
 
   /// Moves a doc to [offsetMs] (its chapter's new start).
   Future<void> setLyricsDocOffset(int docId, int offsetMs) =>

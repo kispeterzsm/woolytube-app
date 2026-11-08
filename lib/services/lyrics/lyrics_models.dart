@@ -95,6 +95,14 @@ class LyricsDocDraft {
   final double timeScale;
   final bool synced;
   final bool pinned;
+
+  /// The user's timing correction: already added to every line's start
+  /// (after the time scale). Kept so a restore from [sourceRef] adds it
+  /// again, and so it can be taken back.
+  final int shiftMs;
+
+  /// The user chose to use the lines without times.
+  final bool timingOff;
   final String? lang;
   final DateTime checkedAt;
 
@@ -117,12 +125,58 @@ class LyricsDocDraft {
     this.timeScale = 1.0,
     this.synced = false,
     this.pinned = false,
+    this.shiftMs = 0,
+    this.timingOff = false,
     this.lang,
     required this.checkedAt,
     this.attempts = 0,
     this.lines = const [],
   });
+
+  /// This doc with other fields.
+  LyricsDocDraft copyWith({
+    bool? synced,
+    bool? pinned,
+    int? shiftMs,
+    bool? timingOff,
+    List<LyricsLineDraft>? lines,
+  }) => LyricsDocDraft(
+    trackId: trackId,
+    chapterId: chapterId,
+    offsetMs: offsetMs,
+    kind: kind,
+    status: status,
+    source: source,
+    sourceRef: sourceRef,
+    matchedArtist: matchedArtist,
+    matchedTitle: matchedTitle,
+    timeScale: timeScale,
+    synced: synced ?? this.synced,
+    pinned: pinned ?? this.pinned,
+    shiftMs: shiftMs ?? this.shiftMs,
+    timingOff: timingOff ?? this.timingOff,
+    lang: lang,
+    checkedAt: checkedAt,
+    attempts: attempts,
+    lines: lines ?? this.lines,
+  );
 }
+
+/// [lines] with [deltaMs] added to every timed start. Starts may become
+/// negative (a line sung before the file starts); readers clamp them.
+List<LyricsLineDraft> shiftLyricsLines(
+  List<LyricsLineDraft> lines,
+  int deltaMs,
+) =>
+    deltaMs == 0
+        ? lines
+        : [
+          for (final line in lines)
+            LyricsLineDraft(
+              line.text,
+              startMs: line.startMs == null ? null : line.startMs! + deltaMs,
+            ),
+        ];
 
 /// What the user chose in the picker for a track or chapter.
 class LyricsPick {
@@ -137,11 +191,20 @@ class LyricsPick {
   /// "No lyrics here": stored as status none, pinned.
   final bool none;
 
+  /// The user's timing correction, added to every line (see
+  /// [LyricsDocDraft.shiftMs]).
+  final int shiftMs;
+
+  /// Store the lines without times even when they would fit.
+  final bool timingOff;
+
   const LyricsPick({
     required String this.source,
     required String this.sourceRef,
     this.artist,
     this.title,
+    this.shiftMs = 0,
+    this.timingOff = false,
   }) : none = false;
 
   /// An LRCLIB record chosen from the picker.
@@ -150,6 +213,8 @@ class LyricsPick {
       sourceRef = '${candidate.id}',
       artist = candidate.artist,
       title = candidate.title,
+      shiftMs = 0,
+      timingOff = false,
       none = false;
 
   /// The track or chapter has no lyrics.
@@ -158,6 +223,8 @@ class LyricsPick {
       sourceRef = null,
       artist = null,
       title = null,
+      shiftMs = 0,
+      timingOff = false,
       none = true;
 }
 
@@ -175,6 +242,16 @@ class LyricsCandidate {
   /// The plain lyrics (or synced text without times), for the preview.
   final String plainPreview;
 
+  /// When the last synced line starts in the record; null when not synced.
+  final double? lastLineSeconds;
+
+  /// The length of the user's file (or chapter) it was compared with.
+  final double? localSeconds;
+
+  /// Whether its synced times fit the user's file; null when unknown (not
+  /// synced, or no local length to compare with).
+  final bool? timingFits;
+
   const LyricsCandidate({
     required this.id,
     required this.artist,
@@ -184,6 +261,9 @@ class LyricsCandidate {
     required this.synced,
     required this.instrumental,
     required this.plainPreview,
+    this.lastLineSeconds,
+    this.localSeconds,
+    this.timingFits,
   });
 }
 

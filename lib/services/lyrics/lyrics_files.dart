@@ -34,6 +34,9 @@ Map<String, dynamic> lyricsFileJson(
         if (doc.timeScale != 1.0) 'timeScale': doc.timeScale,
         if (doc.synced) 'synced': true,
         if (doc.pinned) 'pinned': true,
+        // Already added to the line times below.
+        if (doc.shiftMs != 0) 'shiftMs': doc.shiftMs,
+        if (doc.timingOff) 'timingOff': true,
         if (doc.lang != null) 'lang': doc.lang,
         'checkedAt': doc.checkedAt.toUtc().toIso8601String(),
         if (doc.attempts != 0) 'attempts': doc.attempts,
@@ -87,6 +90,8 @@ List<LyricsDocDraft> lyricsDocsFromJson(Object? json, int trackId) {
         timeScale: (doc['timeScale'] as num?)?.toDouble() ?? 1.0,
         synced: doc['synced'] == true,
         pinned: doc['pinned'] == true,
+        shiftMs: (doc['shiftMs'] as num?)?.toInt() ?? 0,
+        timingOff: doc['timingOff'] == true,
         lang: text('lang'),
         checkedAt: checkedAt.toLocal(),
         attempts: (doc['attempts'] as num?)?.toInt() ?? 0,

@@ -88,6 +88,13 @@ Accept only when lyrics are non-empty and not instrumental, folded title similar
 
 Nightcore with a synced original: `timeScale = localDur / lrclibDur` when within the window; line times are scaled when stored.
 
+Synced times are checked against the record's real line times, not only its stated length (`syncedTimingFor`). Some records are mislabelled: LRCLIB 32583562 (Wind Rose – Diggy Diggy Hole) states 248 s but its lines run 1:07 → 5:10, a longer recording. Rules:
+- A record whose last line starts more than 1 s after its stated length is mislabelled: its length counts as unknown (so without an artist it is not accepted on duration) and its times are never used.
+- Whole file: the length must fit (±4 s, or the nightcore window) and the last line, after the time scale, must start at least 1 s before the file ends.
+- Chapter: lines are cut at the chapter end (TV sizes), so only the first line must start inside the chapter.
+- Within a step, records whose times fit come first. When the best record has synced lyrics whose times do not fit, later steps may still find a record of the same song whose times do; otherwise the first one is stored plain.
+- Repair (schema 17 data): every backfill finds unpinned automatic LRCLIB whole-file docs whose last stored line starts after the file's end (minus 1 s) and fetches them again. A failed lookup keeps the old lines. Pinned docs are left to the user.
+
 ### Retry and budget
 `status` none/error docs are retried after 7 days (+ spread by track id, as SponsorBlock does), at most 4 attempts, unless pinned. The download service runs `_backfillMissingLyrics(playlist)` next to `_backfillMissingSponsorBlockSegments` (both call sites), gated on `lyricsMode != null`, stopping on cancel and on a time budget so the scheduled update stays inside its 7-minute soft limit. Chapters that come from recognition are fetched when they are applied (`recognition_review_page` after `applyRecognition`) if the playlist has lyrics on, and otherwise by the next backfill.
 
@@ -112,7 +119,9 @@ UI:
 - Header: matched "Artist – Title", source and whether it is automatic or chosen; for a file with chapters, a chapter selector listing each chapter with its status.
 - Body: the lines; synced lines show times and tapping one plays from there.
 - Actions: **Wrong song?** opens the picker; **No lyrics here** (status none, pinned); **Refetch automatically** (drops the pin, fetches again).
-- Picker (`LyricsPickerSheet`): search field prefilled with the parsed `Artist Title`; results from LRCLIB `search` (`artist – title · album · m:ss · synced/plain/instrumental`) with an expandable lyrics preview; choosing one stores it pinned with `source='lrclib', sourceRef=id`. A second tab "From YouTube" takes a video link (e.g. an official lyric video) and uses its manual captions (`yt_subs`, `sourceRef=<videoId>:<lang>`), and in transcript mode this is the only tab.
+- **Timing off?** (synced docs of a downloaded track) opens a tap-to-sync sheet: play, then tap the line being sung; `shiftMs = shiftMs + (position in doc time − 250 ms reaction) − line.startMs`. ±0.5 s nudges, **Reset timing** (shift 0) and **Use without timing** (lines without times, `timingOff`, pinned). A shifted doc is pinned.
+- Shift representation (schema 17, `LyricsDocs.shiftMs`, `timingOff`): the shift is baked into the stored `startMs` of every line (after the time scale), so search, the lyrics page, chapter offset moves and chapter cuts need nothing extra; `shiftMs` is kept so a restore from `sourceRef` (a pin without its text) adds it again and so it can be taken back exactly. Lines may start below 0; search and the page clamp to the doc's start. Both fields go into `.lyrics.json` and the sidecar `lyricsPins`.
+- Picker (`LyricsPickerSheet`): search field prefilled with the parsed `Artist Title`; results from LRCLIB `search` (`artist – title`, a badge synced · fits / timing off / synced / plain / instrumental, then `m:ss · your file m:ss · album`; records of the same artist and title are sorted by whether their times fit) with an expandable lyrics preview; choosing one stores it pinned with `source='lrclib', sourceRef=id`. A second tab "From YouTube" takes a video link (e.g. an official lyric video) and uses its manual captions (`yt_subs`, `sourceRef=<videoId>:<lang>`), and in transcript mode this is the only tab.
 
 ## 6. Research summary
 - LRCLIB: 82% correct on a 40-track sample with the full rules, 0 wrong; most hits synced. `q` doesn't search lyric text. Nightcore durations are 0.77–0.89 of the original in ~90% of nightcore tracks.

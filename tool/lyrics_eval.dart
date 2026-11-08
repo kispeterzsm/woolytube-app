@@ -91,11 +91,18 @@ Future<void> main(List<String> args) async {
       if (result.found && record != null) {
         found++;
         if (result.synced) synced++;
+        // When the record's last synced line starts (after the time
+        // scale), against the file's length.
+        final span = syncedSpanOf(record);
+        final last =
+            span == null
+                ? ''
+                : ', last line ${(span.lastMs * result.timeScale / 1000).round()}s';
         line.write(
-          '-> ${record.artistName} - ${record.trackName} '
+          '-> ${record.artistName} - ${record.trackName} #${record.id} '
           '(${result.step}, ${result.synced ? 'synced' : 'plain'}'
           '${result.timeScale == 1.0 ? '' : ', x${result.timeScale.toStringAsFixed(2)}'}'
-          ', ${record.duration?.round()}s vs ${duration?.round()}s)',
+          ', ${record.duration?.round()}s vs ${duration?.round()}s$last)',
         );
       } else if (result.status == 'instrumental') {
         instrumental++;

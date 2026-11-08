@@ -11,6 +11,7 @@ import '../services/chapters.dart';
 import '../services/lyrics/lyrics_models.dart';
 import '../services/lyrics/lyrics_service.dart' show LyricsService;
 import '../widgets/lyrics_picker_sheet.dart';
+import '../widgets/lyrics_timing_sheet.dart';
 import '../widgets/mobile_data_download_guard.dart';
 
 const _accent = Color(0xFF2196F3);
@@ -128,6 +129,27 @@ class _LyricsPageState extends ConsumerState<LyricsPage> {
         mode == LyricsMode.transcript ? 'Transcript saved' : 'Lyrics saved',
       );
     }
+  }
+
+  Future<void> _fixTiming(
+    Track track,
+    Playlist? playlist,
+    _Unit unit,
+    String? Function(int fileMs) chapterAt,
+  ) async {
+    if (_busy) return;
+    await showLyricsTimingSheet(
+      context,
+      track: track,
+      chapterId: unit.chapterId,
+      playFrom:
+          (fileMs) => _playAt(
+            track,
+            playlist,
+            fileMs,
+            unit.chapterId ?? chapterAt(fileMs),
+          ),
+    );
   }
 
   /// Plays [track] from [fileMs] (file time). Keeps the queue when this
@@ -318,6 +340,27 @@ class _LyricsPageState extends ConsumerState<LyricsPage> {
                               : 'No lyrics here',
                         ),
                       ),
+                    if (doc != null &&
+                        doc.status == LyricsStatus.found &&
+                        doc.synced &&
+                        playable)
+                      TextButton.icon(
+                        key: const ValueKey('lyrics-timing'),
+                        onPressed:
+                            _busy
+                                ? null
+                                : () => _fixTiming(
+                                  track,
+                                  playlist,
+                                  unit,
+                                  (fileMs) =>
+                                      playsAsChapters
+                                          ? _chapterAt(chapters, fileMs)
+                                          : null,
+                                ),
+                        icon: const Icon(Icons.timer_outlined),
+                        label: const Text('Timing off?'),
+                      ),
                     if (doc != null && blocked == null)
                       TextButton.icon(
                         key: const ValueKey('lyrics-refetch'),
@@ -365,8 +408,11 @@ class _LyricsPageState extends ConsumerState<LyricsPage> {
                   if (i < header.length) return header[i];
                   final line = lines[i - header.length];
                   final startMs = line.startMs;
+                  // A timing shift can move a line before the doc's start.
                   final fileMs =
-                      startMs == null ? null : doc.offsetMs + startMs;
+                      startMs == null
+                          ? null
+                          : doc.offsetMs + max<int>(0, startMs);
                   return _LineRow(
                     line: line,
                     onTap:
@@ -490,7 +536,11 @@ class _StatusHeader extends StatelessWidget {
           detail = [
             lyricsSourceLabel(doc.source),
             if (doc.lang != null && doc.lang!.isNotEmpty) doc.lang!,
-            doc.synced ? 'timed' : 'not timed',
+            doc.synced
+                ? doc.shiftMs == 0
+                    ? 'timed'
+                    : 'timed, moved ${lyricsShiftLabel(doc.shiftMs)}'
+                : 'not timed',
             how,
           ].join(' · ');
         case LyricsStatus.none:

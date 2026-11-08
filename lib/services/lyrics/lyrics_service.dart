@@ -186,6 +186,7 @@ class LyricsService {
       }
     }
     final tracks = await _db.getTracksForPlaylist(playlistId);
+    final mistimed = await _mistimedDocs(tracks, docsByTrack);
     for (final track in tracks) {
       if (!_eligible(track, mode) &&
           (docsByTrack[track.id]?.any((d) => _unusable(track, d, mode)) ??
@@ -201,7 +202,9 @@ class LyricsService {
                   docsByTrack[track.id]
                       ?.where((d) => d.chapterId == slot.chapterId)
                       .firstOrNull;
-              return _isDue(doc, mode, now) || emptyPins.contains(doc?.id);
+              return _isDue(doc, mode, now) ||
+                  emptyPins.contains(doc?.id) ||
+                  mistimed.contains(doc?.id);
             }))
           track,
     ];
@@ -224,6 +227,7 @@ class LyricsService {
         track,
         cancellation: cancellation,
         deadline: deadline,
+        mistimed: mistimed,
       );
       total
         ..due += outcome.due
@@ -261,14 +265,46 @@ class LyricsService {
     );
   }
 
-  /// LRCLIB search results for the picker's free text [query].
-  Future<List<LyricsCandidate>> candidatesFor(String query) async {
+  /// LRCLIB search results for the picker's free text [query]. With
+  /// [trackId] each result says whether its synced times fit that track's
+  /// file (or [chapterId]'s chapter), and results of the same song come
+  /// fitting ones first.
+  Future<List<LyricsCandidate>> candidatesFor(
+    String query, {
+    int? trackId,
+    String? chapterId,
+  }) async {
     final text = query.trim();
     if (text.isEmpty) return const [];
     final client = await _lrclib();
     var records = await client.searchQ(text);
     if (records.isEmpty) records = await client.search(trackName: text);
-    return [for (final record in records) record.toCandidate()];
+    double? localSeconds;
+    var nightcore = false;
+    final track = trackId == null ? null : await _db.getTrack(trackId);
+    if (track != null) {
+      if (chapterId != null) {
+        final chapter =
+            ChapterData.decode(
+              track.chaptersJson,
+            ).active.where((c) => c.id == chapterId).firstOrNull;
+        if (chapter != null) {
+          localSeconds = (chapter.endMs - chapter.startMs) / 1000;
+        }
+      } else if ((track.durationSeconds ?? 0) > 0) {
+        localSeconds = track.durationSeconds!.toDouble();
+      }
+      nightcore = parseSongTitle(track.title).nightcore;
+    }
+    return sortCandidatesByFit([
+      for (final record in records)
+        lyricsCandidateFor(
+          record,
+          localSeconds: localSeconds,
+          nightcore: nightcore,
+          chapter: chapterId != null,
+        ),
+    ]);
   }
 
   /// The picker's starting query for a track or chapter: the parsed
@@ -334,6 +370,59 @@ class LyricsService {
     );
     await _fetchTrack(track, force: true, single: true, onlyChapter: chapterId);
   }
+
+  /// Moves every line of a synced doc so it starts [shiftMs] later than
+  /// the source times it (negative = earlier), and pins the doc so
+  /// automatic runs keep it. 0 takes the correction back. The shift is
+  /// added to the stored line times and remembered for a restore.
+  Future<void> setTimingShift(int trackId, String? chapterId, int shiftMs) =>
+      _changeDoc(trackId, chapterId, (doc, lines) {
+        if (!doc.synced) {
+          throw StateError('These lyrics have no times to move.');
+        }
+        return draftFromDoc(doc, lines).copyWith(
+          pinned: true,
+          shiftMs: shiftMs,
+          lines: shiftLyricsLines([
+            for (final line in lines)
+              LyricsLineDraft(line.lineText, startMs: line.startMs),
+          ], shiftMs - doc.shiftMs),
+        );
+      });
+
+  /// Keeps a doc's lines without their times, pinned.
+  Future<void> useWithoutTiming(int trackId, String? chapterId) => _changeDoc(
+    trackId,
+    chapterId,
+    (doc, lines) => draftFromDoc(doc, lines).copyWith(
+      synced: false,
+      pinned: true,
+      shiftMs: 0,
+      timingOff: true,
+      lines: [for (final line in lines) LyricsLineDraft(line.lineText)],
+    ),
+  );
+
+  /// Rewrites the found doc of [trackId]/[chapterId] by [change] and saves
+  /// the lyrics file.
+  Future<void> _changeDoc(
+    int trackId,
+    String? chapterId,
+    LyricsDocDraft Function(LyricsDoc doc, List<LyricsLine> lines) change,
+  ) => _locked(trackId, () async {
+    final track = await _db.getTrack(trackId);
+    if (track == null) throw StateError('The track is gone.');
+    final playlist = await _db.getPlaylistOrNull(track.playlistId);
+    if (playlist == null) throw StateError('The playlist is gone.');
+    final doc = await _db.lyricsDocFor(trackId, chapterId);
+    if (doc == null || doc.status != LyricsStatus.found) {
+      throw StateError('There are no lyrics to change here.');
+    }
+    final lines = await _db.lyricsLinesForDoc(doc.id);
+    await _db.replaceLyricsDoc(change(doc, lines));
+    await _persist(track, playlist);
+    _emit(LyricsChange(trackId, chapterId));
+  });
 
   /// After a track's chapters changed (edit, recognition, undo): deletes
   /// docs of chapters that are gone and fetches the new ones when the
@@ -542,6 +631,7 @@ class LyricsService {
     String? onlyChapter,
     LyricsCancellation? cancellation,
     DateTime? deadline,
+    Set<int>? mistimed,
   }) => _locked(track.id, () async {
     final outcome = _Outcome();
     final fresh = await _db.getTrack(track.id);
@@ -574,6 +664,8 @@ class LyricsService {
 
     final context = _TrackContext(this, fresh, playlist);
     final now = _clock();
+    final wrongTiming =
+        mistimed ?? await _mistimedDocs([fresh], {fresh.id: existing});
     bool stop() =>
         (cancellation?.isCancelled ?? false) ||
         (deadline != null && !_clock().isBefore(deadline));
@@ -602,6 +694,8 @@ class LyricsService {
               sourceRef: doc.sourceRef ?? '',
               artist: doc.matchedArtist,
               title: doc.matchedTitle,
+              shiftMs: doc.shiftMs,
+              timingOff: doc.timingOff,
             ),
             stop: stop,
           );
@@ -617,7 +711,8 @@ class LyricsService {
           continue;
         }
       } else {
-        if (!force && !_isDue(doc, mode, now)) continue;
+        final retime = doc != null && wrongTiming.contains(doc.id);
+        if (!force && !retime && !_isDue(doc, mode, now)) continue;
         outcome.due++;
         final attempts =
             doc != null && doc.kind == mode.dbValue && !force
@@ -626,6 +721,14 @@ class LyricsService {
         draft = await _fetchSlot(context, slot, mode, attempts, stop);
         // Stopped halfway: not a failed lookup, nothing to store.
         if (draft.status == LyricsStatus.error && stop()) break;
+        // Lyrics whose times ran past the file are only replaced by an
+        // answer: a failed lookup keeps them for the next try.
+        if (retime && !force && draft.status == LyricsStatus.error) {
+          await _db.markLyricsDocTried(doc.id, _clock(), doc.attempts);
+          outcome.failed++;
+          changed = true;
+          continue;
+        }
       }
       // The lookup took a while: a chapter edited meanwhile was looked up
       // under its old title or start, and media replaced meanwhile is
@@ -896,6 +999,8 @@ class LyricsService {
       timeScale: timeScale,
       synced: synced,
       pinned: true,
+      shiftMs: synced ? pick.shiftMs : 0,
+      timingOff: pick.timingOff && status == LyricsStatus.found,
       lang: lang,
       checkedAt: _clock(),
       lines: lines,
@@ -918,17 +1023,21 @@ class LyricsService {
             title: record.trackName,
           );
         }
-        final (synced, scale) = _timingFor(record, slot, track.title);
+        final (fits, scale) = _timingFor(record, slot, track.title);
+        final synced = fits && !pick.timingOff;
         return draft(
           LyricsStatus.found,
           source: LyricsSource.lrclib,
           sourceRef: '$id',
           artist: record.artistName,
           title: record.trackName,
-          timeScale: scale,
+          timeScale: synced ? scale : 1.0,
           synced: synced,
           lines: _cutToSlot(
-            lyricsLinesFor(record, synced: synced, timeScale: scale),
+            shiftLyricsLines(
+              lyricsLinesFor(record, synced: synced, timeScale: scale),
+              synced ? pick.shiftMs : 0,
+            ),
             slot,
             synced: synced,
           ),
@@ -967,9 +1076,12 @@ class LyricsService {
           sourceRef: '$videoId:${choice.key}',
           artist: pick.artist,
           title: pick.title ?? (info['title'] is String ? info['title'] : null),
-          synced: true,
+          synced: !pick.timingOff,
           lang: choice.lang,
-          lines: lines,
+          lines:
+              pick.timingOff
+                  ? [for (final line in lines) LyricsLineDraft(line.text)]
+                  : shiftLyricsLines(lines, pick.shiftMs),
         );
       default:
         throw ArgumentError('Unknown lyrics source ${pick.source}');
@@ -1003,25 +1115,50 @@ class LyricsService {
     return pickCaption(usable, mode: LyricsMode.transcript);
   }
 
-  /// Whether a chosen record's times fit the slot, and their scale.
+  /// Whether a chosen record's times fit the slot (see
+  /// [syncedTimingFor]), and their scale.
   static (bool, double) _timingFor(
     LrclibRecord record,
     _Slot slot,
     String fileTitle,
   ) {
-    if (!record.isSynced) return (false, 1.0);
-    if (slot.isChapter) return (true, 1.0);
-    final local = slot.durationMs == null ? null : slot.durationMs! / 1000;
-    final remote = record.duration;
-    if (local == null || remote == null || remote <= 0) return (false, 1.0);
-    if ((local - remote).abs() <= durationToleranceSeconds) return (true, 1.0);
-    final ratio = local / remote;
-    if (parseSongTitle(fileTitle).nightcore &&
-        ratio >= nightcoreMinRatio &&
-        ratio <= nightcoreMaxRatio) {
-      return (true, ratio);
+    final timing = syncedTimingFor(
+      record,
+      localSeconds: slot.durationMs == null ? null : slot.durationMs! / 1000,
+      nightcore: parseSongTitle(fileTitle).nightcore,
+      chapter: slot.isChapter,
+    );
+    return timing.fits ? (true, timing.timeScale) : (false, 1.0);
+  }
+
+  /// The automatic LRCLIB whole-file docs among [docsByTrack] whose synced
+  /// lines start after their file ends (a record of a longer recording
+  /// whose stated length was wrong): fetched again by the next run.
+  /// Chapter docs are cut at the chapter's end, so they never show it.
+  Future<Set<int>> _mistimedDocs(
+    Iterable<Track> tracks,
+    Map<int, List<LyricsDoc>> docsByTrack,
+  ) async {
+    final durationMs = <int, int>{};
+    for (final track in tracks) {
+      final seconds = track.durationSeconds;
+      if (seconds == null || seconds <= 0) continue;
+      for (final doc in docsByTrack[track.id] ?? const <LyricsDoc>[]) {
+        if (!doc.pinned &&
+            doc.chapterId == null &&
+            doc.status == LyricsStatus.found &&
+            doc.synced &&
+            doc.source == LyricsSource.lrclib) {
+          durationMs[doc.id] = seconds * 1000;
+        }
+      }
     }
-    return (false, 1.0);
+    if (durationMs.isEmpty) return const {};
+    final lastStarts = await _db.lyricsLastLineStarts(durationMs.keys);
+    return {
+      for (final MapEntry(key: id, value: last) in lastStarts.entries)
+        if (!syncedLinesFit(last, durationMs[id]!)) id,
+    };
   }
 
   /// Runs one yt-dlp extraction at a time, at least [extractionGap] after
@@ -1099,6 +1236,8 @@ LyricsDocDraft draftFromDoc(LyricsDoc doc, List<LyricsLine> lines) =>
       timeScale: doc.timeScale,
       synced: doc.synced,
       pinned: doc.pinned,
+      shiftMs: doc.shiftMs,
+      timingOff: doc.timingOff,
       lang: doc.lang,
       checkedAt: doc.checkedAt,
       attempts: doc.attempts,

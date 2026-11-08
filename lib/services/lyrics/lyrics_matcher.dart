@@ -25,6 +25,171 @@ const durationToleranceSeconds = 4.0;
 const nightcoreMinRatio = 0.70;
 const nightcoreMaxRatio = 0.93;
 
+/// The last synced line must start at least this long before the file (or
+/// chapter) ends.
+const syncedEndMarginMs = 1000;
+
+/// A record's last line may start this much after its stated length (the
+/// length is rounded) before the length counts as wrong.
+const claimedDurationSlackMs = 1000;
+
+/// When a record's synced lines start and end (unscaled), or null when it
+/// has no timed lines.
+({int firstMs, int lastMs})? syncedSpanOf(LrclibRecord record) {
+  final synced = record.syncedLyrics;
+  if (synced == null) return null;
+  int? first;
+  int? last;
+  for (final line in parseLrc(synced)) {
+    final start = line.startMs;
+    if (start == null) continue;
+    if (first == null || start < first) first = start;
+    if (last == null || start > last) last = start;
+  }
+  return first == null ? null : (firstMs: first, lastMs: last!);
+}
+
+/// Whether a record states a length its own lines fit in. A record whose
+/// lines run past its stated length is mislabelled (another recording's
+/// lines under this one's length), so that length says nothing.
+bool claimedDurationTrustworthy(double? claimedSeconds, int? lastLineMs) =>
+    claimedSeconds != null &&
+    claimedSeconds > 0 &&
+    (lastLineMs == null ||
+        lastLineMs <= claimedSeconds * 1000 + claimedDurationSlackMs);
+
+/// Whether synced lines whose last one starts at [lastLineMs] (doc time,
+/// already scaled) fit a file of [durationMs].
+bool syncedLinesFit(int lastLineMs, int durationMs) =>
+    lastLineMs <= durationMs - syncedEndMarginMs;
+
+/// How a record's synced lines fit a file or chapter.
+class SyncedTiming {
+  /// Whether the times can be used.
+  final bool fits;
+
+  /// Line times are multiplied by this (nightcore: local / original).
+  final double timeScale;
+
+  /// The record's stated length is wrong for its own lines.
+  final bool mislabelled;
+
+  const SyncedTiming(
+    this.fits, {
+    this.timeScale = 1.0,
+    this.mislabelled = false,
+  });
+
+  static const none = SyncedTiming(false);
+}
+
+/// Whether [record]'s synced times fit a file (or [chapter]) of
+/// [localSeconds], checked against its real line times, not only its
+/// stated length:
+///
+/// * a whole file must be as long as the record (±4 s), or a nightcore
+///   speed-up of it when [nightcore]; then the last line, scaled, must
+///   start before the file ends;
+/// * a chapter is often a shortened version (a TV size), whose lines are
+///   cut at its end: the first line must start inside it;
+/// * a record whose lines run past its stated length never fits.
+SyncedTiming syncedTimingFor(
+  LrclibRecord record, {
+  required double? localSeconds,
+  bool nightcore = false,
+  bool chapter = false,
+}) {
+  final span = syncedSpanOf(record);
+  if (span == null || localSeconds == null || localSeconds <= 0) {
+    return SyncedTiming.none;
+  }
+  final claimed = record.duration;
+  if (!claimedDurationTrustworthy(claimed, span.lastMs)) {
+    return const SyncedTiming(false, mislabelled: true);
+  }
+  final localMs = (localSeconds * 1000).round();
+  final ratio = localSeconds / claimed!;
+  var scale = 1.0;
+  if ((localSeconds - claimed).abs() <= durationToleranceSeconds) {
+    scale = 1.0;
+  } else if (nightcore &&
+      ratio >= nightcoreMinRatio &&
+      ratio <= nightcoreMaxRatio) {
+    scale = ratio;
+  } else if (!chapter) {
+    return SyncedTiming.none;
+  }
+  if (chapter) {
+    final first = (span.firstMs * scale).round();
+    return SyncedTiming(first <= localMs - syncedEndMarginMs, timeScale: scale);
+  }
+  final last = (span.lastMs * scale).round();
+  return SyncedTiming(syncedLinesFit(last, localMs), timeScale: scale);
+}
+
+/// [record] as a picker result, with whether its synced times fit a file
+/// (or [chapter]) of [localSeconds].
+LyricsCandidate lyricsCandidateFor(
+  LrclibRecord record, {
+  double? localSeconds,
+  bool nightcore = false,
+  bool chapter = false,
+}) {
+  final span = syncedSpanOf(record);
+  return LyricsCandidate(
+    id: record.id,
+    artist: record.artistName,
+    title: record.trackName,
+    album: record.albumName,
+    durationSeconds: record.duration,
+    synced: record.isSynced,
+    instrumental: record.instrumental,
+    plainPreview: record.plainText,
+    lastLineSeconds: span == null ? null : span.lastMs / 1000,
+    localSeconds: localSeconds,
+    timingFits:
+        span == null || localSeconds == null || record.instrumental
+            ? null
+            : syncedTimingFor(
+              record,
+              localSeconds: localSeconds,
+              nightcore: nightcore,
+              chapter: chapter,
+            ).fits,
+  );
+}
+
+/// [candidates] with the records of one song (same title and artist)
+/// reordered among themselves: synced times that fit first, then plain
+/// ones, then times that do not fit. Other songs keep their places.
+List<LyricsCandidate> sortCandidatesByFit(List<LyricsCandidate> candidates) {
+  String key(LyricsCandidate c) =>
+      '${foldForSearch(c.artist)}|${foldForSearch(c.title)}';
+  int rank(LyricsCandidate c) => switch (c.timingFits) {
+    true => 0,
+    null => 1,
+    false => 2,
+  };
+  final groups = <String, List<int>>{};
+  for (final (i, c) in candidates.indexed) {
+    groups.putIfAbsent(key(c), () => []).add(i);
+  }
+  final result = [...candidates];
+  for (final positions in groups.values) {
+    if (positions.length < 2) continue;
+    final members = [for (final i in positions) candidates[i]];
+    // A stable sort: equal ranks keep LRCLIB's order.
+    final order = [for (var i = 0; i < members.length; i++) i]..sort((a, b) {
+      final byRank = rank(members[a]).compareTo(rank(members[b]));
+      return byRank != 0 ? byRank : a.compareTo(b);
+    });
+    for (var j = 0; j < positions.length; j++) {
+      result[positions[j]] = members[order[j]];
+    }
+  }
+  return result;
+}
+
 /// What a lookup decided.
 class LyricsMatch {
   /// One of [LyricsStatus]: found, instrumental or none.
@@ -152,6 +317,11 @@ class _Step {
 /// A record is accepted when it has lyrics, its title is similar enough
 /// and: the artist matches when one is known; otherwise the duration fits
 /// (±4 s, or the nightcore window). Chapters are never gated on duration.
+/// A record whose lines run past its stated length has no known duration.
+///
+/// Times are kept only when [syncedTimingFor] says they fit. When the best
+/// record's synced times do not fit, later steps may still find a record
+/// of the same song whose times do; otherwise it is stored plain.
 class LyricsMatcher {
   LyricsMatcher(this.client);
 
@@ -237,6 +407,9 @@ class LyricsMatcher {
     }
 
     LyricsMatch? instrumental;
+    // Synced lyrics whose times do not fit: kept as plain unless a later
+    // step finds a record of the same song whose times fit.
+    LyricsMatch? untimed;
     var anyResults = false;
     final answers = <String, List<LrclibRecord>>{};
     for (final step in steps) {
@@ -255,13 +428,17 @@ class LyricsMatcher {
         withLyrics.sort(_preference);
         final best = withLyrics.first;
         final synced = best.record.isSynced && best.timingFits;
-        return LyricsMatch(
+        final match = LyricsMatch(
           status: LyricsStatus.found,
           record: best.record,
           step: step.name,
           timeScale: synced ? best.timeScale : 1.0,
           synced: synced,
         );
+        if (synced) return match;
+        if (!best.record.isSynced) return untimed ?? match;
+        untimed ??= match;
+        continue;
       }
       final instrumentalFit =
           accepted.where((f) => f.record.instrumental).firstOrNull;
@@ -275,7 +452,8 @@ class LyricsMatcher {
         if (step.name == 'get') return instrumental;
       }
     }
-    return instrumental ??
+    return untimed ??
+        instrumental ??
         LyricsMatch.none(anyResults ? 'no result fits' : 'no results');
   }
 
@@ -292,34 +470,31 @@ class LyricsMatcher {
             ? null
             : artistSimilarity(record.artistName, step.artist!);
     final recordDuration = record.duration;
+    // A record whose lines run past its stated length has no known length.
+    final trustworthy = claimedDurationTrustworthy(
+      recordDuration,
+      syncedSpanOf(record)?.lastMs,
+    );
     double? delta;
     double? ratio;
-    if (duration != null && recordDuration != null && recordDuration > 0) {
-      delta = (duration - recordDuration).abs();
+    if (duration != null && trustworthy) {
+      delta = (duration - recordDuration!).abs();
       ratio = duration / recordDuration;
     }
-    var timingFits = false;
-    var timeScale = 1.0;
-    if (delta != null && delta <= durationToleranceSeconds) {
-      timingFits = true;
-    } else if (query.nightcore &&
-        ratio != null &&
-        ratio >= nightcoreMinRatio &&
-        ratio <= nightcoreMaxRatio) {
-      timingFits = true;
-      timeScale = ratio;
-    } else if (chapter) {
-      // Chapters are often shortened versions; the start still lines up.
-      timingFits = true;
-    }
+    final timing = syncedTimingFor(
+      record,
+      localSeconds: duration,
+      nightcore: query.nightcore,
+      chapter: chapter,
+    );
     return _Fit(
       record,
       titleSim,
       artistSim,
       delta,
       ratio,
-      timingFits,
-      timeScale,
+      timing.fits,
+      timing.fits ? timing.timeScale : 1.0,
     );
   }
 

@@ -15,6 +15,7 @@ class FakeLyricsService implements LyricsService {
   /// What [candidatesFor] returns, and the queries it got.
   List<LyricsCandidate> candidates = const [];
   final queries = <String>[];
+  final candidateSlots = <(int?, String?)>[];
   String pickerQuery = 'Avicii Hey Brother';
 
   /// Thrown by [applyPick] when set.
@@ -83,8 +84,13 @@ class FakeLyricsService implements LyricsService {
   }
 
   @override
-  Future<List<LyricsCandidate>> candidatesFor(String query) async {
+  Future<List<LyricsCandidate>> candidatesFor(
+    String query, {
+    int? trackId,
+    String? chapterId,
+  }) async {
     queries.add(query);
+    candidateSlots.add((trackId, chapterId));
     return candidates;
   }
 
@@ -120,6 +126,33 @@ class FakeLyricsService implements LyricsService {
         lines: pick.none ? const [] : const [LyricsLineDraft('Picked line')],
       ),
     );
+  }
+
+  @override
+  Future<void> setTimingShift(
+    int trackId,
+    String? chapterId,
+    int shiftMs,
+  ) async {
+    calls.add('shift $trackId $chapterId $shiftMs');
+    final doc = await db!.lyricsDocFor(trackId, chapterId);
+    if (doc == null) return;
+    final lines = await db!.lyricsLinesForDoc(doc.id);
+    await db!.replaceLyricsDoc(
+      draftFromDoc(doc, lines).copyWith(
+        pinned: true,
+        shiftMs: shiftMs,
+        lines: shiftLyricsLines([
+          for (final line in lines)
+            LyricsLineDraft(line.lineText, startMs: line.startMs),
+        ], shiftMs - doc.shiftMs),
+      ),
+    );
+  }
+
+  @override
+  Future<void> useWithoutTiming(int trackId, String? chapterId) async {
+    calls.add('untimed $trackId $chapterId');
   }
 
   @override
