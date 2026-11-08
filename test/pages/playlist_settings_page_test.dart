@@ -17,6 +17,7 @@ import 'package:woolytube/services/chapter_service.dart';
 import 'package:woolytube/services/download_network_policy.dart';
 import 'package:woolytube/services/download_service.dart';
 import 'package:woolytube/services/library_gate.dart';
+import 'package:woolytube/services/lyrics/lyrics_models.dart';
 import 'package:woolytube/services/playback_service.dart';
 import 'package:woolytube/services/playlist_service.dart';
 import 'package:woolytube/services/sponsorblock_categories.dart';
@@ -773,6 +774,7 @@ class _Playlists implements PlaylistService {
     bool? sponsorBlockEnabled,
     List<String>? sponsorBlockCategories,
     Map<String, SponsorBlockCategoryAction>? sponsorBlockCategoryActions,
+    Value<LyricsMode?> lyricsMode = const Value.absent(),
   }) async {
     final failure = failWith;
     if (failure != null) throw failure;
@@ -788,6 +790,7 @@ class _Playlists implements PlaylistService {
         'sponsorBlockEnabled': sponsorBlockEnabled,
       if (sponsorBlockCategoryActions != null)
         'sponsorBlockCategoryActions': sponsorBlockCategoryActions,
+      if (lyricsMode.present) 'lyricsMode': lyricsMode.value,
     };
     await beforeWrite?.call(call);
     calls.add(call);
@@ -807,6 +810,10 @@ class _Playlists implements PlaylistService {
                     : encodeSponsorBlockCategoryActions(
                       sponsorBlockCategoryActions,
                     ),
+            lyricsMode:
+                lyricsMode.present
+                    ? Value(LyricsMode.toDb(lyricsMode.value))
+                    : const Value.absent(),
           )
           .toCompanion(true),
     );

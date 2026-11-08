@@ -22,6 +22,8 @@ import '../services/thumbnail_backfill_service.dart';
 import '../services/recognition/audio_window_decoder.dart';
 import '../services/recognition/shazam_client.dart';
 import '../services/recognition/song_recognition_service.dart';
+import '../services/lyrics/lyrics_search.dart';
+import '../services/lyrics/lyrics_service.dart';
 
 final chapterServiceProvider = Provider<ChapterService>(
   (ref) => ChapterService(
@@ -623,6 +625,22 @@ final songRecognitionServiceProvider = Provider<SongRecognitionService>((ref) {
   ref.onDispose(service.dispose);
   return service;
 });
+
+/// Fetches lyrics and transcripts and applies the user's corrections.
+final lyricsServiceProvider = Provider<LyricsService>((ref) {
+  final service = LyricsService(
+    ref.watch(databaseProvider),
+    ref.watch(logServiceProvider),
+    ytdlp: ref.watch(ytdlpServiceProvider),
+  );
+  ref.onDispose(service.dispose);
+  return service;
+});
+
+/// Searches stored lyrics and transcripts.
+final lyricsSearchProvider = Provider<LyricsSearch>(
+  (ref) => LyricsSearch(ref.watch(databaseProvider)),
+);
 
 final recognitionProgressProvider = StreamProvider<RecognitionProgress>((ref) {
   return ref.watch(songRecognitionServiceProvider).progressStream;

@@ -403,6 +403,18 @@ void main() {
           'ALTER TABLE $table DROP COLUMN $column',
         );
       }
+      // Added in schema 16 (its triggers went with the others above).
+      for (final table in [
+        'lyrics_vocab',
+        'lyrics_fts',
+        'lyrics_lines',
+        'lyrics_docs',
+      ]) {
+        await database.customStatement('DROP TABLE $table');
+      }
+      await database.customStatement(
+        'ALTER TABLE playlists DROP COLUMN lyrics_mode',
+      );
       await database.customStatement('PRAGMA user_version = 9');
       await database.close();
       database = AppDatabase.forTesting(NativeDatabase(file));

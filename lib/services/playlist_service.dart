@@ -13,6 +13,7 @@ import 'sponsorblock_service.dart';
 import 'media_thumbnail_service.dart' as media_thumbnail_service;
 import 'app_settings_service.dart';
 import 'video_quality.dart';
+import 'lyrics/lyrics_models.dart';
 
 /// Thrown by [PlaylistService.syncPlaylist] when the owner stopped the
 /// update while YouTube was being asked for the playlist.
@@ -624,6 +625,8 @@ class PlaylistService {
     bool? sponsorBlockEnabled,
     List<String>? sponsorBlockCategories,
     Map<String, SponsorBlockCategoryAction>? sponsorBlockCategoryActions,
+    // `Value(null)` turns lyrics off; absent leaves the mode alone.
+    Value<LyricsMode?> lyricsMode = const Value.absent(),
   }) async {
     final playlist = await _db.getPlaylist(id);
     final legacyCategorySet =
@@ -670,6 +673,10 @@ class PlaylistService {
               ? Value(
                 encodeSponsorBlockCategoryActions(resolvedSponsorBlockActions),
               )
+              : const Value.absent(),
+      lyricsMode:
+          lyricsMode.present
+              ? Value(LyricsMode.toDb(lyricsMode.value))
               : const Value.absent(),
     );
 

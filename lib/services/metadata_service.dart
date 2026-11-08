@@ -9,6 +9,7 @@ import 'chapters.dart';
 import 'library_layout.dart';
 import 'media_thumbnail_service.dart';
 import 'video_quality.dart';
+import 'lyrics/lyrics_models.dart';
 
 class DiscoveredTrack {
   final int index;
@@ -108,6 +109,9 @@ class DiscoveredPlaylist {
   /// The app's own "Temporary" playlist (see `Playlists.isTemporary`).
   final bool isTemporary;
 
+  /// `Playlists.lyricsMode`: 'lyrics', 'transcript' or null (off).
+  final String? lyricsMode;
+
   DiscoveredPlaylist({
     required this.folderPath,
     required this.url,
@@ -127,6 +131,7 @@ class DiscoveredPlaylist {
     required this.tracks,
     this.videoQuality,
     this.isTemporary = false,
+    this.lyricsMode,
   });
 }
 
@@ -1783,6 +1788,7 @@ for video) to keep a complete backup.
           outputPath: discovered.folderPath,
           videoQuality: Value(discovered.videoQuality),
           isTemporary: Value(discovered.isTemporary),
+          lyricsMode: Value(discovered.lyricsMode),
         ),
       );
 
@@ -1961,6 +1967,9 @@ for video) to keep a complete backup.
       tracks: tracks,
       videoQuality: _optionalInt(pl['videoQuality']),
       isTemporary: pl['temporary'] == true || pl['url'] == temporaryPlaylistUrl,
+      lyricsMode: LyricsMode.toDb(
+        LyricsMode.fromDb(pl['lyricsMode'] is String ? pl['lyricsMode'] : null),
+      ),
     );
   }
 
@@ -2143,6 +2152,7 @@ String buildSidecarJson(
       'createdAt': playlist.createdAt.toUtc().toIso8601String(),
       if (playlist.videoQuality != null) 'videoQuality': playlist.videoQuality,
       if (playlist.isTemporary) 'temporary': true,
+      if (playlist.lyricsMode != null) 'lyricsMode': playlist.lyricsMode,
     },
     'tracks': tracksJson,
   };

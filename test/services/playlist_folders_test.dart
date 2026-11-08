@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:drift/drift.dart' show Value;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -8,6 +9,7 @@ import 'package:woolytube/database/database.dart';
 import 'package:woolytube/services/download_service.dart';
 import 'package:woolytube/services/library_layout.dart';
 import 'package:woolytube/services/log_service.dart';
+import 'package:woolytube/services/lyrics/lyrics_models.dart';
 import 'package:woolytube/services/metadata_service.dart';
 import 'package:woolytube/services/playlist_service.dart';
 
@@ -82,6 +84,27 @@ void main() {
   Set<String> namesIn(String dir) => {
     for (final e in Directory(dir).listSync()) p.basename(e.path),
   };
+
+  test('the lyrics mode is set, kept and turned off', () async {
+    final folder = p.join(audioBase, 'Lyrics');
+    await Directory(folder).create(recursive: true);
+    final playlist = await insertTestPlaylist(db, outputPath: folder);
+
+    await service.updatePlaylistSettings(
+      id: playlist.id,
+      lyricsMode: const Value(LyricsMode.lyrics),
+    );
+    expect((await db.getPlaylist(playlist.id)).lyricsMode, 'lyrics');
+
+    await service.updatePlaylistSettings(id: playlist.id, name: 'Renamed');
+    expect((await db.getPlaylist(playlist.id)).lyricsMode, 'lyrics');
+
+    await service.updatePlaylistSettings(
+      id: playlist.id,
+      lyricsMode: const Value(null),
+    );
+    expect((await db.getPlaylist(playlist.id)).lyricsMode, isNull);
+  });
 
   group('adding playlists', () {
     test('two playlists with the same name get their own folders', () async {
