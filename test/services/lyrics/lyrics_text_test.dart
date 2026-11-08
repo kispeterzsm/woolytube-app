@@ -26,6 +26,10 @@ void main() {
         'σαγαπω πολυ καρδια μου',
       );
       expect(foldForSearch('ΰ ΐ ἄ ǽ ǿ'), 'υ ι α ae o');
+      // Spacing accents are no letters: they separate words.
+      expect(foldForSearch('λόγος΅ x'), 'λογοσ x');
+      expect(foldForSearch('a῍b x῝y'), 'a b x y');
+      expect(foldForSearch('΅'), '');
     });
 
     test('folds decomposed accents', () {

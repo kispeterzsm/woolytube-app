@@ -106,6 +106,22 @@ void main() {
     expect(match.timeScale, closeTo(148 / 180, 1e-9));
   });
 
+  test('nightcore without an artist refuses a same-length record', () async {
+    lrclib.searches['q=Come Clean'] = [
+      lrclibRecord(
+        id: 8,
+        track: 'Come Clean',
+        artist: 'Conrad Sewell',
+        duration: 184,
+      ),
+    ];
+    final match = await lrclib.matcher().match(
+      parseSongTitle('Nightcore - Come Clean'),
+      durationSeconds: 184,
+    );
+    expect(match.found, isFalse);
+  });
+
   test(
     'timing that does not fit keeps the lines but drops the times',
     () async {

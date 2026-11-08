@@ -103,6 +103,38 @@ void main() {
       );
     });
 
+    test('lyrics never take a translation when the video language is '
+        'known', () {
+      for (final (title, lang, key) in [
+        ('Despacito', 'es', 'en'),
+        ('夜に駆ける', 'ja', 'zh-Hans'),
+        ('BTS Dynamite', 'ko', 'en'),
+        ('Love Story', 'ko', 'en'),
+      ]) {
+        expect(
+          pickCaption({
+            'title': title,
+            'language': lang,
+            'subtitles': {key: formats('https://x/$key')},
+          }, mode: LyricsMode.lyrics),
+          isNull,
+          reason: '$title ($lang) with only $key',
+        );
+      }
+    });
+
+    test('lyrics fall back to the CJK title script when the video language '
+        'contradicts it', () {
+      expect(
+        pickCaption({
+          'title': '夜に駆ける',
+          'language': 'en',
+          'subtitles': {'ja': formats('https://x/ja')},
+        }, mode: LyricsMode.lyrics)?.key,
+        'ja',
+      );
+    });
+
     test('onlyLang narrows the choice', () {
       final info = {
         'subtitles': {

@@ -1576,10 +1576,13 @@ class AppDatabase extends _$AppDatabase {
   /// from playlists with lyrics on (only [playlistId] when given), in docs
   /// of the playlist's current mode. At most [perDoc] lines of one doc, so
   /// a long transcript repeating the words cannot crowd out other songs.
+  /// The cap applies to the best [overFetch] times [limit] matches, which
+  /// keeps a common word from ranking every matching line twice.
   Future<List<LyricsFtsCandidate>> lyricsFtsCandidates(
     String matchExpr, {
     int limit = 150,
     int perDoc = 4,
+    int overFetch = 20,
     int? playlistId,
   }) async {
     final rows =
@@ -1593,7 +1596,7 @@ class AppDatabase extends _$AppDatabase {
           'JOIN playlists p ON p.id = t.playlist_id '
           'WHERE lyrics_fts MATCH ? AND d.kind = p.lyrics_mode '
           '${playlistId == null ? '' : 'AND p.id = ? '}'
-          'LIMIT -1), '
+          'ORDER BY rank LIMIT ?), '
           'ranked AS (SELECT *, ROW_NUMBER() OVER '
           '(PARTITION BY doc_id ORDER BY rank, line_no) AS per_doc '
           'FROM matched) '
@@ -1602,6 +1605,7 @@ class AppDatabase extends _$AppDatabase {
           variables: [
             Variable<String>(matchExpr),
             if (playlistId != null) Variable<int>(playlistId),
+            Variable<int>(limit * overFetch),
             Variable<int>(perDoc),
             Variable<int>(limit),
           ],

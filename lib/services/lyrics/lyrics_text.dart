@@ -66,7 +66,11 @@ String? _foldChar(String char) {
   final mapped = _latinFolding[lower];
   if (mapped != null) return mapped;
   final base = _decomposed[lower];
-  if (base != null) return _latinFolding[base] ?? base;
+  // Spacing accents (΅, ῍) decompose to a bare symbol, not a letter: they
+  // stay word separators, as in the FTS tokenizer.
+  if (base != null && _wordChar.hasMatch(base)) {
+    return _latinFolding[base] ?? base;
+  }
   if (_apostrophes.contains(char.codeUnitAt(0))) return null;
   if (_mark.hasMatch(char)) return null;
   if (_wordChar.hasMatch(lower)) return lower;

@@ -40,6 +40,48 @@ final _cjk = RegExp(
 );
 final _hangul = RegExp(r'\p{Script=Hangul}', unicode: true);
 
+/// Languages not written in Latin script. A video in one of them keeps its
+/// language: a Latin or CJK title there (a K-pop "Dynamite") has
+/// translated subtitles, not the song's.
+const _nonLatinLangs = {
+  'ja',
+  'zh',
+  'ko',
+  'ru',
+  'uk',
+  'be',
+  'bg',
+  'sr',
+  'mk',
+  'el',
+  'he',
+  'ar',
+  'fa',
+  'ur',
+  'hi',
+  'bn',
+  'ta',
+  'te',
+  'th',
+  'ka',
+  'hy',
+  'km',
+  'my',
+  'mn',
+  'kk',
+};
+
+final _englishWords = RegExp(
+  r"\b(the|a|an|and|of|to|in|on|my|me|you|your|i|i'm|is|are|it|it's|we|"
+  r"love|some|all|for|with|be|this|that|what|when|don't|can't|never|"
+  r"song|night|day|heart|baby|go|get|feel|time)\b",
+  caseSensitive: false,
+);
+
+/// Whether a Latin-script title has common English words, so an English
+/// track is likely the song itself rather than a translation.
+bool _readsAsEnglish(String title) => _englishWords.hasMatch(title);
+
 /// The json3 URL of a format list, skipping HLS playlists.
 String? _json3Url(Object? formats) {
   if (formats is! List) return null;
@@ -58,8 +100,9 @@ String? _json3Url(Object? formats) {
 /// `automatic_captions`, `language`, `title`). Never a machine translation.
 ///
 /// [mode] lyrics: only a manual track in the song's language (the video's
-/// `language`, else by the title's script: English, or Japanese/Chinese/
-/// Korean for such titles); a translation would be useless for search.
+/// `language`; by the title's script — English, or Japanese/Chinese/Korean
+/// for such titles — only when the language is unknown or the title
+/// contradicts it); a translation would be useless for search.
 /// [mode] transcript: a manual track (video language, then English, then
 /// any), else the original speech-to-text track (`<lang>-orig`).
 /// [onlyLang] restricts the choice to one base language.
@@ -93,11 +136,23 @@ CaptionChoice? pickCaption(
   if (mode == LyricsMode.lyrics) {
     final title = info['title'] is String ? info['title'] as String : '';
     // The video's language comes from its speech-to-text track, which
-    // often guesses wrong for music: the title's script comes next.
+    // often guesses wrong for music: the title's script comes next, but
+    // only when it contradicts that language. A Spanish video's English
+    // track is a translation, not the song.
+    final cjk = _cjk.hasMatch(title);
+    final hangul = _hangul.hasMatch(title);
+    final latin = !cjk && !hangul;
+    final scriptFallback =
+        videoLang == null ||
+        (latin
+            ? !_nonLatinLangs.contains(videoLang) &&
+                videoLang != 'en' &&
+                _readsAsEnglish(title)
+            : !_nonLatinLangs.contains(videoLang));
     final byScript = <String>{
-      if (_hangul.hasMatch(title)) 'ko',
-      if (_cjk.hasMatch(title)) ...['ja', 'zh'],
-      if (!_cjk.hasMatch(title) && !_hangul.hasMatch(title)) 'en',
+      if (scriptFallback && hangul) 'ko',
+      if (scriptFallback && cjk) ...['ja', 'zh'],
+      if (scriptFallback && latin) 'en',
     };
     final tiers = [
       {

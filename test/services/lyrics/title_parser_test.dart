@@ -178,6 +178,31 @@ void main() {
       );
     });
 
+    test('a quoted title after a separator keeps trailing words out', () {
+      for (final (raw, artist, song) in [
+        (
+          'Metallica - "Enter Sandman" Live at Wembley',
+          'Metallica',
+          'Enter Sandman',
+        ),
+        ('Pearl Jam - "Black" MTV Unplugged', 'Pearl Jam', 'Black'),
+        (
+          'Taylor Swift - "Love Story" Taylor\'s Version',
+          'Taylor Swift',
+          'Love Story',
+        ),
+        (
+          'Weird Al Yankovic - "Amish Paradise" Parody of Gangstas Paradise',
+          'Weird Al Yankovic',
+          'Amish Paradise',
+        ),
+      ]) {
+        final query = parseSongTitle(raw);
+        expect(query.title, song, reason: 'title of "$raw"');
+        expect(query.artist, artist, reason: 'artist of "$raw"');
+      }
+    });
+
     test('reads "Title by Artist"', () {
       expectParse(
         '145 (Poodles) by Jake Chudnow [HD]',

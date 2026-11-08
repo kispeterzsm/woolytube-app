@@ -2082,14 +2082,16 @@ class PlaylistService {
     await _deleteQuietly(staging);
 
     await _db.invalidateTrackChapters(track.id);
-    // Lyrics timed to the old file (chapters, transcripts, synced lines).
-    await dropLyricsForReplacedMedia(_db, track.id);
     await _db.updateTrackStatus(
       track.id,
       'complete',
       filePath: destinationPath,
       isLocalReplacement: true,
     );
+    // Lyrics timed to the old file (chapters, transcripts, synced lines),
+    // after the new file is recorded: a lookup still running for the old
+    // one sees the change and does not write.
+    await dropLyricsForReplacedMedia(_db, track.id);
     await _db.setTrackReplaceRequested(track.id, false);
     // Remote segments were timed against the YouTube video, not this file.
     await _db.deleteRemoteSegmentsForTrack(track.id);

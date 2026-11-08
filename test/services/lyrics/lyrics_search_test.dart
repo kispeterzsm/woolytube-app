@@ -46,7 +46,7 @@ void main() {
         '"wory" OR "worry" OR "hapy"* OR "happy"',
       );
       // Only stop words: they are kept.
-      expect(buildLyricsMatchExpression(['the', 'be'], vocab), '"the" OR "be"');
+      expect(buildLyricsMatchExpression(['be', 'the'], vocab), '"be" OR "the"');
       // A known word is not expanded; a short last word is no prefix.
       expect(
         buildLyricsMatchExpression(['happy', 'mix'], vocab),
@@ -67,6 +67,13 @@ void main() {
         buildLyricsMatchExpression(['hapy', 'x'], vocab),
         contains('"happy"'),
       );
+      // A 1-2 letter last word being typed falls back to the other words,
+      // stop words too, rather than matching nothing.
+      expect(
+        buildLyricsMatchExpression(['its', 'my', 'li'], vocab),
+        '"its" OR "my"',
+      );
+      expect(buildLyricsMatchExpression(['li'], vocab), '"li"');
       expect(buildLyricsMatchExpression(const [], vocab), isNull);
     });
   });
@@ -194,6 +201,14 @@ void main() {
         words.map((w) => w.toLowerCase()),
         containsAll(['szétszórom', 'könnyű', 'szívvel']),
       );
+    });
+
+    test('a 1-2 letter last word does not empty the results', () async {
+      for (final query in ['its my l', 'its my li']) {
+        final hits = await search.search(query);
+        expect(hits, isNotEmpty, reason: query);
+        expect(titleOfTrack[hits.first.trackId], "It's My Life");
+      }
     });
 
     test('a phrase across a line break is joined with " / "', () async {

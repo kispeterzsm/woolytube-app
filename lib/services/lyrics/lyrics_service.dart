@@ -109,6 +109,7 @@ class LyricsService {
   CaptionsClient? _captionsClient;
   LyricsMatcher? _lyricsMatcher;
   DateTime? _lastExtraction;
+  Future<void> _extractions = Future.value();
   final _trackLocks = <int, Future<void>>{};
 
   /// Fires after this service wrote a track's lyrics.
@@ -187,9 +188,9 @@ class LyricsService {
     final tracks = await _db.getTracksForPlaylist(playlistId);
     for (final track in tracks) {
       if (!_eligible(track, mode) &&
-          (docsByTrack[track.id]?.any((d) => d.kind != mode.dbValue) ??
+          (docsByTrack[track.id]?.any((d) => _unusable(track, d, mode)) ??
               false)) {
-        await _locked(track.id, () => _dropOtherKind(track, playlist, mode));
+        await _locked(track.id, () => _dropUnusable(track, playlist, mode));
       }
     }
     final due = [
@@ -473,10 +474,18 @@ class LyricsService {
     return now.difference(doc.checkedAt) >= wait;
   }
 
-  /// Whether [slot]'s chapter still exists with the same start and title.
-  Future<bool> _slotUnchanged(int trackId, _Slot slot) async {
-    final track = await _db.getTrack(trackId);
+  /// Whether a draft looked up for [read] and [slot] still applies: the
+  /// track plays the same file and can still be fetched in [mode], and a
+  /// chapter still exists with the same start and title.
+  Future<bool> _slotUnchanged(Track read, _Slot slot, LyricsMode mode) async {
+    final track = await _db.getTrack(read.id);
     if (track == null) return false;
+    if (track.filePath != read.filePath ||
+        track.isLocalReplacement != read.isLocalReplacement ||
+        !_eligible(track, mode)) {
+      return false;
+    }
+    if (!slot.isChapter) return true;
     final chapter =
         ChapterData.decode(
           track.chaptersJson,
@@ -486,16 +495,26 @@ class LyricsService {
         chapter.title == slot.title;
   }
 
-  /// Deletes [track]'s docs of the other mode (a track that cannot be
+  /// Whether [doc] of [track], which cannot be fetched in [mode], must go:
+  /// a doc of the other mode, or a transcript of a track that plays
+  /// another file than the YouTube video.
+  static bool _unusable(Track track, LyricsDoc doc, LyricsMode mode) =>
+      doc.kind != mode.dbValue ||
+      (mode == LyricsMode.transcript &&
+          track.status == 'complete' &&
+          track.filePath != null &&
+          (track.isLocalReplacement || _isForcedInsert(track)));
+
+  /// Deletes the [_unusable] docs of [track] (a track that cannot be
   /// fetched in [mode] keeps nothing searchable from the old one).
-  Future<void> _dropOtherKind(
+  Future<void> _dropUnusable(
     Track track,
     Playlist playlist,
     LyricsMode mode,
   ) async {
     var dropped = false;
     for (final doc in await _db.lyricsDocsForTrack(track.id)) {
-      if (doc.kind == mode.dbValue) continue;
+      if (!_unusable(track, doc, mode)) continue;
       await _db.deleteLyricsDocs(track.id, chapterId: doc.chapterId);
       dropped = true;
     }
@@ -531,7 +550,7 @@ class LyricsService {
     final mode = LyricsMode.fromDb(playlist?.lyricsMode);
     if (playlist == null || mode == null) return outcome;
     if (!_eligible(fresh, mode)) {
-      await _dropOtherKind(fresh, playlist, mode);
+      await _dropUnusable(fresh, playlist, mode);
       return outcome;
     }
     final slots = _slotsFor(fresh, playlist, mode);
@@ -584,8 +603,11 @@ class LyricsService {
               artist: doc.matchedArtist,
               title: doc.matchedTitle,
             ),
+            stop: stop,
           );
         } catch (e) {
+          // Stopped (cancel or deadline): not a failed restore.
+          if (stop()) break;
           _log.warn('Lyrics: could not restore the pick of ${fresh.title}: $e');
           // Keep the pin and wait before the next try. A record or captions
           // that are gone are not an outage, so they do not stop a backfill.
@@ -606,8 +628,9 @@ class LyricsService {
         if (draft.status == LyricsStatus.error && stop()) break;
       }
       // The lookup took a while: a chapter edited meanwhile was looked up
-      // under its old title or start, so leave it to the next fetch.
-      if (slot.isChapter && !await _slotUnchanged(fresh.id, slot)) continue;
+      // under its old title or start, and media replaced meanwhile is
+      // another file, so leave it to the next fetch.
+      if (!await _slotUnchanged(fresh, slot, mode)) continue;
       await _db.replaceLyricsDoc(draft);
       changed = true;
       switch (draft.status) {
@@ -666,6 +689,15 @@ class LyricsService {
     final durationSeconds =
         slot.durationMs == null ? null : slot.durationMs! / 1000;
     var query = await context.queryFor(slot);
+    // A nightcore title alone matches any song of that name: without the
+    // description naming the original, try again later rather than store
+    // a guess for good.
+    if (!slot.isChapter &&
+        query.nightcore &&
+        query.artist == null &&
+        context.freshInfoFailed) {
+      throw StateError('No video description for the nightcore original.');
+    }
     final matcher = await _matcher();
     var match = await matcher.match(
       query,
@@ -838,8 +870,9 @@ class LyricsService {
     Track track,
     _Slot slot,
     LyricsMode mode,
-    LyricsPick pick,
-  ) async {
+    LyricsPick pick, {
+    bool Function()? stop,
+  }) async {
     LyricsDocDraft draft(
       String status, {
       String? source,
@@ -874,7 +907,7 @@ class LyricsService {
       case LyricsSource.lrclib:
         final id = int.tryParse(ref);
         if (id == null) throw ArgumentError('Not an LRCLIB id: $ref');
-        final record = await (await _lrclib()).getById(id);
+        final record = await (await _lrclib()).getById(id, stop: stop);
         if (record == null) throw StateError('That lyrics record is gone.');
         if (record.instrumental) {
           return draft(
@@ -920,6 +953,7 @@ class LyricsService {
         if (loader == null) throw StateError('yt-dlp is not available.');
         final info = await _paced(
           () => loader('https://www.youtube.com/watch?v=$videoId'),
+          stop: stop,
         );
         final choice = _captionForPick(info, mode, lang);
         if (choice == null) {
@@ -990,18 +1024,29 @@ class LyricsService {
     return (false, 1.0);
   }
 
-  /// Runs one yt-dlp extraction at least [extractionGap] after the
-  /// previous one ended.
-  Future<T> _paced<T>(Future<T> Function() run) async {
-    final last = _lastExtraction;
-    if (last != null) {
-      final since = _clock().difference(last);
-      if (since < extractionGap) await _sleep(extractionGap - since);
-    }
+  /// Runs one yt-dlp extraction at a time, at least [extractionGap] after
+  /// the previous one ended. A [stop] that fires while waiting throws.
+  Future<T> _paced<T>(Future<T> Function() run, {bool Function()? stop}) async {
+    final previous = _extractions;
+    final done = Completer<void>();
+    _extractions = done.future;
     try {
-      return await run();
+      await previous;
+      final last = _lastExtraction;
+      if (last != null) {
+        final since = _clock().difference(last);
+        if (since < extractionGap) await _sleep(extractionGap - since);
+      }
+      if (stop?.call() ?? false) {
+        throw const LyricsStoppedException();
+      }
+      try {
+        return await run();
+      } finally {
+        _lastExtraction = _clock();
+      }
     } finally {
-      _lastExtraction = _clock();
+      done.complete();
     }
   }
 
@@ -1029,6 +1074,14 @@ class LyricsService {
       _log.warn('Lyrics: could not save the lyrics file of ${track.title}: $e');
     }
   }
+}
+
+/// A lookup stopped (cancelled or out of time) before it started.
+class LyricsStoppedException implements Exception {
+  const LyricsStoppedException();
+
+  @override
+  String toString() => 'The lyrics lookup was stopped.';
 }
 
 /// A stored doc and its lines as a draft (to write to a file or copy).
@@ -1067,6 +1120,9 @@ class _TrackContext {
   bool _keptInfoRead = false;
   Map<String, dynamic>? _freshInfo;
   bool _freshInfoTried = false;
+
+  /// yt-dlp was there but its extraction failed (rate limit, offline).
+  bool freshInfoFailed = false;
   final _captionLines = <String, List<LyricsLineDraft>>{};
 
   Future<Map<String, dynamic>?> _kept() async {
@@ -1096,6 +1152,7 @@ class _TrackContext {
       );
     } catch (e) {
       if (required) rethrow;
+      freshInfoFailed = true;
       service._log.warn('Lyrics: no video info for ${track.videoId}: $e');
     }
     return _freshInfo;
@@ -1145,9 +1202,10 @@ Future<void> persistLyricsFile(AppDatabase db, int trackId) async {
 
 /// Keeps lyrics docs in step after a track's chapters were written as
 /// [data]: docs of chapters that are gone are deleted, and unpinned docs of
-/// chapters whose title or start changed since [previous] too, so the next
-/// fetch looks them up again. A pinned doc whose chapter moved follows its
-/// new start (its lines are timed from the song's start). When anything
+/// chapters whose title or start changed since [previous] too (synced ones
+/// also when the end moved), so the next fetch looks them up again. A
+/// pinned doc whose chapter moved follows its new start (its lines are
+/// timed from the song's start) and loses synced lines past its end. When anything
 /// changed, the lyrics file is rewritten. Returns how many docs changed.
 Future<int> syncLyricsChapterDocs(
   AppDatabase db,
@@ -1167,6 +1225,19 @@ Future<int> syncLyricsChapterDocs(
     final now = active[id];
     if (now == null) continue;
     if (doc.pinned) {
+      // Synced lines past a shortened chapter's end belong to the next one.
+      final duration = now.endMs - now.startMs;
+      if (doc.synced) {
+        final lines = await db.lyricsLinesForDoc(doc.id);
+        final kept = [
+          for (final line in lines)
+            if (line.startMs == null || line.startMs! < duration) line,
+        ];
+        if (kept.length != lines.length) {
+          await db.replaceLyricsDoc(draftFromDoc(doc, kept));
+          changed++;
+        }
+      }
       if (doc.offsetMs != now.startMs) {
         await db.setLyricsDocOffset(doc.id, now.startMs);
         changed++;
@@ -1175,7 +1246,11 @@ Future<int> syncLyricsChapterDocs(
     }
     final then = before[id];
     if (then == null) continue;
-    if (now.title != then.title || now.startMs != then.startMs) {
+    // A synced doc was cut at the chapter's old end: its lines no longer
+    // fit a chapter whose end moved.
+    if (now.title != then.title ||
+        now.startMs != then.startMs ||
+        (doc.synced && now.endMs != then.endMs)) {
       changed += await db.deleteLyricsDocs(trackId, chapterId: id);
     }
   }

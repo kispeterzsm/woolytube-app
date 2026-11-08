@@ -65,9 +65,10 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
   bool _reloadWhenSaved = false;
   bool _switchingFormat = false;
   bool _deleting = false;
+  bool _switchingLyricsMode = false;
   bool _isForceInserting = false;
 
-  bool get _busy => _switchingFormat || _deleting;
+  bool get _busy => _switchingFormat || _deleting || _switchingLyricsMode;
 
   @override
   void initState() {
@@ -256,10 +257,21 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
     );
     if (confirmed != true || !mounted) return;
     setState(() => _switchingFormat = true);
+    Future<void> write(PlaylistService playlists) =>
+        playlists.updatePlaylistSettings(id: playlist.id, audioOnly: value);
+    // A running lyrics job would write its files into the old folder.
+    final lyricsJobs = ref.read(lyricsFetchJobsProvider.notifier);
+    if (lyricsJobs.isRunning(playlist.id)) {
+      await lyricsJobs.stop(playlist.id);
+      if (!mounted) {
+        // The page was closed meanwhile: the switch still happens.
+        unawaited(_queueSave(write, failure: 'Could not save'));
+        return;
+      }
+    }
     final saved = await _update(
-      playlist.copyWith(audioOnly: value),
-      (playlists) =>
-          playlists.updatePlaylistSettings(id: playlist.id, audioOnly: value),
+      (_playlist ?? playlist).copyWith(audioOnly: value),
+      write,
     );
     if (!mounted) return;
     setState(() => _switchingFormat = false);
@@ -581,20 +593,34 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
     final mode = picked.mode;
     if (mode == current) return;
     final jobs = ref.read(lyricsFetchJobsProvider.notifier);
-    // A running job would go on with the old mode. Wait for it to end
-    // (after its current track), so the new mode's fetch can start; its
-    // own summary is dropped.
-    if (jobs.isRunning(playlist.id)) {
-      await jobs.stop(playlist.id);
-      if (!mounted) return;
+    Future<void> write(PlaylistService playlists) => playlists
+        .updatePlaylistSettings(id: playlist.id, lyricsMode: Value(mode));
+    const failure = 'Could not save the lyrics mode';
+    // Deleting or switching the format waits until the new mode is saved.
+    setState(() => _switchingLyricsMode = true);
+    final bool saved;
+    try {
+      // A running job would go on with the old mode. Wait for it to end
+      // (after its current track), so the new mode's fetch can start; its
+      // own summary is dropped.
+      if (jobs.isRunning(playlist.id)) {
+        await jobs.stop(playlist.id);
+        if (!mounted) {
+          // The page was closed meanwhile: the choice is still saved.
+          unawaited(_queueSave(write, failure: failure));
+          return;
+        }
+      }
+      // Settings changed during the wait are on the latest copy.
+      final latest = _playlist ?? playlist;
+      saved = await _update(
+        latest.copyWith(lyricsMode: Value(LyricsMode.toDb(mode))),
+        write,
+        failure: failure,
+      );
+    } finally {
+      if (mounted) setState(() => _switchingLyricsMode = false);
     }
-    final saved = await _update(
-      playlist.copyWith(lyricsMode: Value(LyricsMode.toDb(mode))),
-      (playlists) => playlists.updatePlaylistSettings(
-        id: playlist.id,
-        lyricsMode: Value(mode),
-      ),
-    );
     if (!saved || !mounted || mode == null) return;
     await _fetchLyrics(mode, startedBySwitch: true);
   }
@@ -617,6 +643,8 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
         }
         return;
       }
+      // A delete started meanwhile: no new job on a playlist going away.
+      if (!mounted || _deleting) return;
       // The job keeps running if the page is closed; the result is still
       // reported.
       final result = await jobs.start(widget.playlistId);

@@ -314,7 +314,7 @@ final _byStart = RegExp(r'^by\b', caseSensitive: false);
 /// Whether [quote] in [text] is a nickname within a name rather than the
 /// song title: another part (across a separator) exists, and the quote's
 /// own part has a name word after it and either a word before it or a
-/// quote of at most two words at its start.
+/// quote of at most two words at the start of the whole title.
 bool _isNickname(String text, RegExpMatch quote) {
   final before = text.substring(0, quote.start);
   final after = text.substring(quote.end);
@@ -331,6 +331,9 @@ bool _isNickname(String text, RegExpMatch quote) {
     return false;
   }
   if (_letter.hasMatch(partBefore)) return true;
+  // 'Artist - "Song" Live at Wembley': a quote right after a separator is
+  // the song title, not a nickname.
+  if (beforeSep != null) return false;
   return quote[1]!.trim().split(_spaces).length <= 2;
 }
 

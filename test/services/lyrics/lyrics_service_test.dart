@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -996,6 +997,251 @@ void main() {
         videoId: 'p',
       );
       await expectLater(service.fetchTrack(pending), throwsStateError);
+    });
+  });
+  group('second review fixes', () {
+    Map<String, dynamic> asrInfo() => {
+      'language': 'en',
+      'automatic_captions': {
+        'en-orig': [
+          {'ext': 'json3', 'url': 'https://caps/en-orig'},
+        ],
+      },
+    };
+    FakeHttpResponse oneLine(FakeHttpRequest _) => FakeHttpResponse.json({
+      'events': [
+        {
+          'tStartMs': 1000,
+          'segs': [
+            {'utf8': 'old video words'},
+          ],
+        },
+      ],
+    });
+
+    test('media replaced during a lookup is not written over', () async {
+      final started = Completer<void>();
+      final gate = Completer<void>();
+      final slow = LyricsService(
+        db,
+        LogService(),
+        lrclib: LrclibClient(
+          http: lrclib.http,
+          sleep: (_) async {},
+          retryDelays: const [],
+        ),
+        captions: CaptionsClient(http: captionsHttp),
+        captionInfo: (url) async {
+          started.complete();
+          await gate.future;
+          return asrInfo();
+        },
+        clock: () => now,
+        sleep: (_) async {},
+      );
+      addTearDown(slow.dispose);
+      captionsHttp.handler = oneLine;
+      final p = await playlist(mode: 'transcript');
+      final t = await track(p);
+      final fetch = slow.backfillPlaylist(p.id);
+      await started.future;
+      await db.updateTrackStatus(
+        t.id,
+        'complete',
+        filePath: '${dir.path}/local.m4a',
+        isLocalReplacement: true,
+      );
+      await dropLyricsForReplacedMedia(db, t.id);
+      gate.complete();
+      await fetch;
+      expect(await db.lyricsDocsForTrack(t.id), isEmpty);
+    });
+
+    test('a stale transcript of a local replacement is dropped', () async {
+      final p = await playlist(mode: 'transcript');
+      final t = await insertTestTrack(
+        db,
+        playlistId: p.id,
+        videoId: 'local',
+        title: 'Local',
+        filePath: '${dir.path}/l.m4a',
+        status: 'complete',
+        isLocalReplacement: true,
+      );
+      await db.replaceLyricsDoc(
+        LyricsDocDraft(
+          trackId: t.id,
+          kind: LyricsMode.transcript,
+          status: LyricsStatus.found,
+          source: LyricsSource.ytAuto,
+          checkedAt: now,
+          lines: const [LyricsLineDraft('old video words', startMs: 0)],
+        ),
+      );
+      await service.backfillPlaylist(p.id);
+      expect(await db.lyricsDocsForTrack(t.id), isEmpty);
+    });
+
+    test('yt-dlp runs never overlap', () async {
+      var active = 0;
+      var most = 0;
+      final paced = LyricsService(
+        db,
+        LogService(),
+        lrclib: LrclibClient(
+          http: lrclib.http,
+          sleep: (_) async {},
+          retryDelays: const [],
+        ),
+        captions: CaptionsClient(http: captionsHttp),
+        captionInfo: (url) async {
+          active++;
+          if (active > most) most = active;
+          for (var i = 0; i < 5; i++) {
+            await Future<void>.delayed(Duration.zero);
+          }
+          active--;
+          return const {};
+        },
+        clock: () => now,
+        sleep: (d) async => now = now.add(d),
+      );
+      addTearDown(paced.dispose);
+      final a = await playlist(mode: 'transcript');
+      final b = await playlist(mode: 'transcript');
+      await track(a, index: 1, videoId: 'a');
+      await track(b, index: 1, videoId: 'b');
+      await Future.wait([
+        paced.backfillPlaylist(a.id),
+        paced.backfillPlaylist(b.id),
+      ]);
+      expect(most, 1);
+    });
+
+    test('a pin restore stops on cancel without using an attempt', () async {
+      final sleeps = <Duration>[];
+      final cancellation = LyricsCancellation();
+      final restoring = LyricsService(
+        db,
+        LogService(),
+        lrclib: LrclibClient(
+          http: lrclib.http,
+          sleep: (d) async => sleeps.add(d),
+          retryDelays: const [Duration(seconds: 3), Duration(seconds: 10)],
+        ),
+        captions: CaptionsClient(http: captionsHttp),
+        clock: () => now,
+        sleep: (_) async {},
+      );
+      addTearDown(restoring.dispose);
+      lrclib.http.handler = (_) {
+        cancellation.cancel();
+        return const FakeHttpResponse(429, '');
+      };
+      final p = await playlist();
+      final t = await track(p);
+      await db.replaceLyricsDoc(
+        LyricsDocDraft(
+          trackId: t.id,
+          kind: LyricsMode.lyrics,
+          status: LyricsStatus.found,
+          source: LyricsSource.lrclib,
+          sourceRef: '404',
+          pinned: true,
+          checkedAt: now,
+        ),
+      );
+      final result = await restoring.backfillPlaylist(
+        p.id,
+        cancellation: cancellation,
+      );
+      expect(result.failed, 0);
+      expect(lrclib.http.requests, hasLength(1));
+      expect(sleeps.where((d) => d >= const Duration(seconds: 3)), isEmpty);
+      final doc = (await db.lyricsDocFor(t.id, null))!;
+      expect(doc.pinned, isTrue);
+      expect(doc.attempts, 0);
+    });
+
+    test('a nightcore title without a description is retried later', () async {
+      lrclib.searches['q=Come Clean'] = [
+        lrclibRecord(
+          id: 8,
+          track: 'Come Clean',
+          artist: 'Somebody',
+          duration: 230,
+        ),
+      ];
+      captionInfo = null;
+      final p = await playlist();
+      final t = await track(p, title: 'Nightcore - Come Clean', duration: 184);
+      await service.fetchTrack(t);
+      final doc = (await db.lyricsDocFor(t.id, null))!;
+      expect(doc.status, LyricsStatus.error);
+    });
+
+    test('a shortened chapter loses its synced lines past the end', () async {
+      final p = await playlist();
+      final t = await track(
+        p,
+        title: 'Mix',
+        chaptersJson: chapters([
+          ('c1', 'A — One', 0, 60000),
+          ('c2', 'B — Two', 60000, 120000),
+        ]),
+      );
+      await db.replaceLyricsDoc(
+        LyricsDocDraft(
+          trackId: t.id,
+          chapterId: 'c1',
+          kind: LyricsMode.lyrics,
+          status: LyricsStatus.found,
+          source: LyricsSource.lrclib,
+          sourceRef: '1',
+          synced: true,
+          pinned: true,
+          checkedAt: now,
+          lines: const [
+            LyricsLineDraft('early', startMs: 10000),
+            LyricsLineDraft('late', startMs: 50000),
+          ],
+        ),
+      );
+      await db.replaceLyricsDoc(
+        LyricsDocDraft(
+          trackId: t.id,
+          chapterId: 'c2',
+          offsetMs: 60000,
+          kind: LyricsMode.lyrics,
+          status: LyricsStatus.found,
+          source: LyricsSource.lrclib,
+          sourceRef: '2',
+          synced: true,
+          checkedAt: now,
+          lines: const [LyricsLineDraft('second', startMs: 50000)],
+        ),
+      );
+      final old = ChapterData.decode(t.chaptersJson);
+      final edited = ChapterData(
+        downloaded: const [
+          MediaChapter(id: 'c1', title: 'A — One', startMs: 0, endMs: 30000),
+          MediaChapter(
+            id: 'c2',
+            title: 'B — Two',
+            startMs: 60000,
+            endMs: 100000,
+          ),
+        ],
+      );
+      await db.writeTrackChapters(t.id, edited);
+      await syncLyricsChapterDocs(db, t.id, edited, previous: old);
+      final docs = await db.lyricsDocsForTrack(t.id);
+      expect(docs.single.chapterId, 'c1');
+      expect(docs.single.pinned, isTrue);
+      expect(
+        (await db.lyricsLinesForDoc(docs.single.id)).map((l) => l.lineText),
+        ['early'],
+      );
     });
   });
 }

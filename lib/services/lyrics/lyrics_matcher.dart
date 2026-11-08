@@ -331,12 +331,18 @@ class LyricsMatcher {
     }
     if (chapter) return fit.titleSim >= minChapterTitleSimilarity;
     final delta = fit.delta;
-    if (delta != null && delta <= durationToleranceSeconds) return true;
     final ratio = fit.ratio;
-    return query.nightcore &&
+    final sped =
         ratio != null &&
         ratio >= nightcoreMinRatio &&
         ratio <= nightcoreMaxRatio;
+    if (query.nightcore) {
+      // A sped-up upload is shorter than its original: a record of the
+      // same length is another song with that title. With no artist the
+      // title alone must match closely.
+      return sped && fit.titleSim >= minChapterTitleSimilarity;
+    }
+    return delta != null && delta <= durationToleranceSeconds;
   }
 
   /// Synced with fitting timing first, then synced, then closest length,

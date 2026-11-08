@@ -199,9 +199,10 @@ class LyricsSearch {
 }
 
 /// The FTS5 query for folded query [words]: stop words dropped (unless
-/// nothing would remain), unknown words joined by up to five vocabulary
-/// words within edit distance 1 (≤ 5 letters) or 2, and the last word as a
-/// prefix when it has 4+ letters. Null when there is nothing to match.
+/// nothing would remain), a 1-2 letter last word of several left out,
+/// unknown words joined by up to five vocabulary words within edit
+/// distance 1 (≤ 5 letters) or 2, and the last word as a prefix when it has
+/// 4+ letters. Null when there is nothing to match.
 @visibleForTesting
 String? buildLyricsMatchExpression(
   List<String> words,
@@ -210,14 +211,18 @@ String? buildLyricsMatchExpression(
 
 String? _matchExpression(List<String> words, _Vocabulary vocab) {
   if (words.isEmpty) return null;
+  // A 1-2 letter last word is still being typed: as an exact term it would
+  // match nothing, so it only counts when it is the whole query.
+  final count =
+      words.length > 1 && words.last.length < 3
+          ? words.length - 1
+          : words.length;
   final kept = [
-    for (var i = 0; i < words.length; i++)
+    for (var i = 0; i < count; i++)
       if (!isLyricsStopWord(words[i])) (i, words[i]),
   ];
   final use =
-      kept.isEmpty
-          ? [for (var i = 0; i < words.length; i++) (i, words[i])]
-          : kept;
+      kept.isEmpty ? [for (var i = 0; i < count; i++) (i, words[i])] : kept;
   final terms = <String>{};
   var expanded = 0;
   for (final (i, word) in use) {

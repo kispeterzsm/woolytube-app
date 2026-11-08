@@ -91,6 +91,13 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  /// Pumps a while without settling (a running job animates).
+  Future<void> pumpFor(WidgetTester tester) async {
+    for (var i = 0; i < 5; i++) {
+      await tester.pump(const Duration(milliseconds: 200));
+    }
+  }
+
   Future<void> tapRow(WidgetTester tester, String key) async {
     final row = find.byKey(ValueKey(key));
     await tester.scrollUntilVisible(
@@ -824,6 +831,107 @@ void main() {
         'backfill ${playlist.id}',
       ]);
       expect((await db.getPlaylist(playlist.id)).lyricsMode, 'transcript');
+    });
+
+    group('while a mode switch waits for the old job', () {
+      Future<Playlist> startAndSwitch(WidgetTester tester) async {
+        lyrics = FakeLyricsService();
+        final playlist = await insertTestPlaylist(
+          db,
+          outputPath: tempDir.path,
+          lyricsMode: 'lyrics',
+        );
+        await pumpStack(tester, playlist.id, overrides: overrides());
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(PlaylistSettingsPage)),
+        );
+        unawaited(
+          container.read(lyricsFetchJobsProvider.notifier).start(playlist.id),
+        );
+        await tester.pump();
+        final row = find.byKey(const ValueKey('playlist-lyrics-mode'));
+        await tester.scrollUntilVisible(
+          row,
+          200,
+          scrollable: find.byType(Scrollable).first,
+        );
+        await pumpFor(tester);
+        await tester.tap(row);
+        await pumpFor(tester);
+        await tester.tap(find.byKey(const ValueKey('lyrics-mode-option-off')));
+        await pumpFor(tester);
+        expect(lyrics.cancellation!.isCancelled, isTrue);
+        return playlist;
+      }
+
+      testWidgets('delete and the other settings wait for the new mode', (
+        tester,
+      ) async {
+        final playlist = await startAndSwitch(tester);
+        final delete = find.byKey(const ValueKey('delete-playlist-button'));
+        await tester.scrollUntilVisible(
+          delete,
+          200,
+          scrollable: find.byType(Scrollable).first,
+        );
+        await pumpFor(tester);
+        await tester.tap(delete);
+        await pumpFor(tester);
+        expect(
+          find.byKey(const ValueKey('delete-playlist-confirm')),
+          findsNothing,
+        );
+
+        // Other settings wait too, so the mode save cannot undo them.
+        final autoUpdate = find.byKey(const ValueKey('playlist-auto-update'));
+        expect(tester.widget<SwitchListTile>(autoUpdate).onChanged, isNull);
+
+        lyrics.step();
+        await tester.pumpAndSettle();
+        expect((await db.getPlaylist(playlist.id)).lyricsMode, isNull);
+        expect(playlists.deletedIds, isEmpty);
+        expect(tester.widget<SwitchListTile>(autoUpdate).onChanged, isNotNull);
+      });
+
+      testWidgets('leaving the page still saves the new mode', (tester) async {
+        final playlist = await startAndSwitch(tester);
+        await tester.pageBack();
+        await pumpFor(tester);
+        expect(find.text('detail marker'), findsOneWidget);
+        lyrics.step();
+        await tester.pumpAndSettle();
+        expect((await db.getPlaylist(playlist.id)).lyricsMode, isNull);
+        expect(lyrics.calls, ['backfill ${playlist.id}']);
+      });
+    });
+
+    testWidgets('switching the format stops a running lyrics job first', (
+      tester,
+    ) async {
+      lyrics = FakeLyricsService();
+      final playlist = await insertTestPlaylist(
+        db,
+        outputPath: tempDir.path,
+        lyricsMode: 'lyrics',
+      );
+      await pumpStack(tester, playlist.id, overrides: overrides());
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(PlaylistSettingsPage)),
+      );
+      unawaited(
+        container.read(lyricsFetchJobsProvider.notifier).start(playlist.id),
+      );
+      await tester.pump();
+      final row = find.byKey(const ValueKey('playlist-audio-only'));
+      await tester.tap(row);
+      await pumpFor(tester);
+      await tester.tap(find.text('Switch'));
+      await pumpFor(tester);
+      expect(lyrics.cancellation!.isCancelled, isTrue);
+      expect(playlists.calls, isEmpty, reason: 'the job is on a track');
+      lyrics.step();
+      await tester.pumpAndSettle();
+      expect((await db.getPlaylist(playlist.id)).audioOnly, isTrue);
     });
 
     testWidgets('delete waits for a running lyrics job to stop', (
