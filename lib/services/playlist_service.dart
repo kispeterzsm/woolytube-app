@@ -458,6 +458,7 @@ class PlaylistService {
         }
         if (!keptVideoIds.contains(track.videoId)) {
           await deleteFile(LibraryLayout.infoJsonPath(folder, track.videoId));
+          await deleteFile(LibraryLayout.lyricsJsonPath(folder, track.videoId));
         }
       }
       final numbered = RegExp(r'^(\d+)_');
@@ -923,11 +924,20 @@ class PlaylistService {
         media_thumbnail_service.noteThumbnailWritten(target);
         await _db.updateTrackThumbnailPath(track.id, target);
       }
-      final info = File(LibraryLayout.infoJsonPath(oldFolder, track.videoId));
-      if (await info.exists()) {
-        final target = LibraryLayout.infoJsonPath(newFolder, track.videoId);
-        await Directory(p.dirname(target)).create(recursive: true);
-        await info.copy(target);
+      for (final (from, to) in [
+        (
+          LibraryLayout.infoJsonPath(oldFolder, track.videoId),
+          LibraryLayout.infoJsonPath(newFolder, track.videoId),
+        ),
+        (
+          LibraryLayout.lyricsJsonPath(oldFolder, track.videoId),
+          LibraryLayout.lyricsJsonPath(newFolder, track.videoId),
+        ),
+      ]) {
+        final file = File(from);
+        if (!await file.exists()) continue;
+        await Directory(p.dirname(to)).create(recursive: true);
+        await file.copy(to);
       }
     }
     await _db.updatePlaylistFields(

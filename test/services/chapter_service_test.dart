@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/services/chapter_service.dart';
 import 'package:woolytube/services/chapters.dart';
+import 'package:woolytube/services/lyrics/lyrics_models.dart';
 import 'package:woolytube/services/metadata_service.dart';
 import 'package:woolytube/services/recognition/chapter_estimator.dart';
 import 'package:woolytube/services/recognition/song_recognition_service.dart';
@@ -480,6 +481,38 @@ void main() {
         throwsStateError,
       );
     });
+
+    test(
+      'chapter edits drop the lyrics of changed and deleted chapters',
+      () async {
+        await seed([
+          chapter('a', 0, 20000),
+          chapter('b', 20000, 40000),
+          chapter('c', 40000, 60000),
+        ]);
+        Future<void> doc(String id, {bool pinned = false}) =>
+            db.replaceLyricsDoc(
+              LyricsDocDraft(
+                trackId: track.id,
+                chapterId: id,
+                kind: LyricsMode.lyrics,
+                status: LyricsStatus.none,
+                pinned: pinned,
+                checkedAt: DateTime(2026),
+              ),
+            );
+        await doc('a');
+        await doc('b', pinned: true);
+        await doc('c');
+        // A renamed chapter is looked up again, unless the user chose its
+        // lyrics; a deleted chapter's lyrics go.
+        await service.rename(track, 'a', 'New name');
+        await service.rename(track, 'b', 'Other name');
+        await service.delete(track, 'c');
+        final left = await db.lyricsDocsForTrack(track.id);
+        expect(left.map((d) => d.chapterId), ['b']);
+      },
+    );
 
     test(
       'moveBoundary shifts both neighbours and rejects stale edges',

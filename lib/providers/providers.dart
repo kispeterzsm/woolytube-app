@@ -134,6 +134,7 @@ final downloadServiceProvider = Provider<DownloadService>((ref) {
     DownloadLock.foregroundOwner,
     ref.watch(libraryGateProvider),
     ref.watch(mediaThumbnailServiceProvider),
+    ref.watch(lyricsServiceProvider),
   );
   ref.onDispose(() => service.dispose());
   return service;

@@ -60,6 +60,8 @@ class SidecarMirror {
             _db.playlists,
             _db.tracks,
             _db.sponsorBlockSegments,
+            // Pinned docs go into the sidecar as lyricsPins.
+            _db.lyricsDocs,
           ]),
         )
         .listen((_) => _schedule());
