@@ -15,6 +15,8 @@ import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
@@ -71,6 +73,12 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         private var runtimeInitialized = false
 
         private val mainHandler = Handler(Looper.getMainLooper())
+
+        /**
+         * One loudness analysis at a time in the whole process: each decodes
+         * a full track and keeps a core busy for seconds.
+         */
+        private val loudnessMutex = Mutex()
 
         fun hasActiveDownloads(): Boolean = activeProcessIds.isNotEmpty()
 
@@ -231,6 +239,7 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "stopDownloadService" -> handleStopDownloadService(result)
             "decodeAudioWindow" -> handleDecodeAudioWindow(call.arguments as Map<*, *>, result)
             "probeMediaDurationMs" -> handleProbeMediaDuration(call.arguments as Map<*, *>, result)
+            "analyzeLoudness" -> handleAnalyzeLoudness(call.arguments as? Map<*, *>, result)
             else -> result.notImplemented()
         }
     }
@@ -865,6 +874,42 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             } catch (e: Throwable) {
                 Log.w(TAG, "Duration probe failed", e)
                 withContext(Dispatchers.Main) { result.error("PROBE_ERROR", e.message, null) }
+            }
+        }
+    }
+
+    private fun handleAnalyzeLoudness(args: Map<*, *>?, result: MethodChannel.Result) {
+        val path = args?.get("path") as? String
+        if (path == null) {
+            result.error("INVALID_ARGS", "path is required", null)
+            return
+        }
+        scope.launch {
+            try {
+                // Dart asks for one track at a time too, but the background
+                // worker's engine has its own Dart side.
+                val loudness = loudnessMutex.withLock {
+                    LoudnessAnalyzer.analyze(path) { ensureActive() }
+                }
+                withContext(Dispatchers.Main) {
+                    result.success(
+                        mapOf(
+                            "integratedLufs" to loudness.integratedLufs,
+                            "cabinLufs" to loudness.cabinLufs,
+                            "peakDb" to loudness.peakDb,
+                            "durationMs" to loudness.durationMs
+                        )
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                // Also an OutOfMemoryError or a codec Error: Dart gets an
+                // error instead of the whole process going down.
+                Log.w(TAG, "Loudness analysis failed", e)
+                withContext(Dispatchers.Main) {
+                    result.error("ANALYZE_ERROR", e.message ?: e.javaClass.simpleName, null)
+                }
             }
         }
     }
