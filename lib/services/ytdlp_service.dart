@@ -97,6 +97,18 @@ class YtDlpService {
     return decodeYtDlpJson(result!);
   }
 
+  /// Info for lyrics and transcripts: `id`, `title`, `duration`,
+  /// `language`, `description`, `uploader`, `channel`, `artist`, `track`,
+  /// `alt_title`, and `subtitles` / `automatic_captions` trimmed to one
+  /// json3 entry (`{ext, url, name}`) per manual language and per `-orig`
+  /// speech-to-text track. Caption URLs expire after a few hours.
+  Future<Map<String, dynamic>> getCaptionInfo(String url) async {
+    final result = await _methodChannel.invokeMethod<String>('getCaptionInfo', {
+      'url': url,
+    });
+    return decodeYtDlpJson(result!);
+  }
+
   Future<Map<String, dynamic>> getPlaylistInfo(String url) async {
     final result = await _methodChannel.invokeMethod<String>(
       'getPlaylistInfo',
