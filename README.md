@@ -23,6 +23,8 @@ Per-architecture APKs are also available on the [Releases page](https://github.c
 - **Plays without the app** -- each playlist folder has a `.m3u8` playlist, files carry title/artist/album tags and cover art, and video downloads prefer H.264 so they play on almost any device
 - **Library backup** -- Settings > Library backup exports everything (covers, playlist files, a copy of the app data) and restores playlists from any copied folder
 - **Audio focus** -- playback pauses for calls and resumes when they end, lowers volume for short prompts, and pauses when headphones disconnect
+- **Plane mode** -- evens out songs and lifts their quiet parts so music stays clear over engine noise at a lower volume
+- **Even out volume** -- plays every song at a similar loudness, so a loud song does not follow a quiet one
 
 ## Installation
 
@@ -53,6 +55,19 @@ All chapter data lives in WoolyTube's database and `woolytube_meta.json`. The co
 For a long file such as a mixtape with no chapters, open its **Chapters** page and tap **Recognize songs**. The app decodes short samples every minute, fingerprints them on the device and asks Shazam's tagging endpoint what they are; only fingerprints are sent, never audio. Where the recognized song changes it looks for a quiet transition to place the boundary. Lookups are cached per file, so a cancelled or failed scan resumes where it stopped.
 
 The result is a list of **proposed** chapters with the evidence behind each one. Review them: play a proposal or its boundary, rename, merge or remove entries, then **Apply**. Applying keeps chapters you created or edited and replaces earlier automatic ones; **Undo last chapter change** and **Remove automatic chapters** are available afterwards. Titles come from a catalog match and can be wrong, especially for sped-up or remixed audio, so unrecognized sections and review notes stay visible until you decide.
+
+## Plane mode and even volume
+
+Earbuds without noise cancelling let engine rumble through, so quiet passages disappear and the volume ends up high. Switch on **Plane mode** under **Settings > Sound**:
+- Every song is brought to the same level, with extra level for bass-heavy songs, whose bass the rumble hides.
+- A gentle compressor lifts quiet parts, and a small low-mid lift keeps voices and instruments clear.
+- A limiter stops anything from clipping.
+
+Set the volume so the quiet parts are just clear, and no louder. Loud recent songs may need it a little higher than before, quiet recordings lower. **Plane mode strength** offers Standard and Strong. A tight earbud fit (a bigger tip size, or foam tips) blocks more noise than any setting.
+
+**Even out volume** plays every song at about the level YouTube uses. Loud songs are turned down, and quiet ones are turned up as far as they can go without clipping.
+
+Both measure each song's loudness once, on the phone. The playing song and the next ones are measured right away; the rest of the library only while the phone is charging. Nothing is uploaded or written into your files. The research behind the settings is in [docs/research/plane-mode.md](docs/research/plane-mode.md).
 
 ## Building from Source
 

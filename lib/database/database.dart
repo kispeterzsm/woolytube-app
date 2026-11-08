@@ -119,6 +119,32 @@ class SponsorBlockSegments extends Table {
   DateTimeColumn get createdAt => dateTime()();
 }
 
+/// A song file's measured loudness, for "Even out volume" and plane mode.
+/// The file's path, size and modification time tell whether the
+/// measurement still belongs to the file on disk: a replaced or
+/// re-downloaded file is measured again.
+@DataClassName('LoudnessMeasurement')
+class LoudnessMeasurements extends Table {
+  IntColumn get trackId =>
+      integer().references(Tracks, #id, onDelete: KeyAction.cascade)();
+  TextColumn get filePath => text()();
+  IntColumn get fileSize => integer()();
+  IntColumn get fileModifiedMs => integer()();
+
+  /// EBU R128 integrated loudness, LUFS; null for a silent file.
+  RealColumn get integratedLufs => real().nullable()();
+
+  /// Loudness above about 300 Hz, LUFS (see `MeasuredLoudness.cabinLufs`).
+  RealColumn get cabinLufs => real().nullable()();
+
+  /// Highest sample, dBFS; null for a silent file.
+  RealColumn get peakDb => real().nullable()();
+  DateTimeColumn get measuredAt => dateTime()();
+
+  @override
+  Set<Column> get primaryKey => {trackId};
+}
+
 /// Lyrics or a transcript of one track, or of one chapter of a mix.
 class LyricsDocs extends Table {
   IntColumn get id => integer().autoIncrement()();
@@ -221,7 +247,14 @@ bool titleMatchesFileName(String title, String filePath) {
 }
 
 @DriftDatabase(
-  tables: [Playlists, Tracks, SponsorBlockSegments, LyricsDocs, LyricsLines],
+  tables: [
+    Playlists,
+    Tracks,
+    SponsorBlockSegments,
+    LyricsDocs,
+    LyricsLines,
+    LoudnessMeasurements,
+  ],
 )
 class AppDatabase extends _$AppDatabase {
   AppDatabase._internal(super.e);
@@ -238,7 +271,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 17;
+  int get schemaVersion => 18;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -366,6 +399,9 @@ class AppDatabase extends _$AppDatabase {
       if (from == 16) {
         await migrator.addColumn(lyricsDocs, lyricsDocs.shiftMs);
         await migrator.addColumn(lyricsDocs, lyricsDocs.timingOff);
+      }
+      if (from < 18) {
+        await migrator.createTable(loudnessMeasurements);
       }
     },
   );
@@ -1388,6 +1424,21 @@ class AppDatabase extends _$AppDatabase {
     });
     return true;
   }
+
+  /// The stored loudness measurement of [trackId]'s file, if any.
+  Future<LoudnessMeasurement?> getLoudnessMeasurement(int trackId) =>
+      (select(loudnessMeasurements)
+        ..where((m) => m.trackId.equals(trackId))).getSingleOrNull();
+
+  /// Every stored loudness measurement by track id.
+  Future<Map<int, LoudnessMeasurement>> getLoudnessMeasurements() async {
+    final rows = await select(loudnessMeasurements).get();
+    return {for (final row in rows) row.trackId: row};
+  }
+
+  /// Stores a measurement, replacing any earlier one of the same track.
+  Future<void> saveLoudnessMeasurement(LoudnessMeasurementsCompanion entry) =>
+      into(loudnessMeasurements).insertOnConflictUpdate(entry);
 
   Future<void> deleteSegment(int segmentId) =>
       (delete(sponsorBlockSegments)..where((s) => s.id.equals(segmentId))).go();

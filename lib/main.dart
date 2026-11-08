@@ -71,6 +71,17 @@ void main() async {
     debugPrint('Audio focus init failed: $e');
   }
 
+  try {
+    await playbackService.setPlaneModeStrength(
+      await appSettingsService.getPlaneModeStrength(),
+    );
+    await playbackService.setEvenOutVolume(
+      await appSettingsService.getEvenOutVolume(),
+    );
+  } catch (e) {
+    debugPrint('Sound settings could not be read: $e');
+  }
+
   runApp(
     ProviderScope(
       overrides: [
@@ -111,6 +122,13 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
     ref.listenManual<AsyncValue<bool>>(initProvider, (_, next) {
       if (next.valueOrNull == true) {
         ref.read(foregroundAutoUpdateBridgeProvider).attach();
+        // Plane mode and "Even out volume" still work without it, at a
+        // typical level per song.
+        try {
+          ref.read(playbackLoudnessLinkProvider);
+        } catch (e) {
+          debugPrint('Loudness measuring is not available: $e');
+        }
       }
     }, fireImmediately: true);
   }

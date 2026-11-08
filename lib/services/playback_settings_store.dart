@@ -65,14 +65,31 @@ class PlaybackPreferences {
   final bool? shuffle;
   final bool? autoplay;
   final bool? audioOnly;
+  final bool? planeMode;
   final PlaybackSession? session;
 
   const PlaybackPreferences({
     this.shuffle,
     this.autoplay,
     this.audioOnly,
+    this.planeMode,
     this.session,
   });
+
+  PlaybackPreferences copyWith({
+    bool? shuffle,
+    bool? autoplay,
+    bool? audioOnly,
+    bool? planeMode,
+    PlaybackSession? session,
+    bool clearSession = false,
+  }) => PlaybackPreferences(
+    shuffle: shuffle ?? this.shuffle,
+    autoplay: autoplay ?? this.autoplay,
+    audioOnly: audioOnly ?? this.audioOnly,
+    planeMode: planeMode ?? this.planeMode,
+    session: clearSession ? null : (session ?? this.session),
+  );
 }
 
 /// Persistence for [PlaybackPreferences]. Failures are swallowed by the
@@ -82,6 +99,7 @@ abstract interface class PlaybackSettingsStore {
   Future<void> saveShuffle(bool enabled);
   Future<void> saveAutoplay(bool enabled);
   Future<void> saveAudioOnly(bool enabled);
+  Future<void> savePlaneMode(bool enabled);
 
   /// Null forgets the session (after an explicit stop).
   Future<void> saveSession(PlaybackSession? session);
@@ -95,6 +113,7 @@ class SharedPreferencesPlaybackSettingsStore implements PlaybackSettingsStore {
   static const shuffleKey = 'playback_shuffle';
   static const autoplayKey = 'playback_autoplay';
   static const audioOnlyKey = 'playback_audio_only';
+  static const planeModeKey = 'playback_plane_mode';
   static const sessionKey = 'playback_last_session';
 
   final Future<SharedPreferences> Function() _preferencesLoader;
@@ -113,6 +132,7 @@ class SharedPreferencesPlaybackSettingsStore implements PlaybackSettingsStore {
       shuffle: preferences.getBool(shuffleKey),
       autoplay: preferences.getBool(autoplayKey),
       audioOnly: preferences.getBool(audioOnlyKey),
+      planeMode: preferences.getBool(planeModeKey),
       session: session,
     );
   }
@@ -128,6 +148,10 @@ class SharedPreferencesPlaybackSettingsStore implements PlaybackSettingsStore {
   @override
   Future<void> saveAudioOnly(bool enabled) async =>
       (await _preferencesLoader()).setBool(audioOnlyKey, enabled);
+
+  @override
+  Future<void> savePlaneMode(bool enabled) async =>
+      (await _preferencesLoader()).setBool(planeModeKey, enabled);
 
   @override
   Future<void> saveSession(PlaybackSession? session) async {
@@ -152,42 +176,30 @@ class MemoryPlaybackSettingsStore implements PlaybackSettingsStore {
 
   @override
   Future<void> saveShuffle(bool enabled) async {
-    preferences = PlaybackPreferences(
-      shuffle: enabled,
-      autoplay: preferences.autoplay,
-      audioOnly: preferences.audioOnly,
-      session: preferences.session,
-    );
+    preferences = preferences.copyWith(shuffle: enabled);
   }
 
   @override
   Future<void> saveAutoplay(bool enabled) async {
-    preferences = PlaybackPreferences(
-      shuffle: preferences.shuffle,
-      autoplay: enabled,
-      audioOnly: preferences.audioOnly,
-      session: preferences.session,
-    );
+    preferences = preferences.copyWith(autoplay: enabled);
   }
 
   @override
   Future<void> saveAudioOnly(bool enabled) async {
-    preferences = PlaybackPreferences(
-      shuffle: preferences.shuffle,
-      autoplay: preferences.autoplay,
-      audioOnly: enabled,
-      session: preferences.session,
-    );
+    preferences = preferences.copyWith(audioOnly: enabled);
+  }
+
+  @override
+  Future<void> savePlaneMode(bool enabled) async {
+    preferences = preferences.copyWith(planeMode: enabled);
   }
 
   @override
   Future<void> saveSession(PlaybackSession? session) async {
     sessions.add(session);
-    preferences = PlaybackPreferences(
-      shuffle: preferences.shuffle,
-      autoplay: preferences.autoplay,
-      audioOnly: preferences.audioOnly,
+    preferences = preferences.copyWith(
       session: session,
+      clearSession: session == null,
     );
   }
 }

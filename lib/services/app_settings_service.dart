@@ -1,6 +1,8 @@
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'audio_processing.dart';
+
 typedef PreferencesLoader = Future<SharedPreferences> Function();
 
 class AppSettingsService {
@@ -13,6 +15,9 @@ class AppSettingsService {
   static const pauseOnAudioInterruptionKey = 'pause_on_audio_interruption';
   static const dismissedImportUrlsKey = 'dismissed_import_urls';
   static const lastYtDlpUpdateAttemptKey = 'last_ytdlp_update_attempt';
+  static const evenOutVolumeKey = 'even_out_volume';
+  static const planeModeStrengthKey = 'plane_mode_strength';
+  static const planeModeTipShownKey = 'plane_mode_tip_shown';
   static const _backgroundChannel = MethodChannel('com.woolytube/background');
 
   final PreferencesLoader _preferencesLoader;
@@ -36,6 +41,41 @@ class AppSettingsService {
   Future<void> setPauseOnAudioInterruption(bool enabled) async {
     final preferences = await _preferencesLoader();
     await preferences.setBool(pauseOnAudioInterruptionKey, enabled);
+  }
+
+  /// Plays every song at a similar loudness.
+  Future<bool> getEvenOutVolume() async {
+    final preferences = await _preferencesLoader();
+    return preferences.getBool(evenOutVolumeKey) ?? false;
+  }
+
+  Future<void> setEvenOutVolume(bool enabled) async {
+    final preferences = await _preferencesLoader();
+    await preferences.setBool(evenOutVolumeKey, enabled);
+  }
+
+  Future<PlaneModeStrength> getPlaneModeStrength() async {
+    final preferences = await _preferencesLoader();
+    return PlaneModeStrength.fromName(
+      preferences.getString(planeModeStrengthKey),
+    );
+  }
+
+  Future<void> setPlaneModeStrength(PlaneModeStrength strength) async {
+    final preferences = await _preferencesLoader();
+    await preferences.setString(planeModeStrengthKey, strength.name);
+  }
+
+  /// Whether the tips shown the first time plane mode is switched on were
+  /// already shown.
+  Future<bool> getPlaneModeTipShown() async {
+    final preferences = await _preferencesLoader();
+    return preferences.getBool(planeModeTipShownKey) ?? false;
+  }
+
+  Future<void> setPlaneModeTipShown() async {
+    final preferences = await _preferencesLoader();
+    await preferences.setBool(planeModeTipShownKey, true);
   }
 
   Future<bool> getDownloadSubtitles() async {
@@ -151,12 +191,19 @@ class AppSettingsService {
       autoDownloadWithMobileDataKey,
       downloadSubtitlesKey,
       pauseOnAudioInterruptionKey,
+      evenOutVolumeKey,
     ]) {
       final value = values[key];
       if (value is bool) {
         await preferences.setBool(key, value);
         applied++;
       }
+    }
+    final strength = values[planeModeStrengthKey];
+    if (strength is String &&
+        PlaneModeStrength.values.any((s) => s.name == strength)) {
+      await preferences.setString(planeModeStrengthKey, strength);
+      applied++;
     }
     final languages = values[subtitleLanguagesKey];
     if (languages is String) {

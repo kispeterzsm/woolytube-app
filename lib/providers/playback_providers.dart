@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart' show SubtitleTrack;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../database/database.dart';
+import '../services/audio_processing.dart';
 import '../services/chapter_playback.dart';
 import '../services/playback_service.dart';
 import '../services/audio_handler.dart';
@@ -131,6 +132,18 @@ final autoplayEnabledProvider = StreamProvider<bool>((ref) {
 final audioOnlyModeProvider = StreamProvider<bool>((ref) {
   return ref.watch(playbackServiceProvider).audioOnlyModeStream;
 });
+
+/// Plane mode on or off (see [PlaybackService.setPlaneModePreference]).
+final planeModeProvider = StreamProvider<bool>((ref) {
+  return ref.watch(playbackServiceProvider).planeModeStream;
+});
+
+/// Plane mode, its strength and "Even out volume" as the player has them.
+final audioProcessingSettingsProvider = StreamProvider<AudioProcessingSettings>(
+  (ref) {
+    return ref.watch(playbackServiceProvider).audioProcessingSettingsStream;
+  },
+);
 
 final sleepTimerRemainingProvider = StreamProvider<Duration?>((ref) {
   return ref.watch(playbackServiceProvider).sleepTimerRemainingStream;
