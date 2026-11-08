@@ -10,6 +10,8 @@ import 'ytdlp_service.dart';
 import 'app_settings_service.dart';
 import 'library_gate.dart';
 import 'log_service.dart';
+import 'lyrics/lyrics_models.dart';
+import 'lyrics/lyrics_service.dart';
 import 'media_thumbnail_service.dart';
 import 'metadata_service.dart';
 import 'notification_service.dart';
@@ -331,6 +333,7 @@ class DownloadService {
   final MetadataService _metadata;
   final DownloadNotificationService? _notifications;
   final SponsorBlockService? _sponsorBlock;
+  final LyricsService? _lyrics;
   final AppSettingsService _settings;
   final LibraryGate _gate;
   final MediaThumbnailService _thumbnails;
@@ -413,7 +416,9 @@ class DownloadService {
     String lockOwner = DownloadLock.foregroundOwner,
     LibraryGate? gate,
     MediaThumbnailService? thumbnails,
-  ]) : _settings = settings ?? AppSettingsService(),
+    LyricsService? lyrics,
+  ]) : _lyrics = lyrics,
+       _settings = settings ?? AppSettingsService(),
        _gate =
            gate ?? LibraryGate(lock: lock ?? DownloadLock(), owner: lockOwner),
        _thumbnails = thumbnails ?? const MediaThumbnailService();
@@ -592,6 +597,7 @@ class DownloadService {
         if (sourceChecked) await _markPlaylistUpdated(playlist);
         _emitRun(playlist, DownloadPhase.finishing);
         await _backfillMissingSponsorBlockSegments(playlist);
+        await _backfillMissingLyrics(playlist);
         await _writeMetadataForPlaylist(playlist.id);
         if (_cancelRequested) {
           _emit(DownloadProgress.idle);
@@ -709,6 +715,7 @@ class DownloadService {
       _position = _workTotal;
       _emitRun(playlist, DownloadPhase.finishing, trackProgress: 100);
       await _backfillMissingSponsorBlockSegments(playlist);
+      await _backfillMissingLyrics(playlist);
       await _writeMetadataForPlaylist(playlist.id);
       await _cleanupFolder(playlist);
 
@@ -1753,6 +1760,27 @@ class DownloadService {
     }
   }
 
+  /// Longest a playlist run spends fetching lyrics, so a scheduled update
+  /// stays inside its time limit; the rest waits for the next run.
+  static const lyricsBackfillBudget = Duration(seconds: 90);
+
+  /// Fetches lyrics or transcripts that are due, when the playlist has them
+  /// on. Stops on cancel and after [lyricsBackfillBudget].
+  Future<void> _backfillMissingLyrics(Playlist playlist) async {
+    final lyrics = _lyrics;
+    if (lyrics == null || !lyricsModeIsOn(playlist.lyricsMode)) return;
+    if (_cancelRequested) return;
+    try {
+      await lyrics.backfillPlaylist(
+        playlist.id,
+        cancellation: _DownloadLyricsCancellation(() => _cancelRequested),
+        budget: lyricsBackfillBudget,
+      );
+    } catch (e) {
+      _log.warn('Lyrics backfill failed for "${playlist.name}": $e');
+    }
+  }
+
   /// Whether a downloaded track without segments is due for another
   /// SponsorBlock check. The interval is spread over two extra days by
   /// track, so a playlist checked in one go does not come due all at once
@@ -1806,4 +1834,14 @@ class DownloadService {
     }
     return cleaned;
   }
+}
+
+/// Stops a lyrics backfill when the download run is cancelled.
+class _DownloadLyricsCancellation extends LyricsCancellation {
+  _DownloadLyricsCancellation(this._cancelRequested);
+
+  final bool Function() _cancelRequested;
+
+  @override
+  bool get isCancelled => super.isCancelled || _cancelRequested();
 }

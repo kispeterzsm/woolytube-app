@@ -1,12 +1,14 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:drift/drift.dart' show Value;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/pages/chapter_editor_page.dart';
 import 'package:woolytube/pages/chapters_page.dart';
+import 'package:woolytube/pages/lyrics_page.dart';
 import 'package:woolytube/providers/chapter_editor_providers.dart';
 import 'package:woolytube/providers/playback_providers.dart';
 import 'package:woolytube/providers/providers.dart';
@@ -407,6 +409,23 @@ void main() {
     await unmount(tester);
   });
 
+  testWidgets('Lyrics opens that chapter on the lyrics page', (tester) async {
+    final track = await addTrack(chapters: youTubeChapters);
+    await (db.update(db.playlists)..where(
+      (p) => p.id.equals(track.playlistId),
+    )).write(const PlaylistsCompanion(lyricsMode: Value('lyrics')));
+    await pumpPage(tester, track);
+
+    await openChapterOptions(tester, 'b');
+    expect(find.text('See the lyrics, or pick the right song'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('chapter-actions-lyrics')));
+    await tester.pumpAndSettle();
+    expect(find.byType(LyricsPage), findsOneWidget);
+    expect(find.text('2. Song'), findsOneWidget);
+    expect(find.text('Not fetched yet'), findsOneWidget);
+    await unmount(tester);
+  });
+
   testWidgets('a chapter can be renamed and its times typed', (tester) async {
     final track = await addTrack(chapters: youTubeChapters);
     await pumpPage(tester, track);
@@ -552,6 +571,7 @@ class _Player implements PlaybackService {
     Playlist? playlist,
     String? chapterId,
     bool whole = false,
+    Duration? startAt,
   }) async {
     playedTracks.add((track.id, chapterId, allTracks.length));
   }

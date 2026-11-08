@@ -13,6 +13,9 @@ import 'sponsorblock_service.dart';
 import 'media_thumbnail_service.dart' as media_thumbnail_service;
 import 'app_settings_service.dart';
 import 'video_quality.dart';
+import 'lyrics/lyrics_models.dart';
+import 'lyrics/lyrics_service.dart'
+    show dropLyricsForReplacedMedia, persistLyricsFile;
 
 /// Thrown by [PlaylistService.syncPlaylist] when the owner stopped the
 /// update while YouTube was being asked for the playlist.
@@ -457,6 +460,7 @@ class PlaylistService {
         }
         if (!keptVideoIds.contains(track.videoId)) {
           await deleteFile(LibraryLayout.infoJsonPath(folder, track.videoId));
+          await deleteFile(LibraryLayout.lyricsJsonPath(folder, track.videoId));
         }
       }
       final numbered = RegExp(r'^(\d+)_');
@@ -624,6 +628,8 @@ class PlaylistService {
     bool? sponsorBlockEnabled,
     List<String>? sponsorBlockCategories,
     Map<String, SponsorBlockCategoryAction>? sponsorBlockCategoryActions,
+    // `Value(null)` turns lyrics off; absent leaves the mode alone.
+    Value<LyricsMode?> lyricsMode = const Value.absent(),
   }) async {
     final playlist = await _db.getPlaylist(id);
     final legacyCategorySet =
@@ -670,6 +676,10 @@ class PlaylistService {
               ? Value(
                 encodeSponsorBlockCategoryActions(resolvedSponsorBlockActions),
               )
+              : const Value.absent(),
+      lyricsMode:
+          lyricsMode.present
+              ? Value(LyricsMode.toDb(lyricsMode.value))
               : const Value.absent(),
     );
 
@@ -787,6 +797,22 @@ class PlaylistService {
     final switched = await _db.getPlaylist(playlist.id);
     for (final id in adopt) {
       await _metadata.adoptKeptFile(switched, id);
+    }
+    // A reinstall imports only the new folder: the kept video info and the
+    // lyrics go along. Lyrics are written from the database, which also
+    // replaces stale files left in a reused earlier folder.
+    for (final track in await _db.getTracksForPlaylist(playlist.id)) {
+      try {
+        final info = File(LibraryLayout.infoJsonPath(oldFolder, track.videoId));
+        final target = LibraryLayout.infoJsonPath(targetFolder, track.videoId);
+        if (!p.equals(oldFolder, targetFolder) && await info.exists()) {
+          await Directory(p.dirname(target)).create(recursive: true);
+          await info.copy(target);
+        }
+        await persistLyricsFile(_db, track.id);
+      } catch (_) {
+        // Extras; the switch itself is done.
+      }
     }
 
     // New sidecar first, then set the old one aside: the old folder's
@@ -916,11 +942,20 @@ class PlaylistService {
         media_thumbnail_service.noteThumbnailWritten(target);
         await _db.updateTrackThumbnailPath(track.id, target);
       }
-      final info = File(LibraryLayout.infoJsonPath(oldFolder, track.videoId));
-      if (await info.exists()) {
-        final target = LibraryLayout.infoJsonPath(newFolder, track.videoId);
-        await Directory(p.dirname(target)).create(recursive: true);
-        await info.copy(target);
+      for (final (from, to) in [
+        (
+          LibraryLayout.infoJsonPath(oldFolder, track.videoId),
+          LibraryLayout.infoJsonPath(newFolder, track.videoId),
+        ),
+        (
+          LibraryLayout.lyricsJsonPath(oldFolder, track.videoId),
+          LibraryLayout.lyricsJsonPath(newFolder, track.videoId),
+        ),
+      ]) {
+        final file = File(from);
+        if (!await file.exists()) continue;
+        await Directory(p.dirname(to)).create(recursive: true);
+        await file.copy(to);
       }
     }
     await _db.updatePlaylistFields(
@@ -2053,6 +2088,10 @@ class PlaylistService {
       filePath: destinationPath,
       isLocalReplacement: true,
     );
+    // Lyrics timed to the old file (chapters, transcripts, synced lines),
+    // after the new file is recorded: a lookup still running for the old
+    // one sees the change and does not write.
+    await dropLyricsForReplacedMedia(_db, track.id);
     await _db.setTrackReplaceRequested(track.id, false);
     // Remote segments were timed against the YouTube video, not this file.
     await _db.deleteRemoteSegmentsForTrack(track.id);

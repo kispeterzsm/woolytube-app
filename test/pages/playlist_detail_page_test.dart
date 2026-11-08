@@ -13,6 +13,8 @@ import 'package:woolytube/providers/providers.dart';
 import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/download_service.dart';
 import 'package:woolytube/services/library_gate.dart';
+import 'package:woolytube/services/lyrics/lyrics_models.dart';
+import 'package:woolytube/services/lyrics/lyrics_search.dart';
 import 'package:woolytube/services/metadata_service.dart';
 import 'package:woolytube/services/playback_service.dart';
 import 'package:woolytube/services/playlist_service.dart';
@@ -25,6 +27,7 @@ void main() {
   late Playlist playlist;
   late _Downloads downloads;
   late _Playback playback;
+  late _LyricsSearch lyrics;
   late _Playlists playlists;
   late _Metadata metadata;
   late BehaviorSubject<Track?> currentTrack;
@@ -39,6 +42,7 @@ void main() {
     playlist = await insertTestPlaylist(db, name: 'Loaded name');
     downloads = _Downloads();
     playback = _Playback();
+    lyrics = _LyricsSearch();
     playlists = _Playlists();
     metadata = _Metadata();
     currentTrack = BehaviorSubject<Track?>.seeded(null);
@@ -74,6 +78,7 @@ void main() {
     ),
     syncingPlaylistsProvider.overrideWith((ref) => syncing.stream),
     downloadQueueProvider.overrideWith((ref) => queued.stream),
+    lyricsSearchProvider.overrideWithValue(lyrics),
   ];
 
   List<Override> overrides(
@@ -306,6 +311,130 @@ void main() {
     expect(find.text('Play'), findsOneWidget);
   });
 
+  testWidgets('search adds lyric matches with a one-line subtitle', (
+    tester,
+  ) async {
+    playlist = await insertTestPlaylist(
+      db,
+      url: 'lyrics',
+      name: 'Songs',
+      lyricsMode: 'lyrics',
+    );
+    final title = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      title: 'Endless road trip',
+      status: 'complete',
+      filePath: '/tmp/title.m4a',
+      durationSeconds: 200,
+    );
+    final song = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 2,
+      videoId: 'song',
+      title: 'Avicii - Hey Brother',
+      status: 'complete',
+      filePath: '/tmp/song.m4a',
+      durationSeconds: 255,
+    );
+    final other = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 3,
+      videoId: 'other',
+      title: 'Something else',
+      status: 'complete',
+      filePath: '/tmp/other.m4a',
+    );
+    lyrics.hits = [
+      LyricsHit(
+        trackId: song.id,
+        docId: 5,
+        lineId: 50,
+        lineNo: 3,
+        lineText:
+            "Oh brother, there's an endless road to rediscover, "
+            'far away from home and every single thing we know',
+        highlightRanges: const [
+          LyricsHighlight(23, 30),
+          LyricsHighlight(31, 35),
+        ],
+        positionMs: 83000,
+        score: 0.9,
+        kind: LyricsMode.lyrics,
+      ),
+    ];
+    await pumpPage(tester, tracks: [title, song, other]);
+    final rowHeight =
+        tester.getSize(find.byKey(ValueKey('track-row-${title.id}'))).height;
+
+    await tester.tap(find.byTooltip('Search tracks'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'Endless road');
+    await tester.pump();
+    // Title matches show at once; lyrics once typing pauses.
+    expect(find.text('Endless road trip'), findsOneWidget);
+    expect(find.text('Avicii - Hey Brother'), findsNothing);
+    expect(lyrics.queries, isEmpty);
+
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pumpAndSettle();
+    expect(lyrics.queries, [('endless road', playlist.id)]);
+    expect(find.text('Avicii - Hey Brother'), findsOneWidget);
+    expect(find.text('Something else'), findsNothing);
+    final subtitle = find.byKey(ValueKey('track-lyric-${song.id}'));
+    expect(subtitle, findsOneWidget);
+    expect(
+      find.descendant(of: subtitle, matching: find.text('” · 1:23')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: subtitle,
+        matching: find.textContaining('endless road', findRichText: true),
+      ),
+      findsOneWidget,
+    );
+    // Still one subtitle line: the row keeps the fixed height.
+    expect(
+      tester.getSize(find.byKey(ValueKey('track-row-${song.id}'))).height,
+      rowHeight,
+    );
+    expect(tester.takeException(), isNull);
+
+    await tester.tap(find.text('Avicii - Hey Brother'));
+    await tester.pump();
+    expect(playback.playTrackIds, [song.id]);
+    expect(playback.startAts, [const Duration(milliseconds: 81000)]);
+
+    // Closing the search forgets the lyric matches.
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.byKey(ValueKey('track-lyric-${song.id}')), findsNothing);
+  });
+
+  testWidgets('a playlist with lyrics off never searches lyrics', (
+    tester,
+  ) async {
+    final track = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      title: 'Only song',
+      status: 'complete',
+      filePath: '/tmp/only.m4a',
+    );
+    await pumpPage(tester, tracks: [track]);
+    await tester.tap(find.byTooltip('Search tracks'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'endless road');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pumpAndSettle();
+    expect(lyrics.queries, isEmpty);
+    expect(find.text('No matching tracks'), findsOneWidget);
+  });
+
   testWidgets('every row has the same height whatever its content', (
     tester,
   ) async {
@@ -536,6 +665,7 @@ void main() {
       'Add to queue',
       'Always skip',
       'Chapters…',
+      'Lyrics…',
       'Skip segments…',
       'File',
       'Edit title & file name',
@@ -1039,6 +1169,105 @@ void main() {
     await jump();
     expect(find.byKey(ValueKey('track-row-${tracks[29].id}')), findsOneWidget);
     expect(find.textContaining('Back to the first'), findsOneWidget);
+  });
+
+  testWidgets('the menu jumps from one track without lyrics to the next', (
+    tester,
+  ) async {
+    playlist = await insertTestPlaylist(
+      db,
+      url: 'lyrics-jump',
+      name: 'Songs',
+      lyricsMode: 'lyrics',
+    );
+    final tracks = [
+      for (var i = 1; i <= 60; i++)
+        await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: i,
+          videoId: 'v$i',
+          title: 'Track $i',
+          status: i == 10 ? 'error' : 'complete',
+          filePath: i == 10 ? null : '/tmp/$i.m4a',
+        ),
+    ];
+    final checkedAt = DateTime(2026, 11, 8);
+    Future<void> doc(int index, String status, {bool pinned = false}) =>
+        db.replaceLyricsDoc(
+          LyricsDocDraft(
+            trackId: tracks[index - 1].id,
+            kind: LyricsMode.lyrics,
+            status: status,
+            pinned: pinned,
+            checkedAt: checkedAt,
+            lines:
+                status == LyricsStatus.found
+                    ? const [LyricsLineDraft('la la la')]
+                    : const [],
+          ),
+        );
+    for (var i = 1; i <= 60; i++) {
+      switch (i) {
+        case 20:
+          await doc(i, LyricsStatus.none);
+        case 40:
+          break; // Not fetched yet.
+        case 45:
+          await doc(i, LyricsStatus.instrumental);
+        case 50:
+          await doc(i, LyricsStatus.none, pinned: true); // User said none.
+        case 55:
+          await doc(i, LyricsStatus.error);
+        default:
+          await doc(i, LyricsStatus.found);
+      }
+    }
+    await pumpPage(tester, tracks: tracks);
+    await tester.pumpAndSettle();
+
+    Future<void> jump() async {
+      await tester.tap(find.byKey(const ValueKey('playlist-detail-menu')));
+      await tester.pumpAndSettle();
+      // Not the failed download (#10), the instrumental (#45) or the one
+      // marked as having no lyrics (#50).
+      expect(find.text('Jump to next without lyrics (3)'), findsOneWidget);
+      await tester.tap(find.text('Jump to next without lyrics (3)'));
+      await tester.pumpAndSettle();
+    }
+
+    await jump();
+    expect(find.byKey(ValueKey('track-row-${tracks[19].id}')), findsOneWidget);
+    expect(find.textContaining('1 of 3: #20 no lyrics'), findsOneWidget);
+
+    await jump();
+    expect(find.byKey(ValueKey('track-row-${tracks[39].id}')), findsOneWidget);
+    expect(find.textContaining('2 of 3: #40 no lyrics'), findsOneWidget);
+
+    await jump();
+    expect(find.textContaining('3 of 3: #55 no lyrics'), findsOneWidget);
+
+    await jump();
+    expect(find.byKey(ValueKey('track-row-${tracks[19].id}')), findsOneWidget);
+    expect(find.textContaining('Back to the first'), findsOneWidget);
+  });
+
+  testWidgets('no lyrics jump while the playlist has lyrics off', (
+    tester,
+  ) async {
+    final tracks = [
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        status: 'complete',
+        filePath: '/tmp/1.m4a',
+      ),
+    ];
+    await pumpPage(tester, tracks: tracks);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('playlist-detail-menu')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('without lyrics'), findsNothing);
   });
 
   group('temporary playlist', () {
@@ -1607,6 +1836,24 @@ class _Playlists implements PlaylistService {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
+class _LyricsSearch implements LyricsSearch {
+  List<LyricsHit> hits = const [];
+  final queries = <(String, int?)>[];
+
+  @override
+  Future<List<LyricsHit>> search(
+    String query, {
+    int? playlistId,
+    int limit = 50,
+  }) async {
+    queries.add((query, playlistId));
+    return hits;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
 class _Playback implements PlaybackService {
   int toggleCalls = 0;
   final removedPlaylists = <int>[];
@@ -1622,6 +1869,7 @@ class _Playback implements PlaybackService {
   int shuffleToggles = 0;
   int playAllCalls = 0;
   final playTrackIds = <int>[];
+  final startAts = <Duration?>[];
   final alwaysSkipCalls = <(int, bool)>[];
   final queued = <(int, bool)>[];
   final playedUpNext = <int>[];
@@ -1644,7 +1892,11 @@ class _Playback implements PlaybackService {
     Playlist? playlist,
     String? chapterId,
     bool whole = false,
-  }) async => playTrackIds.add(track.id);
+    Duration? startAt,
+  }) async {
+    playTrackIds.add(track.id);
+    startAts.add(startAt);
+  }
 
   @override
   Future<void> setAlwaysSkip(Track track, bool alwaysSkip) async =>

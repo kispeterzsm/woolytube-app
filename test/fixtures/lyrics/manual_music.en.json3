@@ -1,0 +1,513 @@
+{
+  "wireMagic": "pb3",
+  "pens": [ {
+  
+  } ],
+  "wsWinStyles": [ {
+  
+  }, {
+    "juJustifCode": 2
+  } ],
+  "wpWinPositions": [ {
+  
+  }, {
+    "apPoint": 7,
+    "ahHorPos": 50,
+    "avVerPos": 100,
+    "rcRows": 1,
+    "ccCols": 14
+  }, {
+    "apPoint": 7,
+    "ahHorPos": 50,
+    "avVerPos": 100,
+    "rcRows": 1,
+    "ccCols": 15
+  }, {
+    "apPoint": 6,
+    "ahHorPos": 3,
+    "avVerPos": 100,
+    "rcRows": 1,
+    "ccCols": 41
+  }, {
+    "apPoint": 7,
+    "ahHorPos": 50,
+    "avVerPos": 100,
+    "rcRows": 2,
+    "ccCols": 26
+  }, {
+    "apPoint": 6,
+    "ahHorPos": 3,
+    "avVerPos": 100,
+    "rcRows": 1,
+    "ccCols": 37
+  }, {
+    "apPoint": 7,
+    "ahHorPos": 50,
+    "avVerPos": 100,
+    "rcRows": 1,
+    "ccCols": 11
+  }, {
+    "apPoint": 7,
+    "ahHorPos": 50,
+    "avVerPos": 100,
+    "rcRows": 2,
+    "ccCols": 25
+  }, {
+    "apPoint": 6,
+    "ahHorPos": 3,
+    "avVerPos": 100,
+    "rcRows": 1,
+    "ccCols": 39
+  }, {
+    "apPoint": 6,
+    "ahHorPos": 3,
+    "avVerPos": 100,
+    "rcRows": 1,
+    "ccCols": 42
+  }, {
+    "apPoint": 7,
+    "ahHorPos": 50,
+    "avVerPos": 100,
+    "rcRows": 1,
+    "ccCols": 29
+  }, {
+    "apPoint": 6,
+    "ahHorPos": 3,
+    "avVerPos": 100,
+    "rcRows": 1,
+    "ccCols": 36
+  }, {
+    "apPoint": 7,
+    "ahHorPos": 50,
+    "avVerPos": 100,
+    "rcRows": 1,
+    "ccCols": 25
+  }, {
+    "apPoint": 6,
+    "ahHorPos": 3,
+    "avVerPos": 100,
+    "rcRows": 1,
+    "ccCols": 34
+  }, {
+    "apPoint": 7,
+    "ahHorPos": 50,
+    "avVerPos": 100,
+    "rcRows": 1,
+    "ccCols": 20
+  }, {
+    "apPoint": 7,
+    "ahHorPos": 50,
+    "avVerPos": 100,
+    "rcRows": 1,
+    "ccCols": 31
+  }, {
+    "apPoint": 7,
+    "ahHorPos": 50,
+    "avVerPos": 100,
+    "rcRows": 2,
+    "ccCols": 23
+  }, {
+    "apPoint": 7,
+    "ahHorPos": 50,
+    "avVerPos": 100,
+    "rcRows": 1,
+    "ccCols": 24
+  }, {
+    "apPoint": 7,
+    "ahHorPos": 50,
+    "avVerPos": 100,
+    "rcRows": 2,
+    "ccCols": 22
+  }, {
+    "apPoint": 7,
+    "ahHorPos": 50,
+    "avVerPos": 100,
+    "rcRows": 1,
+    "ccCols": 19
+  } ],
+  "events": [ {
+    "tStartMs": 536,
+    "dDurationMs": 2583,
+    "segs": [ {
+      "utf8": "(gentle music)"
+    } ],
+    "wpWinPosId": 1,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 4278,
+    "dDurationMs": 3309,
+    "segs": [ {
+      "utf8": "♪ Hey brother ♪"
+    } ],
+    "wpWinPosId": 2,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 7587,
+    "dDurationMs": 5000,
+    "segs": [ {
+      "utf8": "♪ There's an endless road to rediscover ♪"
+    } ],
+    "wpWinPosId": 3,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 12919,
+    "dDurationMs": 3359,
+    "segs": [ {
+      "utf8": "♪ Hey sister ♪"
+    } ],
+    "wpWinPosId": 1,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 16278,
+    "dDurationMs": 5000,
+    "segs": [ {
+      "utf8": "♪ Know that water's sweet,\nbut blood is thicker ♪"
+    } ],
+    "wpWinPosId": 4,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 21478,
+    "dDurationMs": 5000,
+    "segs": [ {
+      "utf8": "♪ Oh, if the sky comes fallin' down ♪"
+    } ],
+    "wpWinPosId": 5,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 27089,
+    "dDurationMs": 1917,
+    "segs": [ {
+      "utf8": "♪ For you ♪"
+    } ],
+    "wpWinPosId": 6,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 29006,
+    "dDurationMs": 5000,
+    "segs": [ {
+      "utf8": "♪ There's nothin' in this\nworld I wouldn't do ♪"
+    } ],
+    "wpWinPosId": 7,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 34978,
+    "dDurationMs": 3361,
+    "segs": [ {
+      "utf8": "♪ Hey brother ♪"
+    } ],
+    "wpWinPosId": 2,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 38339,
+    "dDurationMs": 5000,
+    "segs": [ {
+      "utf8": "♪ Do you still believe in one another ♪"
+    } ],
+    "wpWinPosId": 8,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 43631,
+    "dDurationMs": 3378,
+    "segs": [ {
+      "utf8": "♪ Hey sister ♪"
+    } ],
+    "wpWinPosId": 1,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 47009,
+    "dDurationMs": 5000,
+    "segs": [ {
+      "utf8": "♪ Do you still believe in love, I wonder ♪"
+    } ],
+    "wpWinPosId": 9,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 52289,
+    "dDurationMs": 5000,
+    "segs": [ {
+      "utf8": "♪ Oh, if the sky comes fallin' down ♪"
+    } ],
+    "wpWinPosId": 5,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 57849,
+    "dDurationMs": 1841,
+    "segs": [ {
+      "utf8": "♪ For you ♪"
+    } ],
+    "wpWinPosId": 6,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 59690,
+    "dDurationMs": 5000,
+    "segs": [ {
+      "utf8": "♪ There's nothin' in this\nworld I wouldn't do ♪"
+    } ],
+    "wpWinPosId": 7,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 64897,
+    "dDurationMs": 2029,
+    "segs": [ {
+      "utf8": "♪ Ah, ah, ah ♪"
+    } ],
+    "wpWinPosId": 1,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 66926,
+    "dDurationMs": 3462,
+    "segs": [ {
+      "utf8": "♪ What if I'm far from home ♪"
+    } ],
+    "wpWinPosId": 10,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 70388,
+    "dDurationMs": 3280,
+    "segs": [ {
+      "utf8": "♪ Oh brother, I will hear you call ♪"
+    } ],
+    "wpWinPosId": 11,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 73668,
+    "dDurationMs": 3411,
+    "segs": [ {
+      "utf8": "♪ What if I lose it all ♪"
+    } ],
+    "wpWinPosId": 12,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 77079,
+    "dDurationMs": 2216,
+    "segs": [ {
+      "utf8": "♪ Oh sister, I will help you out ♪"
+    } ],
+    "wpWinPosId": 13,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 79295,
+    "dDurationMs": 5000,
+    "segs": [ {
+      "utf8": "♪ Oh, if the sky comes fallin' down ♪"
+    } ],
+    "wpWinPosId": 5,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 84718,
+    "dDurationMs": 1981,
+    "segs": [ {
+      "utf8": "♪ For you ♪"
+    } ],
+    "wpWinPosId": 6,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 86699,
+    "dDurationMs": 5000,
+    "segs": [ {
+      "utf8": "♪ There's nothin' in this\nworld I wouldn't do ♪"
+    } ],
+    "wpWinPosId": 7,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 91831,
+    "dDurationMs": 2583,
+    "segs": [ {
+      "utf8": "(upbeat music)"
+    } ],
+    "wpWinPosId": 1,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 107911,
+    "dDurationMs": 3083,
+    "segs": [ {
+      "utf8": "(lively dance music)"
+    } ],
+    "wpWinPosId": 14,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 142586,
+    "dDurationMs": 3300,
+    "segs": [ {
+      "utf8": "♪ Hey brother ♪"
+    } ],
+    "wpWinPosId": 2,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 145886,
+    "dDurationMs": 5000,
+    "segs": [ {
+      "utf8": "♪ There's an endless road to rediscover ♪"
+    } ],
+    "wpWinPosId": 3,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 151130,
+    "dDurationMs": 3403,
+    "segs": [ {
+      "utf8": "♪ Hey sister ♪"
+    } ],
+    "wpWinPosId": 1,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 154533,
+    "dDurationMs": 5000,
+    "segs": [ {
+      "utf8": "♪ Do you still believe in love, I wonder ♪"
+    } ],
+    "wpWinPosId": 9,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 159772,
+    "dDurationMs": 5000,
+    "segs": [ {
+      "utf8": "♪ Oh, if the sky comes fallin' down ♪"
+    } ],
+    "wpWinPosId": 5,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 165398,
+    "dDurationMs": 1860,
+    "segs": [ {
+      "utf8": "♪ For you ♪"
+    } ],
+    "wpWinPosId": 6,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 167258,
+    "dDurationMs": 5000,
+    "segs": [ {
+      "utf8": "♪ There's nothin' in this\nworld I wouldn't do ♪"
+    } ],
+    "wpWinPosId": 7,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 172396,
+    "dDurationMs": 2124,
+    "segs": [ {
+      "utf8": "♪ Ah, ah, ah ♪"
+    } ],
+    "wpWinPosId": 1,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 174520,
+    "dDurationMs": 3486,
+    "segs": [ {
+      "utf8": "♪ What if I'm far from home ♪"
+    } ],
+    "wpWinPosId": 10,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 178006,
+    "dDurationMs": 3199,
+    "segs": [ {
+      "utf8": "♪ Oh brother, I will hear you call ♪"
+    } ],
+    "wpWinPosId": 11,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 181205,
+    "dDurationMs": 3333,
+    "segs": [ {
+      "utf8": "♪ What if I lose it all ♪"
+    } ],
+    "wpWinPosId": 12,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 184538,
+    "dDurationMs": 2258,
+    "segs": [ {
+      "utf8": "♪ Oh sister, I will help you out ♪"
+    } ],
+    "wpWinPosId": 13,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 186796,
+    "dDurationMs": 5000,
+    "segs": [ {
+      "utf8": "♪ Oh, if the sky comes fallin' down ♪"
+    } ],
+    "wpWinPosId": 5,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 192239,
+    "dDurationMs": 1926,
+    "segs": [ {
+      "utf8": "♪ For you ♪"
+    } ],
+    "wpWinPosId": 6,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 194165,
+    "dDurationMs": 5000,
+    "segs": [ {
+      "utf8": "♪ There's nothin' in this\nworld I wouldn't do ♪"
+    } ],
+    "wpWinPosId": 7,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 199369,
+    "dDurationMs": 3083,
+    "segs": [ {
+      "utf8": "(lively dance music)"
+    } ],
+    "wpWinPosId": 14,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 219875,
+    "dDurationMs": 2318,
+    "segs": [ {
+      "utf8": "- [Jack] Tell me another story."
+    } ],
+    "wpWinPosId": 15,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 222193,
+    "dDurationMs": 2323,
+    "segs": [ {
+      "utf8": "- I think it's time for\nyou to tell me a story."
+    } ],
+    "wpWinPosId": 16,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 224516,
+    "dDurationMs": 3417,
+    "segs": [ {
+      "utf8": "(lively music continues)"
+    } ],
+    "wpWinPosId": 17,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 231833,
+    "dDurationMs": 2369,
+    "segs": [ {
+      "utf8": "- [Jack] Why do you have to go, Dad?"
+    } ],
+    "wpWinPosId": 11,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 234202,
+    "dDurationMs": 1997,
+    "segs": [ {
+      "utf8": "- [Zach] Promise, I'll\nbe back another time."
+    } ],
+    "wpWinPosId": 18,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 236199,
+    "dDurationMs": 3417,
+    "segs": [ {
+      "utf8": "(lively music continues)"
+    } ],
+    "wpWinPosId": 17,
+    "wsWinStyleId": 1
+  }, {
+    "tStartMs": 249355,
+    "dDurationMs": 3083,
+    "segs": [ {
+      "utf8": "(crickets chirping)"
+    } ],
+    "wpWinPosId": 19,
+    "wsWinStyleId": 1
+  } ]
+}

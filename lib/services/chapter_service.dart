@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import '../database/database.dart';
 import 'chapters.dart';
+import 'lyrics/lyrics_service.dart';
 import 'metadata_service.dart';
 import 'recognition/song_recognition_service.dart';
 import 'ytdlp_service.dart';
@@ -74,6 +75,16 @@ class ChapterService {
     return write;
   }
 
+  /// Writes a track's chapters and drops lyrics of chapters that are gone
+  /// or changed.
+  Future<void> _writeChapters(int trackId, ChapterData data) async {
+    final previous = ChapterData.decode(
+      (await db.getTrack(trackId))?.chaptersJson,
+    );
+    await db.writeTrackChapters(trackId, data);
+    await syncLyricsChapterDocs(db, trackId, data, previous: previous);
+  }
+
   Future<void> setOverride(Track track, bool? enabled) async {
     await db.setTrackChapterOverride(track.id, enabled);
     await persist(track.playlistId);
@@ -82,7 +93,7 @@ class ChapterService {
   Future<void> setShuffleChapters(Track track, bool enabled) async {
     final fresh = await db.getTrack(track.id);
     if (fresh == null) return;
-    await db.writeTrackChapters(
+    await _writeChapters(
       track.id,
       ChapterData.decode(fresh.chaptersJson).withShuffleChapters(enabled),
     );
@@ -103,7 +114,7 @@ class ChapterService {
       final old = ChapterData.decode(fresh.chaptersJson);
       final next = old.withChapterSkip(chapterId, skip);
       if (identical(old, next)) return;
-      await db.writeTrackChapters(track.id, next);
+      await _writeChapters(track.id, next);
       changed = true;
     });
     if (changed) await persist(track.playlistId);
@@ -167,7 +178,7 @@ class ChapterService {
               (await db.getTrack(track.id))?.chaptersJson,
             );
             // copyWith keeps the edit history and recognition state.
-            await db.writeTrackChapters(
+            await _writeChapters(
               track.id,
               old.copyWith(
                 downloaded: remote.downloaded,
@@ -234,7 +245,7 @@ class ChapterService {
     }
     final old = ChapterData.decode(fresh.chaptersJson);
     final remote = ChapterData.fromVideoInfo(info);
-    await db.writeTrackChapters(
+    await _writeChapters(
       track.id,
       old.copyWith(
         downloaded: remote.downloaded,
@@ -265,7 +276,7 @@ class ChapterService {
       final next = action(old, fresh);
       if (identical(old, next)) return;
       _validateEdit(old, next);
-      await db.writeTrackChapters(track.id, next);
+      await _writeChapters(track.id, next);
       changed = true;
     });
     if (changed) await persist(track.playlistId);
@@ -575,7 +586,7 @@ class ChapterService {
         throw StateError('The media changed. Reopen its chapters.');
       }
       final current = ChapterData.decode(fresh.chaptersJson);
-      await db.writeTrackChapters(
+      await _writeChapters(
         track.id,
         data.copyWith(
           recognitionEpoch:

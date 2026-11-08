@@ -11,7 +11,10 @@ import 'package:woolytube/providers/playback_providers.dart';
 import 'package:woolytube/providers/providers.dart';
 import 'package:woolytube/services/app_settings_service.dart';
 import 'package:woolytube/services/download_network_policy.dart';
+import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/download_service.dart';
+import 'package:woolytube/services/lyrics/lyrics_models.dart';
+import 'package:woolytube/services/lyrics/lyrics_search.dart';
 import 'package:woolytube/services/metadata_service.dart';
 import 'package:woolytube/services/playback_service.dart';
 import 'package:woolytube/services/playlist_service.dart';
@@ -32,6 +35,7 @@ void main() {
   late List<Track> tracks;
   late StreamController<DownloadProgress> progress;
   late _Playback playback;
+  late _LyricsSearch lyrics;
 
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
@@ -60,6 +64,7 @@ void main() {
     ];
     progress = StreamController<DownloadProgress>.broadcast();
     playback = _Playback();
+    lyrics = _LyricsSearch();
   });
 
   tearDown(() async {
@@ -105,6 +110,7 @@ void main() {
           ),
           isPlayingProvider.overrideWith((ref) => Stream.value(true)),
           playbackServiceProvider.overrideWithValue(playback),
+          lyricsSearchProvider.overrideWithValue(lyrics),
           ...overrides,
         ],
         child: const MaterialApp(home: HomePage()),
@@ -400,6 +406,168 @@ void main() {
     expect(card(0), findsOneWidget);
   });
 
+  testWidgets('search: lyric lines show after a pause and play at the line', (
+    tester,
+  ) async {
+    await db.writeTrackChapters(
+      tracks.first.id,
+      const ChapterData(
+        downloaded: [
+          MediaChapter(id: 'ch1', title: 'Opener', startMs: 0, endMs: 600000),
+          MediaChapter(
+            id: 'ch2',
+            title: 'Hey Brother',
+            startMs: 600000,
+            endMs: 900000,
+          ),
+        ],
+      ),
+    );
+    tracks = [(await db.getTrack(tracks.first.id))!, tracks.last];
+    lyrics.hits = [
+      LyricsHit(
+        trackId: tracks.first.id,
+        chapterId: 'ch2',
+        docId: 7,
+        lineId: 70,
+        lineNo: 1,
+        lineText: "There's an endless road to rediscover",
+        highlightRanges: const [
+          LyricsHighlight(8, 10),
+          LyricsHighlight(11, 18),
+        ],
+        positionMs: 605000,
+        score: 0.95,
+        kind: LyricsMode.lyrics,
+      ),
+    ];
+    await pumpHome(tester);
+    await tester.tap(find.byTooltip('Search'));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'an endles');
+    await tester.enterText(find.byType(TextField), 'an endless road');
+    await tester.pump();
+    // Not searched until typing pauses.
+    expect(lyrics.queries, isEmpty);
+    expect(find.text('Lyrics'), findsNothing);
+    expect(find.text('Nothing matches'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pump();
+    expect(lyrics.queries, ['an endless road']);
+    expect(find.text('Lyrics'), findsOneWidget);
+    final tile = find.byKey(const ValueKey('search-lyrics-7'));
+    expect(tile, findsOneWidget);
+    expect(
+      find.descendant(of: tile, matching: find.text('Hey Brother')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: tile,
+        matching: find.text('Morning song · Playlist 2'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: tile,
+        matching: find.text(
+          "There's an endless road to rediscover",
+          findRichText: true,
+        ),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: tile, matching: find.text('10:05')),
+      findsOneWidget,
+    );
+
+    await tester.tap(tile);
+    await tester.pump();
+    expect(playback.played, tracks.first.id);
+    expect(playback.playedChapterId, 'ch2');
+    expect(playback.playedStartAt, const Duration(milliseconds: 603000));
+
+    // A new query hides the old lines until its own search is done.
+    await tester.enterText(find.byType(TextField), 'winter snow');
+    await tester.pump();
+    expect(find.byKey(const ValueKey('search-lyrics-7')), findsNothing);
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pump();
+    expect(lyrics.queries, hasLength(2));
+    expect(find.byKey(const ValueKey('search-lyrics-7')), findsOneWidget);
+
+    // A short query clears the lines without searching.
+    await tester.enterText(find.byType(TextField), 'a');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.text('Lyrics'), findsNothing);
+    expect(lyrics.queries, hasLength(2));
+  });
+
+  testWidgets('a whole-file transcript hit plays the chapter at its time', (
+    tester,
+  ) async {
+    await db.writeTrackChapters(
+      tracks.first.id,
+      const ChapterData(
+        downloaded: [
+          MediaChapter(id: 'a', title: 'Intro', startMs: 0, endMs: 60000),
+          MediaChapter(
+            id: 'b',
+            title: 'Interview',
+            startMs: 60000,
+            endMs: 10000000,
+          ),
+        ],
+      ),
+    );
+    tracks = [(await db.getTrack(tracks.first.id))!, tracks.last];
+    lyrics.hits = [
+      LyricsHit(
+        trackId: tracks.first.id,
+        docId: 3,
+        lineId: 30,
+        lineNo: 40,
+        lineText: 'the mitochondria is the powerhouse',
+        positionMs: 3723000,
+        score: 0.9,
+        kind: LyricsMode.transcript,
+      ),
+    ];
+    await pumpHome(tester);
+    await tester.tap(find.byTooltip('Search'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'mitochondria');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pump();
+
+    final tile = find.byKey(const ValueKey('search-lyrics-3'));
+    expect(
+      find.descendant(of: tile, matching: find.text('Interview')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: tile, matching: find.text('1:02:03')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: tile,
+        matching: find.byIcon(Icons.subtitles_outlined),
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(tile);
+    await tester.pump();
+    expect(playback.playedChapterId, 'b');
+    expect(playback.playedStartAt, const Duration(milliseconds: 3721000));
+  });
+
   testWidgets('a double tap on Update starts one update', (tester) async {
     final settings = AppSettingsService();
     final sync = Completer<void>();
@@ -552,6 +720,8 @@ void main() {
 
 class _Playback implements PlaybackService {
   int? played;
+  String? playedChapterId;
+  Duration? playedStartAt;
 
   @override
   Future<void> playTrack(
@@ -560,8 +730,29 @@ class _Playback implements PlaybackService {
     Playlist? playlist,
     String? chapterId,
     bool whole = false,
+    Duration? startAt,
   }) async {
     played = track.id;
+    playedChapterId = chapterId;
+    playedStartAt = startAt;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _LyricsSearch implements LyricsSearch {
+  List<LyricsHit> hits = const [];
+  final queries = <String>[];
+
+  @override
+  Future<List<LyricsHit>> search(
+    String query, {
+    int? playlistId,
+    int limit = 50,
+  }) async {
+    queries.add(query);
+    return hits;
   }
 
   @override

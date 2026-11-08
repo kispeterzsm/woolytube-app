@@ -27,6 +27,7 @@ Future<Playlist> insertTestPlaylist(
   int? sortOrder,
   int? videoQuality,
   bool isTemporary = false,
+  String? lyricsMode,
 }) async {
   final id = await db.insertPlaylist(
     PlaylistsCompanion.insert(
@@ -48,6 +49,7 @@ Future<Playlist> insertTestPlaylist(
       sortOrder: sortOrder == null ? const Value.absent() : Value(sortOrder),
       videoQuality: Value(videoQuality),
       isTemporary: Value(isTemporary),
+      lyricsMode: Value(lyricsMode),
     ),
   );
   return db.getPlaylist(id);

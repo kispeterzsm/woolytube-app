@@ -93,6 +93,11 @@ class LibraryLayout {
   static String infoJsonPath(String playlistPath, String videoId) =>
       p.join(infoDir(playlistPath), '${safeId(videoId)}.info.json');
 
+  /// A track's lyrics and transcripts with their lines, so they survive a
+  /// reinstall (see `lyrics_files.dart`).
+  static String lyricsJsonPath(String playlistPath, String videoId) =>
+      p.join(infoDir(playlistPath), '${safeId(videoId)}.lyrics.json');
+
   /// Whether [path] lies strictly inside one of the two library roots, one
   /// level down (a playlist folder). Guards every recursive operation.
   static bool isPlaylistFolder(String path) {

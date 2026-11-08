@@ -613,6 +613,9 @@ class PlaybackService
     }
   }
 
+  /// Plays [track] with [allTracks] as the queue. [startAt] is a time in
+  /// the file: when the file plays as chapters and no [chapterId] is given,
+  /// the chapter at that time is played, from that time.
   @override
   Future<void> playTrack(
     Track track,
@@ -620,6 +623,7 @@ class PlaybackService
     Playlist? playlist,
     String? chapterId,
     bool whole = false,
+    Duration? startAt,
   }) => _transition(() async {
     final playable = playableTracksForPlayback(
       allTracks,
@@ -630,6 +634,7 @@ class PlaybackService
       selected: track,
       chapterId: chapterId,
       whole: whole,
+      startAt: startAt,
     );
   });
 
@@ -643,6 +648,7 @@ class PlaybackService
     Track? selected,
     String? chapterId,
     bool whole = false,
+    Duration? startAt,
   }) async {
     final trackId = selected?.id;
     final groups = await _buildAlbums(
@@ -654,6 +660,9 @@ class PlaybackService
     if (groups.isEmpty) {
       reportMessage('Nothing to play');
       return;
+    }
+    if (startAt != null && chapterId == null && selected != null) {
+      chapterId = _chapterAt(groups, selected.id, startAt);
     }
     // Validate the explicitly selected file and take audio focus before the
     // live queue is replaced, so a failure leaves current playback untouched.
@@ -699,12 +708,42 @@ class PlaybackService
     final result = await _loadAndPlay(
       first,
       filePath: filePath,
+      startAt:
+          first.track.id == trackId && startAt != null
+              ? _startWithin(first, startAt)
+              : null,
       reportFailure: false,
     );
     if (result == _LoadResult.openFailed) {
       reportMessage('Could not play "${first.track.title}"');
       await _advance();
     }
+  }
+
+  /// The id of the chapter of track [trackId] that holds file time [at],
+  /// when that file plays as chapters.
+  String? _chapterAt(List<PlaybackAlbum> groups, int trackId, Duration at) {
+    final album = groups.where((g) => g.trackId == trackId).firstOrNull;
+    if (album == null) return null;
+    final ms = at.inMilliseconds;
+    MediaChapter? found;
+    for (final item in album.items) {
+      final chapter = item.chapter;
+      if (chapter == null) return null;
+      if (chapter.startMs <= ms) found = chapter;
+      if (ms < chapter.endMs && chapter.startMs <= ms) return chapter.id;
+    }
+    return found?.id;
+  }
+
+  /// File time [at] kept inside [item]: a time before a chapter starts at
+  /// its start, one past its end is dropped.
+  Duration? _startWithin(PlaybackItem item, Duration at) {
+    final chapter = item.chapter;
+    final ms = at.inMilliseconds;
+    if (chapter == null) return ms <= 0 ? null : at;
+    if (ms >= chapter.endMs) return null;
+    return ms <= chapter.startMs ? null : at;
   }
 
   /// The items of [selected]'s album that are marked Always skip: they are in

@@ -357,6 +357,58 @@ void main() {
       expect(player.opened, hasLength(1));
     });
 
+    test('startAt in a whole file opens the file there', () async {
+      final track = await addTrack('song');
+      await playback.playTrack(track, [
+        track,
+      ], startAt: const Duration(seconds: 12));
+
+      expect(player.opened.single.start, const Duration(seconds: 12));
+      expect(playback.position, const Duration(seconds: 12));
+    });
+
+    test(
+      'startAt picks the chapter that holds it when none is given',
+      () async {
+        final track = await addTrack('album', chapters: threeChapters);
+        await playback.playTrack(track, [
+          track,
+        ], startAt: const Duration(seconds: 45));
+
+        expect(playback.currentTrack!.title, 'Third song');
+        expect(player.opened.single.start, const Duration(seconds: 45));
+        // The position is relative to the chapter.
+        expect(playback.position, const Duration(seconds: 5));
+      },
+    );
+
+    test('startAt before the given chapter starts at the chapter', () async {
+      final track = await addTrack('album', chapters: threeChapters);
+      await playback.playTrack(
+        track,
+        [track],
+        chapterId: 'two',
+        startAt: const Duration(seconds: 18),
+      );
+
+      expect(playback.currentTrack!.title, 'Second song');
+      expect(player.opened.single.start, const Duration(seconds: 20));
+      expect(playback.position, Duration.zero);
+    });
+
+    test('startAt inside the given chapter is kept', () async {
+      final track = await addTrack('album', chapters: threeChapters);
+      await playback.playTrack(
+        track,
+        [track],
+        chapterId: 'two',
+        startAt: const Duration(seconds: 33),
+      );
+
+      expect(player.opened.single.start, const Duration(seconds: 33));
+      expect(playback.position, const Duration(seconds: 13));
+    });
+
     test('previous from a tapped chapter plays the chapter above', () async {
       final track = await addTrack('album', chapters: threeChapters);
       await playback.playTrack(track, [track], chapterId: 'two');

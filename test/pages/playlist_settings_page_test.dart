@@ -10,6 +10,7 @@ import 'package:woolytube/database/database.dart';
 import 'package:woolytube/pages/playlist_settings_page.dart';
 import 'package:woolytube/pages/sponsorblock_settings_page.dart';
 import 'package:woolytube/providers/chapter_fetch_jobs.dart';
+import 'package:woolytube/providers/lyrics_fetch_jobs.dart';
 import 'package:woolytube/providers/playback_providers.dart';
 import 'package:woolytube/providers/providers.dart';
 import 'package:woolytube/services/app_settings_service.dart';
@@ -17,11 +18,13 @@ import 'package:woolytube/services/chapter_service.dart';
 import 'package:woolytube/services/download_network_policy.dart';
 import 'package:woolytube/services/download_service.dart';
 import 'package:woolytube/services/library_gate.dart';
+import 'package:woolytube/services/lyrics/lyrics_models.dart';
 import 'package:woolytube/services/playback_service.dart';
 import 'package:woolytube/services/playlist_service.dart';
 import 'package:woolytube/services/sponsorblock_categories.dart';
 
 import '../helpers/test_database.dart';
+import 'lyrics_fakes.dart';
 
 void main() {
   late AppDatabase db;
@@ -86,6 +89,13 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+  }
+
+  /// Pumps a while without settling (a running job animates).
+  Future<void> pumpFor(WidgetTester tester) async {
+    for (var i = 0; i < 5; i++) {
+      await tester.pump(const Duration(milliseconds: 200));
+    }
   }
 
   Future<void> tapRow(WidgetTester tester, String key) async {
@@ -680,6 +690,287 @@ void main() {
     );
     expect((await db.getPlaylist(playlist.id)).name, 'Test Playlist');
   });
+
+  group('lyrics', () {
+    late FakeLyricsService lyrics;
+    setUp(() => lyrics = FakeLyricsService()..instantBackfill = true);
+    List<Override> overrides() => [
+      lyricsServiceProvider.overrideWithValue(lyrics),
+      downloadNetworkPolicyProvider.overrideWithValue(
+        DownloadNetworkPolicy(
+          AppSettingsService(),
+          checkConnectivity: () async => [ConnectivityResult.wifi],
+        ),
+      ),
+    ];
+
+    testWidgets('is off by default and has no fetch tool then', (tester) async {
+      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+      await pumpStack(tester, playlist.id, overrides: overrides());
+
+      final tile = tester.widget<ListTile>(
+        find.byKey(const ValueKey('playlist-lyrics-mode')),
+      );
+      expect((tile.subtitle! as Text).data, 'Off');
+      expect(find.byKey(const ValueKey('fetch-lyrics')), findsNothing);
+    });
+
+    testWidgets('turning it on saves the mode and starts fetching', (
+      tester,
+    ) async {
+      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+      await pumpStack(tester, playlist.id, overrides: overrides());
+
+      await tapRow(tester, 'playlist-lyrics-mode');
+      expect(find.text('Spoken transcript'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('lyrics-mode-option-lyrics')));
+      await tester.pumpAndSettle();
+
+      expect((await db.getPlaylist(playlist.id)).lyricsMode, 'lyrics');
+      expect(playlists.calls.single, {'lyricsMode': LyricsMode.lyrics});
+      expect(lyrics.calls, ['backfill ${playlist.id}']);
+      expect(find.text('Found lyrics for 3 of 3'), findsOneWidget);
+      expect(find.text('Fetch lyrics now'), findsOneWidget);
+
+      // The tool runs it again.
+      await tapRow(tester, 'fetch-lyrics');
+      expect(lyrics.calls, hasLength(2));
+    });
+
+    testWidgets('turning it off saves null and hides the tool', (tester) async {
+      final playlist = await insertTestPlaylist(
+        db,
+        outputPath: tempDir.path,
+        lyricsMode: 'transcript',
+      );
+      await pumpStack(tester, playlist.id, overrides: overrides());
+      expect(find.text('Fetch transcripts now'), findsOneWidget);
+
+      await tapRow(tester, 'playlist-lyrics-mode');
+      await tester.tap(find.byKey(const ValueKey('lyrics-mode-option-off')));
+      await tester.pumpAndSettle();
+
+      expect(playlists.calls.single, {'lyricsMode': null});
+      expect((await db.getPlaylist(playlist.id)).lyricsMode, isNull);
+      expect(lyrics.calls, isEmpty);
+      expect(find.byKey(const ValueKey('fetch-lyrics')), findsNothing);
+    });
+
+    testWidgets('the running job shows progress and stops', (tester) async {
+      lyrics = FakeLyricsService();
+      final playlist = await insertTestPlaylist(
+        db,
+        outputPath: tempDir.path,
+        lyricsMode: 'lyrics',
+      );
+      await pumpStack(tester, playlist.id, overrides: overrides());
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(PlaylistSettingsPage)),
+      );
+      final job = container
+          .read(lyricsFetchJobsProvider.notifier)
+          .start(playlist.id);
+      await tester.pump();
+      expect(find.text('Fetching lyrics'), findsOneWidget);
+      expect(find.text('Checking 0 of 3…'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('fetch-lyrics-stop')));
+      await tester.pump();
+      expect(find.text('Stopping after this track…'), findsOneWidget);
+      lyrics.step();
+      await tester.pumpAndSettle();
+      expect(find.text('Fetch lyrics now'), findsOneWidget);
+      expect((await job)!.cancelled, isTrue);
+    });
+
+    testWidgets('switching the mode during a job starts the new mode\'s '
+        'fetch once the old job ends', (tester) async {
+      lyrics = FakeLyricsService();
+      final playlist = await insertTestPlaylist(
+        db,
+        outputPath: tempDir.path,
+        lyricsMode: 'lyrics',
+      );
+      await pumpStack(tester, playlist.id, overrides: overrides());
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(PlaylistSettingsPage)),
+      );
+      unawaited(
+        container.read(lyricsFetchJobsProvider.notifier).start(playlist.id),
+      );
+      await tester.pump();
+
+      // A running job animates: no pumpAndSettle until it ends.
+      Future<void> pumpABit() async {
+        for (var i = 0; i < 5; i++) {
+          await tester.pump(const Duration(milliseconds: 200));
+        }
+      }
+
+      final row = find.byKey(const ValueKey('playlist-lyrics-mode'));
+      await tester.scrollUntilVisible(
+        row,
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await pumpABit();
+      await tester.tap(row);
+      await pumpABit();
+      await tester.tap(
+        find.byKey(const ValueKey('lyrics-mode-option-transcript')),
+      );
+      await pumpABit();
+      expect(lyrics.cancellation!.isCancelled, isTrue);
+      // The old job finishes its track; then the transcripts are fetched.
+      lyrics
+        ..instantBackfill = true
+        ..step();
+      await tester.pumpAndSettle();
+      expect(lyrics.calls, [
+        'backfill ${playlist.id}',
+        'backfill ${playlist.id}',
+      ]);
+      expect((await db.getPlaylist(playlist.id)).lyricsMode, 'transcript');
+    });
+
+    group('while a mode switch waits for the old job', () {
+      Future<Playlist> startAndSwitch(WidgetTester tester) async {
+        lyrics = FakeLyricsService();
+        final playlist = await insertTestPlaylist(
+          db,
+          outputPath: tempDir.path,
+          lyricsMode: 'lyrics',
+        );
+        await pumpStack(tester, playlist.id, overrides: overrides());
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(PlaylistSettingsPage)),
+        );
+        unawaited(
+          container.read(lyricsFetchJobsProvider.notifier).start(playlist.id),
+        );
+        await tester.pump();
+        final row = find.byKey(const ValueKey('playlist-lyrics-mode'));
+        await tester.scrollUntilVisible(
+          row,
+          200,
+          scrollable: find.byType(Scrollable).first,
+        );
+        await pumpFor(tester);
+        await tester.tap(row);
+        await pumpFor(tester);
+        await tester.tap(find.byKey(const ValueKey('lyrics-mode-option-off')));
+        await pumpFor(tester);
+        expect(lyrics.cancellation!.isCancelled, isTrue);
+        return playlist;
+      }
+
+      testWidgets('delete and the other settings wait for the new mode', (
+        tester,
+      ) async {
+        final playlist = await startAndSwitch(tester);
+        final delete = find.byKey(const ValueKey('delete-playlist-button'));
+        await tester.scrollUntilVisible(
+          delete,
+          200,
+          scrollable: find.byType(Scrollable).first,
+        );
+        await pumpFor(tester);
+        await tester.tap(delete);
+        await pumpFor(tester);
+        expect(
+          find.byKey(const ValueKey('delete-playlist-confirm')),
+          findsNothing,
+        );
+
+        // Other settings wait too, so the mode save cannot undo them.
+        final autoUpdate = find.byKey(const ValueKey('playlist-auto-update'));
+        expect(tester.widget<SwitchListTile>(autoUpdate).onChanged, isNull);
+
+        lyrics.step();
+        await tester.pumpAndSettle();
+        expect((await db.getPlaylist(playlist.id)).lyricsMode, isNull);
+        expect(playlists.deletedIds, isEmpty);
+        expect(tester.widget<SwitchListTile>(autoUpdate).onChanged, isNotNull);
+      });
+
+      testWidgets('leaving the page still saves the new mode', (tester) async {
+        final playlist = await startAndSwitch(tester);
+        await tester.pageBack();
+        await pumpFor(tester);
+        expect(find.text('detail marker'), findsOneWidget);
+        lyrics.step();
+        await tester.pumpAndSettle();
+        expect((await db.getPlaylist(playlist.id)).lyricsMode, isNull);
+        expect(lyrics.calls, ['backfill ${playlist.id}']);
+      });
+    });
+
+    testWidgets('switching the format stops a running lyrics job first', (
+      tester,
+    ) async {
+      lyrics = FakeLyricsService();
+      final playlist = await insertTestPlaylist(
+        db,
+        outputPath: tempDir.path,
+        lyricsMode: 'lyrics',
+      );
+      await pumpStack(tester, playlist.id, overrides: overrides());
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(PlaylistSettingsPage)),
+      );
+      unawaited(
+        container.read(lyricsFetchJobsProvider.notifier).start(playlist.id),
+      );
+      await tester.pump();
+      final row = find.byKey(const ValueKey('playlist-audio-only'));
+      await tester.tap(row);
+      await pumpFor(tester);
+      await tester.tap(find.text('Switch'));
+      await pumpFor(tester);
+      expect(lyrics.cancellation!.isCancelled, isTrue);
+      expect(playlists.calls, isEmpty, reason: 'the job is on a track');
+      lyrics.step();
+      await tester.pumpAndSettle();
+      expect((await db.getPlaylist(playlist.id)).audioOnly, isTrue);
+    });
+
+    testWidgets('delete waits for a running lyrics job to stop', (
+      tester,
+    ) async {
+      lyrics = FakeLyricsService()..failWhenStopped = true;
+      final playlist = await insertTestPlaylist(
+        db,
+        outputPath: tempDir.path,
+        lyricsMode: 'lyrics',
+      );
+      await pumpStack(tester, playlist.id, overrides: overrides());
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(PlaylistSettingsPage)),
+      );
+      final job = container
+          .read(lyricsFetchJobsProvider.notifier)
+          .start(playlist.id);
+      await tester.pump();
+
+      await tester.tap(find.byKey(const ValueKey('delete-playlist-button')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.tap(find.byKey(const ValueKey('delete-playlist-confirm')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(lyrics.cancellation!.isCancelled, isTrue);
+      expect(
+        playlists.deletedIds,
+        isEmpty,
+        reason: 'one track is still checked',
+      );
+
+      lyrics.step();
+      await tester.pumpAndSettle();
+      expect(playlists.deletedIds, [playlist.id]);
+      expect(await job, isNull);
+    });
+  });
 }
 
 /// Fetches chapters until cancelled, then finishes the video it is on when
@@ -773,6 +1064,7 @@ class _Playlists implements PlaylistService {
     bool? sponsorBlockEnabled,
     List<String>? sponsorBlockCategories,
     Map<String, SponsorBlockCategoryAction>? sponsorBlockCategoryActions,
+    Value<LyricsMode?> lyricsMode = const Value.absent(),
   }) async {
     final failure = failWith;
     if (failure != null) throw failure;
@@ -788,6 +1080,7 @@ class _Playlists implements PlaylistService {
         'sponsorBlockEnabled': sponsorBlockEnabled,
       if (sponsorBlockCategoryActions != null)
         'sponsorBlockCategoryActions': sponsorBlockCategoryActions,
+      if (lyricsMode.present) 'lyricsMode': lyricsMode.value,
     };
     await beforeWrite?.call(call);
     calls.add(call);
@@ -807,9 +1100,22 @@ class _Playlists implements PlaylistService {
                     : encodeSponsorBlockCategoryActions(
                       sponsorBlockCategoryActions,
                     ),
+            lyricsMode:
+                lyricsMode.present
+                    ? Value(LyricsMode.toDb(lyricsMode.value))
+                    : const Value.absent(),
           )
           .toCompanion(true),
     );
+    // toCompanion(true) leaves out nulls, so "off" is written here.
+    if (lyricsMode.present) {
+      await db.updatePlaylistFields(
+        id,
+        PlaylistsCompanion(
+          lyricsMode: Value(LyricsMode.toDb(lyricsMode.value)),
+        ),
+      );
+    }
   }
 
   @override

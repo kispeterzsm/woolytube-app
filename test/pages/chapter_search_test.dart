@@ -154,6 +154,7 @@ class _Playback implements PlaybackService {
     Playlist? playlist,
     String? chapterId,
     bool whole = false,
+    Duration? startAt,
   }) async {
     trackId = track.id;
     this.chapterId = chapterId;

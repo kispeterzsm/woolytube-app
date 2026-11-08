@@ -1,7 +1,9 @@
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:woolytube/services/chapters.dart';
+import 'package:woolytube/services/lyrics/lyrics_models.dart';
 import 'package:woolytube/services/track_search.dart';
+import 'package:woolytube/widgets/lyrics_line_text.dart';
 import '../helpers/test_database.dart';
 
 void main() {
@@ -105,5 +107,99 @@ void main() {
       ),
       isFalse,
     );
+  });
+
+  group('lyrics hits', () {
+    LyricsHit hit({String? chapterId, int? positionMs}) => LyricsHit(
+      trackId: 1,
+      chapterId: chapterId,
+      docId: 1,
+      lineId: 1,
+      lineNo: 0,
+      lineText: 'line',
+      positionMs: positionMs,
+      score: 1,
+      kind: LyricsMode.lyrics,
+    );
+
+    test('a hit plays its chapter, or the one at its time', () async {
+      final db = openTestDatabase();
+      addTearDown(db.close);
+      final playlist = await insertTestPlaylist(db);
+      final track = (await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+      )).copyWith(
+        chaptersJson: Value(
+          const ChapterData(
+            downloaded: [
+              MediaChapter(id: 'a', title: 'A', startMs: 0, endMs: 60000),
+              MediaChapter(id: 'b', title: 'B', startMs: 60000, endMs: 120000),
+            ],
+          ).encode(),
+        ),
+      );
+
+      var target = lyricsHitTarget(
+        track,
+        hit(chapterId: 'b', positionMs: 61000),
+      );
+      expect(target.chapter?.id, 'b');
+      expect(target.startAt, const Duration(milliseconds: 59000));
+
+      target = lyricsHitTarget(track, hit(positionMs: 90000));
+      expect(target.chapter?.id, 'b');
+      expect(target.startAt, const Duration(milliseconds: 88000));
+
+      target = lyricsHitTarget(track, hit(positionMs: 1000));
+      expect(target.chapter?.id, 'a');
+      expect(target.startAt, Duration.zero);
+
+      // Plain lyrics of a chapter: the chapter from its start.
+      target = lyricsHitTarget(track, hit(chapterId: 'a'));
+      expect(target.chapter?.id, 'a');
+      expect(target.startAt, isNull);
+
+      final plain = track.copyWith(chaptersJson: const Value(null));
+      target = lyricsHitTarget(plain, hit(chapterId: 'a', positionMs: 5000));
+      expect(target.chapter, isNull);
+      expect(target.startAt, const Duration(milliseconds: 3000));
+    });
+
+    test('times read m:ss or h:mm:ss', () {
+      expect(formatLyricsTime(83000), '1:23');
+      expect(formatLyricsTime(5000), '0:05');
+      expect(formatLyricsTime(3723000), '1:02:03');
+    });
+
+    test('a snippet starts shortly before the first match', () {
+      const text =
+          'Oh brother, oh sister, there is an endless road to rediscover';
+      final long = LyricsHit(
+        trackId: 1,
+        docId: 1,
+        lineId: 1,
+        lineNo: 0,
+        lineText: text,
+        highlightRanges: const [
+          LyricsHighlight(35, 42),
+          LyricsHighlight(43, 47),
+        ],
+        score: 1,
+        kind: LyricsMode.lyrics,
+      );
+      final snippet = lyricsSnippet(long);
+      expect(snippet.text, '…there is an endless road to rediscover');
+      expect(
+        [
+          for (final r in snippet.highlights)
+            snippet.text.substring(r.start, r.end),
+        ],
+        ['endless', 'road'],
+      );
+      // A match near the start keeps the whole line.
+      final short = lyricsSnippet(hit());
+      expect(short.text, 'line');
+    });
   });
 }
