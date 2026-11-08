@@ -6,7 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:woolytube/providers/playback_providers.dart';
 import 'package:woolytube/services/app_settings_service.dart';
 import 'package:woolytube/services/playback_service.dart';
-import 'package:woolytube/widgets/plane_mode_button.dart';
+import 'package:woolytube/widgets/plane_mode_toggle.dart';
 
 class _Player implements PlaybackService {
   final _plane = BehaviorSubject<bool>.seeded(false);
@@ -36,13 +36,23 @@ void main() {
     player = _Player();
   });
 
-  Future<void> pumpButton(WidgetTester tester, {bool announce = true}) async {
+  Future<void> pumpButton(WidgetTester tester) async {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [playbackServiceProvider.overrideWithValue(player)],
         child: MaterialApp(
           home: Scaffold(
-            body: Center(child: PlaneModeButton(announce: announce)),
+            body: Center(
+              child: Consumer(
+                builder:
+                    (context, ref, _) => TextButton(
+                      key: const ValueKey('plane-mode-toggle'),
+                      onPressed:
+                          () => togglePlaneModeWithFeedback(context, ref),
+                      child: const Text('Plane mode'),
+                    ),
+              ),
+            ),
           ),
         ),
       ),
@@ -50,25 +60,11 @@ void main() {
     await tester.pump();
   }
 
-  testWidgets('shows whether plane mode is on', (tester) async {
-    await pumpButton(tester);
-    expect(find.byIcon(Icons.airplanemode_inactive_rounded), findsOneWidget);
-    expect(find.byTooltip('Plane mode: off'), findsOneWidget);
-
-    await player.setPlaneModePreference(true);
-    await tester.pump();
-    expect(find.byIcon(Icons.flight_rounded), findsOneWidget);
-    expect(
-      find.byTooltip('Plane mode: on (quiet parts lifted over engine noise)'),
-      findsOneWidget,
-    );
-  });
-
   testWidgets('the first switch-on explains how to listen quieter', (
     tester,
   ) async {
     await pumpButton(tester);
-    await tester.tap(find.byKey(const ValueKey('plane-mode-button')));
+    await tester.tap(find.byKey(const ValueKey('plane-mode-toggle')));
     await tester.pumpAndSettle();
     expect(player.choices, [true]);
     expect(find.byKey(const ValueKey('plane-mode-tips')), findsOneWidget);
@@ -81,33 +77,14 @@ void main() {
     expect(preferences.getBool(AppSettingsService.planeModeTipShownKey), true);
 
     // Off, then on again: only short messages from now on.
-    await tester.tap(find.byKey(const ValueKey('plane-mode-button')));
+    await tester.tap(find.byKey(const ValueKey('plane-mode-toggle')));
     await tester.pump();
     expect(find.text('Plane mode off'), findsOneWidget);
     await tester.pumpAndSettle(const Duration(seconds: 5));
-    await tester.tap(find.byKey(const ValueKey('plane-mode-button')));
+    await tester.tap(find.byKey(const ValueKey('plane-mode-toggle')));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('plane-mode-tips')), findsNothing);
     expect(find.textContaining('Plane mode on.'), findsOneWidget);
-    expect(player.choices, [true, false, true]);
-  });
-
-  testWidgets('over a video only the first-time tips are shown', (
-    tester,
-  ) async {
-    await pumpButton(tester, announce: false);
-    final button = find.byKey(const ValueKey('plane-mode-button'));
-    await tester.tap(button);
-    await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('plane-mode-tips')), findsOneWidget);
-    await tester.tap(find.text('Got it'));
-    await tester.pumpAndSettle();
-
-    await tester.tap(button);
-    await tester.pumpAndSettle();
-    await tester.tap(button);
-    await tester.pumpAndSettle();
-    expect(find.byType(SnackBar), findsNothing);
     expect(player.choices, [true, false, true]);
   });
 }

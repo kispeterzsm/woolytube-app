@@ -58,7 +58,7 @@ The result is a list of **proposed** chapters with the evidence behind each one.
 
 ## Plane mode and even volume
 
-Earbuds without noise cancelling let engine rumble through, so quiet passages disappear and the volume ends up high. Tap the plane icon at the top of the player (or use **Settings > Sound**) to switch on **Plane mode**:
+Earbuds without noise cancelling let engine rumble through, so quiet passages disappear and the volume ends up high. Switch on **Plane mode** under **Settings > Sound**:
 - Every song is brought to the same level, with extra level for bass-heavy songs, whose bass the rumble hides.
 - A gentle compressor lifts quiet parts, and a small low-mid lift keeps voices and instruments clear.
 - A limiter stops anything from clipping.

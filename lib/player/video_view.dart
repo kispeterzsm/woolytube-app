@@ -6,7 +6,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/playback_providers.dart';
 import '../widgets/chapters_button.dart';
 import '../widgets/next_file_button.dart';
-import '../widgets/plane_mode_button.dart';
 import '../widgets/player_controls.dart';
 import '../widgets/segment_mark_button.dart';
 import '../widgets/sleep_timer_button.dart';
@@ -385,13 +384,6 @@ class _VideoControls extends ConsumerWidget {
                     ),
                   ),
                   SubtitleButton(onOpened: onHoldOpen, onClosed: onAnyAction),
-                  // In the top bar: the bottom row is full on narrow phones.
-                  PlaneModeButton(
-                    inactiveColor: Colors.white,
-                    activeColor: PlayerLayout.accent,
-                    announce: false,
-                    onAction: onAnyAction,
-                  ),
                   IconButton(
                     icon: const Icon(Icons.lock_open, color: Colors.white),
                     tooltip: 'Lock controls',

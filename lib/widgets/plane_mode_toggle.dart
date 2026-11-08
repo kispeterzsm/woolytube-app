@@ -1,69 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../player/player_widgets.dart';
 import '../providers/playback_providers.dart';
 import '../providers/providers.dart';
 
-/// Switches plane mode on and off from the player.
-class PlaneModeButton extends ConsumerWidget {
-  final Color activeColor;
-  final Color inactiveColor;
-  final double iconSize;
-  final bool showLabel;
-  final VoidCallback? onAction;
-
-  /// Whether a short message confirms each switch. Off over a full-screen
-  /// video, where it would cover the controls; the icon shows the state.
-  final bool announce;
-
-  const PlaneModeButton({
-    super.key,
-    this.activeColor = const Color(0xFF2196F3),
-    this.inactiveColor = const Color(0xFF888888),
-    this.iconSize = 24,
-    this.showLabel = false,
-    this.announce = true,
-    this.onAction,
-  });
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final on = ref.watch(planeModeProvider).valueOrNull ?? false;
-    return PlayerActionButton(
-      key: const ValueKey('plane-mode-button'),
-      icon: on ? Icons.flight_rounded : Icons.airplanemode_inactive_rounded,
-      label: 'Plane',
-      tooltip:
-          on
-              ? 'Plane mode: on (quiet parts lifted over engine noise)'
-              : 'Plane mode: off',
-      toggled: on,
-      showLabel: showLabel,
-      activeColor: activeColor,
-      inactiveColor: inactiveColor,
-      iconSize: iconSize,
-      onPressed: () {
-        onAction?.call();
-        togglePlaneModeWithFeedback(context, ref, announce: announce);
-      },
-    );
-  }
-}
-
-/// Toggles plane mode and, when [announce], says what changed. The first
-/// time it is switched on, explains how to get the most out of it.
+/// Toggles plane mode and says what changed. The first time it is switched
+/// on, explains how to get the most out of it.
 Future<void> togglePlaneModeWithFeedback(
   BuildContext context,
-  WidgetRef ref, {
-  bool announce = true,
-}) async {
+  WidgetRef ref,
+) async {
   final service = ref.read(playbackServiceProvider);
   final enable = !service.planeMode;
   final messenger = ScaffoldMessenger.maybeOf(context);
   await service.setPlaneModePreference(enable);
   if (!enable) {
-    if (!announce) return;
     messenger?.hideCurrentSnackBar();
     messenger?.showSnackBar(const SnackBar(content: Text('Plane mode off')));
     return;
@@ -80,7 +31,6 @@ Future<void> togglePlaneModeWithFeedback(
     await showPlaneModeTips(context);
     return;
   }
-  if (!announce) return;
   messenger?.hideCurrentSnackBar();
   messenger?.showSnackBar(
     const SnackBar(

@@ -17,7 +17,7 @@ import '../services/library_export_service.dart';
 import '../services/library_layout.dart';
 import '../services/metadata_service.dart';
 import '../services/playback_service.dart';
-import '../widgets/plane_mode_button.dart';
+import '../widgets/plane_mode_toggle.dart';
 import '../widgets/settings_section_header.dart';
 import 'debug_log_page.dart';
 

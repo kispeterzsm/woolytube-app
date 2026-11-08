@@ -98,7 +98,7 @@ WoolyTube plays through media_kit's libmpv. Three routes were checked in source:
 
 ## Proposed and implemented behavior
 
-**Plane mode** (a button in the player's header and video controls, and a switch under Settings > Sound) sets mpv's `af` to:
+**Plane mode** (a switch under Settings > Sound) sets mpv's `af` to:
 
 ```
 @plane:lavfi=[volume=<L>dB,
