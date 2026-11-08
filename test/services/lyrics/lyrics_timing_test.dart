@@ -63,12 +63,24 @@ void main() {
       final late = record(
         lrclibRecord(
           duration: 250,
-          synced: '[00:10.00] First\n[04:08.50] Last',
+          synced: '[00:10.00] First\n[04:09.20] Last',
         ),
       );
-      // 248.5 s into a 249 s file: inside the stated length, but too late.
+      // 249.2 s into a 249 s file: inside the stated length, but too late.
       expect(syncedTimingFor(late, localSeconds: 249).fits, isFalse);
       expect(syncedTimingFor(late, localSeconds: 250).fits, isTrue);
+    });
+
+    test('a last word sung in the file\'s final seconds still fits', () {
+      // The upload is 2 s shorter (fade-out trimmed); "Hey!" at 3:17.5
+      // still starts inside it.
+      final hey = record(
+        lrclibRecord(
+          duration: 200,
+          synced: '[00:10.00] First\n[03:17.50] Hey!',
+        ),
+      );
+      expect(syncedTimingFor(hey, localSeconds: 198).fits, isTrue);
     });
 
     test('nightcore checks the scaled last line', () {
@@ -193,6 +205,57 @@ void main() {
       expect(match.record!.id, 5);
       expect(match.step, 'search');
       expect(match.synced, isTrue);
+    });
+  });
+
+  group('LyricsMatcher untimed records', () {
+    late FakeLrclib lrclib;
+    setUp(() => lrclib = FakeLrclib());
+
+    /// The right song, 10 s shorter than the 310 s file (a video intro).
+    Map<String, Object?> battery() => lrclibRecord(
+      id: 1,
+      track: 'Battery',
+      artist: 'Metallica',
+      duration: 300,
+      synced: '[00:20.00] Lashing out the action\n[04:50.00] Battery',
+    );
+
+    test('another reading of the title does not replace them', () async {
+      lrclib.exact['Metallica|Battery'] = battery();
+      // The swapped reading finds another "song" whose length fits.
+      lrclib.searches['track_name=Metallica&artist_name=Battery'] = [
+        lrclibRecord(
+          id: 2,
+          track: 'Metallica',
+          artist: 'Battery',
+          duration: 310,
+          synced: '[00:20.00] Other words\n[05:00.00] Other end',
+        ),
+      ];
+      final match = await lrclib.matcher().match(
+        parseSongTitle('Metallica - Battery'),
+        durationSeconds: 310,
+      );
+      expect(match.record!.id, 1);
+      expect(match.synced, isFalse);
+    });
+
+    test('a three-part title does not swap in another song', () async {
+      lrclib.searches['track_name=Battery&artist_name=Metallica'] = [battery()];
+      lrclib.searches['track_name=Master of Puppets&artist_name=Metallica'] = [
+        lrclibRecord(
+          id: 3,
+          track: 'Master of Puppets',
+          artist: 'Metallica',
+          duration: 310,
+          synced: '[00:20.00] End of passion\n[05:00.00] Master',
+        ),
+      ];
+      final query = parseSongTitle('Metallica - Master of Puppets - Battery');
+      final match = await lrclib.matcher().match(query, durationSeconds: 310);
+      expect(match.found, isTrue);
+      expect(match.record!.id, isNot(3));
     });
   });
 
@@ -346,13 +409,53 @@ void main() {
       expect((await service.backfillPlaylist(playlist.id)).due, 0);
     });
 
-    test('a pick that does not fit is stored plain', () async {
+    test(
+      'a pick keeps its times when they do not fit, to be shifted',
+      () async {
+        final (_, track) = await diggy();
+        // 241.8 s against the 249 s file: "Timing off" in the picker.
+        answerAll([yogscast(id: 22471449, duration: 241.8)]);
+        await service.applyPick(
+          track.id,
+          null,
+          const LyricsPick(source: LyricsSource.lrclib, sourceRef: '22471449'),
+        );
+        var doc = (await db.lyricsDocFor(track.id, null))!;
+        expect(doc.synced, isTrue);
+        expect(doc.pinned, isTrue);
+        expect((await db.lyricsLinesForDoc(doc.id)).first.startMs, 31960);
+
+        // "Timing off?" can now move them to the longer intro.
+        await service.setTimingShift(track.id, null, 7000);
+        doc = (await db.lyricsDocFor(track.id, null))!;
+        expect(doc.shiftMs, 7000);
+        expect((await db.lyricsLinesForDoc(doc.id)).first.startMs, 38960);
+
+        // A restore of the pin gives the same lines.
+        await db.replaceLyricsDoc(
+          draftFromDoc(doc, const []).copyWith(lines: const []),
+        );
+        await service.fetchTrack(track, force: true);
+        doc = (await db.lyricsDocFor(track.id, null))!;
+        expect(doc.synced, isTrue);
+        expect((await db.lyricsLinesForDoc(doc.id)).map((l) => l.startMs), [
+          38960,
+          232110,
+        ]);
+      },
+    );
+
+    test('a timing-off pick of a mislabelled record keeps no times', () async {
       final (_, track) = await diggy();
-      answerAll([windRose(), yogscast()]);
+      answerAll([windRose()]);
       await service.applyPick(
         track.id,
         null,
-        const LyricsPick(source: LyricsSource.lrclib, sourceRef: '32583562'),
+        const LyricsPick(
+          source: LyricsSource.lrclib,
+          sourceRef: '32583562',
+          timingOff: true,
+        ),
       );
       final doc = (await db.lyricsDocFor(track.id, null))!;
       expect(doc.synced, isFalse);
@@ -361,6 +464,209 @@ void main() {
         isTrue,
       );
     });
+
+    test('the repair keeps the words when no record fits any more', () async {
+      final (playlist, track) = await diggy();
+      await db.replaceLyricsDoc(storedWindRose(track.id));
+      // Only the mislabelled record: nothing is accepted on its length.
+      answerAll([windRose()]);
+      final result = await service.backfillPlaylist(playlist.id);
+      expect(result.due, 1);
+      final doc = (await db.lyricsDocFor(track.id, null))!;
+      expect(doc.status, LyricsStatus.found);
+      expect(doc.sourceRef, '32583562');
+      expect(doc.synced, isFalse);
+      final lines = await db.lyricsLinesForDoc(doc.id);
+      expect(lines.map((l) => l.lineText), [
+        'I am a dwarf',
+        'Diggy diggy hole',
+      ]);
+      expect(lines.every((l) => l.startMs == null), isTrue);
+      // Not looked up again.
+      expect((await service.backfillPlaylist(playlist.id)).due, 0);
+    });
+
+    test('the repair leaves a last line in the final second alone', () async {
+      final (playlist, track) = await diggy();
+      await db.replaceLyricsDoc(
+        LyricsDocDraft(
+          trackId: track.id,
+          kind: LyricsMode.lyrics,
+          status: LyricsStatus.found,
+          source: LyricsSource.lrclib,
+          sourceRef: '6495352',
+          synced: true,
+          checkedAt: now,
+          attempts: 1,
+          lines: const [
+            LyricsLineDraft('first', startMs: 31960),
+            // 249.4 s: the stored 249 s length is rounded.
+            LyricsLineDraft('Hey!', startMs: 249400),
+          ],
+        ),
+      );
+      answerAll([yogscast()]);
+      expect((await service.backfillPlaylist(playlist.id)).due, 0);
+    });
+
+    test('a chapter shift is cut at its end and gives back lines', () async {
+      final (_, track) = await diggy(
+        chaptersJson:
+            const ChapterData(
+              downloaded: [
+                MediaChapter(id: 'c', title: 'Diggy', startMs: 0, endMs: 60000),
+              ],
+            ).encode(),
+      );
+      answerAll([
+        lrclibRecord(
+          id: 7,
+          track: 'Diggy Diggy Hole',
+          artist: 'The Yogscast',
+          duration: 247,
+          synced: '[00:10.00] one\n[00:59.00] two\n[01:02.00] three',
+        ),
+      ]);
+      await service.applyPick(
+        track.id,
+        'c',
+        const LyricsPick(source: LyricsSource.lrclib, sourceRef: '7'),
+      );
+      Future<List<int?>> starts() async => [
+        for (final line in await db.lyricsLinesForDoc(
+          (await db.lyricsDocFor(track.id, 'c'))!.id,
+        ))
+          line.startMs,
+      ];
+      expect(await starts(), [10000, 59000]);
+
+      // Later: "two" moves past the chapter's end and is cut.
+      await service.setTimingShift(track.id, 'c', 2000);
+      expect(await starts(), [12000]);
+      // Earlier: "two" comes back, and "three" now fits.
+      await service.setTimingShift(track.id, 'c', -3000);
+      expect(await starts(), [7000, 56000, 59000]);
+
+      // A restore of the same pin gives the same lines.
+      final doc = (await db.lyricsDocFor(track.id, 'c'))!;
+      await db.replaceLyricsDoc(
+        draftFromDoc(doc, const []).copyWith(lines: const []),
+      );
+      await service.fetchTrack(track, force: true);
+      expect(await starts(), [7000, 56000, 59000]);
+    });
+
+    test(
+      'a pinned caption doc is restored from its video, per chapter',
+      () async {
+        final (_, track) = await diggy(
+          chaptersJson:
+              const ChapterData(
+                downloaded: [
+                  MediaChapter(
+                    id: 'c',
+                    title: 'Diggy',
+                    startMs: 10000,
+                    endMs: 20000,
+                  ),
+                ],
+              ).encode(),
+        );
+        final infoUrls = <String>[];
+        final captions = LyricsService(
+          db,
+          LogService(),
+          lrclib: LrclibClient(
+            http: lrclib.http,
+            sleep: (_) async {},
+            retryDelays: const [],
+          ),
+          ytMusic: YtMusicLyricsClient(
+            http: FakeHttpClient((_) => FakeHttpResponse.json(nextAnswer())),
+          ),
+          captions: CaptionsClient(
+            http: FakeHttpClient(
+              (_) => FakeHttpResponse.json({
+                'events': [
+                  for (final (ms, text) in [
+                    (5000, 'before'),
+                    (12000, 'in one'),
+                    (18000, 'in two'),
+                    (25000, 'after'),
+                  ])
+                    {
+                      'tStartMs': ms,
+                      'dDurationMs': 1000,
+                      'segs': [
+                        {'utf8': text},
+                      ],
+                    },
+                ],
+              }),
+            ),
+          ),
+          captionInfo: (url) async {
+            infoUrls.add(url);
+            return {
+              'subtitles': {
+                'en': [
+                  {'ext': 'json3', 'url': 'https://caps/en'},
+                ],
+              },
+            };
+          },
+          clock: () => now,
+          sleep: (_) async {},
+        );
+        addTearDown(captions.dispose);
+
+        // An automatic caption doc stored with only its caption key.
+        await db.replaceLyricsDoc(
+          LyricsDocDraft(
+            trackId: track.id,
+            chapterId: 'c',
+            offsetMs: 10000,
+            kind: LyricsMode.lyrics,
+            status: LyricsStatus.found,
+            source: LyricsSource.ytSubs,
+            sourceRef: 'en',
+            synced: true,
+            lang: 'en',
+            checkedAt: now,
+            lines: const [
+              LyricsLineDraft('in one', startMs: 2000),
+              LyricsLineDraft('in two', startMs: 8000),
+            ],
+          ),
+        );
+        await captions.setTimingShift(track.id, 'c', 500);
+        var doc = (await db.lyricsDocFor(track.id, 'c'))!;
+        expect(doc.pinned, isTrue);
+        expect(doc.sourceRef, 'ytWz0qVvBZ0:en');
+
+        Future<void> restore(String ref) async {
+          await db.replaceLyricsDoc(
+            draftFromDoc(
+              doc,
+              const [],
+            ).copyWith(sourceRef: ref, lines: const []),
+          );
+          await captions.fetchTrack(track, force: true);
+          doc = (await db.lyricsDocFor(track.id, 'c'))!;
+          expect(doc.synced, isTrue);
+          expect(doc.shiftMs, 500);
+          final lines = await db.lyricsLinesForDoc(doc.id);
+          expect(lines.map((l) => l.lineText), ['in one', 'in two']);
+          expect(lines.map((l) => l.startMs), [2500, 8500]);
+        }
+
+        await restore('ytWz0qVvBZ0:en');
+        // A pin written before refs named the video still restores.
+        await restore('en');
+        expect(infoUrls, everyElement(contains('v=ytWz0qVvBZ0')));
+        expect(infoUrls, hasLength(2));
+      },
+    );
 
     test(
       'a timing shift moves every line, is saved and can be undone',

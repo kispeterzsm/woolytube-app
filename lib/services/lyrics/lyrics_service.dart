@@ -112,6 +112,10 @@ class LyricsService {
   Future<void> _extractions = Future.value();
   final _trackLocks = <int, Future<void>>{};
 
+  /// LRCLIB records fetched by id lately, so retiming a chapter doc can
+  /// rebuild its lines without asking LRCLIB on every tap.
+  final _recentRecords = <int, LrclibRecord>{};
+
   /// Fires after this service wrote a track's lyrics.
   Stream<LyricsChange> get changes => _changes.stream;
 
@@ -136,6 +140,19 @@ class LyricsService {
 
   Future<LyricsMatcher> _matcher() async =>
       _lyricsMatcher ??= LyricsMatcher(await _lrclib());
+
+  /// LRCLIB record [id] (null when it is gone), remembered for a while.
+  Future<LrclibRecord?> _recordById(int id, {bool Function()? stop}) async {
+    final known = _recentRecords.remove(id);
+    final record = known ?? await (await _lrclib()).getById(id, stop: stop);
+    if (record != null) {
+      _recentRecords[id] = record;
+      while (_recentRecords.length > 8) {
+        _recentRecords.remove(_recentRecords.keys.first);
+      }
+    }
+    return record;
+  }
 
   YtMusicLyricsClient get _ytMusic =>
       _ytMusicOverride ?? (_ytMusicClient ??= YtMusicLyricsClient(http: _http));
@@ -375,18 +392,67 @@ class LyricsService {
   /// the source times it (negative = earlier), and pins the doc so
   /// automatic runs keep it. 0 takes the correction back. The shift is
   /// added to the stored line times and remembered for a restore.
+  ///
+  /// A chapter's lines are cut at its end after the shift, as a restore
+  /// does; an LRCLIB chapter doc is rebuilt from its record, so lines an
+  /// earlier cut dropped come back.
   Future<void> setTimingShift(int trackId, String? chapterId, int shiftMs) =>
-      _changeDoc(trackId, chapterId, (doc, lines) {
+      _changeDoc(trackId, chapterId, (track, playlist, doc, lines) async {
         if (!doc.synced) {
           throw StateError('These lyrics have no times to move.');
+        }
+        List<LyricsLineDraft>? rebuilt;
+        _Slot? slot;
+        if (doc.chapterId != null) {
+          try {
+            slot = _slotFor(track, playlist, doc.chapterId);
+          } on StateError {
+            slot = null;
+          }
+          final id =
+              doc.source == LyricsSource.lrclib
+                  ? int.tryParse(doc.sourceRef ?? '')
+                  : null;
+          if (slot != null && id != null) {
+            // The sheet waits on this: give up soon and shift what is
+            // stored.
+            final deadline = _clock().add(const Duration(seconds: 5));
+            try {
+              final record = await _recordById(
+                id,
+                stop: () => !_clock().isBefore(deadline),
+              );
+              if (record != null && record.isSynced) {
+                rebuilt = shiftLyricsLines(
+                  lyricsLinesFor(
+                    record,
+                    synced: true,
+                    timeScale: doc.timeScale,
+                  ),
+                  shiftMs,
+                );
+              }
+            } catch (e) {
+              _log.warn('Lyrics: could not reload record $id: $e');
+            }
+          }
+        }
+        var shifted =
+            rebuilt ??
+            shiftLyricsLines([
+              for (final line in lines)
+                LyricsLineDraft(line.lineText, startMs: line.startMs),
+            ], shiftMs - doc.shiftMs);
+        if (slot != null) {
+          final cut = _cutToSlot(shifted, slot, synced: true);
+          // Never shift every line out of the chapter.
+          if (cut.isNotEmpty) shifted = cut;
         }
         return draftFromDoc(doc, lines).copyWith(
           pinned: true,
           shiftMs: shiftMs,
-          lines: shiftLyricsLines([
-            for (final line in lines)
-              LyricsLineDraft(line.lineText, startMs: line.startMs),
-          ], shiftMs - doc.shiftMs),
+          sourceRef: _pinnedSourceRef(track, doc),
+          lines: shifted,
         );
       });
 
@@ -394,21 +460,41 @@ class LyricsService {
   Future<void> useWithoutTiming(int trackId, String? chapterId) => _changeDoc(
     trackId,
     chapterId,
-    (doc, lines) => draftFromDoc(doc, lines).copyWith(
+    (track, playlist, doc, lines) async => draftFromDoc(doc, lines).copyWith(
       synced: false,
       pinned: true,
       shiftMs: 0,
       timingOff: true,
+      sourceRef: _pinnedSourceRef(track, doc),
       lines: [for (final line in lines) LyricsLineDraft(line.lineText)],
     ),
   );
+
+  /// The source ref a pin of [doc] keeps: automatic caption docs written
+  /// before this rule name only the caption track ("en"), which a restore
+  /// cannot load, so they get the video id too.
+  static String? _pinnedSourceRef(Track track, LyricsDoc doc) {
+    final ref = doc.sourceRef;
+    final captions =
+        doc.source == LyricsSource.ytSubs || doc.source == LyricsSource.ytAuto;
+    if (!captions || ref == null || ref.isEmpty || ref.contains(':')) {
+      return ref;
+    }
+    return '${track.videoId}:$ref';
+  }
 
   /// Rewrites the found doc of [trackId]/[chapterId] by [change] and saves
   /// the lyrics file.
   Future<void> _changeDoc(
     int trackId,
     String? chapterId,
-    LyricsDocDraft Function(LyricsDoc doc, List<LyricsLine> lines) change,
+    Future<LyricsDocDraft> Function(
+      Track track,
+      Playlist playlist,
+      LyricsDoc doc,
+      List<LyricsLine> lines,
+    )
+    change,
   ) => _locked(trackId, () async {
     final track = await _db.getTrack(trackId);
     if (track == null) throw StateError('The track is gone.');
@@ -419,7 +505,7 @@ class LyricsService {
       throw StateError('There are no lyrics to change here.');
     }
     final lines = await _db.lyricsLinesForDoc(doc.id);
-    await _db.replaceLyricsDoc(change(doc, lines));
+    await _db.replaceLyricsDoc(await change(track, playlist, doc, lines));
     await _persist(track, playlist);
     _emit(LyricsChange(trackId, chapterId));
   });
@@ -729,6 +815,21 @@ class LyricsService {
           changed = true;
           continue;
         }
+        // No record fits any more (the old one is mislabelled, and nothing
+        // else names its length): the words were right, so keep them
+        // without their times.
+        if (retime &&
+            !force &&
+            draft.status != LyricsStatus.found &&
+            draft.status != LyricsStatus.instrumental) {
+          final lines = await _db.lyricsLinesForDoc(doc.id);
+          draft = draftFromDoc(doc, lines).copyWith(
+            synced: false,
+            timeScale: 1.0,
+            checkedAt: _clock(),
+            lines: [for (final line in lines) LyricsLineDraft(line.lineText)],
+          );
+        }
       }
       // The lookup took a while: a chapter edited meanwhile was looked up
       // under its old title or start, and media replaced meanwhile is
@@ -890,7 +991,7 @@ class LyricsService {
             kind: LyricsMode.lyrics,
             status: LyricsStatus.found,
             source: LyricsSource.ytSubs,
-            sourceRef: choice.key,
+            sourceRef: '${track.videoId}:${choice.key}',
             synced: true,
             lang: choice.lang,
             checkedAt: _clock(),
@@ -921,7 +1022,7 @@ class LyricsService {
       kind: LyricsMode.transcript,
       status: LyricsStatus.found,
       source: choice.automatic ? LyricsSource.ytAuto : LyricsSource.ytSubs,
-      sourceRef: choice.key,
+      sourceRef: '${context.track.videoId}:${choice.key}',
       synced: true,
       lang: choice.lang,
       checkedAt: _clock(),
@@ -1012,7 +1113,7 @@ class LyricsService {
       case LyricsSource.lrclib:
         final id = int.tryParse(ref);
         if (id == null) throw ArgumentError('Not an LRCLIB id: $ref');
-        final record = await (await _lrclib()).getById(id, stop: stop);
+        final record = await _recordById(id, stop: stop);
         if (record == null) throw StateError('That lyrics record is gone.');
         if (record.instrumental) {
           return draft(
@@ -1023,8 +1124,27 @@ class LyricsService {
             title: record.trackName,
           );
         }
-        final (fits, scale) = _timingFor(record, slot, track.title);
-        final synced = fits && !pick.timingOff;
+        // The user chose this record: its times are kept even when they
+        // do not fit (another intro or edit), so "Timing off?" can shift
+        // them. Only automatic matches drop times that do not fit.
+        final (_, scale) = _timingFor(record, slot, track.title);
+        var synced = record.isSynced && !pick.timingOff;
+        var lines =
+            synced
+                ? _cutToSlot(
+                  shiftLyricsLines(
+                    lyricsLinesFor(record, synced: true, timeScale: scale),
+                    pick.shiftMs,
+                  ),
+                  slot,
+                  synced: true,
+                )
+                : const <LyricsLineDraft>[];
+        // Every line starts after the chapter ends: keep the words.
+        if (lines.isEmpty) {
+          synced = false;
+          lines = lyricsLinesFor(record, synced: false);
+        }
         return draft(
           LyricsStatus.found,
           source: LyricsSource.lrclib,
@@ -1033,14 +1153,7 @@ class LyricsService {
           title: record.trackName,
           timeScale: synced ? scale : 1.0,
           synced: synced,
-          lines: _cutToSlot(
-            shiftLyricsLines(
-              lyricsLinesFor(record, synced: synced, timeScale: scale),
-              synced ? pick.shiftMs : 0,
-            ),
-            slot,
-            synced: synced,
-          ),
+          lines: lines,
         );
       case LyricsSource.ytmusic:
         final ytm = await _ytMusic.lyricsFor(ref.isEmpty ? track.videoId : ref);
@@ -1055,8 +1168,14 @@ class LyricsService {
         );
       case LyricsSource.ytSubs || LyricsSource.ytAuto:
         final separator = ref.indexOf(':');
-        final videoId = separator < 0 ? ref : ref.substring(0, separator);
-        final lang = separator < 0 ? null : ref.substring(separator + 1);
+        var videoId = separator < 0 ? ref : ref.substring(0, separator);
+        var lang = separator < 0 ? null : ref.substring(separator + 1);
+        // An automatic caption doc stored before refs named the video
+        // keeps only the caption track ("en"): it is this track's video.
+        if (separator < 0 && _looksLikeCaptionKey(ref)) {
+          videoId = track.videoId;
+          lang = ref;
+        }
         if (videoId.isEmpty) throw ArgumentError('No video id in "$ref".');
         final loader = _captionInfo;
         if (loader == null) throw StateError('yt-dlp is not available.');
@@ -1068,7 +1187,18 @@ class LyricsService {
         if (choice == null) {
           throw StateError('That video has no captions to use.');
         }
-        final lines = await _captions.fetch(choice.url);
+        // Captions are timed to the whole video: a chapter takes its part,
+        // timed from its start, shifted and then cut at its end as a live
+        // shift does.
+        final all = await _captions.fetch(choice.url);
+        final lines =
+            slot.isChapter && videoId == track.videoId
+                ? _cutToSlot(
+                  shiftLyricsLines(_sliceForSlot(all, slot), pick.shiftMs),
+                  slot,
+                  synced: true,
+                )
+                : shiftLyricsLines(all, pick.shiftMs);
         if (lines.isEmpty) throw StateError('Those captions are empty.');
         return draft(
           LyricsStatus.found,
@@ -1081,12 +1211,17 @@ class LyricsService {
           lines:
               pick.timingOff
                   ? [for (final line in lines) LyricsLineDraft(line.text)]
-                  : shiftLyricsLines(lines, pick.shiftMs),
+                  : lines,
         );
       default:
         throw ArgumentError('Unknown lyrics source ${pick.source}');
     }
   }
+
+  /// Whether a bare [ref] is a caption track key ("en", "en-US",
+  /// "cs-orig", "en-nP7-2PuUl7o") and not a video id (always 11 chars).
+  static bool _looksLikeCaptionKey(String ref) =>
+      ref.length != 11 && RegExp(r'^[a-z]{2,3}(-[A-Za-z0-9]+)*$').hasMatch(ref);
 
   /// The caption track named by [key] (exact, else by language), or the
   /// best one: manual captions first, speech-to-text only for transcripts.
@@ -1149,7 +1284,8 @@ class LyricsService {
             doc.status == LyricsStatus.found &&
             doc.synced &&
             doc.source == LyricsSource.lrclib) {
-          durationMs[doc.id] = seconds * 1000;
+          // The stored length is whole seconds: allow the rest of one.
+          durationMs[doc.id] = (seconds + 1) * 1000;
         }
       }
     }

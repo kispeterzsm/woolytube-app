@@ -25,8 +25,8 @@ const durationToleranceSeconds = 4.0;
 const nightcoreMinRatio = 0.70;
 const nightcoreMaxRatio = 0.93;
 
-/// The last synced line must start at least this long before the file (or
-/// chapter) ends.
+/// A chapter's first synced line must start at least this long before the
+/// chapter ends.
 const syncedEndMarginMs = 1000;
 
 /// A record's last line may start this much after its stated length (the
@@ -59,9 +59,10 @@ bool claimedDurationTrustworthy(double? claimedSeconds, int? lastLineMs) =>
         lastLineMs <= claimedSeconds * 1000 + claimedDurationSlackMs);
 
 /// Whether synced lines whose last one starts at [lastLineMs] (doc time,
-/// already scaled) fit a file of [durationMs].
-bool syncedLinesFit(int lastLineMs, int durationMs) =>
-    lastLineMs <= durationMs - syncedEndMarginMs;
+/// already scaled) fit a file of [durationMs]: it starts before the file
+/// ends. A last word sung in the final second still fits; a record of a
+/// longer recording overruns by far more.
+bool syncedLinesFit(int lastLineMs, int durationMs) => lastLineMs < durationMs;
 
 /// How a record's synced lines fit a file or chapter.
 class SyncedTiming {
@@ -270,6 +271,12 @@ List<LyricsLineDraft> lyricsLinesFor(
   return parsePlainLyrics(record.plainLyrics ?? record.plainText);
 }
 
+/// Whether [a] and [b] are records of the same song: similar title and
+/// artist.
+bool sameSong(LrclibRecord a, LrclibRecord b) =>
+    textSimilarity(a.trackName, b.trackName) >= minTitleSimilarity &&
+    artistSimilarity(a.artistName, b.artistName) >= minArtistSimilarity;
+
 /// How one record fits a query.
 class _Fit {
   final LrclibRecord record;
@@ -321,7 +328,8 @@ class _Step {
 ///
 /// Times are kept only when [syncedTimingFor] says they fit. When the best
 /// record's synced times do not fit, later steps may still find a record
-/// of the same song whose times do; otherwise it is stored plain.
+/// of the same song (similar artist and title, see [sameSong]) whose times
+/// do; otherwise it is stored plain.
 class LyricsMatcher {
   LyricsMatcher(this.client);
 
@@ -424,6 +432,16 @@ class LyricsMatcher {
       ];
       final accepted = fits.where((f) => _accepted(f, step, query, chapter));
       final withLyrics = accepted.where((f) => f.record.hasLyrics).toList();
+      // Once a record's times did not fit, only the same song with times
+      // that fit can replace it: another reading of the title may find
+      // another song.
+      final pending = untimed?.record;
+      if (pending != null) {
+        withLyrics.retainWhere(
+          (f) =>
+              f.record.isSynced && f.timingFits && sameSong(f.record, pending),
+        );
+      }
       if (withLyrics.isNotEmpty) {
         withLyrics.sort(_preference);
         final best = withLyrics.first;

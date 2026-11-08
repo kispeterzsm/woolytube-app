@@ -194,7 +194,7 @@ void main() {
       await service.fetchTrack(t, force: true);
       doc = (await db.lyricsDocFor(t.id, null))!;
       expect(doc.source, LyricsSource.ytSubs);
-      expect(doc.sourceRef, 'en-nP7-2PuUl7o');
+      expect(doc.sourceRef, 'vid1:en-nP7-2PuUl7o');
       expect(doc.lang, 'en');
       expect(doc.synced, isTrue);
       expect(captionInfoUrls.single, 'https://www.youtube.com/watch?v=vid1');
@@ -359,7 +359,7 @@ void main() {
       expect(docs.single.chapterId, isNull);
       expect(docs.single.kind, 'transcript');
       expect(docs.single.source, LyricsSource.ytAuto);
-      expect(docs.single.sourceRef, 'cs-orig');
+      expect(docs.single.sourceRef, 'vid1:cs-orig');
       expect(docs.single.lang, 'cs');
       expect(await db.lyricsLinesForDoc(docs.single.id), isNotEmpty);
       expect(lrclib.http.requests, isEmpty);

@@ -135,10 +135,13 @@ class LyricsDocDraft {
 
   /// This doc with other fields.
   LyricsDocDraft copyWith({
+    String? sourceRef,
+    double? timeScale,
     bool? synced,
     bool? pinned,
     int? shiftMs,
     bool? timingOff,
+    DateTime? checkedAt,
     List<LyricsLineDraft>? lines,
   }) => LyricsDocDraft(
     trackId: trackId,
@@ -147,16 +150,16 @@ class LyricsDocDraft {
     kind: kind,
     status: status,
     source: source,
-    sourceRef: sourceRef,
+    sourceRef: sourceRef ?? this.sourceRef,
     matchedArtist: matchedArtist,
     matchedTitle: matchedTitle,
-    timeScale: timeScale,
+    timeScale: timeScale ?? this.timeScale,
     synced: synced ?? this.synced,
     pinned: pinned ?? this.pinned,
     shiftMs: shiftMs ?? this.shiftMs,
     timingOff: timingOff ?? this.timingOff,
     lang: lang,
-    checkedAt: checkedAt,
+    checkedAt: checkedAt ?? this.checkedAt,
     attempts: attempts,
     lines: lines ?? this.lines,
   );
