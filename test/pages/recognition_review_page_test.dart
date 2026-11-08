@@ -182,8 +182,9 @@ void main() {
     });
   });
 
-  testWidgets('applying fetches lyrics for the new chapters when the '
-      'playlist has lyrics on', (tester) async {
+  testWidgets('applying tells the lyrics service the chapters changed', (
+    tester,
+  ) async {
     tester.view.physicalSize = const Size(1200, 3200);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
@@ -238,7 +239,7 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('apply-proposals')));
       await settle(tester);
 
-      expect(lyrics.calls, ['fetch ${track.id}']);
+      expect(lyrics.calls, ['chapters ${track.id}']);
       await tester.pumpWidget(const SizedBox());
       await tester.pump(const Duration(seconds: 10));
     });

@@ -159,7 +159,9 @@ class _LyricsPageState extends ConsumerState<LyricsPage> {
         playlist: playlist,
         chapterId: chapterId,
         whole: chapterId == null,
+        startAt: Duration(milliseconds: fileMs),
       );
+      return;
     }
     current = player.currentItem;
     if (current == null || current.track.id != track.id) return;

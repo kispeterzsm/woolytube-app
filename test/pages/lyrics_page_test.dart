@@ -154,7 +154,9 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('lyrics-line-1')));
     await tester.pumpAndSettle();
     expect(player.played, [(track.id, null, true)]);
-    expect(player.seeks, [const Duration(milliseconds: 9500)]);
+    // A fresh start begins at the line, no seek needed.
+    expect(player.startAts, [const Duration(milliseconds: 9500)]);
+    expect(player.seeks, isEmpty);
 
     // Now this file plays: only a seek.
     await tester.tap(find.byKey(const ValueKey('lyrics-line-0')));
@@ -175,8 +177,8 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('lyrics-line-0')));
     await tester.pumpAndSettle();
     expect(player.played, [(track.id, 'b', false)]);
-    // Chapter time: the chapter starts at 1:00, the line 5 s into it.
-    expect(player.seeks, [const Duration(milliseconds: 5000)]);
+    // File time: the chapter starts at 1:00, the line 5 s into it.
+    expect(player.startAts, [const Duration(milliseconds: 65000)]);
 
     await tester.tap(find.byKey(const ValueKey('lyrics-chapter-selector')));
     await tester.pumpAndSettle();
@@ -357,7 +359,7 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('lyrics-line-0')));
     await tester.pumpAndSettle();
     expect(player.played, [(track.id, 'b', false)]);
-    expect(player.seeks, [const Duration(milliseconds: 5000)]);
+    expect(player.startAts, [const Duration(milliseconds: 65000)]);
     await unmount(tester);
   });
 
@@ -389,6 +391,7 @@ class _Player implements PlaybackService {
   bool playing = false;
   final played = <(int, String?, bool)>[];
   final seeks = <Duration>[];
+  final startAts = <Duration?>[];
 
   @override
   PlaybackItem? get currentItem => item;
@@ -421,6 +424,7 @@ class _Player implements PlaybackService {
       final chapterId = invocation.namedArguments[#chapterId] as String?;
       final whole = invocation.namedArguments[#whole] as bool? ?? false;
       played.add((track.id, chapterId, whole));
+      startAts.add(invocation.namedArguments[#startAt] as Duration?);
       final chapter =
           chapterId == null
               ? null

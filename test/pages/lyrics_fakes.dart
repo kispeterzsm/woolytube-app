@@ -40,6 +40,11 @@ class FakeLyricsService implements LyricsService {
   bool instantBackfill = false;
 
   @override
+  Future<void> onChaptersChanged(int trackId) async {
+    calls.add('chapters $trackId');
+  }
+
+  @override
   Future<void> fetchTrack(Track track, {bool force = false}) async {
     calls.add('fetch ${track.id}');
     final draft = fetched?.call(track);
