@@ -651,12 +651,15 @@ Set<int> lyricsSettledTrackIds(List<LyricsDoc> docs) => {
 
 /// [lyricsSettledTrackIds] of a playlist's tracks, again after every change.
 final lyricsSettledTracksProvider = StreamProvider.autoDispose
-    .family<Set<int>, int>(
-      (ref, playlistId) => ref
-          .watch(databaseProvider)
-          .watchLyricsDocsForPlaylist(playlistId)
-          .map(lyricsSettledTrackIds),
-    );
+    .family<Set<int>, int>((ref, playlistId) async* {
+      final db = ref.watch(databaseProvider);
+      // Re-read on each lyrics write rather than keeping a live query open.
+      final changes = db.watchLyricsChanges();
+      yield lyricsSettledTrackIds(await db.lyricsDocsForPlaylist(playlistId));
+      await for (final _ in changes) {
+        yield lyricsSettledTrackIds(await db.lyricsDocsForPlaylist(playlistId));
+      }
+    });
 
 /// Searches stored lyrics and transcripts.
 final lyricsSearchProvider = Provider<LyricsSearch>((ref) {

@@ -79,12 +79,6 @@ void main() {
     syncingPlaylistsProvider.overrideWith((ref) => syncing.stream),
     downloadQueueProvider.overrideWith((ref) => queued.stream),
     lyricsSearchProvider.overrideWithValue(lyrics),
-    // A one-shot read: a live Drift query leaves a timer behind at dispose.
-    lyricsSettledTracksProvider.overrideWith(
-      (ref, id) => Stream.fromFuture(
-        db.lyricsDocsForPlaylist(id),
-      ).map(lyricsSettledTrackIds),
-    ),
   ];
 
   List<Override> overrides(
