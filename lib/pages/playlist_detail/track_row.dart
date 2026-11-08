@@ -76,7 +76,12 @@ class _TrackRowMetrics {
 }
 
 typedef _TrackTapCallback =
-    void Function(Track track, bool isCurrent, MediaChapter? chapter);
+    void Function(
+      Track track,
+      bool isCurrent,
+      MediaChapter? chapter,
+      LyricsHit? lyricMatch,
+    );
 
 /// One row of the track list. It watches only whether it is the current
 /// track (and, if so, whether it plays), so a track change or play/pause
@@ -87,6 +92,7 @@ class _TrackRow extends ConsumerWidget {
     required this.track,
     required this.metrics,
     required this.chapterMatch,
+    this.lyricMatch,
     required this.onTap,
     required this.onActions,
   });
@@ -96,6 +102,9 @@ class _TrackRow extends ConsumerWidget {
 
   /// The chapter the search query matched, if any.
   final MediaChapter? chapterMatch;
+
+  /// The lyric line the search query matched, if any. A chapter match wins.
+  final LyricsHit? lyricMatch;
   final _TrackTapCallback onTap;
   final void Function(Track track) onActions;
 
@@ -113,13 +122,19 @@ class _TrackRow extends ConsumerWidget {
         );
     final state = _TrackState.of(track);
     final subtitle = _rowSubtitle(track, state, chapterMatch);
+    final lyric = chapterMatch == null ? lyricMatch : null;
+    final subtitleStyle = TextStyle(
+      color: _subtitleColor(track, state),
+      fontSize: _subtitleFontSize,
+      height: _lineHeight,
+    );
 
     return SizedBox(
       height: metrics.extent,
       child: Material(
         color: isCurrent ? const Color(0xFF2A2A2A) : Colors.transparent,
         child: InkWell(
-          onTap: () => onTap(track, isCurrent, chapterMatch),
+          onTap: () => onTap(track, isCurrent, chapterMatch, lyricMatch),
           onLongPress: () => onActions(track),
           child: Padding(
             padding: const EdgeInsets.only(left: 12),
@@ -198,17 +213,16 @@ class _TrackRow extends ConsumerWidget {
                         ),
                       ),
                       const SizedBox(height: 4),
-                      Text(
-                        subtitle,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        strutStyle: _subtitleStrut,
-                        style: TextStyle(
-                          color: _subtitleColor(track, state),
-                          fontSize: _subtitleFontSize,
-                          height: _lineHeight,
+                      if (lyric != null)
+                        _LyricSubtitle(hit: lyric, style: subtitleStyle)
+                      else
+                        Text(
+                          subtitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          strutStyle: _subtitleStrut,
+                          style: subtitleStyle,
                         ),
-                      ),
                     ],
                   ),
                 ),
@@ -237,6 +251,45 @@ class _TrackRow extends ConsumerWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// The one-line subtitle of a lyric match: `“…line…” · 1:23`. The time
+/// always shows; the line is cut to fit.
+class _LyricSubtitle extends StatelessWidget {
+  const _LyricSubtitle({required this.hit, required this.style});
+
+  final LyricsHit hit;
+  final TextStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    final position = hit.positionMs;
+    return Row(
+      key: ValueKey('track-lyric-${hit.trackId}'),
+      children: [
+        Flexible(
+          child: LyricsLineText(
+            hit: hit,
+            style: style,
+            highlightStyle: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w600,
+            ),
+            maxLines: 1,
+            snippet: true,
+            quoted: true,
+            strutStyle: _subtitleStrut,
+          ),
+        ),
+        Text(
+          position == null ? '”' : '” · ${formatLyricsTime(position)}',
+          maxLines: 1,
+          strutStyle: _subtitleStrut,
+          style: style,
+        ),
+      ],
     );
   }
 }

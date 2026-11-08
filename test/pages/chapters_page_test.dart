@@ -552,6 +552,7 @@ class _Player implements PlaybackService {
     Playlist? playlist,
     String? chapterId,
     bool whole = false,
+    Duration? startAt,
   }) async {
     playedTracks.add((track.id, chapterId, allTracks.length));
   }
