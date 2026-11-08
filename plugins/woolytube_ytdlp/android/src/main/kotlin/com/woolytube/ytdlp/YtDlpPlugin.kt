@@ -229,6 +229,8 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "startDownloadService" -> handleStartDownloadService(call.arguments as Map<*, *>, result)
             "updateDownloadServiceProgress" -> handleUpdateDownloadServiceProgress(call.arguments as Map<*, *>, result)
             "stopDownloadService" -> handleStopDownloadService(result)
+            "decodeAudioWindow" -> handleDecodeAudioWindow(call.arguments as Map<*, *>, result)
+            "probeMediaDurationMs" -> handleProbeMediaDuration(call.arguments as Map<*, *>, result)
             else -> result.notImplemented()
         }
     }
@@ -803,6 +805,60 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             trackTitle = args["trackTitle"] as? String
         )
         result.success(null)
+    }
+
+    private fun handleDecodeAudioWindow(args: Map<*, *>, result: MethodChannel.Result) {
+        val path = args["path"] as? String
+        val startMs = (args["startMs"] as? Number)?.toLong() ?: 0L
+        val durationMs = (args["durationMs"] as? Number)?.toLong() ?: 0L
+        if (path == null || durationMs <= 0 || startMs < 0) {
+            result.error("INVALID_ARGS", "path and durationMs are required", null)
+            return
+        }
+        // The whole window is held in memory (32 KB per second); Dart asks
+        // for at most about a minute at a time.
+        if (durationMs > AudioWindowDecoder.MAX_WINDOW_MS) {
+            result.error(
+                "INVALID_ARGS",
+                "durationMs $durationMs exceeds ${AudioWindowDecoder.MAX_WINDOW_MS}",
+                null
+            )
+            return
+        }
+        scope.launch {
+            try {
+                val pcm = AudioWindowDecoder.decodeWindow(path, startMs, durationMs)
+                withContext(Dispatchers.Main) { result.success(pcm) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                // Also an OutOfMemoryError or a codec Error: Dart gets an
+                // error instead of the whole process going down.
+                Log.w(TAG, "Audio window decode failed", e)
+                withContext(Dispatchers.Main) {
+                    result.error("DECODE_ERROR", e.message ?: e.javaClass.simpleName, null)
+                }
+            }
+        }
+    }
+
+    private fun handleProbeMediaDuration(args: Map<*, *>, result: MethodChannel.Result) {
+        val path = args["path"] as? String
+        if (path == null) {
+            result.error("INVALID_ARGS", "path is required", null)
+            return
+        }
+        scope.launch {
+            try {
+                val duration = AudioWindowDecoder.probeDurationMs(path)
+                withContext(Dispatchers.Main) { result.success(duration) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Log.w(TAG, "Duration probe failed", e)
+                withContext(Dispatchers.Main) { result.error("PROBE_ERROR", e.message, null) }
+            }
+        }
     }
 
     private fun handleStopDownloadService(result: MethodChannel.Result) {

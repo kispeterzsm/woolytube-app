@@ -469,6 +469,57 @@ void main() {
     ]);
   });
 
+  test('Download Original makes song recognition results timed to the local '
+      'file stale', () async {
+    service.dispose();
+    service = newService(withSponsorBlock: false);
+    final playlist = await insertTestPlaylist(
+      db,
+      outputPath: folder,
+      audioOnly: true,
+    );
+    const localChapters = ChapterData(
+      custom: [
+        MediaChapter(
+          id: 'l',
+          title: 'Local part',
+          startMs: 0,
+          endMs: 30000,
+          origin: ChapterOrigin.auto,
+        ),
+      ],
+      undoChapters: [],
+      recognitionEpoch: 3,
+      lastRecognitionRunId: 'run-1',
+    );
+    final track = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 1,
+      videoId: 'made-for-local',
+      title: 'First',
+      filePath: await write('00001_First local.m4a', 'local 1'),
+      status: 'complete',
+      isLocalReplacement: true,
+      replaceRequested: true,
+      downloadedAt: DateTime(2025, 6, 1),
+      sponsorBlockCheckedAt: DateTime(2025, 6, 1),
+      chaptersJson: localChapters.encode(),
+    );
+
+    await service.downloadPlaylist(playlist);
+
+    final after = (await db.getTrack(track.id))!;
+    expect(after.isLocalReplacement, isFalse);
+    final data = ChapterData.decode(after.chaptersJson);
+    expect(data.custom, isNull);
+    // The undo step would bring back chapters made for the local file.
+    expect(data.undoChapters, isNull);
+    // A scan of the local file can no longer be applied.
+    expect(data.recognitionEpoch, 4);
+    expect(data.lastRecognitionRunId, 'run-1');
+  });
+
   group('R18', () {
     /// Gives [path] a second name, like case-insensitive shared storage
     /// does for every letter-case variant: two names, one file. Returns

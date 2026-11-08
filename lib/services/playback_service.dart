@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:math';
 import 'package:flutter/foundation.dart' show listEquals;
 import 'package:media_kit/media_kit.dart' hide Track, Playlist, Tracks;
@@ -546,42 +545,8 @@ class PlaybackService
   }
 
   /// Resolve stored file path (without extension) to actual file on disk
-  String? resolveFilePath(String storedPath) {
-    // First try the stored path directly (in case it already has extension)
-    if (File(storedPath).existsSync()) return storedPath;
-
-    // Scan directory for matching file by full basename
-    final dir = Directory(p.dirname(storedPath));
-    final baseName = p.basename(storedPath);
-    if (!dir.existsSync()) return null;
-
-    final entries = dir.listSync();
-    for (final entity in entries) {
-      if (entity is File &&
-          p.basenameWithoutExtension(entity.path) == baseName) {
-        return entity.path;
-      }
-    }
-
-    // Fallback: match by index prefix (handles title mismatch from yt-dlp)
-    final indexPrefixMatch = RegExp(r'^\d+[_ -]').firstMatch(baseName);
-    if (indexPrefixMatch != null) {
-      final prefix = indexPrefixMatch.group(0)!;
-      for (final entity in entries) {
-        if (entity is File) {
-          final fileName = p.basename(entity.path);
-          final ext = p.extension(entity.path).toLowerCase();
-          if (fileName.startsWith(prefix) &&
-              MetadataService.mediaExtensions.contains(ext) &&
-              !MetadataService.isTransientFile(fileName)) {
-            return entity.path;
-          }
-        }
-      }
-    }
-
-    return null;
-  }
+  String? resolveFilePath(String storedPath) =>
+      MetadataService.resolveStoredFilePath(storedPath);
 
   /// Whether the resolved file is a video format
   bool _isVideoFile(String? filePath) {

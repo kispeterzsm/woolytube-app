@@ -258,6 +258,13 @@ class MetadataService {
         shuffleChapters: old.shuffleChapters,
         checkedAt: data.checkedAt,
         durationMs: data.durationMs,
+        // An undo step for dropped chapters no longer applies, and song
+        // recognition results timed to a local file are stale.
+        undoChapters: keepCustom ? old.undoChapters : null,
+        undoFollowsDownloaded: keepCustom && old.undoFollowsDownloaded,
+        recognitionEpoch:
+            wasLocal ? old.recognitionEpoch + 1 : old.recognitionEpoch,
+        lastRecognitionRunId: old.lastRecognitionRunId,
       ),
     );
   }
@@ -1126,6 +1133,43 @@ for video) to keep a complete backup.
     return '$fixed$ext';
   }
 
+  /// Resolves a stored track path (which may lack its extension) to the
+  /// file on disk: the exact path, the same basename with any extension, or
+  /// the first media file sharing its index prefix (handles a title mismatch
+  /// from yt-dlp). Intermediate and staging files are never returned.
+  static String? resolveStoredFilePath(String storedPath) {
+    if (File(storedPath).existsSync()) return storedPath;
+
+    final dir = Directory(p.dirname(storedPath));
+    final baseName = p.basename(storedPath);
+    if (!dir.existsSync()) return null;
+
+    final entries = dir.listSync();
+    for (final entity in entries) {
+      if (entity is File &&
+          p.basenameWithoutExtension(entity.path) == baseName) {
+        return entity.path;
+      }
+    }
+
+    final indexPrefixMatch = RegExp(r'^\d+[_ -]').firstMatch(baseName);
+    if (indexPrefixMatch != null) {
+      final prefix = indexPrefixMatch.group(0)!;
+      for (final entity in entries) {
+        if (entity is File) {
+          final fileName = p.basename(entity.path);
+          final ext = p.extension(entity.path).toLowerCase();
+          if (fileName.startsWith(prefix) &&
+              mediaExtensions.contains(ext) &&
+              !isTransientFile(fileName)) {
+            return entity.path;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
   /// Find a media file in [dirPath] whose number prefix equals the number in
   /// [indexPrefix] (e.g. "001_" also matches "00001_"). Intermediate and
   /// staging files are never returned, even when their extension looks like
@@ -1362,6 +1406,10 @@ for video) to keep a complete backup.
             shuffleChapters: old.shuffleChapters,
             checkedAt: old.checkedAt,
             durationMs: old.durationMs,
+            undoChapters: old.valid ? null : old.undoChapters,
+            undoFollowsDownloaded: !old.valid && old.undoFollowsDownloaded,
+            recognitionEpoch: old.recognitionEpoch + 1,
+            lastRecognitionRunId: old.lastRecognitionRunId,
           ),
         );
       }

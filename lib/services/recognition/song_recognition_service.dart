@@ -1,0 +1,960 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:math' as math;
+import 'dart:typed_data';
+
+import 'package:crypto/crypto.dart';
+import 'package:path/path.dart' as p;
+
+import '../../database/database.dart';
+import '../chapters.dart';
+import '../metadata_service.dart';
+import '../ytdlp_service.dart';
+import 'audio_window_decoder.dart';
+import 'chapter_estimator.dart';
+import 'shazam_client.dart';
+import 'shazam_signature.dart';
+import 'silence_detector.dart';
+
+enum RecognitionPhase {
+  sampling,
+
+  /// Sampling is paused before retrying a lookup; see
+  /// [RecognitionProgress.resumeAt].
+  waiting,
+  silence,
+  estimating,
+  done,
+  cancelled,
+  failed,
+}
+
+/// Why a scan is [RecognitionPhase.waiting].
+enum RecognitionWaitReason {
+  /// Shazam asked us to slow down.
+  rateLimited,
+
+  /// A lookup failed on the network or server side.
+  network,
+}
+
+class RecognitionProgress {
+  final int trackId;
+  final RecognitionPhase phase;
+  final int completed;
+  final int total;
+  final String? message;
+
+  /// While [RecognitionPhase.waiting]: when the lookup is retried.
+  final DateTime? resumeAt;
+  final RecognitionWaitReason? waitReason;
+
+  const RecognitionProgress({
+    required this.trackId,
+    required this.phase,
+    this.completed = 0,
+    this.total = 0,
+    this.message,
+    this.resumeAt,
+    this.waitReason,
+  });
+
+  bool get running =>
+      phase == RecognitionPhase.sampling ||
+      phase == RecognitionPhase.waiting ||
+      phase == RecognitionPhase.silence ||
+      phase == RecognitionPhase.estimating;
+}
+
+/// A completed scan: the proposals plus what they were computed against, so
+/// they can be applied later only if the chapters have not changed since.
+class RecognitionRun {
+  final String runId;
+  final int trackId;
+  final String fileKey;
+  final int epoch;
+  final int durationMs;
+  final DateTime completedAt;
+  final int sampleCount;
+  final int matchedSamples;
+  final List<ChapterProposal> proposals;
+
+  const RecognitionRun({
+    required this.runId,
+    required this.trackId,
+    required this.fileKey,
+    required this.epoch,
+    required this.durationMs,
+    required this.completedAt,
+    required this.sampleCount,
+    required this.matchedSamples,
+    required this.proposals,
+  });
+
+  RecognitionRun copyWith({List<ChapterProposal>? proposals}) => RecognitionRun(
+    runId: runId,
+    trackId: trackId,
+    fileKey: fileKey,
+    epoch: epoch,
+    durationMs: durationMs,
+    completedAt: completedAt,
+    sampleCount: sampleCount,
+    matchedSamples: matchedSamples,
+    proposals: proposals ?? this.proposals,
+  );
+
+  Map<String, dynamic> toJson() => {
+    'runId': runId,
+    'trackId': trackId,
+    'fileKey': fileKey,
+    'epoch': epoch,
+    'durationMs': durationMs,
+    'completedAt': completedAt.toIso8601String(),
+    'sampleCount': sampleCount,
+    'matchedSamples': matchedSamples,
+    'proposals': proposals.map((c) => c.toJson()).toList(),
+  };
+
+  factory RecognitionRun.fromJson(Map<String, dynamic> json) => RecognitionRun(
+    runId: json['runId'] as String,
+    trackId: json['trackId'] as int,
+    fileKey: json['fileKey'] as String,
+    epoch: json['epoch'] as int,
+    durationMs: json['durationMs'] as int,
+    completedAt: DateTime.parse(json['completedAt'] as String),
+    sampleCount: json['sampleCount'] as int,
+    matchedSamples: json['matchedSamples'] as int,
+    proposals:
+        (json['proposals'] as List)
+            .map((c) => ChapterProposal.fromJson(c as Map<String, dynamic>))
+            .toList(),
+  );
+}
+
+class RecognitionCancelled implements Exception {
+  const RecognitionCancelled();
+  @override
+  String toString() => 'Recognition cancelled';
+}
+
+/// Shazam kept rate-limiting lookups for longer than the scan waits. The
+/// lookups made so far stay cached, so a later scan resumes from there.
+class RecognitionRateLimited implements Exception {
+  const RecognitionRateLimited();
+  static const message =
+      'Shazam is limiting requests right now. Progress is saved; '
+      'try again later.';
+  @override
+  String toString() => message;
+}
+
+/// Keeps the process alive and visible while a scan runs.
+abstract interface class ScanForegroundNotifier {
+  Future<void> start(String label);
+
+  /// [detail], when given, replaces the "n of total" line, for example
+  /// while the scan waits before retrying a lookup. The Android side keeps
+  /// showing the last detail while [current] stays the same, so an update
+  /// without one does not clear it; send a new detail to replace it.
+  Future<void> update(String label, int current, int total, {String? detail});
+  Future<void> stop();
+}
+
+/// Reuses the download foreground service of the yt-dlp plugin.
+///
+/// A download owns that service whenever [downloadActive] says one is
+/// running: the scan then leaves its notification alone and never stops the
+/// service, so a download that starts during a scan keeps its foreground
+/// protection when the scan ends. Once the download has finished (and
+/// stopped the service), the next progress update starts it again for the
+/// scan.
+class YtDlpScanForegroundNotifier implements ScanForegroundNotifier {
+  YtDlpScanForegroundNotifier(this._ytdlp, {bool Function()? downloadActive})
+    : _downloadActive = downloadActive ?? _never;
+  final YtDlpService _ytdlp;
+  final bool Function() _downloadActive;
+
+  /// Whether this scan started the service and still owns it.
+  bool _owned = false;
+
+  static bool _never() => false;
+
+  @override
+  Future<void> start(String label) async {
+    if (_downloadActive()) {
+      _owned = false;
+      return;
+    }
+    _owned = true;
+    await _ytdlp.startDownloadService(label);
+  }
+
+  @override
+  Future<void> update(
+    String label,
+    int current,
+    int total, {
+    String? detail,
+  }) async {
+    if (_downloadActive()) {
+      _owned = false;
+      return;
+    }
+    if (!_owned) {
+      _owned = true;
+      await _ytdlp.startDownloadService(label);
+    }
+    await _ytdlp.updateDownloadServiceProgress(
+      playlistName: label,
+      currentTrack: current,
+      totalTracks: total,
+      progress: total == 0 ? 0 : (current * 100 ~/ total),
+      trackTitle: detail,
+    );
+  }
+
+  @override
+  Future<void> stop() async {
+    final owned = _owned;
+    _owned = false;
+    if (!owned || _downloadActive()) return;
+    await _ytdlp.stopDownloadService();
+  }
+}
+
+/// Runs the song recognition pipeline for one downloaded file.
+///
+/// Windows are decoded locally, fingerprinted, and looked up one at a time.
+/// Every lookup is cached under the file's content key, so a cancelled or
+/// failed scan resumes where it stopped and a finished scan can be re-run
+/// without network use. Quiet gaps are only measured where the recognized
+/// song changes, which is the only place the estimator uses them.
+///
+/// When Shazam rate-limits a lookup, the scan waits (a growing backoff, or
+/// longer when Retry-After asks for it) and retries the same sample, giving
+/// up once [rateLimitBudget] has passed since the first rate limit without
+/// a single success. Network and server hiccups are retried a few times.
+/// Every wait, the recognizer's own pacing included, ends at once on
+/// [cancel].
+class SongRecognitionService {
+  SongRecognitionService(
+    this._db, {
+    required AudioWindowDecoder decoder,
+    required ShazamRecognizer recognizer,
+    required Future<Directory> Function() rootDirectory,
+    ScanForegroundNotifier? notifier,
+    SilenceDetector silenceDetector = const SilenceDetector(),
+    this.windowSeconds = 12,
+    this.stepSeconds = 60,
+    this.firstStartSeconds = 30,
+    this.silenceMarginSeconds = 4,
+    this.rateLimitBackoff = const [
+      Duration(seconds: 30),
+      Duration(seconds: 60),
+      Duration(seconds: 120),
+      Duration(seconds: 240),
+      Duration(seconds: 300),
+    ],
+    this.rateLimitBudget = const Duration(minutes: 20),
+    this.transientRetryDelays = const [
+      Duration(seconds: 10),
+      Duration(seconds: 30),
+      Duration(seconds: 60),
+    ],
+    Future<void> Function(Duration)? delay,
+    DateTime Function()? clock,
+  }) : _decoder = decoder,
+       _recognizer = recognizer,
+       _rootDirectory = rootDirectory,
+       _notifier = notifier,
+       _silence = silenceDetector,
+       _delay = delay ?? Future<void>.delayed,
+       _clock = clock ?? DateTime.now;
+
+  final AppDatabase _db;
+  final AudioWindowDecoder _decoder;
+  final ShazamRecognizer _recognizer;
+  final Future<Directory> Function() _rootDirectory;
+  final ScanForegroundNotifier? _notifier;
+  final SilenceDetector _silence;
+  final int windowSeconds;
+  final int stepSeconds;
+  final int firstStartSeconds;
+  final int silenceMarginSeconds;
+
+  /// Waits after consecutive rate-limit responses; the last one repeats.
+  /// A longer Retry-After is used instead. Restarts after a successful
+  /// lookup.
+  final List<Duration> rateLimitBackoff;
+
+  /// The scan gives up once the next retry would come later than this
+  /// after the first rate-limit response since the last successful lookup.
+  /// Measured on the clock, so pacing and request time count too.
+  final Duration rateLimitBudget;
+
+  /// Waits before each retry of a lookup that failed on the network or
+  /// server side; when they are used up, the scan fails.
+  final List<Duration> transientRetryDelays;
+
+  final Future<void> Function(Duration) _delay;
+  final DateTime Function() _clock;
+
+  /// Longest stretch the silence pass decodes in one platform call. Quiet
+  /// gaps are measured around song changes, and back-to-back changes merge
+  /// into one stretch that can cover most of a long mix; decoding that in
+  /// one piece would hold hundreds of MB of PCM at once.
+  static const silenceChunkMs = 60000;
+
+  /// Decoded ahead of every later chunk and dropped, so the decoder's
+  /// start-up output never lands inside the stretch.
+  static const silencePrerollMs = 1000;
+
+  final _progress = StreamController<RecognitionProgress>.broadcast();
+  RecognitionProgress? _current;
+  bool _cancelRequested = false;
+
+  /// Completed by [cancel], so a wait between retries ends at once.
+  Completer<void> _cancelSignal = Completer<void>();
+
+  /// The track of the scan in progress. Set before scan() first awaits, so a
+  /// second call can never start alongside it.
+  int? _activeTrackId;
+
+  /// The time stamp of the last run id handed out, so a rescan served from
+  /// cached lookups within the same millisecond still gets a new id (a run
+  /// id that was applied before is never applied again).
+  static int _lastRunStamp = 0;
+
+  static String _nextRunId() {
+    final stamp = math.max(
+      DateTime.now().millisecondsSinceEpoch,
+      _lastRunStamp + 1,
+    );
+    _lastRunStamp = stamp;
+    return stamp.toRadixString(36);
+  }
+
+  Stream<RecognitionProgress> get progressStream => _progress.stream;
+  RecognitionProgress? get currentProgress => _current;
+  bool get isScanning => _activeTrackId != null;
+  int? get scanningTrackId => _activeTrackId;
+
+  void cancel() {
+    if (!isScanning) return;
+    _cancelRequested = true;
+    if (!_cancelSignal.isCompleted) _cancelSignal.complete();
+  }
+
+  void dispose() {
+    _progress.close();
+  }
+
+  /// The last completed run for [track], if its file is unchanged.
+  Future<RecognitionRun?> loadRun(Track track) async {
+    final path = _filePath(track);
+    if (path == null) return null;
+    final dir = await _runDirectory(track, path);
+    final file = File(p.join(dir, 'run.json'));
+    if (!await file.exists()) return null;
+    try {
+      final run = RecognitionRun.fromJson(
+        jsonDecode(await file.readAsString()) as Map<String, dynamic>,
+      );
+      // Only a run made from exactly this file content belongs here.
+      return run.fileKey == p.basename(dir) ? run : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Stores review edits of [run]. Does nothing when [track]'s file is no
+  /// longer the one the run was made from, so a run never lands in the
+  /// cache of a replacement file.
+  Future<void> saveRun(RecognitionRun run, Track track) async {
+    final path = _filePath(track);
+    if (path == null) return;
+    final dir = Directory(await _runDirectory(track, path));
+    if (run.fileKey != p.basename(dir.path)) return;
+    await dir.create(recursive: true);
+    await File(
+      p.join(dir.path, 'run.json'),
+    ).writeAsString(jsonEncode(run.toJson()));
+  }
+
+  Future<void> discardRun(Track track) async {
+    final path = _filePath(track);
+    if (path == null) return;
+    final file = File(p.join(await _runDirectory(track, path), 'run.json'));
+    if (await file.exists()) await file.delete();
+  }
+
+  /// Removes cached lookups and runs for files that no longer exist or
+  /// belong to other content.
+  Future<int> pruneCache(Iterable<Track> liveTracks) async {
+    final root = Directory(
+      p.join((await _rootDirectory()).path, 'recognition'),
+    );
+    if (!await root.exists()) return 0;
+    final keep = <String>{};
+    for (final track in liveTracks) {
+      final path = _filePath(track);
+      if (path != null) keep.add(p.basename(await _runDirectory(track, path)));
+    }
+    var removed = 0;
+    await for (final entity in root.list()) {
+      if (entity is Directory && !keep.contains(p.basename(entity.path))) {
+        await entity.delete(recursive: true);
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  Future<RecognitionRun> scan(Track track) async {
+    // Checked and claimed synchronously: nothing may await between the two.
+    if (isScanning) {
+      throw StateError('Another recognition scan is running.');
+    }
+    final path = _filePath(track);
+    if (path == null) {
+      throw StateError('The file for "${track.title}" was not found.');
+    }
+    _activeTrackId = track.id;
+    _cancelRequested = false;
+    _cancelSignal = Completer<void>();
+    try {
+      return await _scan(track, path);
+    } finally {
+      _activeTrackId = null;
+      _cancelRequested = false;
+    }
+  }
+
+  Future<RecognitionRun> _scan(Track track, String path) async {
+    final label = 'songs in ${track.title}';
+    // Read before sampling: an undo, reset or file replacement while the
+    // scan runs bumps it, and the run is then not applied.
+    final epoch =
+        ChapterData.decode(
+          (await _db.getTrack(track.id))?.chaptersJson,
+        ).recognitionEpoch;
+    final durationMs = await _durationMs(track, path);
+    final dir = Directory(await _runDirectory(track, path));
+    await _pruneStaleCaches(track, dir);
+    await dir.create(recursive: true);
+    final starts = sampleStartsMs(durationMs);
+    _emit(
+      RecognitionProgress(
+        trackId: track.id,
+        phase: RecognitionPhase.sampling,
+        total: starts.length,
+      ),
+    );
+    try {
+      await _notifier?.start(label);
+      final samples = <RecognitionSample>[];
+      final retry = _RetryState();
+      final sampleDir = Directory(p.join(dir.path, 'samples'));
+      await sampleDir.create(recursive: true);
+      for (var i = 0; i < starts.length; i++) {
+        _checkCancelled();
+        final startMs = starts[i];
+        final cached = File(p.join(sampleDir.path, '$startMs.json'));
+        Map<String, dynamic>? raw;
+        if (await cached.exists()) {
+          try {
+            raw =
+                jsonDecode(await cached.readAsString()) as Map<String, dynamic>;
+          } catch (_) {
+            raw = null;
+          }
+        }
+        if (raw == null) {
+          final pcm = await _decoder.decode(
+            path,
+            start: Duration(milliseconds: startMs),
+            duration: Duration(seconds: windowSeconds),
+          );
+          _checkCancelled();
+          final ShazamResult result;
+          if (pcm.length < 128) {
+            result = ShazamResult.fromJson(const {});
+          } else {
+            result = await _lookUp(
+              ShazamSignatureGenerator.fromSamples(pcm),
+              retry,
+              trackId: track.id,
+              label: label,
+              completed: i,
+              total: starts.length,
+            );
+          }
+          raw = {
+            'sampleStartMs': startMs,
+            'sampleDurationMs': windowSeconds * 1000,
+            'recordedAt': DateTime.now().toUtc().toIso8601String(),
+            'response': result.raw,
+          };
+          await cached.writeAsString(jsonEncode(raw));
+        }
+        samples.add(
+          RecognitionSample(
+            sampleStartMs: startMs,
+            sampleDurationMs: windowSeconds * 1000,
+            result: ShazamResult.fromJson(
+              (raw['response'] as Map?)?.cast<String, dynamic>() ?? const {},
+            ),
+          ),
+        );
+        _emit(
+          RecognitionProgress(
+            trackId: track.id,
+            phase: RecognitionPhase.sampling,
+            completed: i + 1,
+            total: starts.length,
+          ),
+        );
+        unawaited(
+          _notifier?.update(label, i + 1, starts.length).catchError((_) {}),
+        );
+      }
+
+      _emit(
+        RecognitionProgress(
+          trackId: track.id,
+          phase: RecognitionPhase.silence,
+          completed: 0,
+          total: 0,
+        ),
+      );
+      final quiet = await _quietIntervals(path, dir, samples, durationMs);
+
+      _emit(
+        RecognitionProgress(
+          trackId: track.id,
+          phase: RecognitionPhase.estimating,
+        ),
+      );
+      final runId = _nextRunId();
+      final proposals = ChapterEstimator.estimate(
+        runName: 'r$runId',
+        durationMs: durationMs,
+        samples: samples,
+        quietIntervals: quiet,
+      );
+      final run = RecognitionRun(
+        runId: runId,
+        trackId: track.id,
+        fileKey: p.basename(dir.path),
+        epoch: epoch,
+        durationMs: durationMs,
+        completedAt: DateTime.now(),
+        sampleCount: samples.length,
+        matchedSamples: samples.where((s) => s.result.recognized).length,
+        proposals: proposals,
+      );
+      await File(
+        p.join(dir.path, 'run.json'),
+      ).writeAsString(jsonEncode(run.toJson()));
+      _emit(
+        RecognitionProgress(
+          trackId: track.id,
+          phase: RecognitionPhase.done,
+          completed: starts.length,
+          total: starts.length,
+        ),
+      );
+      return run;
+    } on RecognitionCancelled {
+      _emit(
+        RecognitionProgress(
+          trackId: track.id,
+          phase: RecognitionPhase.cancelled,
+        ),
+      );
+      rethrow;
+    } catch (e) {
+      _emit(
+        RecognitionProgress(
+          trackId: track.id,
+          phase: RecognitionPhase.failed,
+          message: e.toString(),
+        ),
+      );
+      rethrow;
+    } finally {
+      await _notifier?.stop().catchError((_) {});
+    }
+  }
+
+  /// Looks [signature] up, waiting and retrying the same lookup while Shazam
+  /// rate-limits or the network hiccups. [retry] carries the backoff state
+  /// across samples; a success resets it.
+  Future<ShazamResult> _lookUp(
+    ShazamSignature signature,
+    _RetryState retry, {
+    required int trackId,
+    required String label,
+    required int completed,
+    required int total,
+  }) async {
+    while (true) {
+      _checkCancelled();
+      final Duration wait;
+      final RecognitionWaitReason reason;
+      try {
+        final result = await _recognizer.recognize(
+          signature,
+          cancelled: _cancelSignal.future,
+        );
+        retry.succeeded();
+        return result;
+      } catch (error) {
+        // A lookup that fails after Cancel was pressed ends as cancelled.
+        _checkCancelled();
+        switch (classifyShazamFailure(error)) {
+          case ShazamFailureKind.rateLimited:
+            // Retry-After is the least the endpoint wants us to wait, so a
+            // short one never undercuts the backoff: a server that keeps
+            // answering "retry now" is backed off like one that says nothing.
+            final asked = (error as ShazamHttpException).retryAfter;
+            final step =
+                rateLimitBackoff[math.min(
+                  retry.rateLimits++,
+                  rateLimitBackoff.length - 1,
+                )];
+            wait = asked != null && asked > step ? asked : step;
+            final now = _clock();
+            final since = retry.rateLimitedSince ??= now;
+            if (now.add(wait).difference(since) > rateLimitBudget) {
+              throw const RecognitionRateLimited();
+            }
+            reason = RecognitionWaitReason.rateLimited;
+          case ShazamFailureKind.transient:
+            if (retry.transientFailures >= transientRetryDelays.length) {
+              rethrow;
+            }
+            wait = transientRetryDelays[retry.transientFailures++];
+            reason = RecognitionWaitReason.network;
+          case ShazamFailureKind.permanent:
+            rethrow;
+        }
+      }
+      await _waitBeforeRetry(
+        wait,
+        reason,
+        trackId: trackId,
+        label: label,
+        completed: completed,
+        total: total,
+      );
+    }
+  }
+
+  /// Shows the wait, then sleeps for [wait] unless the scan is cancelled
+  /// first, in which case it throws [RecognitionCancelled] right away.
+  Future<void> _waitBeforeRetry(
+    Duration wait,
+    RecognitionWaitReason reason, {
+    required int trackId,
+    required String label,
+    required int completed,
+    required int total,
+  }) async {
+    final resumeAt = _clock().add(wait);
+    _emit(
+      RecognitionProgress(
+        trackId: trackId,
+        phase: RecognitionPhase.waiting,
+        completed: completed,
+        total: total,
+        resumeAt: resumeAt,
+        waitReason: reason,
+      ),
+    );
+    final at = resumeAt.toLocal();
+    final time =
+        '${at.hour.toString().padLeft(2, '0')}:'
+        '${at.minute.toString().padLeft(2, '0')}';
+    unawaited(
+      _notifier
+          ?.update(
+            label,
+            completed,
+            total,
+            detail: switch (reason) {
+              RecognitionWaitReason.rateLimited =>
+                'Shazam asked us to slow down. Retrying at $time',
+              RecognitionWaitReason.network =>
+                'Connection problem. Retrying at $time',
+            },
+          )
+          .catchError((_) {}),
+    );
+    await Future.any([_delay(wait), _cancelSignal.future]);
+    _checkCancelled();
+    _emit(
+      RecognitionProgress(
+        trackId: trackId,
+        phase: RecognitionPhase.sampling,
+        completed: completed,
+        total: total,
+      ),
+    );
+    // A detail of its own: the notification would otherwise keep showing
+    // the retry time, which has now passed, until the sample is done.
+    unawaited(
+      _notifier
+          ?.update(
+            label,
+            completed,
+            total,
+            detail: 'Retrying sample ${completed + 1} of $total…',
+          )
+          .catchError((_) {}),
+    );
+  }
+
+  /// Sample window starts: every [stepSeconds] from [firstStartSeconds], plus
+  /// the final window, matching the PC prototype's grid.
+  List<int> sampleStartsMs(int durationMs) {
+    final duration = durationMs / 1000;
+    final starts = <double>[];
+    final limit = (duration - windowSeconds).floor();
+    for (var s = firstStartSeconds; s < limit; s += stepSeconds) {
+      starts.add(s.toDouble());
+    }
+    final last = math.max(0.0, duration - windowSeconds);
+    starts.add((last * 1000).roundToDouble() / 1000);
+    final result = <int>{};
+    for (final s in starts) {
+      if (s >= 0 && s <= duration - 1) result.add((s * 1000).round());
+    }
+    return result.toList()..sort();
+  }
+
+  Future<List<QuietInterval>> _quietIntervals(
+    String path,
+    Directory dir,
+    List<RecognitionSample> samples,
+    int durationMs,
+  ) async {
+    // Brackets where the recognized song changes, widened so gaps that
+    // straddle the edge still merge like they would in a whole-file pass.
+    final ranges = <(int, int)>[];
+    for (var i = 0; i + 1 < samples.length; i++) {
+      if (samples[i].result.trackKey == samples[i + 1].result.trackKey) {
+        continue;
+      }
+      final from = math.max(
+        0,
+        samples[i].sampleStartMs - silenceMarginSeconds * 1000,
+      );
+      final to = math.min(
+        durationMs,
+        samples[i + 1].sampleStartMs +
+            windowSeconds * 1000 +
+            silenceMarginSeconds * 1000,
+      );
+      if (ranges.isNotEmpty && from <= ranges.last.$2) {
+        ranges[ranges.length - 1] = (
+          ranges.last.$1,
+          math.max(ranges.last.$2, to),
+        );
+      } else {
+        ranges.add((from, to));
+      }
+    }
+    final silenceDir = Directory(p.join(dir.path, 'silences'));
+    await silenceDir.create(recursive: true);
+    final result = <QuietInterval>[];
+    for (var i = 0; i < ranges.length; i++) {
+      _checkCancelled();
+      final (from, to) = ranges[i];
+      final cached = File(p.join(silenceDir.path, '$from-$to.json'));
+      List<QuietInterval>? intervals;
+      if (await cached.exists()) {
+        try {
+          intervals = [
+            for (final s in jsonDecode(await cached.readAsString()) as List)
+              ((s[0] as num).toDouble(), (s[1] as num).toDouble()),
+          ];
+        } catch (_) {
+          intervals = null;
+        }
+      }
+      if (intervals == null) {
+        intervals = await _detectSilence(path, from, to);
+        await cached.writeAsString(
+          jsonEncode([
+            for (final s in intervals) [s.$1, s.$2],
+          ]),
+        );
+      }
+      result.addAll(intervals);
+      _emit(
+        RecognitionProgress(
+          trackId: samples.isEmpty ? 0 : _current!.trackId,
+          phase: RecognitionPhase.silence,
+          completed: i + 1,
+          total: ranges.length,
+        ),
+      );
+    }
+    result.sort((a, b) => a.$1.compareTo(b.$1));
+    return result;
+  }
+
+  /// Quiet intervals in [fromMs, toMs), decoded in chunks of at most
+  /// [silenceChunkMs] (plus the pre-roll) with the detector's open run
+  /// carried across chunk edges.
+  Future<List<QuietInterval>> _detectSilence(
+    String path,
+    int fromMs,
+    int toMs,
+  ) async {
+    final scan = SilenceScan(_silence);
+    for (var start = fromMs; start < toMs; start += silenceChunkMs) {
+      _checkCancelled();
+      final end = math.min(toMs, start + silenceChunkMs);
+      final preroll = start == fromMs ? 0 : math.min(silencePrerollMs, start);
+      var pcm = await _decoder.decode(
+        path,
+        start: Duration(milliseconds: start - preroll),
+        duration: Duration(milliseconds: end - start + preroll),
+      );
+      if (preroll > 0) {
+        final skip = math.min(
+          pcm.length,
+          preroll * _silence.sampleRate ~/ 1000,
+        );
+        pcm = Int16List.sublistView(pcm, skip);
+      }
+      scan.add(pcm, offset: Duration(milliseconds: start));
+    }
+    return scan.close();
+  }
+
+  /// Folders of this service's cache are named `<trackId>-<fileKey>`.
+  static final _cacheFolderName = RegExp(r'^(\d+)-\d+-[0-9a-f]{16}$');
+
+  /// Removes cached lookups nobody can use any more: those of tracks that
+  /// are no longer in the library, and those of earlier content of
+  /// [track]'s file. Only folders directly inside the recognition cache
+  /// whose names this service makes are touched. A failure never stops the
+  /// scan.
+  Future<void> _pruneStaleCaches(Track track, Directory current) async {
+    try {
+      final root = current.parent;
+      if (!await root.exists()) return;
+      final liveIds = {for (final t in await _db.getAllTracks()) t.id};
+      final keep = p.basename(current.path);
+      await for (final entity in root.list(followLinks: false)) {
+        if (entity is! Directory) continue;
+        final name = p.basename(entity.path);
+        final match = _cacheFolderName.firstMatch(name);
+        if (match == null || name == keep) continue;
+        final id = int.parse(match.group(1)!);
+        if (id == track.id || !liveIds.contains(id)) {
+          await entity.delete(recursive: true);
+        }
+      }
+    } catch (_) {
+      // Stale lookups only take space.
+    }
+  }
+
+  Future<int> _durationMs(Track track, String path) async {
+    final probed = await _decoder.probeDuration(path);
+    if (probed != null && probed > Duration.zero) return probed.inMilliseconds;
+    final stored = ChapterData.decode(track.chaptersJson);
+    if (stored.valid && (stored.durationMs ?? 0) > 0) return stored.durationMs!;
+    if ((track.durationSeconds ?? 0) > 0) return track.durationSeconds! * 1000;
+    throw StateError('Could not determine the duration of "${track.title}".');
+  }
+
+  String? _filePath(Track track) =>
+      track.filePath == null
+          ? null
+          : MetadataService.resolveStoredFilePath(track.filePath!);
+
+  Future<String> _runDirectory(Track track, String path) async {
+    final root = await _rootDirectory();
+    return p.join(root.path, 'recognition', await _runKey(track.id, path));
+  }
+
+  /// The [RecognitionRun.fileKey] a run made from [path] gets.
+  static Future<String> _runKey(int trackId, String path) async =>
+      '$trackId-${await fileKey(path)}';
+
+  /// The [RecognitionRun.fileKey] a scan of [track]'s file as it is now
+  /// would get, or null when the file is missing or unreadable. A run whose
+  /// key differs was made from other content and must not be applied.
+  static Future<String?> currentFileKey(Track track) async {
+    final stored = track.filePath;
+    if (stored == null) return null;
+    try {
+      final path = MetadataService.resolveStoredFilePath(stored);
+      if (path == null || !await File(path).exists()) return null;
+      return await _runKey(track.id, path);
+    } on FileSystemException {
+      return null;
+    }
+  }
+
+  /// Cheap content key: size plus a hash of the first and last 256 KiB, so a
+  /// replaced file never reuses another file's lookups.
+  static Future<String> fileKey(String path) async {
+    final file = File(path);
+    final length = await file.length();
+    const chunk = 256 * 1024;
+    final head = await file
+        .openRead(0, math.min(chunk, length))
+        .fold<List<int>>([], (acc, bytes) => acc..addAll(bytes));
+    final tail =
+        length > chunk
+            ? await file
+                .openRead(math.max(chunk, length - chunk), length)
+                .fold<List<int>>([], (acc, bytes) => acc..addAll(bytes))
+            : const <int>[];
+    final digest = sha256.convert([...head, ...tail]).toString();
+    return '$length-${digest.substring(0, 16)}';
+  }
+
+  void _checkCancelled() {
+    if (_cancelRequested) throw const RecognitionCancelled();
+  }
+
+  void _emit(RecognitionProgress progress) {
+    _current = progress;
+    if (!_progress.isClosed) _progress.add(progress);
+  }
+}
+
+/// Retry bookkeeping of one scan's lookups.
+class _RetryState {
+  /// Rate-limit responses since the last success.
+  int rateLimits = 0;
+
+  /// Transient failures since the last success.
+  int transientFailures = 0;
+
+  /// When the first rate-limit response since the last success came.
+  DateTime? rateLimitedSince;
+
+  void succeeded() {
+    rateLimits = 0;
+    transientFailures = 0;
+    rateLimitedSince = null;
+  }
+}
+
+/// Helper for tests and tools: builds a window of PCM from a generator.
+Int16List pcmFromGenerator(int samples, int Function(int index) generator) {
+  final out = Int16List(samples);
+  for (var i = 0; i < samples; i++) {
+    out[i] = generator(i);
+  }
+  return out;
+}
