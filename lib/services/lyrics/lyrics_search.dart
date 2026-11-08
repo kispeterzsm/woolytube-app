@@ -24,6 +24,10 @@ class LyricsSearch {
   /// Typo alternatives per unknown query word.
   static const maxAlternatives = 5;
 
+  /// Unknown query words that get typo alternatives (a pasted paragraph
+  /// would otherwise scan the vocabulary for every word).
+  static const maxExpandedWords = 20;
+
   _Vocabulary? _vocabulary;
   Future<_Vocabulary>? _vocabularyLoad;
   int _vocabularyGeneration = 0;
@@ -215,10 +219,12 @@ String? _matchExpression(List<String> words, _Vocabulary vocab) {
           ? [for (var i = 0; i < words.length; i++) (i, words[i])]
           : kept;
   final terms = <String>{};
+  var expanded = 0;
   for (final (i, word) in use) {
     final last = i == words.length - 1;
     terms.add(last && word.length >= 4 ? '"$word"*' : '"$word"');
     if ((vocab.terms[word] ?? 0) > 0) continue;
+    if (expanded++ >= LyricsSearch.maxExpandedWords) continue;
     for (final alt in vocab.near(word, LyricsSearch.maxAlternatives)) {
       terms.add('"$alt"');
     }
@@ -360,7 +366,16 @@ class _Span {
 /// Scores spans against one query; word similarities are memoised.
 class _Scorer {
   _Scorer(this.words)
-    : weights = [for (final w in words) isLyricsStopWord(w) ? 0.3 : 1.0];
+    : weights = [
+        for (var i = 0; i < words.length; i++)
+          // A last word of 1–2 letters is still being typed: it neither
+          // helps nor hurts.
+          i == words.length - 1 && words.length > 1 && words[i].length < 3
+              ? 0.0
+              : isLyricsStopWord(words[i])
+              ? 0.3
+              : 1.0,
+      ];
 
   final List<String> words;
   final List<double> weights;
@@ -403,6 +418,7 @@ class _Scorer {
     final positions = <int>[];
     final highlighted = [for (final _ in lines) <int>{}];
     for (var q = 0; q < words.length; q++) {
+      if (weights[q] == 0) continue;
       var best = 0.0;
       var at = -1;
       for (var j = 0; j < spanWords.length; j++) {
@@ -432,7 +448,7 @@ class _Scorer {
     var covered = 0;
     for (final (word, _, _) in spanWords) {
       for (var q = 0; q < words.length; q++) {
-        if (_similarity(q, word) > 0) {
+        if (weights[q] > 0 && _similarity(q, word) > 0) {
           covered++;
           break;
         }

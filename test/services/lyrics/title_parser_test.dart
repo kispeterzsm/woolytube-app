@@ -158,6 +158,19 @@ void main() {
         artist: 'MC Jams',
         song: 'Hacker',
       );
+      // A quoted nickname inside a name is not the title.
+      expectParse(
+        'OFFICIAL Somewhere over the Rainbow - Israel "IZ" Kamakawiwoʻole',
+        artist: 'OFFICIAL Somewhere over the Rainbow',
+        song: 'Israel IZ Kamakawiwoʻole',
+        swappable: true,
+      );
+      expectParse(
+        '"Weird Al" Yankovic - Amish Paradise',
+        artist: 'Weird Al Yankovic',
+        song: 'Amish Paradise',
+        swappable: true,
+      );
       expectParse(
         'Tonikaku Kawaii Opening Song Full『Koi no Uta』by Yunomi',
         artist: 'Yunomi',

@@ -9,6 +9,7 @@ import '../providers/playback_providers.dart';
 import '../providers/providers.dart';
 import '../services/chapters.dart';
 import '../services/lyrics/lyrics_models.dart';
+import '../services/lyrics/lyrics_service.dart' show LyricsService;
 import '../widgets/lyrics_picker_sheet.dart';
 import '../widgets/mobile_data_download_guard.dart';
 
@@ -230,6 +231,8 @@ class _LyricsPageState extends ConsumerState<LyricsPage> {
                 units.first);
     final doc = byKey[unit.key];
     final playable = track.status == 'complete' && track.filePath != null;
+    final blocked =
+        mode == null ? null : LyricsService.fetchBlockedReason(track, mode);
     final transcript =
         mode == LyricsMode.transcript ||
         (mode == null && doc?.kind == LyricsMode.transcript.dbValue);
@@ -273,6 +276,11 @@ class _LyricsPageState extends ConsumerState<LyricsPage> {
                     (picked) => setState(() => _selectedKey = picked.key),
               ),
             _StatusHeader(doc: doc, mode: mode),
+            if (blocked != null)
+              _Notice(
+                key: const ValueKey('lyrics-blocked-notice'),
+                text: blocked,
+              ),
             if (mode != null)
               Padding(
                 padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
@@ -280,7 +288,7 @@ class _LyricsPageState extends ConsumerState<LyricsPage> {
                   spacing: 4,
                   runSpacing: 0,
                   children: [
-                    if (doc == null)
+                    if (doc == null && blocked == null)
                       FilledButton.tonalIcon(
                         key: const ValueKey('lyrics-fetch-now'),
                         onPressed: _busy ? null : () => _fetchNow(track),
@@ -310,7 +318,7 @@ class _LyricsPageState extends ConsumerState<LyricsPage> {
                               : 'No lyrics here',
                         ),
                       ),
-                    if (doc != null)
+                    if (doc != null && blocked == null)
                       TextButton.icon(
                         key: const ValueKey('lyrics-refetch'),
                         onPressed: _busy ? null : () => _refetch(track, unit),

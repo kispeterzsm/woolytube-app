@@ -776,6 +776,56 @@ void main() {
       expect((await job)!.cancelled, isTrue);
     });
 
+    testWidgets('switching the mode during a job starts the new mode\'s '
+        'fetch once the old job ends', (tester) async {
+      lyrics = FakeLyricsService();
+      final playlist = await insertTestPlaylist(
+        db,
+        outputPath: tempDir.path,
+        lyricsMode: 'lyrics',
+      );
+      await pumpStack(tester, playlist.id, overrides: overrides());
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(PlaylistSettingsPage)),
+      );
+      unawaited(
+        container.read(lyricsFetchJobsProvider.notifier).start(playlist.id),
+      );
+      await tester.pump();
+
+      // A running job animates: no pumpAndSettle until it ends.
+      Future<void> pumpABit() async {
+        for (var i = 0; i < 5; i++) {
+          await tester.pump(const Duration(milliseconds: 200));
+        }
+      }
+
+      final row = find.byKey(const ValueKey('playlist-lyrics-mode'));
+      await tester.scrollUntilVisible(
+        row,
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await pumpABit();
+      await tester.tap(row);
+      await pumpABit();
+      await tester.tap(
+        find.byKey(const ValueKey('lyrics-mode-option-transcript')),
+      );
+      await pumpABit();
+      expect(lyrics.cancellation!.isCancelled, isTrue);
+      // The old job finishes its track; then the transcripts are fetched.
+      lyrics
+        ..instantBackfill = true
+        ..step();
+      await tester.pumpAndSettle();
+      expect(lyrics.calls, [
+        'backfill ${playlist.id}',
+        'backfill ${playlist.id}',
+      ]);
+      expect((await db.getPlaylist(playlist.id)).lyricsMode, 'transcript');
+    });
+
     testWidgets('delete waits for a running lyrics job to stop', (
       tester,
     ) async {

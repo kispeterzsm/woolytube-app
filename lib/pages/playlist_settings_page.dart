@@ -554,7 +554,8 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
       // The job keeps running if the page is closed; the result is still
       // reported.
       final result = await jobs.start(widget.playlistId);
-      // Null: stopped because the playlist is being deleted.
+      // Null: stopped for a mode switch or because the playlist is being
+      // deleted.
       if (result == null) return;
       messenger.showSnackBar(
         SnackBar(content: Text(chapterFetchSummary(result))),
@@ -580,8 +581,13 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
     final mode = picked.mode;
     if (mode == current) return;
     final jobs = ref.read(lyricsFetchJobsProvider.notifier);
-    // A running job would go on with the old mode.
-    if (jobs.isRunning(playlist.id)) jobs.cancel(playlist.id);
+    // A running job would go on with the old mode. Wait for it to end
+    // (after its current track), so the new mode's fetch can start; its
+    // own summary is dropped.
+    if (jobs.isRunning(playlist.id)) {
+      await jobs.stop(playlist.id);
+      if (!mounted) return;
+    }
     final saved = await _update(
       playlist.copyWith(lyricsMode: Value(LyricsMode.toDb(mode))),
       (playlists) => playlists.updatePlaylistSettings(

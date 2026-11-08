@@ -6,8 +6,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/services/download_service.dart';
+import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/library_layout.dart';
 import 'package:woolytube/services/log_service.dart';
+import 'package:woolytube/services/lyrics/lyrics_files.dart';
+import 'package:woolytube/services/lyrics/lyrics_models.dart';
+import 'package:woolytube/services/lyrics/lyrics_service.dart'
+    show persistLyricsFile;
 import 'package:woolytube/services/metadata_service.dart';
 import 'package:woolytube/services/playlist_service.dart';
 import 'package:woolytube/services/video_quality.dart';
@@ -655,6 +660,56 @@ void main() {
     expect(await File(oldPath).exists(), isFalse);
     expect(updated.thumbnailPath, isNotNull);
     expect(await File(updated.thumbnailPath!).exists(), isTrue);
+  });
+
+  test('a local replacement drops lyrics timed to the old file', () async {
+    final playlist = await insertTestPlaylist(
+      db,
+      outputPath: folder,
+      lyricsMode: 'lyrics',
+    );
+    final oldPath = p.join(folder, '00001_Downloaded.mp4');
+    await File(oldPath).writeAsString('downloaded');
+    final track = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      filePath: oldPath,
+      status: 'complete',
+      chaptersJson:
+          const ChapterData(
+            downloaded: [
+              MediaChapter(id: 'c1', title: 'A', startMs: 0, endMs: 1000),
+            ],
+          ).encode(),
+    );
+    LyricsDocDraft doc({
+      String? chapterId,
+      bool synced = false,
+      bool pinned = false,
+    }) => LyricsDocDraft(
+      trackId: track.id,
+      chapterId: chapterId,
+      kind: LyricsMode.lyrics,
+      status: LyricsStatus.found,
+      synced: synced,
+      pinned: pinned,
+      checkedAt: DateTime(2026),
+      lines: const [LyricsLineDraft('darkness', startMs: 500)],
+    );
+    await db.replaceLyricsDoc(doc(chapterId: 'c1', pinned: true));
+    await db.replaceLyricsDoc(doc(synced: true));
+    await persistLyricsFile(db, track.id);
+    final source = File(p.join(tempDir.path, 'Mine.mp4'));
+    await source.writeAsString('mine');
+
+    await service.replaceWithLocalFile(
+      trackId: track.id,
+      sourcePath: source.path,
+      sourceFileName: 'Mine.mp4',
+    );
+
+    expect(await db.lyricsDocsForTrack(track.id), isEmpty);
+    expect(await readLyricsFile(folder, track.videoId, track.id), isEmpty);
   });
 
   test('a local replacement keeps the previous file aside', () async {

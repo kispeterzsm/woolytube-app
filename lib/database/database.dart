@@ -1416,6 +1416,10 @@ class AppDatabase extends _$AppDatabase {
       attempts: Value(draft.attempts),
     );
     final existing = await lyricsDocFor(draft.trackId, draft.chapterId);
+    // The user's choice wins over an automatic lookup that started before it.
+    if (existing != null && existing.pinned && !draft.pinned) {
+      return existing.id;
+    }
     final int docId;
     if (existing != null) {
       docId = existing.id;
@@ -1527,6 +1531,33 @@ class AppDatabase extends _$AppDatabase {
                 : d.chapterId.equals(chapterId));
       })).go();
 
+  /// Notes a failed lookup of a doc without changing what it holds.
+  Future<void> markLyricsDocTried(
+    int docId,
+    DateTime checkedAt,
+    int attempts,
+  ) => (update(lyricsDocs)..where((d) => d.id.equals(docId))).write(
+    LyricsDocsCompanion(checkedAt: Value(checkedAt), attempts: Value(attempts)),
+  );
+
+  /// Moves a doc to [offsetMs] (its chapter's new start).
+  Future<void> setLyricsDocOffset(int docId, int offsetMs) =>
+      (update(lyricsDocs)..where(
+        (d) => d.id.equals(docId),
+      )).write(LyricsDocsCompanion(offsetMs: Value(offsetMs)));
+
+  /// Deletes the docs of [trackId] timed to its old media after the file
+  /// was replaced: chapter docs, transcripts and unpinned synced whole-file
+  /// docs. Returns how many.
+  Future<int> deleteLyricsDocsTimedToMedia(int trackId) =>
+      (delete(lyricsDocs)..where(
+        (d) =>
+            d.trackId.equals(trackId) &
+            (d.chapterId.isNotNull() |
+                d.kind.equals(LyricsMode.transcript.dbValue) |
+                (d.pinned.equals(false) & d.synced.equals(true))),
+      )).go();
+
   /// Deletes the chapter docs of [trackId] whose chapter is not in
   /// [activeChapterIds] (after a chapter edit or re-recognition). The
   /// whole-file doc stays. Returns how many were deleted.
@@ -1542,26 +1573,36 @@ class AppDatabase extends _$AppDatabase {
       )).go();
 
   /// Lines whose search window matches the FTS5 [matchExpr], best first,
-  /// from playlists with lyrics on (only [playlistId] when given).
+  /// from playlists with lyrics on (only [playlistId] when given), in docs
+  /// of the playlist's current mode. At most [perDoc] lines of one doc, so
+  /// a long transcript repeating the words cannot crowd out other songs.
   Future<List<LyricsFtsCandidate>> lyricsFtsCandidates(
     String matchExpr, {
     int limit = 150,
+    int perDoc = 4,
     int? playlistId,
   }) async {
     final rows =
         await customSelect(
+          'WITH matched AS ('
           'SELECT l.id AS line_id, l.doc_id AS doc_id, l.line_no AS line_no, '
           'bm25(lyrics_fts) AS rank FROM lyrics_fts '
           'JOIN lyrics_lines l ON l.id = lyrics_fts.rowid '
           'JOIN lyrics_docs d ON d.id = l.doc_id '
           'JOIN tracks t ON t.id = d.track_id '
           'JOIN playlists p ON p.id = t.playlist_id '
-          'WHERE lyrics_fts MATCH ? AND p.lyrics_mode IS NOT NULL '
+          'WHERE lyrics_fts MATCH ? AND d.kind = p.lyrics_mode '
           '${playlistId == null ? '' : 'AND p.id = ? '}'
-          'ORDER BY rank LIMIT ?',
+          'LIMIT -1), '
+          'ranked AS (SELECT *, ROW_NUMBER() OVER '
+          '(PARTITION BY doc_id ORDER BY rank, line_no) AS per_doc '
+          'FROM matched) '
+          'SELECT line_id, doc_id, line_no, rank FROM ranked '
+          'WHERE per_doc <= ? ORDER BY rank LIMIT ?',
           variables: [
             Variable<String>(matchExpr),
             if (playlistId != null) Variable<int>(playlistId),
+            Variable<int>(perDoc),
             Variable<int>(limit),
           ],
           readsFrom: {lyricsLines, lyricsDocs, tracks, playlists},

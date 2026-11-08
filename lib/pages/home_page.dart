@@ -906,6 +906,9 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
   int _lyricsGeneration = 0;
   List<LyricsHit> _lyricHits = const [];
 
+  /// The query [_lyricHits] belong to; older hits are not shown.
+  String _lyricHitsQuery = '';
+
   @override
   void initState() {
     super.initState();
@@ -940,7 +943,10 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
         hits = const [];
       }
       if (!mounted || generation != _lyricsGeneration) return;
-      setState(() => _lyricHits = hits);
+      setState(() {
+        _lyricHits = hits;
+        _lyricHitsQuery = query;
+      });
     });
   }
 
@@ -1068,7 +1074,11 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
 
   /// The lyric hits whose track is still in the library, with the track.
   List<(LyricsHit, Track)> _lyricRows(List<Track> tracks) {
-    if (_lyricHits.isEmpty || widget.query.trim().length < 2) return const [];
+    if (_lyricHits.isEmpty ||
+        widget.query.trim().length < 2 ||
+        _lyricHitsQuery != widget.query.trim()) {
+      return const [];
+    }
     final wanted = {for (final hit in _lyricHits) hit.trackId};
     final byId = {
       for (final track in tracks)

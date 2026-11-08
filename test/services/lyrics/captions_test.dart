@@ -91,6 +91,18 @@ void main() {
       );
     });
 
+    test('lyrics fall back to the title script when the speech-to-text '
+        'language is wrong', () {
+      expect(
+        pickCaption({
+          'title': 'Some English Song',
+          'language': 'cs',
+          'subtitles': {'en': formats('https://x/en')},
+        }, mode: LyricsMode.lyrics)?.key,
+        'en',
+      );
+    });
+
     test('onlyLang narrows the choice', () {
       final info = {
         'subtitles': {

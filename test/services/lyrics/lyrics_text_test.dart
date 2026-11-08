@@ -18,6 +18,16 @@ void main() {
       expect(foldForSearch('Æon œuvre'), 'aeon oeuvre');
     });
 
+    test('folds Vietnamese and Greek precomposed letters', () {
+      expect(foldForSearch('Em ơi Hà Nội phố'), 'em oi ha noi pho');
+      expect(foldForSearch('Người ấy đã đi'), 'nguoi ay da di');
+      expect(
+        foldForSearch("Σ'αγαπώ πολύ καρδιά μου"),
+        'σαγαπω πολυ καρδια μου',
+      );
+      expect(foldForSearch('ΰ ΐ ἄ ǽ ǿ'), 'υ ι α ae o');
+    });
+
     test('folds decomposed accents', () {
       expect(foldForSearch('Télápó'), 'telapo');
     });
@@ -133,23 +143,45 @@ plain line without time
       expect(lines[1].text, startsWith('for Life my'));
     });
 
-    test('collapses rolling duplicate lines', () {
+    test('never merges lines; skips only overlapping exact repeats', () {
       const json = '''
 {"events": [
   {"tStartMs": 0, "dDurationMs": 9000, "id": 1},
-  {"tStartMs": 1000, "segs": [{"utf8": "hello"}, {"utf8": " there", "tOffsetMs": 300}]},
+  {"tStartMs": 1000, "dDurationMs": 1500, "segs": [{"utf8": "hello"}, {"utf8": " there", "tOffsetMs": 300}]},
   {"tStartMs": 1500, "aAppend": 1, "segs": [{"utf8": "\\n"}]},
-  {"tStartMs": 2000, "segs": [{"utf8": "hello there my friend"}]},
-  {"tStartMs": 3000, "segs": [{"utf8": "hello there my friend"}]},
-  {"tStartMs": 3500, "segs": [{"utf8": "my friend"}]},
+  {"tStartMs": 2000, "dDurationMs": 1000, "segs": [{"utf8": "hello there"}]},
+  {"tStartMs": 3000, "dDurationMs": 500, "segs": [{"utf8": "hello there my friend"}]},
+  {"tStartMs": 3500, "dDurationMs": 500, "segs": [{"utf8": "my friend"}]},
   {"tStartMs": 4000, "segs": [{"utf8": "[Applause]"}]},
   {"tStartMs": 5000, "segs": [{"utf8": "♪ ♪"}]},
-  {"tStartMs": 6000, "segs": [{"utf8": "next\\nline"}]}
+  {"tStartMs": 6000, "dDurationMs": 1000, "segs": [{"utf8": "next\\nline"}]},
+  {"tStartMs": 9000, "dDurationMs": 1000, "segs": [{"utf8": "next line"}]},
+  {"tStartMs": 59000, "dDurationMs": 1000, "segs": [{"utf8": "Yeah"}]},
+  {"tStartMs": 60000, "dDurationMs": 1000, "segs": [{"utf8": "Yeah, I'm on fire"}]}
 ]}''';
       expect(parseJson3Captions(json), const [
-        LyricsLineDraft('hello there my friend', startMs: 1000),
+        LyricsLineDraft('hello there', startMs: 1000),
+        LyricsLineDraft('hello there my friend', startMs: 3000),
         LyricsLineDraft('my friend', startMs: 3500),
         LyricsLineDraft('next line', startMs: 6000),
+        LyricsLineDraft('next line', startMs: 9000),
+        LyricsLineDraft('Yeah', startMs: 59000),
+        LyricsLineDraft("Yeah, I'm on fire", startMs: 60000),
+      ]);
+    });
+
+    test('keeps lyric lines in parentheses, drops sound cues', () {
+      const json = '''
+{"events": [
+  {"tStartMs": 1000, "segs": [{"utf8": "(gentle music)"}]},
+  {"tStartMs": 2000, "segs": [{"utf8": "(Don't you forget about me)"}]},
+  {"tStartMs": 3000, "segs": [{"utf8": "(audience laughs)"}]},
+  {"tStartMs": 4000, "segs": [{"utf8": "♪ (Ooh, baby) ♪"}]},
+  {"tStartMs": 5000, "segs": [{"utf8": "(Applause)"}]}
+]}''';
+      expect(parseJson3Captions(json), const [
+        LyricsLineDraft("(Don't you forget about me)", startMs: 2000),
+        LyricsLineDraft('(Ooh, baby)', startMs: 4000),
       ]);
     });
 

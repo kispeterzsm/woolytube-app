@@ -58,8 +58,8 @@ String? _json3Url(Object? formats) {
 /// `automatic_captions`, `language`, `title`). Never a machine translation.
 ///
 /// [mode] lyrics: only a manual track in the song's language (the video's
-/// `language`, or else English, or Japanese/Korean for such titles); a
-/// translation would be useless for search.
+/// `language`, else by the title's script: English, or Japanese/Chinese/
+/// Korean for such titles); a translation would be useless for search.
 /// [mode] transcript: a manual track (video language, then English, then
 /// any), else the original speech-to-text track (`<lang>-orig`).
 /// [onlyLang] restricts the choice to one base language.
@@ -92,18 +92,24 @@ CaptionChoice? pickCaption(
 
   if (mode == LyricsMode.lyrics) {
     final title = info['title'] is String ? info['title'] as String : '';
-    final wanted = <String>{
-      if (videoLang != null) videoLang,
-      if (videoLang == null && _hangul.hasMatch(title)) 'ko',
-      if (videoLang == null && _cjk.hasMatch(title)) ...['ja', 'zh'],
-      if (videoLang == null &&
-          !_cjk.hasMatch(title) &&
-          !_hangul.hasMatch(title))
-        'en',
+    // The video's language comes from its speech-to-text track, which
+    // often guesses wrong for music: the title's script comes next.
+    final byScript = <String>{
+      if (_hangul.hasMatch(title)) 'ko',
+      if (_cjk.hasMatch(title)) ...['ja', 'zh'],
+      if (!_cjk.hasMatch(title) && !_hangul.hasMatch(title)) 'en',
     };
-    if (onlyLang != null) wanted.add(captionBaseLang(onlyLang));
-    for (final choice in manual) {
-      if (wanted.contains(choice.lang)) return choice;
+    final tiers = [
+      {
+        if (videoLang != null) videoLang,
+        if (onlyLang != null) captionBaseLang(onlyLang),
+      },
+      byScript,
+    ];
+    for (final wanted in tiers) {
+      for (final choice in manual) {
+        if (wanted.contains(choice.lang)) return choice;
+      }
     }
     return null;
   }

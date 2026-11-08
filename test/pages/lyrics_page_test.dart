@@ -363,6 +363,22 @@ void main() {
     await unmount(tester);
   });
 
+  testWidgets('a track that cannot be fetched says why and offers no '
+      'fetch', (tester) async {
+    final playlist = await insertTestPlaylist(db, lyricsMode: 'lyrics');
+    final track = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      title: 'Not downloaded',
+    );
+    await pumpPage(tester, track);
+
+    expect(find.byKey(const ValueKey('lyrics-blocked-notice')), findsOneWidget);
+    expect(find.text('Download the track first.'), findsOneWidget);
+    expect(find.byKey(const ValueKey('lyrics-fetch-now')), findsNothing);
+    await unmount(tester);
+  });
+
   testWidgets('with lyrics off the page says where to turn them on', (
     tester,
   ) async {

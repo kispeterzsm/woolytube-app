@@ -308,6 +308,32 @@ void _classify(String inner, _Groups groups) {
   groups.others.add(content);
 }
 
+final _letter = RegExp(r'\p{L}', unicode: true);
+final _byStart = RegExp(r'^by\b', caseSensitive: false);
+
+/// Whether [quote] in [text] is a nickname within a name rather than the
+/// song title: another part (across a separator) exists, and the quote's
+/// own part has a name word after it and either a word before it or a
+/// quote of at most two words at its start.
+bool _isNickname(String text, RegExpMatch quote) {
+  final before = text.substring(0, quote.start);
+  final after = text.substring(quote.end);
+  final beforeSep = _seps.allMatches(before).lastOrNull;
+  final afterSep = _seps.firstMatch(after);
+  if (beforeSep == null && afterSep == null) return false;
+  final partBefore =
+      (beforeSep == null ? before : before.substring(beforeSep.end)).trim();
+  final partAfter =
+      (afterSep == null ? after : after.substring(0, afterSep.start)).trim();
+  if (!_letter.hasMatch(partAfter) ||
+      _byStart.hasMatch(partAfter) ||
+      _isNoiseOnly(partAfter)) {
+    return false;
+  }
+  if (_letter.hasMatch(partBefore)) return true;
+  return quote[1]!.trim().split(_spaces).length <= 2;
+}
+
 /// Parses a YouTube video title (rules R1–R8 of the lyrics research).
 /// [meta] from the kept info.json wins where it knows better.
 SongQuery parseSongTitle(String rawTitle, {VideoMeta? meta}) {
@@ -352,8 +378,13 @@ SongQuery parseSongTitle(String rawTitle, {VideoMeta? meta}) {
   String? contextWord;
   final alternatives = <(String, String)>[];
 
-  // R4: a quoted title.
-  final quote = RegExp(r'"([^"]+)"').firstMatch(text);
+  // R4: a quoted title. A nickname inside a name ('Israel "IZ"
+  // Kamakawiwoʻole', '"Weird Al" Yankovic') only loses its quotes.
+  var quote = RegExp(r'"([^"]+)"').firstMatch(text);
+  if (cornerTitle == null && quote != null && _isNickname(text, quote)) {
+    text = text.replaceRange(quote.start, quote.end, quote[1]!);
+    quote = null;
+  }
   final quoted = cornerTitle ?? quote?[1]?.trim();
   if (quoted != null && quoted.isNotEmpty) {
     title = quoted;

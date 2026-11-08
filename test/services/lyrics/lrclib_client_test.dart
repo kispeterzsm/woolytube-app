@@ -115,6 +115,28 @@ void main() {
     expect(sleeps, contains(const Duration(seconds: 10)));
   });
 
+  test('a stop request ends a rate-limit wait early', () async {
+    final http = FakeHttpClient(
+      (_) => const FakeHttpResponse(
+        429,
+        'slow down',
+        headers: {'retry-after': '120'},
+      ),
+    );
+    final start = now;
+    await expectLater(
+      clientFor(http).searchQ(
+        'europe',
+        stop: () => now.difference(start) >= const Duration(seconds: 5),
+      ),
+      throwsA(
+        isA<LrclibException>().having((e) => e.transient, 'transient', true),
+      ),
+    );
+    expect(http.requests, hasLength(1));
+    expect(now.difference(start), lessThan(const Duration(seconds: 10)));
+  });
+
   test('gives up after the retries with a transient error', () async {
     final http = FakeHttpClient((_) => const FakeHttpResponse(500, 'down'));
     await expectLater(

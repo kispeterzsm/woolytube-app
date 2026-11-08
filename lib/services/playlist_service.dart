@@ -14,6 +14,8 @@ import 'media_thumbnail_service.dart' as media_thumbnail_service;
 import 'app_settings_service.dart';
 import 'video_quality.dart';
 import 'lyrics/lyrics_models.dart';
+import 'lyrics/lyrics_service.dart'
+    show dropLyricsForReplacedMedia, persistLyricsFile;
 
 /// Thrown by [PlaylistService.syncPlaylist] when the owner stopped the
 /// update while YouTube was being asked for the playlist.
@@ -795,6 +797,22 @@ class PlaylistService {
     final switched = await _db.getPlaylist(playlist.id);
     for (final id in adopt) {
       await _metadata.adoptKeptFile(switched, id);
+    }
+    // A reinstall imports only the new folder: the kept video info and the
+    // lyrics go along. Lyrics are written from the database, which also
+    // replaces stale files left in a reused earlier folder.
+    for (final track in await _db.getTracksForPlaylist(playlist.id)) {
+      try {
+        final info = File(LibraryLayout.infoJsonPath(oldFolder, track.videoId));
+        final target = LibraryLayout.infoJsonPath(targetFolder, track.videoId);
+        if (!p.equals(oldFolder, targetFolder) && await info.exists()) {
+          await Directory(p.dirname(target)).create(recursive: true);
+          await info.copy(target);
+        }
+        await persistLyricsFile(_db, track.id);
+      } catch (_) {
+        // Extras; the switch itself is done.
+      }
     }
 
     // New sidecar first, then set the old one aside: the old folder's
@@ -2064,6 +2082,8 @@ class PlaylistService {
     await _deleteQuietly(staging);
 
     await _db.invalidateTrackChapters(track.id);
+    // Lyrics timed to the old file (chapters, transcripts, synced lines).
+    await dropLyricsForReplacedMedia(_db, track.id);
     await _db.updateTrackStatus(
       track.id,
       'complete',

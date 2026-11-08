@@ -23,6 +23,28 @@ const _latinFolding = {
   'ż': 'z', 'ž': 'z',
 };
 
+/// Precomposed letters outside [_latinFolding] (Vietnamese, Latin Extended
+/// Additional, Greek with tonos or dialytika), as pairs of letter and base
+/// letter. Generated from Unicode's canonical decompositions, so search
+/// folds at least what SQLite's `remove_diacritics` does.
+const _decomposedPairs =
+    'ơoưuǖuǘuǚuǜuǟaǡaǣæǧgǩkǫoǭoǯʒǰjǵgǹnǻaǽæǿøȁaȃaȅeȇeȉiȋiȍoȏoȑrȓrȕuȗu'
+    'ȟhȧaȩeȫoȭoȯoȱoȳyḁaḃbḅbḇbḉcḋdḍdḏdḑdḓdḕeḗeḙeḛeḝeḟfḡgḣhḥhḧhḩhḫhḭiḯi'
+    'ḱkḳkḵkḷlḹlḻlḽlḿmṁmṃmṅnṇnṉnṋnṍoṏoṑoṓoṕpṗpṙrṛrṝrṟrṡsṣsṥsṧsṩsṫtṭtṯt'
+    'ṱtṳuṵuṷuṹuṻuṽvṿvẁwẃwẅwẇwẉwẋxẍxẏyẑzẓzẕzẖhẗtẘwẙyẛſạaảaấaầaẩaẫaậaắa'
+    'ằaẳaẵaặaẹeẻeẽeếeềeểeễeệeỉiịiọoỏoốoồoổoỗoộoớoờoởoỡoợoụuủuứuừuửuữu'
+    'ựuỳyỵyỷyỹy΅¨άαέεήηίιόούυώωΐιϊιϋυΰυϓϒϔϒἀαἁαἂαἃαἄαἅαἆαἇαἐεἑεἒεἓεἔε'
+    'ἕεἠηἡηἢηἣηἤηἥηἦηἧηἰιἱιἲιἳιἴιἵιἶιἷιὀοὁοὂοὃοὄοὅοὐυὑυὒυὓυὔυὕυὖυὗυὠω'
+    'ὡωὢωὣωὤωὥωὦωὧωὰαάαὲεέεὴηήηὶιίιὸοόοὺυύυὼωώωᾀαᾁαᾂαᾃαᾄαᾅαᾆαᾇαᾐηᾑηᾒη'
+    'ᾓηᾔηᾕηᾖηᾗηᾠωᾡωᾢωᾣωᾤωᾥωᾦωᾧωᾰαᾱαᾲαᾳαᾴαᾶαᾷα῁¨ῂηῃηῄηῆηῇη῍᾿῎᾿῏᾿ῐιῑιῒι'
+    'ΐιῖιῗι῝῾῞῾῟῾ῠυῡυῢυΰυῤρῥρῦυῧυ῭¨΅¨ῲωῳωῴωῶωῷω';
+
+final Map<String, String> _decomposed = {
+  for (var i = 0; i + 1 < _decomposedPairs.length; i += 2)
+    _decomposedPairs[i]: _decomposedPairs[i + 1],
+  'ς': 'σ',
+};
+
 /// Apostrophes vanish inside words ("there's" → "theres").
 const _apostrophes = {0x27, 0x2019, 0x2018, 0x02BC, 0x60, 0xB4};
 
@@ -43,6 +65,8 @@ String? _foldChar(String char) {
   final lower = char.toLowerCase();
   final mapped = _latinFolding[lower];
   if (mapped != null) return mapped;
+  final base = _decomposed[lower];
+  if (base != null) return _latinFolding[base] ?? base;
   if (_apostrophes.contains(char.codeUnitAt(0))) return null;
   if (_mark.hasMatch(char)) return null;
   if (_wordChar.hasMatch(lower)) return lower;
@@ -217,8 +241,24 @@ List<LyricsLineDraft> parseLrc(String lrc) {
   ];
 }
 
-/// Lines like "[Chorus]", "[Music]", "(gentle music)" or "♪♪".
-final _noiseLine = RegExp(r'^(?:\[[^\]]*\]|\([^)]*\)|[♪♫♬\s*~-])*$');
+/// Lines like "[Chorus]", "[Music]", "(gentle music)" or "♪♪". A line in
+/// parentheses is noise only when it describes a sound: lyric captions
+/// often put backing vocals in parentheses.
+final _noiseLine = RegExp(
+  r"^(?:\[[^\]]*\]|\(\s*(?:[\p{L}'-]+\s+){0,2}(?:" +
+      _soundCues +
+      r')(?:\s+(?:playing|continues|fades))?\s*\)|[♪♫♬\s*~-])*$',
+  caseSensitive: false,
+  unicode: true,
+);
+
+/// Words that end a "(...)" sound description: "(music)", "(gentle
+/// music)", "(audience laughs)".
+const _soundCues =
+    r'music|musik|musique|m[uú]sica|hudba|zene|applause|applauding|'
+    r'clapping|laugh(?:s|ter|ing)?|cheer(?:s|ing)?|instrumental|silence|'
+    r'singing|humming|whistling|sigh(?:s|ing)?|gasps?|inaudible|'
+    r'indistinct|chatter(?:ing)?|noise|static|beep(?:s|ing)?';
 final _notes = RegExp(r'^[♪♫♬\s]+|[♪♫♬\s]+$');
 
 String _cleanLine(String line) =>
@@ -236,16 +276,18 @@ List<LyricsLineDraft> parsePlainLyrics(String text) => [
 ];
 
 /// Parses YouTube json3 captions: the segments of each event are joined
-/// into one line timed at the event start; blank lines and bracket-only
-/// lines ("[Music]", "(applause)", "♪") are dropped; and the rolling lines
-/// of speech-to-text, where a line repeats or grows into the next, are
-/// collapsed into one.
+/// into one line timed at the event start; blank lines and sound lines
+/// ("[Music]", "(applause)", "♪") are dropped. json3 has no rolling lines
+/// (speech-to-text marks its line breaks with append events), so lines are
+/// never merged; only an exact repeat that overlaps the previous line in
+/// time is skipped.
 List<LyricsLineDraft> parseJson3Captions(String json) {
   final decoded = jsonDecode(json);
   final events =
       decoded is Map<String, dynamic> ? decoded['events'] as List? : null;
   if (events == null) return const [];
   final lines = <LyricsLineDraft>[];
+  var previousEnd = 0;
   for (final event in events) {
     if (event is! Map) continue;
     final segs = event['segs'];
@@ -255,18 +297,12 @@ List<LyricsLineDraft> parseJson3Captions(String json) {
     );
     if (text.isEmpty || _noiseLine.hasMatch(text)) continue;
     final start = (event['tStartMs'] as num?)?.toInt() ?? 0;
-    if (lines.isNotEmpty) {
-      final previous = lines.last.text;
-      if (text == previous || previous.startsWith(text)) continue;
-      if (text.startsWith(previous)) {
-        lines[lines.length - 1] = LyricsLineDraft(
-          text,
-          startMs: lines.last.startMs,
-        );
-        continue;
-      }
+    final duration = (event['dDurationMs'] as num?)?.toInt() ?? 0;
+    if (lines.isNotEmpty && text == lines.last.text && start < previousEnd) {
+      continue;
     }
     lines.add(LyricsLineDraft(text, startMs: start));
+    previousEnd = start + duration;
   }
   return lines;
 }

@@ -491,12 +491,21 @@ void main() {
     expect(playback.playedChapterId, 'ch2');
     expect(playback.playedStartAt, const Duration(milliseconds: 603000));
 
+    // A new query hides the old lines until its own search is done.
+    await tester.enterText(find.byType(TextField), 'winter snow');
+    await tester.pump();
+    expect(find.byKey(const ValueKey('search-lyrics-7')), findsNothing);
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pump();
+    expect(lyrics.queries, hasLength(2));
+    expect(find.byKey(const ValueKey('search-lyrics-7')), findsOneWidget);
+
     // A short query clears the lines without searching.
     await tester.enterText(find.byType(TextField), 'a');
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 250));
     expect(find.text('Lyrics'), findsNothing);
-    expect(lyrics.queries, hasLength(1));
+    expect(lyrics.queries, hasLength(2));
   });
 
   testWidgets('a whole-file transcript hit plays the chapter at its time', (

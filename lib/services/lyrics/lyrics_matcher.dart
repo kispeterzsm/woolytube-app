@@ -163,6 +163,7 @@ class LyricsMatcher {
     SongQuery query, {
     double? durationSeconds,
     bool chapter = false,
+    bool Function()? stop,
   }) async {
     final artist = query.artist;
     final title = query.title;
@@ -181,7 +182,12 @@ class LyricsMatcher {
           judgeArtist,
           judgeTitle,
           'search|$track|$artistName|$q',
-          () => client.search(trackName: track, artistName: artistName, q: q),
+          () => client.search(
+            trackName: track,
+            artistName: artistName,
+            q: q,
+            stop: stop,
+          ),
         ),
       );
     }
@@ -196,6 +202,7 @@ class LyricsMatcher {
             artist: artist,
             track: title,
             durationSeconds: durationSeconds,
+            stop: stop,
           );
           return record == null ? const <LrclibRecord>[] : [record];
         }),
@@ -233,6 +240,9 @@ class LyricsMatcher {
     var anyResults = false;
     final answers = <String, List<LrclibRecord>>{};
     for (final step in steps) {
+      if (stop?.call() ?? false) {
+        throw const LrclibException('Stopped', transient: true);
+      }
       final records = answers[step.request] ??= await step.run();
       if (records.isNotEmpty) anyResults = true;
       final fits = [

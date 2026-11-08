@@ -445,6 +445,9 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 request.addOption("--dump-json")
                 request.addOption("--no-playlist")
                 request.addOption("--skip-download")
+                // Only captions and metadata are needed: a video whose media
+                // formats are gated for this client still has them.
+                request.addOption("--ignore-no-formats-error")
                 val out = executeInfoRequest(request)
                 val full = org.json.JSONObject(out.trim().lineSequence().first { it.isNotBlank() })
                 val trimmed = org.json.JSONObject()

@@ -148,19 +148,20 @@ class LrclibClient {
     required String track,
     String? album,
     num? durationSeconds,
+    bool Function()? stop,
   }) async {
     final json = await _request('/api/get', {
       'artist_name': artist,
       'track_name': track,
       if (album != null) 'album_name': album,
       if (durationSeconds != null) 'duration': '${durationSeconds.round()}',
-    });
+    }, stop);
     return LrclibRecord.fromJson(json);
   }
 
   /// One record by id; null when it is gone.
-  Future<LrclibRecord?> getById(int id) async =>
-      LrclibRecord.fromJson(await _request('/api/get/$id', const {}));
+  Future<LrclibRecord?> getById(int id, {bool Function()? stop}) async =>
+      LrclibRecord.fromJson(await _request('/api/get/$id', const {}, stop));
 
   /// Search by fields, or by free text [q] (title, artist and album; not
   /// the lyric text). Up to 20 records.
@@ -168,12 +169,13 @@ class LrclibClient {
     String? trackName,
     String? artistName,
     String? q,
+    bool Function()? stop,
   }) async {
     final json = await _request('/api/search', {
       if (q != null) 'q': q,
       if (trackName != null) 'track_name': trackName,
       if (artistName != null) 'artist_name': artistName,
-    });
+    }, stop);
     if (json is! List) return const [];
     return [
       for (final item in json)
@@ -182,22 +184,34 @@ class LrclibClient {
   }
 
   /// Free-text search, see [search].
-  Future<List<LrclibRecord>> searchQ(String q) => search(q: q);
+  Future<List<LrclibRecord>> searchQ(String q, {bool Function()? stop}) =>
+      search(q: q, stop: stop);
 
-  /// Runs requests one after another, spaced by [minInterval].
-  Future<Object?> _request(String path, Map<String, String> query) {
-    final result = _queue.then((_) => _send(path, query));
+  /// Runs requests one after another, spaced by [minInterval]. When [stop]
+  /// says so (cancelled, out of time), throws instead of sending or waiting
+  /// out a rate limit.
+  Future<Object?> _request(
+    String path,
+    Map<String, String> query, [
+    bool Function()? stop,
+  ]) {
+    final result = _queue.then((_) => _send(path, query, stop));
     _queue = result.then<void>((_) {}, onError: (Object _, StackTrace _) {});
     return result;
   }
 
-  Future<Object?> _send(String path, Map<String, String> query) async {
+  Future<Object?> _send(
+    String path,
+    Map<String, String> query,
+    bool Function()? stop,
+  ) async {
     final base = Uri.parse(baseUrl);
     final uri = base.replace(
       path: path,
       queryParameters: query.isEmpty ? null : query,
     );
     for (var attempt = 0; ; attempt++) {
+      _checkStop(stop, path);
       await _pace();
       int? status;
       Duration? retryAfter;
@@ -235,7 +249,7 @@ class LrclibClient {
         if (attempt >= retryDelays.length) {
           throw LrclibException('$path failed: $e');
         }
-        await _sleep(retryDelays[attempt]);
+        await _wait(retryDelays[attempt], stop, path);
         continue;
       }
       if (attempt >= retryDelays.length) {
@@ -248,8 +262,32 @@ class LrclibClient {
                 ? const Duration(seconds: 60)
                 : retryAfter;
       }
-      await _sleep(wait);
+      await _wait(wait, stop, path);
     }
+  }
+
+  static void _checkStop(bool Function()? stop, String path) {
+    if (stop?.call() ?? false) {
+      throw LrclibException('Stopped before $path', transient: true);
+    }
+  }
+
+  /// Sleeps [duration], in steps of a second while [stop] can end it.
+  Future<void> _wait(
+    Duration duration,
+    bool Function()? stop,
+    String path,
+  ) async {
+    if (stop == null) return _sleep(duration);
+    var left = duration;
+    while (left > Duration.zero) {
+      _checkStop(stop, path);
+      final step =
+          left > const Duration(seconds: 1) ? const Duration(seconds: 1) : left;
+      await _sleep(step);
+      left -= step;
+    }
+    _checkStop(stop, path);
   }
 
   Future<void> _pace() async {

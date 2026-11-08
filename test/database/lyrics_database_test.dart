@@ -27,10 +27,11 @@ void main() {
     String? chapterId,
     bool pinned = false,
     String status = LyricsStatus.found,
+    LyricsMode kind = LyricsMode.lyrics,
   }) => LyricsDocDraft(
     trackId: trackId ?? track.id,
     chapterId: chapterId,
-    kind: LyricsMode.lyrics,
+    kind: kind,
     status: status,
     source: LyricsSource.lrclib,
     sourceRef: '42',
@@ -176,13 +177,60 @@ void main() {
       lyricsMode: 'transcript',
     );
     final secondTrack = await insertTestTrack(db, playlistId: second.id);
-    await db.replaceLyricsDoc(draft(['endless talk'], trackId: secondTrack.id));
+    await db.replaceLyricsDoc(
+      draft(
+        ['endless talk'],
+        trackId: secondTrack.id,
+        kind: LyricsMode.transcript,
+      ),
+    );
     expect(await db.lyricsFtsCandidates('endless'), hasLength(2));
     expect(
       await db.lyricsFtsCandidates('endless', playlistId: second.id),
       hasLength(1),
     );
     expect(await db.lyricsFtsCandidates('"endles"*', limit: 1), hasLength(1));
+  });
+
+  test('FTS candidates skip docs of the other mode', () async {
+    await db.replaceLyricsDoc(draft(['endless road']));
+    await db.updatePlaylistFields(
+      track.playlistId,
+      const PlaylistsCompanion(lyricsMode: Value('transcript')),
+    );
+    expect(await db.lyricsFtsCandidates('endless'), isEmpty);
+  });
+
+  test('FTS candidates are capped per doc', () async {
+    final other = await insertTestTrack(
+      db,
+      playlistId: track.playlistId,
+      index: 2,
+      videoId: 'video-2',
+    );
+    await db.replaceLyricsDoc(
+      draft([for (var i = 0; i < 40; i++) 'the summer rain']),
+    );
+    await db.replaceLyricsDoc(
+      draft(['walking in the summer rain with you'], trackId: other.id),
+    );
+    final candidates = await db.lyricsFtsCandidates('rain', limit: 5);
+    expect(candidates.map((c) => c.docId).toSet(), hasLength(2));
+    final byDoc = <int, int>{};
+    for (final c in candidates) {
+      byDoc[c.docId] = (byDoc[c.docId] ?? 0) + 1;
+    }
+    expect(byDoc.values.every((n) => n <= 4), isTrue);
+  });
+
+  test('an automatic draft never replaces a pinned doc', () async {
+    await db.replaceLyricsDoc(draft(['picked words'], pinned: true));
+    await db.replaceLyricsDoc(draft(['automatic words']));
+    final doc = (await db.lyricsDocsForTrack(track.id)).single;
+    expect(doc.pinned, isTrue);
+    expect((await db.lyricsLinesForDoc(doc.id)).map((l) => l.lineText), [
+      'picked words',
+    ]);
   });
 
   test('the vocabulary counts lines per term, folded', () async {
@@ -253,7 +301,11 @@ void main() {
     expect(await migrated.playlistRevision(upgraded.id), revision + 1);
 
     await migrated.replaceLyricsDoc(
-      draft(['upgraded words'], trackId: migratedTrack.id),
+      draft(
+        ['upgraded words'],
+        trackId: migratedTrack.id,
+        kind: LyricsMode.transcript,
+      ),
     );
     expect(await migrated.lyricsFtsCandidates('upgraded'), hasLength(1));
     expect((await migrated.lyricsVocabulary())['words'], 1);

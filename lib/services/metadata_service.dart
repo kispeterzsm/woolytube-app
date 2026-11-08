@@ -1934,6 +1934,11 @@ for video) to keep a complete backup.
     Map<int, DiscoveredTrack> entryByIndex,
   ) async {
     try {
+      final mode =
+          LyricsMode.fromDb(
+            (await _db.getPlaylistOrNull(playlistId))?.lyricsMode,
+          ) ??
+          LyricsMode.lyrics;
       for (final track in await _db.getTracksForPlaylist(playlistId)) {
         final active =
             ChapterData.decode(
@@ -1963,7 +1968,7 @@ for video) to keep a complete backup.
             trackId: track.id,
             chapterId: pin.chapterId,
             offsetMs: kept?.offsetMs ?? 0,
-            kind: kept?.kind ?? LyricsMode.lyrics,
+            kind: kept?.kind ?? mode,
             status: pin.status,
             source: pin.source,
             sourceRef: pin.sourceRef,

@@ -54,6 +54,19 @@ void main() {
       );
       // Stop words are never typo targets.
       expect(buildLyricsMatchExpression(['tre'], vocab), '"tre"');
+      // Only the first unknown words get typo alternatives.
+      final many = [
+        for (var i = 0; i < LyricsSearch.maxExpandedWords; i++) 'zzz$i',
+        'hapy',
+      ];
+      expect(
+        buildLyricsMatchExpression(many, vocab),
+        isNot(contains('"happy"')),
+      );
+      expect(
+        buildLyricsMatchExpression(['hapy', 'x'], vocab),
+        contains('"happy"'),
+      );
       expect(buildLyricsMatchExpression(const [], vocab), isNull);
     });
   });
@@ -310,6 +323,66 @@ void main() {
       expect(hits.single.kind, LyricsMode.transcript);
       expect(hits.single.positionMs, 3723000);
       expect(hits.single.chapterId, isNull);
+    });
+
+    Future<Track> songTrack(
+      int playlistId,
+      int index,
+      List<String> lines, {
+      LyricsMode kind = LyricsMode.lyrics,
+    }) async {
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlistId,
+        index: index,
+        videoId: 's$index',
+      );
+      await db.replaceLyricsDoc(
+        LyricsDocDraft(
+          trackId: track.id,
+          kind: kind,
+          status: LyricsStatus.found,
+          checkedAt: DateTime(2026),
+          lines: [for (final line in lines) LyricsLineDraft(line)],
+        ),
+      );
+      return track;
+    }
+
+    test(
+      'a long doc repeating the words leaves room for other songs',
+      () async {
+        search = LyricsSearch(db);
+        final playlist = await insertTestPlaylist(db, lyricsMode: 'lyrics');
+        await songTrack(playlist.id, 1, [
+          for (var i = 0; i < 150; i++) 'the summer rain',
+        ]);
+        for (var i = 2; i <= 11; i++) {
+          await songTrack(playlist.id, i, [
+            'some other line',
+            'walking in the summer rain with you',
+          ]);
+        }
+        expect(await search.search('summer rain'), hasLength(11));
+      },
+    );
+
+    test('Vietnamese and Greek lyrics are found without accents', () async {
+      search = LyricsSearch(db);
+      final playlist = await insertTestPlaylist(db, lyricsMode: 'lyrics');
+      await songTrack(playlist.id, 1, ['Em ơi Hà Nội phố']);
+      await songTrack(playlist.id, 2, ["Σ'αγαπώ πολύ καρδιά μου"]);
+      expect(await search.search('em oi ha noi pho'), hasLength(1));
+      expect(await search.search('αγαπω πολυ καρδια'), hasLength(1));
+    });
+
+    test('a last word of one or two letters does not hide results', () async {
+      search = LyricsSearch(db);
+      final playlist = await insertTestPlaylist(db, lyricsMode: 'lyrics');
+      await songTrack(playlist.id, 1, ['walking in the summer rain']);
+      for (final query in ['summer r', 'summer ra', 'summer rai']) {
+        expect(await search.search(query), hasLength(1), reason: query);
+      }
     });
   });
 }

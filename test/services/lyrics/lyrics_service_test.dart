@@ -647,4 +647,355 @@ void main() {
     await service.onChaptersChanged(t.id);
     expect(await db.lyricsDocsForTrack(t.id), isEmpty);
   });
+
+  group('review fixes', () {
+    LyricsDocDraft pin(
+      Track t, {
+      String? chapterId,
+      int offsetMs = 0,
+      LyricsMode kind = LyricsMode.lyrics,
+      String source = LyricsSource.lrclib,
+      String sourceRef = '404',
+      List<LyricsLineDraft> lines = const [],
+    }) => LyricsDocDraft(
+      trackId: t.id,
+      chapterId: chapterId,
+      offsetMs: offsetMs,
+      kind: kind,
+      status: LyricsStatus.found,
+      source: source,
+      sourceRef: sourceRef,
+      pinned: true,
+      checkedAt: now,
+      lines: lines,
+    );
+
+    test('a pin that cannot be restored waits and does not stop the '
+        'backfill', () async {
+      lrclib.exact['Europe|The Final Countdown'] = lrclibRecord();
+      final p = await playlist();
+      final pinned = [
+        for (var i = 1; i <= 3; i++)
+          await track(p, index: i, videoId: 'v$i', title: 'Pinned $i'),
+      ];
+      for (final t in pinned) {
+        await db.replaceLyricsDoc(pin(t));
+      }
+      final last = await track(p, index: 4, videoId: 'v4');
+
+      final first = await service.backfillPlaylist(p.id);
+      expect(first.failed, 0);
+      expect(
+        (await db.lyricsDocFor(last.id, null))!.status,
+        LyricsStatus.found,
+      );
+      final doc = (await db.lyricsDocFor(pinned.first.id, null))!;
+      expect(doc.pinned, isTrue);
+      expect(doc.attempts, 1);
+
+      // Not tried again at once; after the error interval, up to the cap.
+      final requests = lrclib.http.requests.length;
+      expect((await service.backfillPlaylist(p.id)).due, 0);
+      expect(lrclib.http.requests.length, requests);
+      for (var i = 0; i < 6; i++) {
+        now = now.add(const Duration(days: 1));
+        await service.backfillPlaylist(p.id);
+      }
+      final tried = (await db.lyricsDocFor(pinned.first.id, null))!;
+      expect(tried.attempts, LyricsService.maxAttempts);
+      expect(tried.pinned, isTrue);
+    });
+
+    test('pinned docs of the other mode give way after a switch', () async {
+      final p = await playlist(mode: 'transcript');
+      final t = await track(
+        p,
+        chaptersJson: chapters([('c1', 'Intro', 0, 10000)]),
+      );
+      await db.replaceLyricsDoc(
+        pin(t, lines: const [LyricsLineDraft('old lyric')]),
+      );
+      await db.replaceLyricsDoc(
+        pin(t, chapterId: 'c1', lines: const [LyricsLineDraft('old lyric')]),
+      );
+      captionInfo = {
+        'automatic_captions': {
+          'en-orig': [
+            {'ext': 'json3', 'url': 'https://caps/asr'},
+          ],
+        },
+      };
+      captionsHttp.handler =
+          (_) => FakeHttpResponse.json({
+            'events': [
+              {
+                'tStartMs': 1000,
+                'segs': [
+                  {'utf8': 'spoken words'},
+                ],
+              },
+            ],
+          });
+      await service.backfillPlaylist(p.id);
+      final docs = await db.lyricsDocsForTrack(t.id);
+      expect(docs.single.kind, 'transcript');
+      expect(docs.single.chapterId, isNull);
+    });
+
+    test('an ineligible track loses its docs of the other mode', () async {
+      final p = await playlist(mode: 'transcript');
+      final t = await insertTestTrack(
+        db,
+        playlistId: p.id,
+        videoId: 'local',
+        title: 'Local',
+        filePath: '${dir.path}/l.m4a',
+        status: 'complete',
+        isLocalReplacement: true,
+      );
+      await db.replaceLyricsDoc(
+        pin(t, lines: const [LyricsLineDraft('old lyric')]),
+      );
+      await service.backfillPlaylist(p.id);
+      expect(await db.lyricsDocsForTrack(t.id), isEmpty);
+    });
+
+    test('a pinned chapter doc follows its chapter and the file is '
+        'rewritten', () async {
+      final p = await playlist();
+      final t = await track(
+        p,
+        chaptersJson: chapters([
+          ('c1', 'A — One', 60000, 120000),
+          ('c2', 'B — Two', 120000, 180000),
+        ]),
+      );
+      await db.replaceLyricsDoc(
+        pin(
+          t,
+          chapterId: 'c1',
+          offsetMs: 60000,
+          lines: const [LyricsLineDraft('line', startMs: 1000)],
+        ),
+      );
+      await db.replaceLyricsDoc(
+        LyricsDocDraft(
+          trackId: t.id,
+          chapterId: 'c2',
+          offsetMs: 120000,
+          kind: LyricsMode.lyrics,
+          status: LyricsStatus.found,
+          checkedAt: now,
+          lines: const [LyricsLineDraft('wrong song')],
+        ),
+      );
+      await persistLyricsFile(db, t.id);
+      final old = ChapterData.decode(t.chaptersJson);
+      final edited = ChapterData(
+        downloaded: const [
+          MediaChapter(
+            id: 'c1',
+            title: 'A — One',
+            startMs: 90000,
+            endMs: 120000,
+          ),
+          MediaChapter(
+            id: 'c2',
+            title: 'B — Right',
+            startMs: 120000,
+            endMs: 180000,
+          ),
+        ],
+      );
+      await db.writeTrackChapters(t.id, edited);
+      expect(await syncLyricsChapterDocs(db, t.id, edited, previous: old), 2);
+      final docs = await db.lyricsDocsForTrack(t.id);
+      expect(docs.single.chapterId, 'c1');
+      expect(docs.single.offsetMs, 90000);
+      final file = await readLyricsFile(dir.path, 'vid1', t.id);
+      expect(file.single.chapterId, 'c1');
+      expect(file.single.offsetMs, 90000);
+    });
+
+    test(
+      'a chapter edited during its lookup is left for the next fetch',
+      () async {
+        final p = await playlist();
+        final t = await track(
+          p,
+          title: 'Mix',
+          chaptersJson: chapters([('c1', 'Avicii — Levels', 0, 180000)]),
+        );
+        lrclib.http.handler = (_) async {
+          final moved = ChapterData(
+            downloaded: const [
+              MediaChapter(
+                id: 'c1',
+                title: 'Avicii — Levels',
+                startMs: 5000,
+                endMs: 180000,
+              ),
+            ],
+          );
+          await db.writeTrackChapters(t.id, moved);
+          return FakeHttpResponse.json(const []);
+        };
+        await service.fetchTrack(t);
+        expect(await db.lyricsDocFor(t.id, 'c1'), isNull);
+      },
+    );
+
+    test(
+      'restoring a captions pin in lyrics mode skips speech-to-text',
+      () async {
+        final p = await playlist();
+        final t = await track(p);
+        await db.replaceLyricsDoc(
+          pin(t, source: LyricsSource.ytSubs, sourceRef: 'other:en-gone'),
+        );
+        captionInfo = {
+          'automatic_captions': {
+            'en-orig': [
+              {'ext': 'json3', 'url': 'https://caps/asr'},
+            ],
+          },
+        };
+        captionsHttp.handler = (_) => FakeHttpResponse.json({'events': []});
+        await service.backfillPlaylist(p.id);
+        final doc = (await db.lyricsDocFor(t.id, null))!;
+        expect(doc.source, LyricsSource.ytSubs);
+        expect(await db.lyricsLinesForDoc(doc.id), isEmpty);
+        expect(captionsHttp.requests, isEmpty);
+      },
+    );
+
+    test('yt-dlp runs are spaced from the end of the previous one', () async {
+      final sleeps = <Duration>[];
+      final paced = LyricsService(
+        db,
+        LogService(),
+        lrclib: LrclibClient(
+          http: lrclib.http,
+          sleep: (_) async {},
+          retryDelays: const [],
+        ),
+        captions: CaptionsClient(http: captionsHttp),
+        captionInfo: (url) async {
+          now = now.add(const Duration(seconds: 5));
+          return const {};
+        },
+        clock: () => now,
+        sleep: (d) async {
+          sleeps.add(d);
+          now = now.add(d);
+        },
+      );
+      addTearDown(paced.dispose);
+      final p = await playlist(mode: 'transcript');
+      await track(p, index: 1, videoId: 'a');
+      await track(p, index: 2, videoId: 'b');
+      await paced.backfillPlaylist(p.id);
+      expect(sleeps, [const Duration(seconds: 2)]);
+    });
+
+    test('a local replacement does not take the video captions', () async {
+      final p = await playlist();
+      final t = await insertTestTrack(
+        db,
+        playlistId: p.id,
+        videoId: 'vid1',
+        title: 'Some Song Nobody Has',
+        filePath: '${dir.path}/l.m4a',
+        durationSeconds: 200,
+        status: 'complete',
+        isLocalReplacement: true,
+      );
+      captionInfo = {
+        'subtitles': {
+          'en': [
+            {'ext': 'json3', 'url': 'https://caps/en'},
+          ],
+        },
+      };
+      captionsHttp.handler =
+          (_) => FakeHttpResponse.json({
+            'events': [
+              {
+                'tStartMs': 1000,
+                'segs': [
+                  {'utf8': 'a lyric'},
+                ],
+              },
+            ],
+          });
+      await service.fetchTrack(t);
+      expect((await db.lyricsDocFor(t.id, null))!.status, LyricsStatus.none);
+      expect(captionInfoUrls, isEmpty);
+    });
+
+    test('LRCLIB lines of a chapter end with the chapter', () async {
+      lrclib.searches['track_name=Africa&artist_name=Toto'] = [
+        lrclibRecord(
+          track: 'Africa',
+          artist: 'Toto',
+          duration: 295,
+          synced:
+              '[00:20.00] I hear the drums\n[03:56.68] Gonna take some time',
+        ),
+      ];
+      final p = await playlist();
+      final t = await track(
+        p,
+        title: 'Mix',
+        duration: 345,
+        chaptersJson: chapters([
+          ('t1', 'Toto — Africa', 0, 120000),
+          ('t2', 'Unrecognized section', 120000, 345000),
+        ]),
+      );
+      await service.fetchTrack(t);
+      final doc = (await db.lyricsDocFor(t.id, 't1'))!;
+      expect(doc.status, LyricsStatus.found);
+      expect((await db.lyricsLinesForDoc(doc.id)).map((l) => l.lineText), [
+        'I hear the drums',
+      ]);
+    });
+
+    test('fetch and refetch say why a track cannot be fetched', () async {
+      final p = await playlist(mode: 'transcript');
+      final t = await insertTestTrack(
+        db,
+        playlistId: p.id,
+        videoId: 'local',
+        title: 'Local',
+        filePath: '${dir.path}/l.m4a',
+        status: 'complete',
+        isLocalReplacement: true,
+      );
+      await db.replaceLyricsDoc(
+        pin(
+          t,
+          kind: LyricsMode.transcript,
+          source: LyricsSource.ytSubs,
+          sourceRef: 'x:en',
+          lines: const [LyricsLineDraft('picked')],
+        ),
+      );
+      expect(
+        LyricsService.fetchBlockedReason(t, LyricsMode.transcript),
+        isNotNull,
+      );
+      await expectLater(service.fetchTrack(t), throwsStateError);
+      await expectLater(service.refetch(t.id, null), throwsStateError);
+      expect((await db.lyricsDocFor(t.id, null))!.pinned, isTrue);
+
+      final pending = await insertTestTrack(
+        db,
+        playlistId: p.id,
+        index: 2,
+        videoId: 'p',
+      );
+      await expectLater(service.fetchTrack(pending), throwsStateError);
+    });
+  });
 }
