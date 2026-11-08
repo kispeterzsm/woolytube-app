@@ -10,8 +10,10 @@ import '../services/chapter_service.dart';
 import '../services/chapters.dart';
 import '../services/playback_service.dart';
 import '../services/playlist_service.dart';
+import '../services/recognition/song_recognition_service.dart';
 import '../widgets/mobile_data_download_guard.dart';
 import '../widgets/settings_section_header.dart';
+import 'recognition_review_page.dart';
 
 /// How one file plays: as the playlist says, as chapters or as one track.
 enum _PlayAs { playlistDefault, chapters, wholeFile }
@@ -34,6 +36,9 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
   int? _markStart;
   bool _busy = false;
 
+  /// The last completed recognition scan for this file, if any.
+  RecognitionRun? _recognitionRun;
+
   @override
   void initState() {
     super.initState();
@@ -47,6 +52,7 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
         (db.select(db.playlists)..where(
           (p) => p.id.equals(widget.track.playlistId),
         )).watchSingleOrNull();
+    unawaited(_loadRecognitionRun());
   }
 
   @override
@@ -384,6 +390,87 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
     );
   }
 
+  Future<void> _loadRecognitionRun() async {
+    try {
+      final run = await ref
+          .read(songRecognitionServiceProvider)
+          .loadRun(widget.track);
+      if (mounted) setState(() => _recognitionRun = run);
+    } catch (_) {
+      // No cached run is the same as none.
+    }
+  }
+
+  Future<void> _recognizeSongs(Track track) async {
+    if (ref.read(downloadServiceProvider).isDownloading) {
+      throw StateError('Wait for the running download to finish first.');
+    }
+    if (!await confirmManualDownload(
+      context,
+      ref.read(downloadNetworkPolicyProvider),
+    )) {
+      return;
+    }
+    final service = ref.read(songRecognitionServiceProvider);
+    // The scan outlives this page; results are picked up through the
+    // progress stream and the cached run.
+    unawaited(
+      service
+          .scan(track)
+          .then((run) {
+            if (!mounted) return;
+            setState(() => _recognitionRun = run);
+            _showMessage(
+              'Recognized ${run.proposals.length} '
+              'section${run.proposals.length == 1 ? '' : 's'} in '
+              '"${track.title}".',
+              action: SnackBarAction(
+                label: 'Review',
+                onPressed: () {
+                  // The message can outlive the page.
+                  if (mounted) _openReview(track, run);
+                },
+              ),
+            );
+          })
+          .catchError((Object error) {
+            if (error is RecognitionCancelled) return;
+            _showMessage(
+              error is RecognitionRateLimited
+                  ? error.toString()
+                  : 'Recognition failed: $error',
+            );
+          }),
+    );
+  }
+
+  Future<void> _openReview(Track track, RecognitionRun run) async {
+    _stopMarking();
+    final applied = await Navigator.of(context).push<int>(
+      MaterialPageRoute(
+        builder: (_) => RecognitionReviewPage(track: track, run: run),
+      ),
+    );
+    if (applied == null || !mounted) return;
+    await _afterEdit(track);
+    _showMessage(
+      'Applied $applied chapter${applied == 1 ? '' : 's'}. '
+      'Undo last chapter change takes them back.',
+    );
+  }
+
+  Future<void> _removeAutomatic(Track track) async {
+    await _chapters.removeAutomatic(track);
+    await _afterEdit(track);
+  }
+
+  /// Takes back the last stored chapter change (an edit, a removal,
+  /// recognition results or going back to the YouTube chapters).
+  Future<void> _undo(Track track) async {
+    await _chapters.undo(track);
+    await _afterEdit(track);
+  }
+
   @override
   Widget build(BuildContext context) {
     final currentId = ref.watch(
@@ -624,6 +711,20 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                     ],
                   ),
                 ),
+                if (data.undoChapters != null)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    child: Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: TextButton.icon(
+                        key: const ValueKey('chapters-undo'),
+                        onPressed:
+                            _busy ? null : () => _run(() => _undo(track)),
+                        icon: const Icon(Icons.undo),
+                        label: const Text('Undo last chapter change'),
+                      ),
+                    ),
+                  ),
                 if (data.active.isNotEmpty && !chaptersOn)
                   const _Notice(
                     icon: Icons.block,
@@ -672,6 +773,17 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                         ),
                     ],
                   ),
+                ),
+                // Below the list, so the page reads as before for files that
+                // are never scanned.
+                _RecognitionSection(
+                  track: track,
+                  data: data,
+                  run: _recognitionRun,
+                  enabled: !_busy && playable,
+                  onRecognize: () => _run(() => _recognizeSongs(track)),
+                  onReview: (run) => _openReview(track, run),
+                  onRemoveAutomatic: () => _run(() => _removeAutomatic(track)),
                 ),
               ],
             ),
@@ -725,6 +837,252 @@ class _SourceChip extends StatelessWidget {
   }
 }
 
+/// "Retrying in m:ss…" for a scan that waits before its next lookup,
+/// ticking down once a second.
+class _RetryCountdown extends StatefulWidget {
+  const _RetryCountdown({required this.progress});
+
+  final RecognitionProgress progress;
+
+  @override
+  State<_RetryCountdown> createState() => _RetryCountdownState();
+}
+
+class _RetryCountdownState extends State<_RetryCountdown> {
+  Timer? _ticker;
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final resumeAt = widget.progress.resumeAt;
+    var remaining =
+        resumeAt == null ? Duration.zero : resumeAt.difference(DateTime.now());
+    if (remaining.isNegative) remaining = Duration.zero;
+    // Rounded up, so the countdown reaches 0:00 only when the retry is due.
+    final seconds = (remaining.inMilliseconds + 999) ~/ 1000;
+    final time =
+        '${seconds ~/ 60}:${(seconds % 60).toString().padLeft(2, '0')}';
+    final reason = switch (widget.progress.waitReason) {
+      RecognitionWaitReason.network => 'Connection problem.',
+      _ => 'Shazam asked us to slow down.',
+    };
+    return Text(
+      '$reason Retrying in $time… '
+      '(${widget.progress.completed} of ${widget.progress.total} done)',
+      key: const ValueKey('recognition-waiting'),
+      style: const TextStyle(color: Color(0xFF999999), fontSize: 12),
+    );
+  }
+}
+
+/// Song recognition for long mixes. Only this section follows the scan's
+/// progress, so the rest of the page does not rebuild with every sample.
+class _RecognitionSection extends ConsumerWidget {
+  const _RecognitionSection({
+    required this.track,
+    required this.data,
+    required this.run,
+    required this.enabled,
+    required this.onRecognize,
+    required this.onReview,
+    required this.onRemoveAutomatic,
+  });
+
+  final Track track;
+  final ChapterData data;
+
+  /// The last completed scan of this file, if any.
+  final RecognitionRun? run;
+
+  /// False while the page is busy or the file cannot be played.
+  final bool enabled;
+  final VoidCallback onRecognize;
+  final void Function(RecognitionRun run) onReview;
+  final VoidCallback onRemoveAutomatic;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final progress =
+        ref.watch(recognitionProgressProvider).valueOrNull ??
+        ref.read(songRecognitionServiceProvider).currentProgress;
+    // The running scan of this file, if any.
+    final scan =
+        progress != null && progress.running && progress.trackId == track.id
+            ? progress
+            : null;
+    // Why the last scan of this file stopped, until the next one starts. A
+    // scan runs unattended, so the message must outlast its snack bar.
+    final failure =
+        progress != null &&
+                progress.phase == RecognitionPhase.failed &&
+                progress.trackId == track.id
+            ? progress.message
+            : null;
+    final scanningOther = progress?.running == true && scan == null;
+    final run = this.run;
+    // A run applies once per recognition epoch, which an undo, a reset or a
+    // replaced file moves on. Recognize again rebuilds a fresh run from the
+    // saved lookups, so only an appliable run is offered for review.
+    final applied = run != null && data.lastRecognitionRunId == run.runId;
+    final stale = run != null && data.recognitionEpoch != run.epoch;
+    // Applying keeps each proposal's id as the prefix of the chapters made
+    // from it, so this tells whether any of the run's chapters are listed.
+    final runShown =
+        run != null &&
+        data.active.any(
+          (c) => run.proposals.any((p) => c.id.startsWith('${p.id}-')),
+        );
+    final runHint =
+        run == null || scan != null
+            ? null
+            : stale
+            ? applied && !runShown
+                ? 'These results were taken back. Recognize again rebuilds '
+                    'them from saved lookups.'
+                : 'The chapters were undone or reset since this scan. '
+                    'Recognize again rebuilds its proposals from saved '
+                    'lookups.'
+            : applied
+            ? runShown
+                ? 'The results of the last scan are applied.'
+                : 'The results of the last scan were applied, then removed. '
+                    'Recognize again rebuilds them from saved lookups.'
+            : null;
+    final hasAutomatic = data.active.any(
+      (c) => c.origin == ChapterOrigin.auto && !c.manuallyEdited,
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SettingsSectionHeader('Song recognition'),
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 16),
+          child: Text(
+            'Identifies the songs in a long mix by fingerprinting short '
+            'samples and proposes chapters for you to review. Only '
+            'fingerprints are sent, never audio.',
+            style: TextStyle(color: Color(0xFF999999), fontSize: 13),
+          ),
+        ),
+        if (scan != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                LinearProgressIndicator(
+                  value:
+                      scan.total > 0 &&
+                              (scan.phase == RecognitionPhase.sampling ||
+                                  scan.phase == RecognitionPhase.waiting)
+                          ? scan.completed / scan.total
+                          : null,
+                ),
+                const SizedBox(height: 4),
+                if (scan.phase == RecognitionPhase.waiting)
+                  _RetryCountdown(progress: scan)
+                else
+                  Text(
+                    switch (scan.phase) {
+                      RecognitionPhase.sampling =>
+                        'Recognizing samples ${scan.completed} of '
+                            '${scan.total}…',
+                      RecognitionPhase.silence => 'Finding quiet transitions…',
+                      _ => 'Estimating chapters…',
+                    },
+                    style: const TextStyle(
+                      color: Color(0xFF999999),
+                      fontSize: 12,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        if (failure != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: Text(
+              failure == RecognitionRateLimited.message
+                  ? failure
+                  : 'The last scan failed: $failure',
+              key: const ValueKey('recognition-failed'),
+              style: const TextStyle(color: Color(0xFFE57373), fontSize: 12),
+            ),
+          ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          child: Wrap(
+            spacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              if (scan != null)
+                TextButton.icon(
+                  key: const ValueKey('cancel-recognition'),
+                  onPressed:
+                      () => ref.read(songRecognitionServiceProvider).cancel(),
+                  icon: const Icon(Icons.stop),
+                  label: const Text('Cancel'),
+                )
+              else
+                TextButton.icon(
+                  key: const ValueKey('recognize-songs'),
+                  onPressed: enabled && !scanningOther ? onRecognize : null,
+                  icon: const Icon(Icons.graphic_eq),
+                  label: Text(
+                    run == null ? 'Recognize songs' : 'Recognize again',
+                  ),
+                ),
+              if (run != null && scan == null && runHint == null)
+                FilledButton.tonalIcon(
+                  key: const ValueKey('review-proposals'),
+                  onPressed: enabled ? () => onReview(run) : null,
+                  icon: const Icon(Icons.fact_check_outlined),
+                  label: Text('Review ${run.proposals.length} proposals'),
+                ),
+              if (hasAutomatic)
+                TextButton(
+                  key: const ValueKey('remove-automatic'),
+                  onPressed: enabled ? onRemoveAutomatic : null,
+                  child: const Text('Remove automatic chapters'),
+                ),
+            ],
+          ),
+        ),
+        if (runHint != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Text(
+              runHint,
+              key: const ValueKey('recognition-run-hint'),
+              style: const TextStyle(color: Color(0xFF999999), fontSize: 12),
+            ),
+          ),
+        if (scanningOther)
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 16),
+            child: Text(
+              'Another file is being scanned.',
+              style: TextStyle(color: Color(0xFF999999), fontSize: 12),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
 class _ChapterRow extends StatelessWidget {
   const _ChapterRow({
     super.key,
@@ -747,6 +1105,14 @@ class _ChapterRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Recognised chapters say so, and the first open question about them
+    // (a doubtful name or timing) shows on a line of its own.
+    final origin = switch (chapter.origin) {
+      ChapterOrigin.auto when chapter.manuallyEdited => ' · Auto, edited',
+      ChapterOrigin.auto => ' · Auto',
+      _ => '',
+    };
+    final review = chapter.reviewReasons.firstOrNull;
     return ListTile(
       leading: SizedBox(
         width: 28,
@@ -760,8 +1126,10 @@ class _ChapterRow extends StatelessWidget {
       subtitle: Text(
         '${chapterTimestamp(chapter.startMs)} – '
         '${chapterTimestamp(chapter.endMs)} · '
-        '${chapterTimestamp(chapter.duration.inMilliseconds)}',
+        '${chapterTimestamp(chapter.duration.inMilliseconds)}'
+        '$origin${review == null ? '' : '\n$review'}',
       ),
+      isThreeLine: review != null,
       enabled: enabled,
       onTap: onTap,
       trailing: PopupMenuButton<String>(
@@ -991,7 +1359,19 @@ class _ChapterEditDialogState extends State<ChapterEditDialog> {
         ...widget.chapters.where((c) => c.id != chapter.id),
         chapter,
       ]..sort((a, b) => a.startMs.compareTo(b.startMs));
-      validateChapters(entries, durationMs: widget.durationMs);
+      validateChapters(entries);
+      // Only the end typed here is checked against the length. The other
+      // chapters were accepted before; one that ends a little past a later,
+      // rounder length estimate must not block editing this one.
+      final durationMs = widget.durationMs;
+      if (durationMs != null &&
+          durationMs > 0 &&
+          chapter.endMs > durationMs &&
+          chapter.endMs != widget.chapter?.endMs) {
+        throw const FormatException(
+          'Chapters must stay within the media duration.',
+        );
+      }
       Navigator.pop(context, chapter);
     } on FormatException catch (e) {
       setState(() => _error = e.message);

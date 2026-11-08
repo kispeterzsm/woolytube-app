@@ -509,6 +509,25 @@ void main() {
       expect(reply, isTrue);
     });
 
+    test('the notification Cancel stops a song scan', () async {
+      var scanCancels = 0;
+      final scanBridge = ForegroundAutoUpdateBridge(
+        db: db,
+        ytdlp: ytdlp,
+        playlists: playlists,
+        downloads: downloads,
+        log: log,
+        lock: lock,
+        attempts: attempts,
+        cancelSongScan: () => scanCancels++,
+      );
+      final reply = await scanBridge.handleControlCall(
+        const MethodCall('cancelRequestedByUser'),
+      );
+      expect(reply, isTrue);
+      expect(scanCancels, 1);
+    });
+
     test('answers the native Cancel-button probe', () async {
       expect(await bridge.handleControlCall(const MethodCall('ping')), isTrue);
     });
@@ -571,6 +590,41 @@ void main() {
       expect(runner.stopRequested, isTrue);
       expect(await reply, isTrue);
       expect((await run).status, AutoUpdateStatus.stopped);
+    });
+
+    test('Cancel during a scheduled run leaves a song scan alone', () async {
+      var scanCancels = 0;
+      final scanBridge = ForegroundAutoUpdateBridge(
+        db: db,
+        ytdlp: ytdlp,
+        playlists: playlists,
+        downloads: downloads,
+        log: log,
+        lock: lock,
+        attempts: attempts,
+        cancelSongScan: () => scanCancels++,
+      );
+      await insertTestPlaylist(db, outputPath: folder);
+      ytdlp.playlistInfo = {
+        'title': 'Playlist',
+        'entries': [
+          {'id': 'abc', 'title': 'Song', 'playlist_index': 1},
+        ],
+      };
+      ytdlp.downloadCompleter = Completer<void>();
+      ytdlp.downloadStarted = Completer<void>();
+
+      final run = scanBridge.runScheduledUpdate();
+      await ytdlp.downloadStarted!.future;
+      expect(
+        await scanBridge.handleControlCall(
+          const MethodCall('cancelRequestedByUser'),
+        ),
+        isTrue,
+      );
+      expect((await run).status, AutoUpdateStatus.stopped);
+      // The download owned the notification, so its Cancel was for it.
+      expect(scanCancels, 0);
     });
   });
 

@@ -48,6 +48,12 @@ Use **Mark chapters** to play the full file, mark a start and end, and name the 
 
 All chapter data lives in WoolyTube's database and `woolytube_meta.json`. The complete audio/video file remains unchanged and independently playable in other apps. Replacing a file disables its old chapter timings.
 
+## Song recognition for mixes
+
+For a long file such as a mixtape with no chapters, open its **Chapters** page and tap **Recognize songs**. The app decodes short samples every minute, fingerprints them on the device and asks Shazam's tagging endpoint what they are; only fingerprints are sent, never audio. Where the recognized song changes it looks for a quiet transition to place the boundary. Lookups are cached per file, so a cancelled or failed scan resumes where it stopped.
+
+The result is a list of **proposed** chapters with the evidence behind each one. Review them: play a proposal or its boundary, rename, merge or remove entries, then **Apply**. Applying keeps chapters you created or edited and replaces earlier automatic ones; **Undo last chapter change** and **Remove automatic chapters** are available afterwards. Titles come from a catalog match and can be wrong, especially for sped-up or remixed audio, so unrecognized sections and review notes stay visible until you decide.
+
 ## Building from Source
 
 **Prerequisites:** Flutter SDK >= 3.7.2, Java 11, Android SDK

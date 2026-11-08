@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../database/database.dart';
 import '../services/ytdlp_service.dart';
@@ -18,6 +19,9 @@ import '../services/library_gate.dart';
 import '../services/sidecar_mirror.dart';
 import '../services/library_export_service.dart';
 import '../services/thumbnail_backfill_service.dart';
+import '../services/recognition/audio_window_decoder.dart';
+import '../services/recognition/shazam_client.dart';
+import '../services/recognition/song_recognition_service.dart';
 
 final chapterServiceProvider = Provider<ChapterService>(
   (ref) => ChapterService(
@@ -609,4 +613,24 @@ final downloadQueueProvider = StreamProvider<List<int>>((ref) async* {
 /// and keep the per-percent progress in a small widget of its own.
 final downloadProgressProvider = StreamProvider<DownloadProgress>((ref) {
   return ref.watch(downloadServiceProvider).progressStream;
+});
+
+/// Recognizes songs inside long downloaded files to propose chapters.
+final songRecognitionServiceProvider = Provider<SongRecognitionService>((ref) {
+  final service = SongRecognitionService(
+    ref.watch(databaseProvider),
+    decoder: const PlatformAudioWindowDecoder(),
+    recognizer: ShazamClient(),
+    rootDirectory: getApplicationSupportDirectory,
+    notifier: YtDlpScanForegroundNotifier(
+      ref.watch(ytdlpServiceProvider),
+      downloadActive: () => ref.read(downloadServiceProvider).isDownloading,
+    ),
+  );
+  ref.onDispose(service.dispose);
+  return service;
+});
+
+final recognitionProgressProvider = StreamProvider<RecognitionProgress>((ref) {
+  return ref.watch(songRecognitionServiceProvider).progressStream;
 });

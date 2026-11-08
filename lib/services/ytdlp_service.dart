@@ -129,12 +129,15 @@ class YtDlpService {
     required int currentTrack,
     required int totalTracks,
     required int progress,
+    String? trackTitle,
   }) async {
     await _methodChannel.invokeMethod('updateDownloadServiceProgress', {
       'playlistName': playlistName,
       'currentTrack': currentTrack,
       'totalTracks': totalTracks,
       'progress': progress,
+      // Shown instead of "Track n of total" when given.
+      if (trackTitle != null) 'trackTitle': trackTitle,
     });
   }
 

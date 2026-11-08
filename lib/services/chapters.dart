@@ -1,38 +1,113 @@
 import 'dart:convert';
 
+enum ChapterOrigin { original, auto, user }
+
 /// A named range on the unchanged source file's timeline.
 class MediaChapter {
   final String id;
   final String title;
   final int startMs;
   final int endMs;
+  final ChapterOrigin origin;
+  final bool manuallyEdited;
+  final List<String> alternativeTitles;
+  final List<String> reviewReasons;
 
   const MediaChapter({
     required this.id,
     required this.title,
     required this.startMs,
     required this.endMs,
+    this.origin = ChapterOrigin.user,
+    this.manuallyEdited = false,
+    this.alternativeTitles = const [],
+    this.reviewReasons = const [],
   });
 
+  bool get protectedFromRecognition =>
+      origin != ChapterOrigin.auto || manuallyEdited;
+  String get originLabel => switch (origin) {
+    ChapterOrigin.original => 'Original',
+    ChapterOrigin.auto => 'Auto',
+    ChapterOrigin.user => 'User-created',
+  };
+  MediaChapter copyWith({
+    String? id,
+    String? title,
+    int? startMs,
+    int? endMs,
+    ChapterOrigin? origin,
+    bool? manuallyEdited,
+    List<String>? alternativeTitles,
+    List<String>? reviewReasons,
+  }) => MediaChapter(
+    id: id ?? this.id,
+    title: title ?? this.title,
+    startMs: startMs ?? this.startMs,
+    endMs: endMs ?? this.endMs,
+    origin: origin ?? this.origin,
+    manuallyEdited: manuallyEdited ?? this.manuallyEdited,
+    alternativeTitles: alternativeTitles ?? this.alternativeTitles,
+    reviewReasons: reviewReasons ?? this.reviewReasons,
+  );
+
   Duration get duration => Duration(milliseconds: endMs - startMs);
-  Map<String, dynamic> toJson() => {
+
+  /// Fields still at the value [parse] would read back are left out, so a
+  /// chapter nobody recognized or edited is stored exactly as before song
+  /// recognition existed (smaller sidecars, nothing for older versions or
+  /// the PC tool to trip over). [impliedOrigin] is the origin [parse] infers
+  /// for this chapter's list when the key is missing.
+  Map<String, dynamic> toJson({ChapterOrigin? impliedOrigin}) => {
     'id': id,
     'title': title,
     'startMs': startMs,
     'endMs': endMs,
+    if (origin != impliedOrigin) 'origin': origin.name,
+    if (manuallyEdited) 'manuallyEdited': true,
+    if (alternativeTitles.isNotEmpty) 'alternativeTitles': alternativeTitles,
+    if (reviewReasons.isNotEmpty) 'reviewReasons': reviewReasons,
   };
 
-  static List<MediaChapter> parse(Object? value) {
+  static List<MediaChapter> parse(
+    Object? value, {
+    ChapterOrigin fallbackOrigin = ChapterOrigin.user,
+    List<MediaChapter> originals = const [],
+  }) {
     if (value is! List) return [];
     try {
       final result =
           value.map((entry) {
               final m = entry as Map;
+              final original =
+                  originals.where((c) => c.id == m['id']).firstOrNull;
+              final origin =
+                  ChapterOrigin.values
+                      .where((o) => o.name == m['origin'])
+                      .firstOrNull ??
+                  (original == null ? fallbackOrigin : ChapterOrigin.original);
+              final editedLegacy =
+                  original != null &&
+                  (original.title != m['title'] ||
+                      original.startMs != m['startMs'] ||
+                      original.endMs != m['endMs']);
               return MediaChapter(
                 id: m['id'] as String,
                 title: m['title'] as String,
                 startMs: m['startMs'] as int,
                 endMs: m['endMs'] as int,
+                origin: origin,
+                manuallyEdited: m['manuallyEdited'] == true || editedLegacy,
+                alternativeTitles:
+                    (m['alternativeTitles'] as List?)
+                        ?.whereType<String>()
+                        .toList() ??
+                    const [],
+                reviewReasons:
+                    (m['reviewReasons'] as List?)
+                        ?.whereType<String>()
+                        .toList() ??
+                    const [],
               );
             }).toList()
             ..sort((a, b) => a.startMs.compareTo(b.startMs));
@@ -81,6 +156,14 @@ class ChapterData {
   final int? durationMs;
   final bool valid;
   final bool shuffleChapters;
+  final List<MediaChapter>? undoChapters;
+
+  /// True when the state [undoChapters] was taken from followed the
+  /// downloaded (YouTube) chapters (custom was null). Undo then follows them
+  /// again instead of freezing a copy, so later YouTube fetches still show.
+  final bool undoFollowsDownloaded;
+  final int recognitionEpoch;
+  final String? lastRecognitionRunId;
 
   const ChapterData({
     this.downloaded = const [],
@@ -89,24 +172,44 @@ class ChapterData {
     this.durationMs,
     this.valid = true,
     this.shuffleChapters = false,
+    this.undoChapters,
+    this.undoFollowsDownloaded = false,
+    this.recognitionEpoch = 0,
+    this.lastRecognitionRunId,
   });
 
   List<MediaChapter> get active => valid ? (custom ?? downloaded) : const [];
-  ChapterData withCustom(List<MediaChapter>? chapters) => ChapterData(
-    downloaded: downloaded,
-    custom: chapters,
-    checkedAt: checkedAt,
-    durationMs: durationMs,
-    valid: valid,
-    shuffleChapters: shuffleChapters,
-  );
-  ChapterData withShuffleChapters(bool enabled) => ChapterData(
-    downloaded: downloaded,
-    custom: custom,
-    checkedAt: checkedAt,
-    durationMs: durationMs,
-    valid: valid,
-    shuffleChapters: enabled,
+  ChapterData withCustom(List<MediaChapter>? chapters) =>
+      copyWith(custom: chapters);
+  ChapterData withShuffleChapters(bool enabled) =>
+      copyWith(shuffleChapters: enabled);
+  static const _unset = Object();
+  ChapterData copyWith({
+    List<MediaChapter>? downloaded,
+    Object? custom = _unset,
+    DateTime? checkedAt,
+    int? durationMs,
+    bool? valid,
+    bool? shuffleChapters,
+    Object? undoChapters = _unset,
+    bool? undoFollowsDownloaded,
+    int? recognitionEpoch,
+    String? lastRecognitionRunId,
+  }) => ChapterData(
+    downloaded: downloaded ?? this.downloaded,
+    custom:
+        identical(custom, _unset) ? this.custom : custom as List<MediaChapter>?,
+    checkedAt: checkedAt ?? this.checkedAt,
+    durationMs: durationMs ?? this.durationMs,
+    valid: valid ?? this.valid,
+    shuffleChapters: shuffleChapters ?? this.shuffleChapters,
+    undoChapters:
+        identical(undoChapters, _unset)
+            ? this.undoChapters
+            : undoChapters as List<MediaChapter>?,
+    undoFollowsDownloaded: undoFollowsDownloaded ?? this.undoFollowsDownloaded,
+    recognitionEpoch: recognitionEpoch ?? this.recognitionEpoch,
+    lastRecognitionRunId: lastRecognitionRunId ?? this.lastRecognitionRunId,
   );
   ChapterData invalidate() => ChapterData(
     downloaded: downloaded,
@@ -115,15 +218,42 @@ class ChapterData {
     durationMs: durationMs,
     valid: false,
     shuffleChapters: shuffleChapters,
+    recognitionEpoch: recognitionEpoch + 1,
+    lastRecognitionRunId: lastRecognitionRunId,
   );
-  Map<String, dynamic> toJson() => {
-    'downloaded': downloaded.map((c) => c.toJson()).toList(),
-    'custom': custom?.map((c) => c.toJson()).toList(),
-    'checkedAt': checkedAt?.toUtc().toIso8601String(),
-    'durationMs': durationMs,
-    'valid': valid,
-    'shuffleChapters': shuffleChapters,
-  };
+
+  /// Main's fields are always written; the recognition fields only when
+  /// they differ from what [fromJson] assumes when they are missing.
+  Map<String, dynamic> toJson() {
+    final originalIds = {for (final c in downloaded) c.id};
+    List<Map<String, dynamic>> edited(List<MediaChapter> chapters) => [
+      for (final c in chapters)
+        c.toJson(
+          impliedOrigin:
+              originalIds.contains(c.id)
+                  ? ChapterOrigin.original
+                  : ChapterOrigin.user,
+        ),
+    ];
+    return {
+      'downloaded': [
+        for (final c in downloaded)
+          c.toJson(impliedOrigin: ChapterOrigin.original),
+      ],
+      'custom': custom == null ? null : edited(custom!),
+      'checkedAt': checkedAt?.toUtc().toIso8601String(),
+      'durationMs': durationMs,
+      'valid': valid,
+      'shuffleChapters': shuffleChapters,
+      if (undoChapters != null) 'undoChapters': edited(undoChapters!),
+      if (undoChapters != null && undoFollowsDownloaded)
+        'undoFollowsDownloaded': true,
+      if (recognitionEpoch != 0) 'recognitionEpoch': recognitionEpoch,
+      if (lastRecognitionRunId != null)
+        'lastRecognitionRunId': lastRecognitionRunId,
+    };
+  }
+
   String encode() => jsonEncode(toJson());
 
   /// Recently decoded values. Playback, the notification and every list row
@@ -155,15 +285,33 @@ class ChapterData {
 
   static ChapterData fromJson(Object? value) {
     if (value is! Map) return const ChapterData();
+    final originals = MediaChapter.parse(
+      value['downloaded'],
+      fallbackOrigin: ChapterOrigin.original,
+    );
     return ChapterData(
-      downloaded: MediaChapter.parse(value['downloaded']),
+      downloaded: originals,
       custom:
-          value['custom'] == null ? null : MediaChapter.parse(value['custom']),
+          value['custom'] == null
+              ? null
+              : MediaChapter.parse(value['custom'], originals: originals),
       checkedAt: DateTime.tryParse(value['checkedAt']?.toString() ?? ''),
       durationMs:
           value['durationMs'] is int ? value['durationMs'] as int : null,
       valid: value['valid'] != false,
       shuffleChapters: value['shuffleChapters'] == true,
+      undoChapters:
+          value['undoChapters'] == null
+              ? null
+              : MediaChapter.parse(value['undoChapters'], originals: originals),
+      undoFollowsDownloaded:
+          value['undoChapters'] != null &&
+          value['undoFollowsDownloaded'] == true,
+      recognitionEpoch:
+          value['recognitionEpoch'] is int
+              ? value['recognitionEpoch'] as int
+              : 0,
+      lastRecognitionRunId: value['lastRecognitionRunId'] as String?,
     );
   }
 
@@ -189,6 +337,7 @@ class ChapterData {
         result.add(
           MediaChapter(
             id: 'youtube-$i-$start',
+            origin: ChapterOrigin.original,
             title:
                 (m['title'] as String?)?.trim().isNotEmpty == true
                     ? (m['title'] as String).trim()

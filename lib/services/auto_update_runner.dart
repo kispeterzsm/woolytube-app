@@ -413,6 +413,7 @@ class ForegroundAutoUpdateBridge {
     MethodChannel? channel,
     MethodChannel? controlChannel,
     DateTime Function()? clock,
+    void Function()? cancelSongScan,
   }) : _db = db,
        _ytdlp = ytdlp,
        _playlists = playlists,
@@ -423,7 +424,8 @@ class ForegroundAutoUpdateBridge {
        _channel = channel ?? const MethodChannel(autoUpdateChannelName),
        _controlChannel =
            controlChannel ?? const MethodChannel(ytdlpControlChannelName),
-       _clock = clock ?? DateTime.now;
+       _clock = clock ?? DateTime.now,
+       _cancelSongScan = cancelSongScan;
 
   final AppDatabase _db;
   final YtDlpService _ytdlp;
@@ -435,6 +437,10 @@ class ForegroundAutoUpdateBridge {
   final MethodChannel _channel;
   final MethodChannel _controlChannel;
   final DateTime Function() _clock;
+
+  /// Stops a song recognition scan, which shows its progress in the same
+  /// notification while no download runs.
+  final void Function()? _cancelSongScan;
 
   AutoUpdateRunner? _runner;
   bool _attached = false;
@@ -505,6 +511,9 @@ class ForegroundAutoUpdateBridge {
         if (runner != null) {
           unawaited(runner.requestStop());
         } else {
+          // A scan only shows its progress in the notification while no
+          // download does; the download keeps it otherwise.
+          if (!_downloads.isDownloading) _cancelSongScan?.call();
           unawaited(_downloads.cancelActiveDownloads());
         }
         return true;
@@ -615,6 +624,12 @@ final foregroundAutoUpdateBridgeProvider = Provider<ForegroundAutoUpdateBridge>(
       playlists: ref.watch(playlistServiceProvider),
       downloads: ref.watch(downloadServiceProvider),
       log: ref.watch(logServiceProvider),
+      cancelSongScan: () {
+        // Never builds the recognition service just to cancel nothing.
+        if (ref.exists(songRecognitionServiceProvider)) {
+          ref.read(songRecognitionServiceProvider).cancel();
+        }
+      },
     );
     ref.onDispose(bridge.detach);
     return bridge;

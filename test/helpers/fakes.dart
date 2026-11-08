@@ -195,6 +195,7 @@ class FakeYtDlpService extends YtDlpService {
     required int currentTrack,
     required int totalTracks,
     required int progress,
+    String? trackTitle,
   }) async {}
 
   /// Runs when the service stops the download notification; a test can
