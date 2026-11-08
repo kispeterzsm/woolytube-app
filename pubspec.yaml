@@ -65,6 +65,12 @@ dev_dependencies:
   drift_dev: ^2.22.1
   build_runner: ^2.4.14
 
+# Swaps in libmpv jars that include FFmpeg's audio filters for plane mode.
+# See plugins/media_kit_libs_android_video/README.md.
+dependency_overrides:
+  media_kit_libs_android_video:
+    path: plugins/media_kit_libs_android_video
+
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
 
