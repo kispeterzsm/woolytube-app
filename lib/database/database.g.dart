@@ -255,6 +255,17 @@ class $PlaylistsTable extends Playlists
     ),
     defaultValue: const Constant(false),
   );
+  static const VerificationMeta _lyricsModeMeta = const VerificationMeta(
+    'lyricsMode',
+  );
+  @override
+  late final GeneratedColumn<String> lyricsMode = GeneratedColumn<String>(
+    'lyrics_mode',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     playChapters,
@@ -277,6 +288,7 @@ class $PlaylistsTable extends Playlists
     sortOrder,
     videoQuality,
     isTemporary,
+    lyricsMode,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -451,6 +463,12 @@ class $PlaylistsTable extends Playlists
         ),
       );
     }
+    if (data.containsKey('lyrics_mode')) {
+      context.handle(
+        _lyricsModeMeta,
+        lyricsMode.isAcceptableOrUnknown(data['lyrics_mode']!, _lyricsModeMeta),
+      );
+    }
     return context;
   }
 
@@ -554,6 +572,10 @@ class $PlaylistsTable extends Playlists
             DriftSqlType.bool,
             data['${effectivePrefix}is_temporary'],
           )!,
+      lyricsMode: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}lyrics_mode'],
+      ),
     );
   }
 
@@ -598,6 +620,10 @@ class Playlist extends DataClass implements Insertable<Playlist> {
   /// The app's own "Temporary" playlist, which has no YouTube playlist
   /// behind it.
   final bool isTemporary;
+
+  /// What text is fetched for search: 'lyrics' (songs) or 'transcript'
+  /// (spoken content); null = off. See `LyricsMode`.
+  final String? lyricsMode;
   const Playlist({
     this.playChapters,
     required this.id,
@@ -619,6 +645,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     required this.sortOrder,
     this.videoQuality,
     required this.isTemporary,
+    this.lyricsMode,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -657,6 +684,9 @@ class Playlist extends DataClass implements Insertable<Playlist> {
       map['video_quality'] = Variable<int>(videoQuality);
     }
     map['is_temporary'] = Variable<bool>(isTemporary);
+    if (!nullToAbsent || lyricsMode != null) {
+      map['lyrics_mode'] = Variable<String>(lyricsMode);
+    }
     return map;
   }
 
@@ -700,6 +730,10 @@ class Playlist extends DataClass implements Insertable<Playlist> {
               ? const Value.absent()
               : Value(videoQuality),
       isTemporary: Value(isTemporary),
+      lyricsMode:
+          lyricsMode == null && nullToAbsent
+              ? const Value.absent()
+              : Value(lyricsMode),
     );
   }
 
@@ -739,6 +773,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
       sortOrder: serializer.fromJson<int>(json['sortOrder']),
       videoQuality: serializer.fromJson<int?>(json['videoQuality']),
       isTemporary: serializer.fromJson<bool>(json['isTemporary']),
+      lyricsMode: serializer.fromJson<String?>(json['lyricsMode']),
     );
   }
   @override
@@ -769,6 +804,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
       'sortOrder': serializer.toJson<int>(sortOrder),
       'videoQuality': serializer.toJson<int?>(videoQuality),
       'isTemporary': serializer.toJson<bool>(isTemporary),
+      'lyricsMode': serializer.toJson<String?>(lyricsMode),
     };
   }
 
@@ -793,6 +829,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     int? sortOrder,
     Value<int?> videoQuality = const Value.absent(),
     bool? isTemporary,
+    Value<String?> lyricsMode = const Value.absent(),
   }) => Playlist(
     playChapters: playChapters.present ? playChapters.value : this.playChapters,
     id: id ?? this.id,
@@ -820,6 +857,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     sortOrder: sortOrder ?? this.sortOrder,
     videoQuality: videoQuality.present ? videoQuality.value : this.videoQuality,
     isTemporary: isTemporary ?? this.isTemporary,
+    lyricsMode: lyricsMode.present ? lyricsMode.value : this.lyricsMode,
   );
   Playlist copyWithCompanion(PlaylistsCompanion data) {
     return Playlist(
@@ -877,6 +915,8 @@ class Playlist extends DataClass implements Insertable<Playlist> {
               : this.videoQuality,
       isTemporary:
           data.isTemporary.present ? data.isTemporary.value : this.isTemporary,
+      lyricsMode:
+          data.lyricsMode.present ? data.lyricsMode.value : this.lyricsMode,
     );
   }
 
@@ -902,13 +942,14 @@ class Playlist extends DataClass implements Insertable<Playlist> {
           ..write('lastUpdateAttempt: $lastUpdateAttempt, ')
           ..write('sortOrder: $sortOrder, ')
           ..write('videoQuality: $videoQuality, ')
-          ..write('isTemporary: $isTemporary')
+          ..write('isTemporary: $isTemporary, ')
+          ..write('lyricsMode: $lyricsMode')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode => Object.hash(
+  int get hashCode => Object.hashAll([
     playChapters,
     id,
     url,
@@ -929,7 +970,8 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     sortOrder,
     videoQuality,
     isTemporary,
-  );
+    lyricsMode,
+  ]);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -954,7 +996,8 @@ class Playlist extends DataClass implements Insertable<Playlist> {
           other.lastUpdateAttempt == this.lastUpdateAttempt &&
           other.sortOrder == this.sortOrder &&
           other.videoQuality == this.videoQuality &&
-          other.isTemporary == this.isTemporary);
+          other.isTemporary == this.isTemporary &&
+          other.lyricsMode == this.lyricsMode);
 }
 
 class PlaylistsCompanion extends UpdateCompanion<Playlist> {
@@ -978,6 +1021,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
   final Value<int> sortOrder;
   final Value<int?> videoQuality;
   final Value<bool> isTemporary;
+  final Value<String?> lyricsMode;
   const PlaylistsCompanion({
     this.playChapters = const Value.absent(),
     this.id = const Value.absent(),
@@ -999,6 +1043,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     this.sortOrder = const Value.absent(),
     this.videoQuality = const Value.absent(),
     this.isTemporary = const Value.absent(),
+    this.lyricsMode = const Value.absent(),
   });
   PlaylistsCompanion.insert({
     this.playChapters = const Value.absent(),
@@ -1021,6 +1066,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     this.sortOrder = const Value.absent(),
     this.videoQuality = const Value.absent(),
     this.isTemporary = const Value.absent(),
+    this.lyricsMode = const Value.absent(),
   }) : url = Value(url),
        name = Value(name),
        createdAt = Value(createdAt),
@@ -1046,6 +1092,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     Expression<int>? sortOrder,
     Expression<int>? videoQuality,
     Expression<bool>? isTemporary,
+    Expression<String>? lyricsMode,
   }) {
     return RawValuesInsertable({
       if (playChapters != null) 'play_chapters': playChapters,
@@ -1072,6 +1119,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
       if (sortOrder != null) 'sort_order': sortOrder,
       if (videoQuality != null) 'video_quality': videoQuality,
       if (isTemporary != null) 'is_temporary': isTemporary,
+      if (lyricsMode != null) 'lyrics_mode': lyricsMode,
     });
   }
 
@@ -1096,6 +1144,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     Value<int>? sortOrder,
     Value<int?>? videoQuality,
     Value<bool>? isTemporary,
+    Value<String?>? lyricsMode,
   }) {
     return PlaylistsCompanion(
       playChapters: playChapters ?? this.playChapters,
@@ -1120,6 +1169,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
       sortOrder: sortOrder ?? this.sortOrder,
       videoQuality: videoQuality ?? this.videoQuality,
       isTemporary: isTemporary ?? this.isTemporary,
+      lyricsMode: lyricsMode ?? this.lyricsMode,
     );
   }
 
@@ -1190,6 +1240,9 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     if (isTemporary.present) {
       map['is_temporary'] = Variable<bool>(isTemporary.value);
     }
+    if (lyricsMode.present) {
+      map['lyrics_mode'] = Variable<String>(lyricsMode.value);
+    }
     return map;
   }
 
@@ -1215,7 +1268,8 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
           ..write('lastUpdateAttempt: $lastUpdateAttempt, ')
           ..write('sortOrder: $sortOrder, ')
           ..write('videoQuality: $videoQuality, ')
-          ..write('isTemporary: $isTemporary')
+          ..write('isTemporary: $isTemporary, ')
+          ..write('lyricsMode: $lyricsMode')
           ..write(')'))
         .toString();
   }
@@ -3249,6 +3303,1442 @@ class SponsorBlockSegmentsCompanion
   }
 }
 
+class $LyricsDocsTable extends LyricsDocs
+    with TableInfo<$LyricsDocsTable, LyricsDoc> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $LyricsDocsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<int> id = GeneratedColumn<int>(
+    'id',
+    aliasedName,
+    false,
+    hasAutoIncrement: true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'PRIMARY KEY AUTOINCREMENT',
+    ),
+  );
+  static const VerificationMeta _trackIdMeta = const VerificationMeta(
+    'trackId',
+  );
+  @override
+  late final GeneratedColumn<int> trackId = GeneratedColumn<int>(
+    'track_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'REFERENCES tracks (id) ON DELETE CASCADE',
+    ),
+  );
+  static const VerificationMeta _chapterIdMeta = const VerificationMeta(
+    'chapterId',
+  );
+  @override
+  late final GeneratedColumn<String> chapterId = GeneratedColumn<String>(
+    'chapter_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _offsetMsMeta = const VerificationMeta(
+    'offsetMs',
+  );
+  @override
+  late final GeneratedColumn<int> offsetMs = GeneratedColumn<int>(
+    'offset_ms',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  static const VerificationMeta _kindMeta = const VerificationMeta('kind');
+  @override
+  late final GeneratedColumn<String> kind = GeneratedColumn<String>(
+    'kind',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _statusMeta = const VerificationMeta('status');
+  @override
+  late final GeneratedColumn<String> status = GeneratedColumn<String>(
+    'status',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _sourceMeta = const VerificationMeta('source');
+  @override
+  late final GeneratedColumn<String> source = GeneratedColumn<String>(
+    'source',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _sourceRefMeta = const VerificationMeta(
+    'sourceRef',
+  );
+  @override
+  late final GeneratedColumn<String> sourceRef = GeneratedColumn<String>(
+    'source_ref',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _matchedArtistMeta = const VerificationMeta(
+    'matchedArtist',
+  );
+  @override
+  late final GeneratedColumn<String> matchedArtist = GeneratedColumn<String>(
+    'matched_artist',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _matchedTitleMeta = const VerificationMeta(
+    'matchedTitle',
+  );
+  @override
+  late final GeneratedColumn<String> matchedTitle = GeneratedColumn<String>(
+    'matched_title',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _timeScaleMeta = const VerificationMeta(
+    'timeScale',
+  );
+  @override
+  late final GeneratedColumn<double> timeScale = GeneratedColumn<double>(
+    'time_scale',
+    aliasedName,
+    false,
+    type: DriftSqlType.double,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(1.0),
+  );
+  static const VerificationMeta _syncedMeta = const VerificationMeta('synced');
+  @override
+  late final GeneratedColumn<bool> synced = GeneratedColumn<bool>(
+    'synced',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("synced" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  static const VerificationMeta _pinnedMeta = const VerificationMeta('pinned');
+  @override
+  late final GeneratedColumn<bool> pinned = GeneratedColumn<bool>(
+    'pinned',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("pinned" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  static const VerificationMeta _shiftMsMeta = const VerificationMeta(
+    'shiftMs',
+  );
+  @override
+  late final GeneratedColumn<int> shiftMs = GeneratedColumn<int>(
+    'shift_ms',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  static const VerificationMeta _timingOffMeta = const VerificationMeta(
+    'timingOff',
+  );
+  @override
+  late final GeneratedColumn<bool> timingOff = GeneratedColumn<bool>(
+    'timing_off',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("timing_off" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  static const VerificationMeta _langMeta = const VerificationMeta('lang');
+  @override
+  late final GeneratedColumn<String> lang = GeneratedColumn<String>(
+    'lang',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _checkedAtMeta = const VerificationMeta(
+    'checkedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> checkedAt = GeneratedColumn<DateTime>(
+    'checked_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _attemptsMeta = const VerificationMeta(
+    'attempts',
+  );
+  @override
+  late final GeneratedColumn<int> attempts = GeneratedColumn<int>(
+    'attempts',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    trackId,
+    chapterId,
+    offsetMs,
+    kind,
+    status,
+    source,
+    sourceRef,
+    matchedArtist,
+    matchedTitle,
+    timeScale,
+    synced,
+    pinned,
+    shiftMs,
+    timingOff,
+    lang,
+    checkedAt,
+    attempts,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'lyrics_docs';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<LyricsDoc> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('track_id')) {
+      context.handle(
+        _trackIdMeta,
+        trackId.isAcceptableOrUnknown(data['track_id']!, _trackIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_trackIdMeta);
+    }
+    if (data.containsKey('chapter_id')) {
+      context.handle(
+        _chapterIdMeta,
+        chapterId.isAcceptableOrUnknown(data['chapter_id']!, _chapterIdMeta),
+      );
+    }
+    if (data.containsKey('offset_ms')) {
+      context.handle(
+        _offsetMsMeta,
+        offsetMs.isAcceptableOrUnknown(data['offset_ms']!, _offsetMsMeta),
+      );
+    }
+    if (data.containsKey('kind')) {
+      context.handle(
+        _kindMeta,
+        kind.isAcceptableOrUnknown(data['kind']!, _kindMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_kindMeta);
+    }
+    if (data.containsKey('status')) {
+      context.handle(
+        _statusMeta,
+        status.isAcceptableOrUnknown(data['status']!, _statusMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_statusMeta);
+    }
+    if (data.containsKey('source')) {
+      context.handle(
+        _sourceMeta,
+        source.isAcceptableOrUnknown(data['source']!, _sourceMeta),
+      );
+    }
+    if (data.containsKey('source_ref')) {
+      context.handle(
+        _sourceRefMeta,
+        sourceRef.isAcceptableOrUnknown(data['source_ref']!, _sourceRefMeta),
+      );
+    }
+    if (data.containsKey('matched_artist')) {
+      context.handle(
+        _matchedArtistMeta,
+        matchedArtist.isAcceptableOrUnknown(
+          data['matched_artist']!,
+          _matchedArtistMeta,
+        ),
+      );
+    }
+    if (data.containsKey('matched_title')) {
+      context.handle(
+        _matchedTitleMeta,
+        matchedTitle.isAcceptableOrUnknown(
+          data['matched_title']!,
+          _matchedTitleMeta,
+        ),
+      );
+    }
+    if (data.containsKey('time_scale')) {
+      context.handle(
+        _timeScaleMeta,
+        timeScale.isAcceptableOrUnknown(data['time_scale']!, _timeScaleMeta),
+      );
+    }
+    if (data.containsKey('synced')) {
+      context.handle(
+        _syncedMeta,
+        synced.isAcceptableOrUnknown(data['synced']!, _syncedMeta),
+      );
+    }
+    if (data.containsKey('pinned')) {
+      context.handle(
+        _pinnedMeta,
+        pinned.isAcceptableOrUnknown(data['pinned']!, _pinnedMeta),
+      );
+    }
+    if (data.containsKey('shift_ms')) {
+      context.handle(
+        _shiftMsMeta,
+        shiftMs.isAcceptableOrUnknown(data['shift_ms']!, _shiftMsMeta),
+      );
+    }
+    if (data.containsKey('timing_off')) {
+      context.handle(
+        _timingOffMeta,
+        timingOff.isAcceptableOrUnknown(data['timing_off']!, _timingOffMeta),
+      );
+    }
+    if (data.containsKey('lang')) {
+      context.handle(
+        _langMeta,
+        lang.isAcceptableOrUnknown(data['lang']!, _langMeta),
+      );
+    }
+    if (data.containsKey('checked_at')) {
+      context.handle(
+        _checkedAtMeta,
+        checkedAt.isAcceptableOrUnknown(data['checked_at']!, _checkedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_checkedAtMeta);
+    }
+    if (data.containsKey('attempts')) {
+      context.handle(
+        _attemptsMeta,
+        attempts.isAcceptableOrUnknown(data['attempts']!, _attemptsMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  LyricsDoc map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return LyricsDoc(
+      id:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.int,
+            data['${effectivePrefix}id'],
+          )!,
+      trackId:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.int,
+            data['${effectivePrefix}track_id'],
+          )!,
+      chapterId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}chapter_id'],
+      ),
+      offsetMs:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.int,
+            data['${effectivePrefix}offset_ms'],
+          )!,
+      kind:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.string,
+            data['${effectivePrefix}kind'],
+          )!,
+      status:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.string,
+            data['${effectivePrefix}status'],
+          )!,
+      source: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source'],
+      ),
+      sourceRef: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source_ref'],
+      ),
+      matchedArtist: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}matched_artist'],
+      ),
+      matchedTitle: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}matched_title'],
+      ),
+      timeScale:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.double,
+            data['${effectivePrefix}time_scale'],
+          )!,
+      synced:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.bool,
+            data['${effectivePrefix}synced'],
+          )!,
+      pinned:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.bool,
+            data['${effectivePrefix}pinned'],
+          )!,
+      shiftMs:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.int,
+            data['${effectivePrefix}shift_ms'],
+          )!,
+      timingOff:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.bool,
+            data['${effectivePrefix}timing_off'],
+          )!,
+      lang: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}lang'],
+      ),
+      checkedAt:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.dateTime,
+            data['${effectivePrefix}checked_at'],
+          )!,
+      attempts:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.int,
+            data['${effectivePrefix}attempts'],
+          )!,
+    );
+  }
+
+  @override
+  $LyricsDocsTable createAlias(String alias) {
+    return $LyricsDocsTable(attachedDatabase, alias);
+  }
+}
+
+class LyricsDoc extends DataClass implements Insertable<LyricsDoc> {
+  final int id;
+  final int trackId;
+
+  /// `MediaChapter.id`; null = the whole file.
+  final String? chapterId;
+
+  /// Chapter start; line times are relative to it.
+  final int offsetMs;
+
+  /// 'lyrics' | 'transcript'
+  final String kind;
+
+  /// 'found' | 'none' | 'instrumental' | 'error'
+  final String status;
+
+  /// 'lrclib' | 'ytmusic' | 'yt_subs' | 'yt_auto'
+  final String? source;
+
+  /// LRCLIB id, ytmusic browseId, caption language key, or a video id.
+  final String? sourceRef;
+  final String? matchedArtist;
+  final String? matchedTitle;
+
+  /// Nightcore: local duration / original duration. Line times are already
+  /// scaled by it.
+  final double timeScale;
+  final bool synced;
+
+  /// The user chose this; automatic runs never replace it.
+  final bool pinned;
+
+  /// The user's timing correction. Already added to the lines' `startMs`;
+  /// kept so a restore from `sourceRef` adds it again. Schema 17.
+  final int shiftMs;
+
+  /// The user chose the lines without times. Schema 17.
+  final bool timingOff;
+  final String? lang;
+  final DateTime checkedAt;
+  final int attempts;
+  const LyricsDoc({
+    required this.id,
+    required this.trackId,
+    this.chapterId,
+    required this.offsetMs,
+    required this.kind,
+    required this.status,
+    this.source,
+    this.sourceRef,
+    this.matchedArtist,
+    this.matchedTitle,
+    required this.timeScale,
+    required this.synced,
+    required this.pinned,
+    required this.shiftMs,
+    required this.timingOff,
+    this.lang,
+    required this.checkedAt,
+    required this.attempts,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<int>(id);
+    map['track_id'] = Variable<int>(trackId);
+    if (!nullToAbsent || chapterId != null) {
+      map['chapter_id'] = Variable<String>(chapterId);
+    }
+    map['offset_ms'] = Variable<int>(offsetMs);
+    map['kind'] = Variable<String>(kind);
+    map['status'] = Variable<String>(status);
+    if (!nullToAbsent || source != null) {
+      map['source'] = Variable<String>(source);
+    }
+    if (!nullToAbsent || sourceRef != null) {
+      map['source_ref'] = Variable<String>(sourceRef);
+    }
+    if (!nullToAbsent || matchedArtist != null) {
+      map['matched_artist'] = Variable<String>(matchedArtist);
+    }
+    if (!nullToAbsent || matchedTitle != null) {
+      map['matched_title'] = Variable<String>(matchedTitle);
+    }
+    map['time_scale'] = Variable<double>(timeScale);
+    map['synced'] = Variable<bool>(synced);
+    map['pinned'] = Variable<bool>(pinned);
+    map['shift_ms'] = Variable<int>(shiftMs);
+    map['timing_off'] = Variable<bool>(timingOff);
+    if (!nullToAbsent || lang != null) {
+      map['lang'] = Variable<String>(lang);
+    }
+    map['checked_at'] = Variable<DateTime>(checkedAt);
+    map['attempts'] = Variable<int>(attempts);
+    return map;
+  }
+
+  LyricsDocsCompanion toCompanion(bool nullToAbsent) {
+    return LyricsDocsCompanion(
+      id: Value(id),
+      trackId: Value(trackId),
+      chapterId:
+          chapterId == null && nullToAbsent
+              ? const Value.absent()
+              : Value(chapterId),
+      offsetMs: Value(offsetMs),
+      kind: Value(kind),
+      status: Value(status),
+      source:
+          source == null && nullToAbsent ? const Value.absent() : Value(source),
+      sourceRef:
+          sourceRef == null && nullToAbsent
+              ? const Value.absent()
+              : Value(sourceRef),
+      matchedArtist:
+          matchedArtist == null && nullToAbsent
+              ? const Value.absent()
+              : Value(matchedArtist),
+      matchedTitle:
+          matchedTitle == null && nullToAbsent
+              ? const Value.absent()
+              : Value(matchedTitle),
+      timeScale: Value(timeScale),
+      synced: Value(synced),
+      pinned: Value(pinned),
+      shiftMs: Value(shiftMs),
+      timingOff: Value(timingOff),
+      lang: lang == null && nullToAbsent ? const Value.absent() : Value(lang),
+      checkedAt: Value(checkedAt),
+      attempts: Value(attempts),
+    );
+  }
+
+  factory LyricsDoc.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return LyricsDoc(
+      id: serializer.fromJson<int>(json['id']),
+      trackId: serializer.fromJson<int>(json['trackId']),
+      chapterId: serializer.fromJson<String?>(json['chapterId']),
+      offsetMs: serializer.fromJson<int>(json['offsetMs']),
+      kind: serializer.fromJson<String>(json['kind']),
+      status: serializer.fromJson<String>(json['status']),
+      source: serializer.fromJson<String?>(json['source']),
+      sourceRef: serializer.fromJson<String?>(json['sourceRef']),
+      matchedArtist: serializer.fromJson<String?>(json['matchedArtist']),
+      matchedTitle: serializer.fromJson<String?>(json['matchedTitle']),
+      timeScale: serializer.fromJson<double>(json['timeScale']),
+      synced: serializer.fromJson<bool>(json['synced']),
+      pinned: serializer.fromJson<bool>(json['pinned']),
+      shiftMs: serializer.fromJson<int>(json['shiftMs']),
+      timingOff: serializer.fromJson<bool>(json['timingOff']),
+      lang: serializer.fromJson<String?>(json['lang']),
+      checkedAt: serializer.fromJson<DateTime>(json['checkedAt']),
+      attempts: serializer.fromJson<int>(json['attempts']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<int>(id),
+      'trackId': serializer.toJson<int>(trackId),
+      'chapterId': serializer.toJson<String?>(chapterId),
+      'offsetMs': serializer.toJson<int>(offsetMs),
+      'kind': serializer.toJson<String>(kind),
+      'status': serializer.toJson<String>(status),
+      'source': serializer.toJson<String?>(source),
+      'sourceRef': serializer.toJson<String?>(sourceRef),
+      'matchedArtist': serializer.toJson<String?>(matchedArtist),
+      'matchedTitle': serializer.toJson<String?>(matchedTitle),
+      'timeScale': serializer.toJson<double>(timeScale),
+      'synced': serializer.toJson<bool>(synced),
+      'pinned': serializer.toJson<bool>(pinned),
+      'shiftMs': serializer.toJson<int>(shiftMs),
+      'timingOff': serializer.toJson<bool>(timingOff),
+      'lang': serializer.toJson<String?>(lang),
+      'checkedAt': serializer.toJson<DateTime>(checkedAt),
+      'attempts': serializer.toJson<int>(attempts),
+    };
+  }
+
+  LyricsDoc copyWith({
+    int? id,
+    int? trackId,
+    Value<String?> chapterId = const Value.absent(),
+    int? offsetMs,
+    String? kind,
+    String? status,
+    Value<String?> source = const Value.absent(),
+    Value<String?> sourceRef = const Value.absent(),
+    Value<String?> matchedArtist = const Value.absent(),
+    Value<String?> matchedTitle = const Value.absent(),
+    double? timeScale,
+    bool? synced,
+    bool? pinned,
+    int? shiftMs,
+    bool? timingOff,
+    Value<String?> lang = const Value.absent(),
+    DateTime? checkedAt,
+    int? attempts,
+  }) => LyricsDoc(
+    id: id ?? this.id,
+    trackId: trackId ?? this.trackId,
+    chapterId: chapterId.present ? chapterId.value : this.chapterId,
+    offsetMs: offsetMs ?? this.offsetMs,
+    kind: kind ?? this.kind,
+    status: status ?? this.status,
+    source: source.present ? source.value : this.source,
+    sourceRef: sourceRef.present ? sourceRef.value : this.sourceRef,
+    matchedArtist:
+        matchedArtist.present ? matchedArtist.value : this.matchedArtist,
+    matchedTitle: matchedTitle.present ? matchedTitle.value : this.matchedTitle,
+    timeScale: timeScale ?? this.timeScale,
+    synced: synced ?? this.synced,
+    pinned: pinned ?? this.pinned,
+    shiftMs: shiftMs ?? this.shiftMs,
+    timingOff: timingOff ?? this.timingOff,
+    lang: lang.present ? lang.value : this.lang,
+    checkedAt: checkedAt ?? this.checkedAt,
+    attempts: attempts ?? this.attempts,
+  );
+  LyricsDoc copyWithCompanion(LyricsDocsCompanion data) {
+    return LyricsDoc(
+      id: data.id.present ? data.id.value : this.id,
+      trackId: data.trackId.present ? data.trackId.value : this.trackId,
+      chapterId: data.chapterId.present ? data.chapterId.value : this.chapterId,
+      offsetMs: data.offsetMs.present ? data.offsetMs.value : this.offsetMs,
+      kind: data.kind.present ? data.kind.value : this.kind,
+      status: data.status.present ? data.status.value : this.status,
+      source: data.source.present ? data.source.value : this.source,
+      sourceRef: data.sourceRef.present ? data.sourceRef.value : this.sourceRef,
+      matchedArtist:
+          data.matchedArtist.present
+              ? data.matchedArtist.value
+              : this.matchedArtist,
+      matchedTitle:
+          data.matchedTitle.present
+              ? data.matchedTitle.value
+              : this.matchedTitle,
+      timeScale: data.timeScale.present ? data.timeScale.value : this.timeScale,
+      synced: data.synced.present ? data.synced.value : this.synced,
+      pinned: data.pinned.present ? data.pinned.value : this.pinned,
+      shiftMs: data.shiftMs.present ? data.shiftMs.value : this.shiftMs,
+      timingOff: data.timingOff.present ? data.timingOff.value : this.timingOff,
+      lang: data.lang.present ? data.lang.value : this.lang,
+      checkedAt: data.checkedAt.present ? data.checkedAt.value : this.checkedAt,
+      attempts: data.attempts.present ? data.attempts.value : this.attempts,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('LyricsDoc(')
+          ..write('id: $id, ')
+          ..write('trackId: $trackId, ')
+          ..write('chapterId: $chapterId, ')
+          ..write('offsetMs: $offsetMs, ')
+          ..write('kind: $kind, ')
+          ..write('status: $status, ')
+          ..write('source: $source, ')
+          ..write('sourceRef: $sourceRef, ')
+          ..write('matchedArtist: $matchedArtist, ')
+          ..write('matchedTitle: $matchedTitle, ')
+          ..write('timeScale: $timeScale, ')
+          ..write('synced: $synced, ')
+          ..write('pinned: $pinned, ')
+          ..write('shiftMs: $shiftMs, ')
+          ..write('timingOff: $timingOff, ')
+          ..write('lang: $lang, ')
+          ..write('checkedAt: $checkedAt, ')
+          ..write('attempts: $attempts')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    trackId,
+    chapterId,
+    offsetMs,
+    kind,
+    status,
+    source,
+    sourceRef,
+    matchedArtist,
+    matchedTitle,
+    timeScale,
+    synced,
+    pinned,
+    shiftMs,
+    timingOff,
+    lang,
+    checkedAt,
+    attempts,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is LyricsDoc &&
+          other.id == this.id &&
+          other.trackId == this.trackId &&
+          other.chapterId == this.chapterId &&
+          other.offsetMs == this.offsetMs &&
+          other.kind == this.kind &&
+          other.status == this.status &&
+          other.source == this.source &&
+          other.sourceRef == this.sourceRef &&
+          other.matchedArtist == this.matchedArtist &&
+          other.matchedTitle == this.matchedTitle &&
+          other.timeScale == this.timeScale &&
+          other.synced == this.synced &&
+          other.pinned == this.pinned &&
+          other.shiftMs == this.shiftMs &&
+          other.timingOff == this.timingOff &&
+          other.lang == this.lang &&
+          other.checkedAt == this.checkedAt &&
+          other.attempts == this.attempts);
+}
+
+class LyricsDocsCompanion extends UpdateCompanion<LyricsDoc> {
+  final Value<int> id;
+  final Value<int> trackId;
+  final Value<String?> chapterId;
+  final Value<int> offsetMs;
+  final Value<String> kind;
+  final Value<String> status;
+  final Value<String?> source;
+  final Value<String?> sourceRef;
+  final Value<String?> matchedArtist;
+  final Value<String?> matchedTitle;
+  final Value<double> timeScale;
+  final Value<bool> synced;
+  final Value<bool> pinned;
+  final Value<int> shiftMs;
+  final Value<bool> timingOff;
+  final Value<String?> lang;
+  final Value<DateTime> checkedAt;
+  final Value<int> attempts;
+  const LyricsDocsCompanion({
+    this.id = const Value.absent(),
+    this.trackId = const Value.absent(),
+    this.chapterId = const Value.absent(),
+    this.offsetMs = const Value.absent(),
+    this.kind = const Value.absent(),
+    this.status = const Value.absent(),
+    this.source = const Value.absent(),
+    this.sourceRef = const Value.absent(),
+    this.matchedArtist = const Value.absent(),
+    this.matchedTitle = const Value.absent(),
+    this.timeScale = const Value.absent(),
+    this.synced = const Value.absent(),
+    this.pinned = const Value.absent(),
+    this.shiftMs = const Value.absent(),
+    this.timingOff = const Value.absent(),
+    this.lang = const Value.absent(),
+    this.checkedAt = const Value.absent(),
+    this.attempts = const Value.absent(),
+  });
+  LyricsDocsCompanion.insert({
+    this.id = const Value.absent(),
+    required int trackId,
+    this.chapterId = const Value.absent(),
+    this.offsetMs = const Value.absent(),
+    required String kind,
+    required String status,
+    this.source = const Value.absent(),
+    this.sourceRef = const Value.absent(),
+    this.matchedArtist = const Value.absent(),
+    this.matchedTitle = const Value.absent(),
+    this.timeScale = const Value.absent(),
+    this.synced = const Value.absent(),
+    this.pinned = const Value.absent(),
+    this.shiftMs = const Value.absent(),
+    this.timingOff = const Value.absent(),
+    this.lang = const Value.absent(),
+    required DateTime checkedAt,
+    this.attempts = const Value.absent(),
+  }) : trackId = Value(trackId),
+       kind = Value(kind),
+       status = Value(status),
+       checkedAt = Value(checkedAt);
+  static Insertable<LyricsDoc> custom({
+    Expression<int>? id,
+    Expression<int>? trackId,
+    Expression<String>? chapterId,
+    Expression<int>? offsetMs,
+    Expression<String>? kind,
+    Expression<String>? status,
+    Expression<String>? source,
+    Expression<String>? sourceRef,
+    Expression<String>? matchedArtist,
+    Expression<String>? matchedTitle,
+    Expression<double>? timeScale,
+    Expression<bool>? synced,
+    Expression<bool>? pinned,
+    Expression<int>? shiftMs,
+    Expression<bool>? timingOff,
+    Expression<String>? lang,
+    Expression<DateTime>? checkedAt,
+    Expression<int>? attempts,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (trackId != null) 'track_id': trackId,
+      if (chapterId != null) 'chapter_id': chapterId,
+      if (offsetMs != null) 'offset_ms': offsetMs,
+      if (kind != null) 'kind': kind,
+      if (status != null) 'status': status,
+      if (source != null) 'source': source,
+      if (sourceRef != null) 'source_ref': sourceRef,
+      if (matchedArtist != null) 'matched_artist': matchedArtist,
+      if (matchedTitle != null) 'matched_title': matchedTitle,
+      if (timeScale != null) 'time_scale': timeScale,
+      if (synced != null) 'synced': synced,
+      if (pinned != null) 'pinned': pinned,
+      if (shiftMs != null) 'shift_ms': shiftMs,
+      if (timingOff != null) 'timing_off': timingOff,
+      if (lang != null) 'lang': lang,
+      if (checkedAt != null) 'checked_at': checkedAt,
+      if (attempts != null) 'attempts': attempts,
+    });
+  }
+
+  LyricsDocsCompanion copyWith({
+    Value<int>? id,
+    Value<int>? trackId,
+    Value<String?>? chapterId,
+    Value<int>? offsetMs,
+    Value<String>? kind,
+    Value<String>? status,
+    Value<String?>? source,
+    Value<String?>? sourceRef,
+    Value<String?>? matchedArtist,
+    Value<String?>? matchedTitle,
+    Value<double>? timeScale,
+    Value<bool>? synced,
+    Value<bool>? pinned,
+    Value<int>? shiftMs,
+    Value<bool>? timingOff,
+    Value<String?>? lang,
+    Value<DateTime>? checkedAt,
+    Value<int>? attempts,
+  }) {
+    return LyricsDocsCompanion(
+      id: id ?? this.id,
+      trackId: trackId ?? this.trackId,
+      chapterId: chapterId ?? this.chapterId,
+      offsetMs: offsetMs ?? this.offsetMs,
+      kind: kind ?? this.kind,
+      status: status ?? this.status,
+      source: source ?? this.source,
+      sourceRef: sourceRef ?? this.sourceRef,
+      matchedArtist: matchedArtist ?? this.matchedArtist,
+      matchedTitle: matchedTitle ?? this.matchedTitle,
+      timeScale: timeScale ?? this.timeScale,
+      synced: synced ?? this.synced,
+      pinned: pinned ?? this.pinned,
+      shiftMs: shiftMs ?? this.shiftMs,
+      timingOff: timingOff ?? this.timingOff,
+      lang: lang ?? this.lang,
+      checkedAt: checkedAt ?? this.checkedAt,
+      attempts: attempts ?? this.attempts,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<int>(id.value);
+    }
+    if (trackId.present) {
+      map['track_id'] = Variable<int>(trackId.value);
+    }
+    if (chapterId.present) {
+      map['chapter_id'] = Variable<String>(chapterId.value);
+    }
+    if (offsetMs.present) {
+      map['offset_ms'] = Variable<int>(offsetMs.value);
+    }
+    if (kind.present) {
+      map['kind'] = Variable<String>(kind.value);
+    }
+    if (status.present) {
+      map['status'] = Variable<String>(status.value);
+    }
+    if (source.present) {
+      map['source'] = Variable<String>(source.value);
+    }
+    if (sourceRef.present) {
+      map['source_ref'] = Variable<String>(sourceRef.value);
+    }
+    if (matchedArtist.present) {
+      map['matched_artist'] = Variable<String>(matchedArtist.value);
+    }
+    if (matchedTitle.present) {
+      map['matched_title'] = Variable<String>(matchedTitle.value);
+    }
+    if (timeScale.present) {
+      map['time_scale'] = Variable<double>(timeScale.value);
+    }
+    if (synced.present) {
+      map['synced'] = Variable<bool>(synced.value);
+    }
+    if (pinned.present) {
+      map['pinned'] = Variable<bool>(pinned.value);
+    }
+    if (shiftMs.present) {
+      map['shift_ms'] = Variable<int>(shiftMs.value);
+    }
+    if (timingOff.present) {
+      map['timing_off'] = Variable<bool>(timingOff.value);
+    }
+    if (lang.present) {
+      map['lang'] = Variable<String>(lang.value);
+    }
+    if (checkedAt.present) {
+      map['checked_at'] = Variable<DateTime>(checkedAt.value);
+    }
+    if (attempts.present) {
+      map['attempts'] = Variable<int>(attempts.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('LyricsDocsCompanion(')
+          ..write('id: $id, ')
+          ..write('trackId: $trackId, ')
+          ..write('chapterId: $chapterId, ')
+          ..write('offsetMs: $offsetMs, ')
+          ..write('kind: $kind, ')
+          ..write('status: $status, ')
+          ..write('source: $source, ')
+          ..write('sourceRef: $sourceRef, ')
+          ..write('matchedArtist: $matchedArtist, ')
+          ..write('matchedTitle: $matchedTitle, ')
+          ..write('timeScale: $timeScale, ')
+          ..write('synced: $synced, ')
+          ..write('pinned: $pinned, ')
+          ..write('shiftMs: $shiftMs, ')
+          ..write('timingOff: $timingOff, ')
+          ..write('lang: $lang, ')
+          ..write('checkedAt: $checkedAt, ')
+          ..write('attempts: $attempts')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $LyricsLinesTable extends LyricsLines
+    with TableInfo<$LyricsLinesTable, LyricsLine> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $LyricsLinesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<int> id = GeneratedColumn<int>(
+    'id',
+    aliasedName,
+    false,
+    hasAutoIncrement: true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'PRIMARY KEY AUTOINCREMENT',
+    ),
+  );
+  static const VerificationMeta _docIdMeta = const VerificationMeta('docId');
+  @override
+  late final GeneratedColumn<int> docId = GeneratedColumn<int>(
+    'doc_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'REFERENCES lyrics_docs (id) ON DELETE CASCADE',
+    ),
+  );
+  static const VerificationMeta _lineNoMeta = const VerificationMeta('lineNo');
+  @override
+  late final GeneratedColumn<int> lineNo = GeneratedColumn<int>(
+    'line_no',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _startMsMeta = const VerificationMeta(
+    'startMs',
+  );
+  @override
+  late final GeneratedColumn<int> startMs = GeneratedColumn<int>(
+    'start_ms',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _lineTextMeta = const VerificationMeta(
+    'lineText',
+  );
+  @override
+  late final GeneratedColumn<String> lineText = GeneratedColumn<String>(
+    'text',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _searchTextMeta = const VerificationMeta(
+    'searchText',
+  );
+  @override
+  late final GeneratedColumn<String> searchText = GeneratedColumn<String>(
+    'search_text',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    docId,
+    lineNo,
+    startMs,
+    lineText,
+    searchText,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'lyrics_lines';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<LyricsLine> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('doc_id')) {
+      context.handle(
+        _docIdMeta,
+        docId.isAcceptableOrUnknown(data['doc_id']!, _docIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_docIdMeta);
+    }
+    if (data.containsKey('line_no')) {
+      context.handle(
+        _lineNoMeta,
+        lineNo.isAcceptableOrUnknown(data['line_no']!, _lineNoMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_lineNoMeta);
+    }
+    if (data.containsKey('start_ms')) {
+      context.handle(
+        _startMsMeta,
+        startMs.isAcceptableOrUnknown(data['start_ms']!, _startMsMeta),
+      );
+    }
+    if (data.containsKey('text')) {
+      context.handle(
+        _lineTextMeta,
+        lineText.isAcceptableOrUnknown(data['text']!, _lineTextMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_lineTextMeta);
+    }
+    if (data.containsKey('search_text')) {
+      context.handle(
+        _searchTextMeta,
+        searchText.isAcceptableOrUnknown(data['search_text']!, _searchTextMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_searchTextMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  LyricsLine map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return LyricsLine(
+      id:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.int,
+            data['${effectivePrefix}id'],
+          )!,
+      docId:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.int,
+            data['${effectivePrefix}doc_id'],
+          )!,
+      lineNo:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.int,
+            data['${effectivePrefix}line_no'],
+          )!,
+      startMs: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}start_ms'],
+      ),
+      lineText:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.string,
+            data['${effectivePrefix}text'],
+          )!,
+      searchText:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.string,
+            data['${effectivePrefix}search_text'],
+          )!,
+    );
+  }
+
+  @override
+  $LyricsLinesTable createAlias(String alias) {
+    return $LyricsLinesTable(attachedDatabase, alias);
+  }
+}
+
+class LyricsLine extends DataClass implements Insertable<LyricsLine> {
+  final int id;
+  final int docId;
+  final int lineNo;
+
+  /// Already scaled by the doc's time scale; relative to the doc (add
+  /// `offsetMs` for file time). Null for plain text.
+  final int? startMs;
+
+  /// Raw, for display. (`text` in SQL; a Drift getter can't be named so.)
+  final String lineText;
+
+  /// Folded line i + ' ' + folded line i+1 (see `buildSearchWindow`).
+  final String searchText;
+  const LyricsLine({
+    required this.id,
+    required this.docId,
+    required this.lineNo,
+    this.startMs,
+    required this.lineText,
+    required this.searchText,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<int>(id);
+    map['doc_id'] = Variable<int>(docId);
+    map['line_no'] = Variable<int>(lineNo);
+    if (!nullToAbsent || startMs != null) {
+      map['start_ms'] = Variable<int>(startMs);
+    }
+    map['text'] = Variable<String>(lineText);
+    map['search_text'] = Variable<String>(searchText);
+    return map;
+  }
+
+  LyricsLinesCompanion toCompanion(bool nullToAbsent) {
+    return LyricsLinesCompanion(
+      id: Value(id),
+      docId: Value(docId),
+      lineNo: Value(lineNo),
+      startMs:
+          startMs == null && nullToAbsent
+              ? const Value.absent()
+              : Value(startMs),
+      lineText: Value(lineText),
+      searchText: Value(searchText),
+    );
+  }
+
+  factory LyricsLine.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return LyricsLine(
+      id: serializer.fromJson<int>(json['id']),
+      docId: serializer.fromJson<int>(json['docId']),
+      lineNo: serializer.fromJson<int>(json['lineNo']),
+      startMs: serializer.fromJson<int?>(json['startMs']),
+      lineText: serializer.fromJson<String>(json['lineText']),
+      searchText: serializer.fromJson<String>(json['searchText']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<int>(id),
+      'docId': serializer.toJson<int>(docId),
+      'lineNo': serializer.toJson<int>(lineNo),
+      'startMs': serializer.toJson<int?>(startMs),
+      'lineText': serializer.toJson<String>(lineText),
+      'searchText': serializer.toJson<String>(searchText),
+    };
+  }
+
+  LyricsLine copyWith({
+    int? id,
+    int? docId,
+    int? lineNo,
+    Value<int?> startMs = const Value.absent(),
+    String? lineText,
+    String? searchText,
+  }) => LyricsLine(
+    id: id ?? this.id,
+    docId: docId ?? this.docId,
+    lineNo: lineNo ?? this.lineNo,
+    startMs: startMs.present ? startMs.value : this.startMs,
+    lineText: lineText ?? this.lineText,
+    searchText: searchText ?? this.searchText,
+  );
+  LyricsLine copyWithCompanion(LyricsLinesCompanion data) {
+    return LyricsLine(
+      id: data.id.present ? data.id.value : this.id,
+      docId: data.docId.present ? data.docId.value : this.docId,
+      lineNo: data.lineNo.present ? data.lineNo.value : this.lineNo,
+      startMs: data.startMs.present ? data.startMs.value : this.startMs,
+      lineText: data.lineText.present ? data.lineText.value : this.lineText,
+      searchText:
+          data.searchText.present ? data.searchText.value : this.searchText,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('LyricsLine(')
+          ..write('id: $id, ')
+          ..write('docId: $docId, ')
+          ..write('lineNo: $lineNo, ')
+          ..write('startMs: $startMs, ')
+          ..write('lineText: $lineText, ')
+          ..write('searchText: $searchText')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(id, docId, lineNo, startMs, lineText, searchText);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is LyricsLine &&
+          other.id == this.id &&
+          other.docId == this.docId &&
+          other.lineNo == this.lineNo &&
+          other.startMs == this.startMs &&
+          other.lineText == this.lineText &&
+          other.searchText == this.searchText);
+}
+
+class LyricsLinesCompanion extends UpdateCompanion<LyricsLine> {
+  final Value<int> id;
+  final Value<int> docId;
+  final Value<int> lineNo;
+  final Value<int?> startMs;
+  final Value<String> lineText;
+  final Value<String> searchText;
+  const LyricsLinesCompanion({
+    this.id = const Value.absent(),
+    this.docId = const Value.absent(),
+    this.lineNo = const Value.absent(),
+    this.startMs = const Value.absent(),
+    this.lineText = const Value.absent(),
+    this.searchText = const Value.absent(),
+  });
+  LyricsLinesCompanion.insert({
+    this.id = const Value.absent(),
+    required int docId,
+    required int lineNo,
+    this.startMs = const Value.absent(),
+    required String lineText,
+    required String searchText,
+  }) : docId = Value(docId),
+       lineNo = Value(lineNo),
+       lineText = Value(lineText),
+       searchText = Value(searchText);
+  static Insertable<LyricsLine> custom({
+    Expression<int>? id,
+    Expression<int>? docId,
+    Expression<int>? lineNo,
+    Expression<int>? startMs,
+    Expression<String>? lineText,
+    Expression<String>? searchText,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (docId != null) 'doc_id': docId,
+      if (lineNo != null) 'line_no': lineNo,
+      if (startMs != null) 'start_ms': startMs,
+      if (lineText != null) 'text': lineText,
+      if (searchText != null) 'search_text': searchText,
+    });
+  }
+
+  LyricsLinesCompanion copyWith({
+    Value<int>? id,
+    Value<int>? docId,
+    Value<int>? lineNo,
+    Value<int?>? startMs,
+    Value<String>? lineText,
+    Value<String>? searchText,
+  }) {
+    return LyricsLinesCompanion(
+      id: id ?? this.id,
+      docId: docId ?? this.docId,
+      lineNo: lineNo ?? this.lineNo,
+      startMs: startMs ?? this.startMs,
+      lineText: lineText ?? this.lineText,
+      searchText: searchText ?? this.searchText,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<int>(id.value);
+    }
+    if (docId.present) {
+      map['doc_id'] = Variable<int>(docId.value);
+    }
+    if (lineNo.present) {
+      map['line_no'] = Variable<int>(lineNo.value);
+    }
+    if (startMs.present) {
+      map['start_ms'] = Variable<int>(startMs.value);
+    }
+    if (lineText.present) {
+      map['text'] = Variable<String>(lineText.value);
+    }
+    if (searchText.present) {
+      map['search_text'] = Variable<String>(searchText.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('LyricsLinesCompanion(')
+          ..write('id: $id, ')
+          ..write('docId: $docId, ')
+          ..write('lineNo: $lineNo, ')
+          ..write('startMs: $startMs, ')
+          ..write('lineText: $lineText, ')
+          ..write('searchText: $searchText')
+          ..write(')'))
+        .toString();
+  }
+}
+
 class $LoudnessMeasurementsTable extends LoudnessMeasurements
     with TableInfo<$LoudnessMeasurementsTable, LoudnessMeasurement> {
   @override
@@ -3791,6 +5281,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $TracksTable tracks = $TracksTable(this);
   late final $SponsorBlockSegmentsTable sponsorBlockSegments =
       $SponsorBlockSegmentsTable(this);
+  late final $LyricsDocsTable lyricsDocs = $LyricsDocsTable(this);
+  late final $LyricsLinesTable lyricsLines = $LyricsLinesTable(this);
   late final $LoudnessMeasurementsTable loudnessMeasurements =
       $LoudnessMeasurementsTable(this);
   @override
@@ -3801,6 +5293,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     playlists,
     tracks,
     sponsorBlockSegments,
+    lyricsDocs,
+    lyricsLines,
     loudnessMeasurements,
   ];
   @override
@@ -3811,6 +5305,20 @@ abstract class _$AppDatabase extends GeneratedDatabase {
         limitUpdateKind: UpdateKind.delete,
       ),
       result: [TableUpdate('sponsor_block_segments', kind: UpdateKind.delete)],
+    ),
+    WritePropagation(
+      on: TableUpdateQuery.onTableName(
+        'tracks',
+        limitUpdateKind: UpdateKind.delete,
+      ),
+      result: [TableUpdate('lyrics_docs', kind: UpdateKind.delete)],
+    ),
+    WritePropagation(
+      on: TableUpdateQuery.onTableName(
+        'lyrics_docs',
+        limitUpdateKind: UpdateKind.delete,
+      ),
+      result: [TableUpdate('lyrics_lines', kind: UpdateKind.delete)],
     ),
     WritePropagation(
       on: TableUpdateQuery.onTableName(
@@ -3844,6 +5352,7 @@ typedef $$PlaylistsTableCreateCompanionBuilder =
       Value<int> sortOrder,
       Value<int?> videoQuality,
       Value<bool> isTemporary,
+      Value<String?> lyricsMode,
     });
 typedef $$PlaylistsTableUpdateCompanionBuilder =
     PlaylistsCompanion Function({
@@ -3867,6 +5376,7 @@ typedef $$PlaylistsTableUpdateCompanionBuilder =
       Value<int> sortOrder,
       Value<int?> videoQuality,
       Value<bool> isTemporary,
+      Value<String?> lyricsMode,
     });
 
 final class $$PlaylistsTableReferences
@@ -3999,6 +5509,11 @@ class $$PlaylistsTableFilterComposer
 
   ColumnFilters<bool> get isTemporary => $composableBuilder(
     column: $table.isTemporary,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get lyricsMode => $composableBuilder(
+    column: $table.lyricsMode,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -4136,6 +5651,11 @@ class $$PlaylistsTableOrderingComposer
     column: $table.isTemporary,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get lyricsMode => $composableBuilder(
+    column: $table.lyricsMode,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$PlaylistsTableAnnotationComposer
@@ -4235,6 +5755,11 @@ class $$PlaylistsTableAnnotationComposer
     builder: (column) => column,
   );
 
+  GeneratedColumn<String> get lyricsMode => $composableBuilder(
+    column: $table.lyricsMode,
+    builder: (column) => column,
+  );
+
   Expression<T> tracksRefs<T extends Object>(
     Expression<T> Function($$TracksTableAnnotationComposer a) f,
   ) {
@@ -4310,6 +5835,7 @@ class $$PlaylistsTableTableManager
                 Value<int> sortOrder = const Value.absent(),
                 Value<int?> videoQuality = const Value.absent(),
                 Value<bool> isTemporary = const Value.absent(),
+                Value<String?> lyricsMode = const Value.absent(),
               }) => PlaylistsCompanion(
                 playChapters: playChapters,
                 id: id,
@@ -4331,6 +5857,7 @@ class $$PlaylistsTableTableManager
                 sortOrder: sortOrder,
                 videoQuality: videoQuality,
                 isTemporary: isTemporary,
+                lyricsMode: lyricsMode,
               ),
           createCompanionCallback:
               ({
@@ -4355,6 +5882,7 @@ class $$PlaylistsTableTableManager
                 Value<int> sortOrder = const Value.absent(),
                 Value<int?> videoQuality = const Value.absent(),
                 Value<bool> isTemporary = const Value.absent(),
+                Value<String?> lyricsMode = const Value.absent(),
               }) => PlaylistsCompanion.insert(
                 playChapters: playChapters,
                 id: id,
@@ -4376,6 +5904,7 @@ class $$PlaylistsTableTableManager
                 sortOrder: sortOrder,
                 videoQuality: videoQuality,
                 isTemporary: isTemporary,
+                lyricsMode: lyricsMode,
               ),
           withReferenceMapper:
               (p0) =>
@@ -4527,6 +6056,24 @@ final class $$TracksTableReferences
     final cache = $_typedResult.readTableOrNull(
       _sponsorBlockSegmentsRefsTable($_db),
     );
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: cache),
+    );
+  }
+
+  static MultiTypedResultKey<$LyricsDocsTable, List<LyricsDoc>>
+  _lyricsDocsRefsTable(_$AppDatabase db) => MultiTypedResultKey.fromTable(
+    db.lyricsDocs,
+    aliasName: $_aliasNameGenerator(db.tracks.id, db.lyricsDocs.trackId),
+  );
+
+  $$LyricsDocsTableProcessedTableManager get lyricsDocsRefs {
+    final manager = $$LyricsDocsTableTableManager(
+      $_db,
+      $_db.lyricsDocs,
+    ).filter((f) => f.trackId.id.sqlEquals($_itemColumn<int>('id')!));
+
+    final cache = $_typedResult.readTableOrNull(_lyricsDocsRefsTable($_db));
     return ProcessedTableManager(
       manager.$state.copyWith(prefetchedData: cache),
     );
@@ -4709,6 +6256,31 @@ class $$TracksTableFilterComposer
           }) => $$SponsorBlockSegmentsTableFilterComposer(
             $db: $db,
             $table: $db.sponsorBlockSegments,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return f(composer);
+  }
+
+  Expression<bool> lyricsDocsRefs(
+    Expression<bool> Function($$LyricsDocsTableFilterComposer f) f,
+  ) {
+    final $$LyricsDocsTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.id,
+      referencedTable: $db.lyricsDocs,
+      getReferencedColumn: (t) => t.trackId,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$LyricsDocsTableFilterComposer(
+            $db: $db,
+            $table: $db.lyricsDocs,
             $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
             joinBuilder: joinBuilder,
             $removeJoinBuilderFromRootComposer:
@@ -5021,6 +6593,31 @@ class $$TracksTableAnnotationComposer
     return f(composer);
   }
 
+  Expression<T> lyricsDocsRefs<T extends Object>(
+    Expression<T> Function($$LyricsDocsTableAnnotationComposer a) f,
+  ) {
+    final $$LyricsDocsTableAnnotationComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.id,
+      referencedTable: $db.lyricsDocs,
+      getReferencedColumn: (t) => t.trackId,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$LyricsDocsTableAnnotationComposer(
+            $db: $db,
+            $table: $db.lyricsDocs,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return f(composer);
+  }
+
   Expression<T> loudnessMeasurementsRefs<T extends Object>(
     Expression<T> Function($$LoudnessMeasurementsTableAnnotationComposer a) f,
   ) {
@@ -5064,6 +6661,7 @@ class $$TracksTableTableManager
           PrefetchHooks Function({
             bool playlistId,
             bool sponsorBlockSegmentsRefs,
+            bool lyricsDocsRefs,
             bool loudnessMeasurementsRefs,
           })
         > {
@@ -5183,12 +6781,14 @@ class $$TracksTableTableManager
           prefetchHooksCallback: ({
             playlistId = false,
             sponsorBlockSegmentsRefs = false,
+            lyricsDocsRefs = false,
             loudnessMeasurementsRefs = false,
           }) {
             return PrefetchHooks(
               db: db,
               explicitlyWatchedTables: [
                 if (sponsorBlockSegmentsRefs) db.sponsorBlockSegments,
+                if (lyricsDocsRefs) db.lyricsDocs,
                 if (loudnessMeasurementsRefs) db.loudnessMeasurements,
               ],
               addJoins: <
@@ -5245,6 +6845,24 @@ class $$TracksTableTableManager
                           ),
                       typedResults: items,
                     ),
+                  if (lyricsDocsRefs)
+                    await $_getPrefetchedData<Track, $TracksTable, LyricsDoc>(
+                      currentTable: table,
+                      referencedTable: $$TracksTableReferences
+                          ._lyricsDocsRefsTable(db),
+                      managerFromTypedResult:
+                          (p0) =>
+                              $$TracksTableReferences(
+                                db,
+                                table,
+                                p0,
+                              ).lyricsDocsRefs,
+                      referencedItemsForCurrentItem:
+                          (item, referencedItems) => referencedItems.where(
+                            (e) => e.trackId == item.id,
+                          ),
+                      typedResults: items,
+                    ),
                   if (loudnessMeasurementsRefs)
                     await $_getPrefetchedData<
                       Track,
@@ -5290,6 +6908,7 @@ typedef $$TracksTableProcessedTableManager =
       PrefetchHooks Function({
         bool playlistId,
         bool sponsorBlockSegmentsRefs,
+        bool lyricsDocsRefs,
         bool loudnessMeasurementsRefs,
       })
     >;
@@ -5784,6 +7403,996 @@ typedef $$SponsorBlockSegmentsTableProcessedTableManager =
       SponsorBlockSegment,
       PrefetchHooks Function({bool trackId})
     >;
+typedef $$LyricsDocsTableCreateCompanionBuilder =
+    LyricsDocsCompanion Function({
+      Value<int> id,
+      required int trackId,
+      Value<String?> chapterId,
+      Value<int> offsetMs,
+      required String kind,
+      required String status,
+      Value<String?> source,
+      Value<String?> sourceRef,
+      Value<String?> matchedArtist,
+      Value<String?> matchedTitle,
+      Value<double> timeScale,
+      Value<bool> synced,
+      Value<bool> pinned,
+      Value<int> shiftMs,
+      Value<bool> timingOff,
+      Value<String?> lang,
+      required DateTime checkedAt,
+      Value<int> attempts,
+    });
+typedef $$LyricsDocsTableUpdateCompanionBuilder =
+    LyricsDocsCompanion Function({
+      Value<int> id,
+      Value<int> trackId,
+      Value<String?> chapterId,
+      Value<int> offsetMs,
+      Value<String> kind,
+      Value<String> status,
+      Value<String?> source,
+      Value<String?> sourceRef,
+      Value<String?> matchedArtist,
+      Value<String?> matchedTitle,
+      Value<double> timeScale,
+      Value<bool> synced,
+      Value<bool> pinned,
+      Value<int> shiftMs,
+      Value<bool> timingOff,
+      Value<String?> lang,
+      Value<DateTime> checkedAt,
+      Value<int> attempts,
+    });
+
+final class $$LyricsDocsTableReferences
+    extends BaseReferences<_$AppDatabase, $LyricsDocsTable, LyricsDoc> {
+  $$LyricsDocsTableReferences(super.$_db, super.$_table, super.$_typedResult);
+
+  static $TracksTable _trackIdTable(_$AppDatabase db) => db.tracks.createAlias(
+    $_aliasNameGenerator(db.lyricsDocs.trackId, db.tracks.id),
+  );
+
+  $$TracksTableProcessedTableManager get trackId {
+    final $_column = $_itemColumn<int>('track_id')!;
+
+    final manager = $$TracksTableTableManager(
+      $_db,
+      $_db.tracks,
+    ).filter((f) => f.id.sqlEquals($_column));
+    final item = $_typedResult.readTableOrNull(_trackIdTable($_db));
+    if (item == null) return manager;
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: [item]),
+    );
+  }
+
+  static MultiTypedResultKey<$LyricsLinesTable, List<LyricsLine>>
+  _lyricsLinesRefsTable(_$AppDatabase db) => MultiTypedResultKey.fromTable(
+    db.lyricsLines,
+    aliasName: $_aliasNameGenerator(db.lyricsDocs.id, db.lyricsLines.docId),
+  );
+
+  $$LyricsLinesTableProcessedTableManager get lyricsLinesRefs {
+    final manager = $$LyricsLinesTableTableManager(
+      $_db,
+      $_db.lyricsLines,
+    ).filter((f) => f.docId.id.sqlEquals($_itemColumn<int>('id')!));
+
+    final cache = $_typedResult.readTableOrNull(_lyricsLinesRefsTable($_db));
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: cache),
+    );
+  }
+}
+
+class $$LyricsDocsTableFilterComposer
+    extends Composer<_$AppDatabase, $LyricsDocsTable> {
+  $$LyricsDocsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get chapterId => $composableBuilder(
+    column: $table.chapterId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get offsetMs => $composableBuilder(
+    column: $table.offsetMs,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get kind => $composableBuilder(
+    column: $table.kind,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get status => $composableBuilder(
+    column: $table.status,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get sourceRef => $composableBuilder(
+    column: $table.sourceRef,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get matchedArtist => $composableBuilder(
+    column: $table.matchedArtist,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get matchedTitle => $composableBuilder(
+    column: $table.matchedTitle,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get timeScale => $composableBuilder(
+    column: $table.timeScale,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get synced => $composableBuilder(
+    column: $table.synced,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get pinned => $composableBuilder(
+    column: $table.pinned,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get shiftMs => $composableBuilder(
+    column: $table.shiftMs,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get timingOff => $composableBuilder(
+    column: $table.timingOff,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get lang => $composableBuilder(
+    column: $table.lang,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get checkedAt => $composableBuilder(
+    column: $table.checkedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get attempts => $composableBuilder(
+    column: $table.attempts,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  $$TracksTableFilterComposer get trackId {
+    final $$TracksTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.trackId,
+      referencedTable: $db.tracks,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$TracksTableFilterComposer(
+            $db: $db,
+            $table: $db.tracks,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+
+  Expression<bool> lyricsLinesRefs(
+    Expression<bool> Function($$LyricsLinesTableFilterComposer f) f,
+  ) {
+    final $$LyricsLinesTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.id,
+      referencedTable: $db.lyricsLines,
+      getReferencedColumn: (t) => t.docId,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$LyricsLinesTableFilterComposer(
+            $db: $db,
+            $table: $db.lyricsLines,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return f(composer);
+  }
+}
+
+class $$LyricsDocsTableOrderingComposer
+    extends Composer<_$AppDatabase, $LyricsDocsTable> {
+  $$LyricsDocsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get chapterId => $composableBuilder(
+    column: $table.chapterId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get offsetMs => $composableBuilder(
+    column: $table.offsetMs,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get kind => $composableBuilder(
+    column: $table.kind,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get status => $composableBuilder(
+    column: $table.status,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get sourceRef => $composableBuilder(
+    column: $table.sourceRef,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get matchedArtist => $composableBuilder(
+    column: $table.matchedArtist,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get matchedTitle => $composableBuilder(
+    column: $table.matchedTitle,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get timeScale => $composableBuilder(
+    column: $table.timeScale,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get synced => $composableBuilder(
+    column: $table.synced,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get pinned => $composableBuilder(
+    column: $table.pinned,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get shiftMs => $composableBuilder(
+    column: $table.shiftMs,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get timingOff => $composableBuilder(
+    column: $table.timingOff,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get lang => $composableBuilder(
+    column: $table.lang,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get checkedAt => $composableBuilder(
+    column: $table.checkedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get attempts => $composableBuilder(
+    column: $table.attempts,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  $$TracksTableOrderingComposer get trackId {
+    final $$TracksTableOrderingComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.trackId,
+      referencedTable: $db.tracks,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$TracksTableOrderingComposer(
+            $db: $db,
+            $table: $db.tracks,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$LyricsDocsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $LyricsDocsTable> {
+  $$LyricsDocsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get chapterId =>
+      $composableBuilder(column: $table.chapterId, builder: (column) => column);
+
+  GeneratedColumn<int> get offsetMs =>
+      $composableBuilder(column: $table.offsetMs, builder: (column) => column);
+
+  GeneratedColumn<String> get kind =>
+      $composableBuilder(column: $table.kind, builder: (column) => column);
+
+  GeneratedColumn<String> get status =>
+      $composableBuilder(column: $table.status, builder: (column) => column);
+
+  GeneratedColumn<String> get source =>
+      $composableBuilder(column: $table.source, builder: (column) => column);
+
+  GeneratedColumn<String> get sourceRef =>
+      $composableBuilder(column: $table.sourceRef, builder: (column) => column);
+
+  GeneratedColumn<String> get matchedArtist => $composableBuilder(
+    column: $table.matchedArtist,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get matchedTitle => $composableBuilder(
+    column: $table.matchedTitle,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<double> get timeScale =>
+      $composableBuilder(column: $table.timeScale, builder: (column) => column);
+
+  GeneratedColumn<bool> get synced =>
+      $composableBuilder(column: $table.synced, builder: (column) => column);
+
+  GeneratedColumn<bool> get pinned =>
+      $composableBuilder(column: $table.pinned, builder: (column) => column);
+
+  GeneratedColumn<int> get shiftMs =>
+      $composableBuilder(column: $table.shiftMs, builder: (column) => column);
+
+  GeneratedColumn<bool> get timingOff =>
+      $composableBuilder(column: $table.timingOff, builder: (column) => column);
+
+  GeneratedColumn<String> get lang =>
+      $composableBuilder(column: $table.lang, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get checkedAt =>
+      $composableBuilder(column: $table.checkedAt, builder: (column) => column);
+
+  GeneratedColumn<int> get attempts =>
+      $composableBuilder(column: $table.attempts, builder: (column) => column);
+
+  $$TracksTableAnnotationComposer get trackId {
+    final $$TracksTableAnnotationComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.trackId,
+      referencedTable: $db.tracks,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$TracksTableAnnotationComposer(
+            $db: $db,
+            $table: $db.tracks,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+
+  Expression<T> lyricsLinesRefs<T extends Object>(
+    Expression<T> Function($$LyricsLinesTableAnnotationComposer a) f,
+  ) {
+    final $$LyricsLinesTableAnnotationComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.id,
+      referencedTable: $db.lyricsLines,
+      getReferencedColumn: (t) => t.docId,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$LyricsLinesTableAnnotationComposer(
+            $db: $db,
+            $table: $db.lyricsLines,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return f(composer);
+  }
+}
+
+class $$LyricsDocsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $LyricsDocsTable,
+          LyricsDoc,
+          $$LyricsDocsTableFilterComposer,
+          $$LyricsDocsTableOrderingComposer,
+          $$LyricsDocsTableAnnotationComposer,
+          $$LyricsDocsTableCreateCompanionBuilder,
+          $$LyricsDocsTableUpdateCompanionBuilder,
+          (LyricsDoc, $$LyricsDocsTableReferences),
+          LyricsDoc,
+          PrefetchHooks Function({bool trackId, bool lyricsLinesRefs})
+        > {
+  $$LyricsDocsTableTableManager(_$AppDatabase db, $LyricsDocsTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer:
+              () => $$LyricsDocsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer:
+              () => $$LyricsDocsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer:
+              () => $$LyricsDocsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                Value<int> trackId = const Value.absent(),
+                Value<String?> chapterId = const Value.absent(),
+                Value<int> offsetMs = const Value.absent(),
+                Value<String> kind = const Value.absent(),
+                Value<String> status = const Value.absent(),
+                Value<String?> source = const Value.absent(),
+                Value<String?> sourceRef = const Value.absent(),
+                Value<String?> matchedArtist = const Value.absent(),
+                Value<String?> matchedTitle = const Value.absent(),
+                Value<double> timeScale = const Value.absent(),
+                Value<bool> synced = const Value.absent(),
+                Value<bool> pinned = const Value.absent(),
+                Value<int> shiftMs = const Value.absent(),
+                Value<bool> timingOff = const Value.absent(),
+                Value<String?> lang = const Value.absent(),
+                Value<DateTime> checkedAt = const Value.absent(),
+                Value<int> attempts = const Value.absent(),
+              }) => LyricsDocsCompanion(
+                id: id,
+                trackId: trackId,
+                chapterId: chapterId,
+                offsetMs: offsetMs,
+                kind: kind,
+                status: status,
+                source: source,
+                sourceRef: sourceRef,
+                matchedArtist: matchedArtist,
+                matchedTitle: matchedTitle,
+                timeScale: timeScale,
+                synced: synced,
+                pinned: pinned,
+                shiftMs: shiftMs,
+                timingOff: timingOff,
+                lang: lang,
+                checkedAt: checkedAt,
+                attempts: attempts,
+              ),
+          createCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                required int trackId,
+                Value<String?> chapterId = const Value.absent(),
+                Value<int> offsetMs = const Value.absent(),
+                required String kind,
+                required String status,
+                Value<String?> source = const Value.absent(),
+                Value<String?> sourceRef = const Value.absent(),
+                Value<String?> matchedArtist = const Value.absent(),
+                Value<String?> matchedTitle = const Value.absent(),
+                Value<double> timeScale = const Value.absent(),
+                Value<bool> synced = const Value.absent(),
+                Value<bool> pinned = const Value.absent(),
+                Value<int> shiftMs = const Value.absent(),
+                Value<bool> timingOff = const Value.absent(),
+                Value<String?> lang = const Value.absent(),
+                required DateTime checkedAt,
+                Value<int> attempts = const Value.absent(),
+              }) => LyricsDocsCompanion.insert(
+                id: id,
+                trackId: trackId,
+                chapterId: chapterId,
+                offsetMs: offsetMs,
+                kind: kind,
+                status: status,
+                source: source,
+                sourceRef: sourceRef,
+                matchedArtist: matchedArtist,
+                matchedTitle: matchedTitle,
+                timeScale: timeScale,
+                synced: synced,
+                pinned: pinned,
+                shiftMs: shiftMs,
+                timingOff: timingOff,
+                lang: lang,
+                checkedAt: checkedAt,
+                attempts: attempts,
+              ),
+          withReferenceMapper:
+              (p0) =>
+                  p0
+                      .map(
+                        (e) => (
+                          e.readTable(table),
+                          $$LyricsDocsTableReferences(db, table, e),
+                        ),
+                      )
+                      .toList(),
+          prefetchHooksCallback: ({trackId = false, lyricsLinesRefs = false}) {
+            return PrefetchHooks(
+              db: db,
+              explicitlyWatchedTables: [if (lyricsLinesRefs) db.lyricsLines],
+              addJoins: <
+                T extends TableManagerState<
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic
+                >
+              >(state) {
+                if (trackId) {
+                  state =
+                      state.withJoin(
+                            currentTable: table,
+                            currentColumn: table.trackId,
+                            referencedTable: $$LyricsDocsTableReferences
+                                ._trackIdTable(db),
+                            referencedColumn:
+                                $$LyricsDocsTableReferences
+                                    ._trackIdTable(db)
+                                    .id,
+                          )
+                          as T;
+                }
+
+                return state;
+              },
+              getPrefetchedDataCallback: (items) async {
+                return [
+                  if (lyricsLinesRefs)
+                    await $_getPrefetchedData<
+                      LyricsDoc,
+                      $LyricsDocsTable,
+                      LyricsLine
+                    >(
+                      currentTable: table,
+                      referencedTable: $$LyricsDocsTableReferences
+                          ._lyricsLinesRefsTable(db),
+                      managerFromTypedResult:
+                          (p0) =>
+                              $$LyricsDocsTableReferences(
+                                db,
+                                table,
+                                p0,
+                              ).lyricsLinesRefs,
+                      referencedItemsForCurrentItem:
+                          (item, referencedItems) =>
+                              referencedItems.where((e) => e.docId == item.id),
+                      typedResults: items,
+                    ),
+                ];
+              },
+            );
+          },
+        ),
+      );
+}
+
+typedef $$LyricsDocsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $LyricsDocsTable,
+      LyricsDoc,
+      $$LyricsDocsTableFilterComposer,
+      $$LyricsDocsTableOrderingComposer,
+      $$LyricsDocsTableAnnotationComposer,
+      $$LyricsDocsTableCreateCompanionBuilder,
+      $$LyricsDocsTableUpdateCompanionBuilder,
+      (LyricsDoc, $$LyricsDocsTableReferences),
+      LyricsDoc,
+      PrefetchHooks Function({bool trackId, bool lyricsLinesRefs})
+    >;
+typedef $$LyricsLinesTableCreateCompanionBuilder =
+    LyricsLinesCompanion Function({
+      Value<int> id,
+      required int docId,
+      required int lineNo,
+      Value<int?> startMs,
+      required String lineText,
+      required String searchText,
+    });
+typedef $$LyricsLinesTableUpdateCompanionBuilder =
+    LyricsLinesCompanion Function({
+      Value<int> id,
+      Value<int> docId,
+      Value<int> lineNo,
+      Value<int?> startMs,
+      Value<String> lineText,
+      Value<String> searchText,
+    });
+
+final class $$LyricsLinesTableReferences
+    extends BaseReferences<_$AppDatabase, $LyricsLinesTable, LyricsLine> {
+  $$LyricsLinesTableReferences(super.$_db, super.$_table, super.$_typedResult);
+
+  static $LyricsDocsTable _docIdTable(_$AppDatabase db) =>
+      db.lyricsDocs.createAlias(
+        $_aliasNameGenerator(db.lyricsLines.docId, db.lyricsDocs.id),
+      );
+
+  $$LyricsDocsTableProcessedTableManager get docId {
+    final $_column = $_itemColumn<int>('doc_id')!;
+
+    final manager = $$LyricsDocsTableTableManager(
+      $_db,
+      $_db.lyricsDocs,
+    ).filter((f) => f.id.sqlEquals($_column));
+    final item = $_typedResult.readTableOrNull(_docIdTable($_db));
+    if (item == null) return manager;
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: [item]),
+    );
+  }
+}
+
+class $$LyricsLinesTableFilterComposer
+    extends Composer<_$AppDatabase, $LyricsLinesTable> {
+  $$LyricsLinesTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get lineNo => $composableBuilder(
+    column: $table.lineNo,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get startMs => $composableBuilder(
+    column: $table.startMs,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get lineText => $composableBuilder(
+    column: $table.lineText,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get searchText => $composableBuilder(
+    column: $table.searchText,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  $$LyricsDocsTableFilterComposer get docId {
+    final $$LyricsDocsTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.docId,
+      referencedTable: $db.lyricsDocs,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$LyricsDocsTableFilterComposer(
+            $db: $db,
+            $table: $db.lyricsDocs,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$LyricsLinesTableOrderingComposer
+    extends Composer<_$AppDatabase, $LyricsLinesTable> {
+  $$LyricsLinesTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get lineNo => $composableBuilder(
+    column: $table.lineNo,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get startMs => $composableBuilder(
+    column: $table.startMs,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get lineText => $composableBuilder(
+    column: $table.lineText,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get searchText => $composableBuilder(
+    column: $table.searchText,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  $$LyricsDocsTableOrderingComposer get docId {
+    final $$LyricsDocsTableOrderingComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.docId,
+      referencedTable: $db.lyricsDocs,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$LyricsDocsTableOrderingComposer(
+            $db: $db,
+            $table: $db.lyricsDocs,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$LyricsLinesTableAnnotationComposer
+    extends Composer<_$AppDatabase, $LyricsLinesTable> {
+  $$LyricsLinesTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<int> get lineNo =>
+      $composableBuilder(column: $table.lineNo, builder: (column) => column);
+
+  GeneratedColumn<int> get startMs =>
+      $composableBuilder(column: $table.startMs, builder: (column) => column);
+
+  GeneratedColumn<String> get lineText =>
+      $composableBuilder(column: $table.lineText, builder: (column) => column);
+
+  GeneratedColumn<String> get searchText => $composableBuilder(
+    column: $table.searchText,
+    builder: (column) => column,
+  );
+
+  $$LyricsDocsTableAnnotationComposer get docId {
+    final $$LyricsDocsTableAnnotationComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.docId,
+      referencedTable: $db.lyricsDocs,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$LyricsDocsTableAnnotationComposer(
+            $db: $db,
+            $table: $db.lyricsDocs,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$LyricsLinesTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $LyricsLinesTable,
+          LyricsLine,
+          $$LyricsLinesTableFilterComposer,
+          $$LyricsLinesTableOrderingComposer,
+          $$LyricsLinesTableAnnotationComposer,
+          $$LyricsLinesTableCreateCompanionBuilder,
+          $$LyricsLinesTableUpdateCompanionBuilder,
+          (LyricsLine, $$LyricsLinesTableReferences),
+          LyricsLine,
+          PrefetchHooks Function({bool docId})
+        > {
+  $$LyricsLinesTableTableManager(_$AppDatabase db, $LyricsLinesTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer:
+              () => $$LyricsLinesTableFilterComposer($db: db, $table: table),
+          createOrderingComposer:
+              () => $$LyricsLinesTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer:
+              () =>
+                  $$LyricsLinesTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                Value<int> docId = const Value.absent(),
+                Value<int> lineNo = const Value.absent(),
+                Value<int?> startMs = const Value.absent(),
+                Value<String> lineText = const Value.absent(),
+                Value<String> searchText = const Value.absent(),
+              }) => LyricsLinesCompanion(
+                id: id,
+                docId: docId,
+                lineNo: lineNo,
+                startMs: startMs,
+                lineText: lineText,
+                searchText: searchText,
+              ),
+          createCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                required int docId,
+                required int lineNo,
+                Value<int?> startMs = const Value.absent(),
+                required String lineText,
+                required String searchText,
+              }) => LyricsLinesCompanion.insert(
+                id: id,
+                docId: docId,
+                lineNo: lineNo,
+                startMs: startMs,
+                lineText: lineText,
+                searchText: searchText,
+              ),
+          withReferenceMapper:
+              (p0) =>
+                  p0
+                      .map(
+                        (e) => (
+                          e.readTable(table),
+                          $$LyricsLinesTableReferences(db, table, e),
+                        ),
+                      )
+                      .toList(),
+          prefetchHooksCallback: ({docId = false}) {
+            return PrefetchHooks(
+              db: db,
+              explicitlyWatchedTables: [],
+              addJoins: <
+                T extends TableManagerState<
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic
+                >
+              >(state) {
+                if (docId) {
+                  state =
+                      state.withJoin(
+                            currentTable: table,
+                            currentColumn: table.docId,
+                            referencedTable: $$LyricsLinesTableReferences
+                                ._docIdTable(db),
+                            referencedColumn:
+                                $$LyricsLinesTableReferences._docIdTable(db).id,
+                          )
+                          as T;
+                }
+
+                return state;
+              },
+              getPrefetchedDataCallback: (items) async {
+                return [];
+              },
+            );
+          },
+        ),
+      );
+}
+
+typedef $$LyricsLinesTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $LyricsLinesTable,
+      LyricsLine,
+      $$LyricsLinesTableFilterComposer,
+      $$LyricsLinesTableOrderingComposer,
+      $$LyricsLinesTableAnnotationComposer,
+      $$LyricsLinesTableCreateCompanionBuilder,
+      $$LyricsLinesTableUpdateCompanionBuilder,
+      (LyricsLine, $$LyricsLinesTableReferences),
+      LyricsLine,
+      PrefetchHooks Function({bool docId})
+    >;
 typedef $$LoudnessMeasurementsTableCreateCompanionBuilder =
     LoudnessMeasurementsCompanion Function({
       Value<int> trackId,
@@ -6192,6 +8801,10 @@ class $AppDatabaseManager {
       $$TracksTableTableManager(_db, _db.tracks);
   $$SponsorBlockSegmentsTableTableManager get sponsorBlockSegments =>
       $$SponsorBlockSegmentsTableTableManager(_db, _db.sponsorBlockSegments);
+  $$LyricsDocsTableTableManager get lyricsDocs =>
+      $$LyricsDocsTableTableManager(_db, _db.lyricsDocs);
+  $$LyricsLinesTableTableManager get lyricsLines =>
+      $$LyricsLinesTableTableManager(_db, _db.lyricsLines);
   $$LoudnessMeasurementsTableTableManager get loudnessMeasurements =>
       $$LoudnessMeasurementsTableTableManager(_db, _db.loudnessMeasurements);
 }

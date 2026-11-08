@@ -14,6 +14,7 @@ import '../services/recognition/song_recognition_service.dart';
 import '../widgets/mobile_data_download_guard.dart';
 import '../widgets/settings_section_header.dart';
 import 'chapter_editor_page.dart';
+import 'lyrics_page.dart';
 import 'recognition_review_page.dart';
 
 /// How one file plays: as the playlist says, as chapters or as one track.
@@ -356,6 +357,7 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
     Track track,
     MediaChapter chapter, {
     required bool playable,
+    String? lyricsMode,
   }) {
     bool? skipOverride;
     showModalBottomSheet<void>(
@@ -416,6 +418,18 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                   onDelete: () {
                     close();
                     _run(() => _delete(track, chapter));
+                  },
+                  lyricsTitle: lyricsMenuTitle(lyricsMode),
+                  lyricsSubtitle: lyricsMenuSubtitle(lyricsMode),
+                  onLyrics: () {
+                    close();
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder:
+                            (_) =>
+                                LyricsPage(track: track, chapterId: chapter.id),
+                      ),
+                    );
                   },
                 ),
               );
@@ -550,14 +564,24 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
           builder: (context, playlistSnapshot) {
             final playlistChapters =
                 playlistSnapshot.data?.playChapters ?? true;
-            return _buildPage(context, track, playlistChapters);
+            return _buildPage(
+              context,
+              track,
+              playlistChapters,
+              playlistSnapshot.data?.lyricsMode,
+            );
           },
         );
       },
     );
   }
 
-  Widget _buildPage(BuildContext context, Track track, bool playlistChapters) {
+  Widget _buildPage(
+    BuildContext context,
+    Track track,
+    bool playlistChapters,
+    String? lyricsMode,
+  ) {
     final data = ChapterData.decode(track.chaptersJson);
     final playable = track.status == 'complete' && track.filePath != null;
     final canFetch =
@@ -821,6 +845,7 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                                 track,
                                 chapter,
                                 playable: playable,
+                                lyricsMode: lyricsMode,
                               ),
                         ),
                     ],
@@ -1235,6 +1260,9 @@ class _ChapterActionsSheet extends StatelessWidget {
     required this.onRename,
     required this.onEditTimes,
     required this.onDelete,
+    required this.lyricsTitle,
+    required this.lyricsSubtitle,
+    required this.onLyrics,
   });
 
   final MediaChapter chapter;
@@ -1248,6 +1276,9 @@ class _ChapterActionsSheet extends StatelessWidget {
   final VoidCallback onRename;
   final VoidCallback onEditTimes;
   final VoidCallback onDelete;
+  final String lyricsTitle;
+  final String lyricsSubtitle;
+  final VoidCallback onLyrics;
 
   @override
   Widget build(BuildContext context) {
@@ -1371,6 +1402,13 @@ class _ChapterActionsSheet extends StatelessWidget {
                 ),
                 value: skipped,
                 onChanged: onSkipChanged,
+              ),
+              tile(
+                key: const ValueKey('chapter-actions-lyrics'),
+                icon: Icons.lyrics_outlined,
+                title: lyricsTitle,
+                subtitle: lyricsSubtitle,
+                onTap: onLyrics,
               ),
               const Divider(height: 1, color: Color(0xFF3A3A3A)),
               tile(

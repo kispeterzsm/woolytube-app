@@ -13,10 +13,12 @@ import '../providers/playlist_counts_provider.dart';
 import '../providers/providers.dart';
 import '../services/download_errors.dart';
 import '../services/download_service.dart';
+import '../services/lyrics/lyrics_models.dart';
 import '../services/media_thumbnail_service.dart';
 import '../services/metadata_service.dart';
 import '../services/track_search.dart';
 import '../services/update_service.dart';
+import '../widgets/lyrics_line_text.dart';
 import '../widgets/mobile_data_download_guard.dart';
 import '../widgets/playlist_card.dart';
 import 'add_playlist_page.dart';
@@ -875,7 +877,8 @@ class _HomeNotice extends StatelessWidget {
 }
 
 /// The library search: playlists whose name matches, then every track whose
-/// title, number or chapter matches. An empty query lists every track.
+/// title, number or chapter matches, then lyric and transcript lines (searched
+/// a moment after typing stops). An empty query lists every track.
 class _SearchResults extends ConsumerStatefulWidget {
   const _SearchResults({required this.query, required this.onOpenPlaylist});
 
@@ -896,6 +899,56 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
   // The tracks grouped by playlist, as a queue for playback.
   List<Track>? _groupedFrom;
   Map<int, List<Track>> _byPlaylist = const {};
+
+  // Lyric lines matching the query, searched after a short pause in typing.
+  static const _lyricsDebounce = Duration(milliseconds: 200);
+  Timer? _lyricsTimer;
+  int _lyricsGeneration = 0;
+  List<LyricsHit> _lyricHits = const [];
+
+  /// The query [_lyricHits] belong to; older hits are not shown.
+  String _lyricHitsQuery = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _scheduleLyricsSearch();
+  }
+
+  @override
+  void didUpdateWidget(_SearchResults oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.query.trim() != widget.query.trim()) _scheduleLyricsSearch();
+  }
+
+  @override
+  void dispose() {
+    _lyricsTimer?.cancel();
+    super.dispose();
+  }
+
+  void _scheduleLyricsSearch() {
+    _lyricsTimer?.cancel();
+    final generation = ++_lyricsGeneration;
+    final query = widget.query.trim();
+    if (query.length < 2) {
+      _lyricHits = const [];
+      return;
+    }
+    _lyricsTimer = Timer(_lyricsDebounce, () async {
+      List<LyricsHit> hits;
+      try {
+        hits = await ref.read(lyricsSearchProvider).search(query, limit: 30);
+      } catch (_) {
+        hits = const [];
+      }
+      if (!mounted || generation != _lyricsGeneration) return;
+      setState(() {
+        _lyricHits = hits;
+        _lyricHitsQuery = query;
+      });
+    });
+  }
 
   List<Track> _filter(List<Track> tracks, String normalized) {
     if (!identical(tracks, _filteredFrom) || normalized != _filteredQuery) {
@@ -954,16 +1007,20 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
                 if (p.name.toLowerCase().contains(normalized)) p,
             ];
     final filtered = _filter(tracks, normalized);
-    if (filtered.isEmpty && matchingPlaylists.isEmpty) {
+    final lyricHits = _lyricRows(tracks);
+    if (filtered.isEmpty && matchingPlaylists.isEmpty && lyricHits.isEmpty) {
       return const _SearchMessage('Nothing matches');
     }
 
-    // Rows: [playlist header + playlists], [tracks header] + tracks.
-    final showHeaders = matchingPlaylists.isNotEmpty;
+    // Rows: [playlist header + playlists], [tracks header] + tracks,
+    // [lyrics header + lyric lines].
+    final showHeaders = matchingPlaylists.isNotEmpty || lyricHits.isNotEmpty;
     final playlistRows =
-        showHeaders ? matchingPlaylists.length + 1 : 0; // + header
+        matchingPlaylists.isEmpty ? 0 : matchingPlaylists.length + 1;
     final trackHeader = showHeaders && filtered.isNotEmpty ? 1 : 0;
-    final itemCount = playlistRows + trackHeader + filtered.length;
+    final trackRows = trackHeader + filtered.length;
+    final lyricRows = lyricHits.isEmpty ? 0 : lyricHits.length + 1;
+    final itemCount = playlistRows + trackRows + lyricRows;
 
     return ValueListenableBuilder<double>(
       valueListenable: audioPlayerOverlayHeightNotifier,
@@ -985,6 +1042,19 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
                 );
               }
               var i = index - playlistRows;
+              if (i >= trackRows) {
+                i -= trackRows;
+                if (i == 0) return const _SearchHeader('Lyrics');
+                final (hit, track) = lyricHits[i - 1];
+                final playlist = playlistsById[track.playlistId];
+                return _LyricsResultTile(
+                  key: ValueKey('search-lyrics-${hit.docId}'),
+                  hit: hit,
+                  track: track,
+                  playlist: playlist,
+                  onTap: () => _onLyricsTap(hit, track, playlist, tracks),
+                );
+              }
               if (trackHeader == 1) {
                 if (i == 0) return const _SearchHeader('Tracks');
                 i--;
@@ -1002,9 +1072,59 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
     );
   }
 
+  /// The lyric hits whose track is still in the library, with the track.
+  List<(LyricsHit, Track)> _lyricRows(List<Track> tracks) {
+    if (_lyricHits.isEmpty ||
+        widget.query.trim().length < 2 ||
+        _lyricHitsQuery != widget.query.trim()) {
+      return const [];
+    }
+    final wanted = {for (final hit in _lyricHits) hit.trackId};
+    final byId = {
+      for (final track in tracks)
+        if (wanted.contains(track.id)) track.id: track,
+    };
+    return [
+      for (final hit in _lyricHits)
+        if (byId[hit.trackId] case final track?) (hit, track),
+    ];
+  }
+
+  void _onLyricsTap(
+    LyricsHit hit,
+    Track track,
+    Playlist? playlist,
+    List<Track> tracks,
+  ) {
+    FocusManager.instance.primaryFocus?.unfocus();
+    if (playlist == null || !_canPlay(track, playlist)) return;
+    final target = lyricsHitTarget(track, hit);
+    ref
+        .read(playbackServiceProvider)
+        .playTrack(
+          track,
+          _queueFor(tracks, track.playlistId),
+          playlist: playlist,
+          chapterId: target.chapter?.id,
+          startAt: target.startAt,
+        );
+  }
+
   void _onTrackTap(Track track, Playlist? playlist, List<Track> tracks) {
     FocusManager.instance.primaryFocus?.unfocus();
-    if (playlist == null) return;
+    if (playlist == null || !_canPlay(track, playlist)) return;
+    ref
+        .read(playbackServiceProvider)
+        .playTrack(
+          track,
+          _queueFor(tracks, track.playlistId),
+          playlist: playlist,
+          chapterId: matchingChapterForSearch(track, widget.query)?.id,
+        );
+  }
+
+  /// Whether [track] has a file to play; if not, says why.
+  bool _canPlay(Track track, Playlist playlist) {
     if (track.status != 'complete') {
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
@@ -1021,16 +1141,104 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
             ),
           ),
         );
-      return;
+      return false;
     }
-    ref
-        .read(playbackServiceProvider)
-        .playTrack(
-          track,
-          _queueFor(tracks, track.playlistId),
-          playlist: playlist,
-          chapterId: matchingChapterForSearch(track, widget.query)?.id,
-        );
+    return true;
+  }
+}
+
+/// One matched lyric or transcript line: the track (or chapter) title, then
+/// the line with its matched words highlighted and its time.
+class _LyricsResultTile extends ConsumerWidget {
+  const _LyricsResultTile({
+    super.key,
+    required this.hit,
+    required this.track,
+    required this.playlist,
+    required this.onTap,
+  });
+
+  final LyricsHit hit;
+  final Track track;
+  final Playlist? playlist;
+  final VoidCallback onTap;
+
+  static const _muted = Color(0xFF888888);
+  static const _accent = Color(0xFF2196F3);
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final isCurrentTrack = ref.watch(
+      currentTrackProvider.select((async) => async.valueOrNull?.id == track.id),
+    );
+    final chapter = lyricsHitTarget(track, hit).chapter;
+    final playlistName = playlist?.name ?? 'Playlist #${track.playlistId}';
+    final position = hit.positionMs;
+    return Material(
+      color: isCurrentTrack ? const Color(0xFF2A2A2A) : Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: 32,
+                child: Icon(
+                  hit.kind == LyricsMode.transcript
+                      ? Icons.subtitles_outlined
+                      : Icons.lyrics_outlined,
+                  color: isCurrentTrack ? _accent : _muted,
+                  size: 20,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      chapter?.title ?? track.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: isCurrentTrack ? _accent : Colors.white,
+                        fontSize: 14,
+                      ),
+                    ),
+                    Text(
+                      chapter == null
+                          ? playlistName
+                          : '${track.title} · $playlistName',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: _muted, fontSize: 12),
+                    ),
+                    const SizedBox(height: 4),
+                    LyricsLineText(
+                      hit: hit,
+                      snippet: true,
+                      style: const TextStyle(
+                        color: Color(0xFFAAAAAA),
+                        fontSize: 13,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (position != null) ...[
+                const SizedBox(width: 8),
+                Text(
+                  formatLyricsTime(position),
+                  style: const TextStyle(color: _muted, fontSize: 12),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 

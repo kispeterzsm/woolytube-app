@@ -9,6 +9,9 @@ import 'chapters.dart';
 import 'library_layout.dart';
 import 'media_thumbnail_service.dart';
 import 'video_quality.dart';
+import 'lyrics/lyrics_files.dart';
+import 'lyrics/lyrics_service.dart' show syncLyricsChapterDocs;
+import 'lyrics/lyrics_models.dart';
 
 class DiscoveredTrack {
   final int index;
@@ -35,6 +38,9 @@ class DiscoveredTrack {
   /// The cap its file was downloaded under (see `Tracks.downloadedMaxHeight`).
   final int? downloadedMaxHeight;
 
+  /// Lyrics the user chose for the track or its chapters.
+  final List<DiscoveredLyricsPin> lyricsPins;
+
   DiscoveredTrack({
     required this.index,
     required this.videoId,
@@ -55,7 +61,54 @@ class DiscoveredTrack {
     this.sponsorBlockSegments = const [],
     this.videoQuality,
     this.downloadedMaxHeight,
+    this.lyricsPins = const [],
   });
+}
+
+/// A lyrics choice the user made (`lyricsPins` in the sidecar): which
+/// record a track or chapter uses, or that it has none.
+class DiscoveredLyricsPin {
+  final String? chapterId;
+  final String status;
+  final String? source;
+  final String? sourceRef;
+  final String? matchedArtist;
+  final String? matchedTitle;
+
+  /// The user's timing correction (see `LyricsDocDraft.shiftMs`).
+  final int shiftMs;
+
+  /// The user chose the lines without times.
+  final bool timingOff;
+
+  const DiscoveredLyricsPin({
+    this.chapterId,
+    required this.status,
+    this.source,
+    this.sourceRef,
+    this.matchedArtist,
+    this.matchedTitle,
+    this.shiftMs = 0,
+    this.timingOff = false,
+  });
+
+  static DiscoveredLyricsPin? fromJson(Object? json) {
+    if (json is! Map) return null;
+    String? text(String key) =>
+        json[key] is String ? json[key] as String : null;
+    final status = text('status');
+    if (status == null) return null;
+    return DiscoveredLyricsPin(
+      chapterId: text('chapterId'),
+      status: status,
+      source: text('source'),
+      sourceRef: text('sourceRef'),
+      matchedArtist: text('matchedArtist'),
+      matchedTitle: text('matchedTitle'),
+      shiftMs: json['shiftMs'] is num ? (json['shiftMs'] as num).toInt() : 0,
+      timingOff: json['timingOff'] == true,
+    );
+  }
 }
 
 class DiscoveredSponsorBlockSegment {
@@ -108,6 +161,9 @@ class DiscoveredPlaylist {
   /// The app's own "Temporary" playlist (see `Playlists.isTemporary`).
   final bool isTemporary;
 
+  /// `Playlists.lyricsMode`: 'lyrics', 'transcript' or null (off).
+  final String? lyricsMode;
+
   DiscoveredPlaylist({
     required this.folderPath,
     required this.url,
@@ -127,6 +183,7 @@ class DiscoveredPlaylist {
     required this.tracks,
     this.videoQuality,
     this.isTemporary = false,
+    this.lyricsMode,
   });
 }
 
@@ -267,26 +324,25 @@ class MetadataService {
     // were made for this video before the replacement and fit again; ones
     // the owner made (and so enabled) while the local file played do not.
     final keepCustom = !wasLocal || !old.valid;
-    await _db.writeTrackChapters(
-      trackId,
-      ChapterData(
-        downloaded: data.downloaded,
-        custom: keepCustom ? old.custom : null,
-        shuffleChapters: old.shuffleChapters,
-        checkedAt: data.checkedAt,
-        durationMs: data.durationMs,
-        // An undo step for dropped chapters no longer applies, and song
-        // recognition results timed to a local file are stale.
-        undoChapters: keepCustom ? old.undoChapters : null,
-        undoFollowsDownloaded: keepCustom && old.undoFollowsDownloaded,
-        // Skip marks go with the chapters they name (ids that no longer
-        // exist are ignored).
-        skippedChapterIds: keepCustom ? old.skippedChapterIds : const {},
-        recognitionEpoch:
-            wasLocal ? old.recognitionEpoch + 1 : old.recognitionEpoch,
-        lastRecognitionRunId: old.lastRecognitionRunId,
-      ),
+    final next = ChapterData(
+      downloaded: data.downloaded,
+      custom: keepCustom ? old.custom : null,
+      shuffleChapters: old.shuffleChapters,
+      checkedAt: data.checkedAt,
+      durationMs: data.durationMs,
+      // An undo step for dropped chapters no longer applies, and song
+      // recognition results timed to a local file are stale.
+      undoChapters: keepCustom ? old.undoChapters : null,
+      undoFollowsDownloaded: keepCustom && old.undoFollowsDownloaded,
+      // Skip marks go with the chapters they name (ids that no longer
+      // exist are ignored).
+      skippedChapterIds: keepCustom ? old.skippedChapterIds : const {},
+      recognitionEpoch:
+          wasLocal ? old.recognitionEpoch + 1 : old.recognitionEpoch,
+      lastRecognitionRunId: old.lastRecognitionRunId,
     );
+    await _db.writeTrackChapters(trackId, next);
+    await syncLyricsChapterDocs(_db, trackId, next, previous: old);
   }
 
   /// Keeps yt-dlp's description of a video (uploader, upload date,
@@ -391,12 +447,18 @@ class MetadataService {
 
     final tracks = await _db.getTracksForPlaylist(playlistId);
     final segmentsByTrack = await _segmentsByTrack(tracks);
+    final lyricsPinsByTrack = <int, List<LyricsDoc>>{};
+    for (final doc in await _db.lyricsDocsForPlaylist(playlistId)) {
+      if (!doc.pinned) continue;
+      lyricsPinsByTrack.putIfAbsent(doc.trackId, () => []).add(doc);
+    }
     final metaPath = p.join(playlist.outputPath, _metaFileName);
     final m3uPath = playlistFilePath(playlist.outputPath);
     final job = SidecarJob(
       playlist: playlist,
       tracks: tracks,
       segmentsByTrack: segmentsByTrack,
+      lyricsPinsByTrack: lyricsPinsByTrack,
       metaPath: metaPath,
       playlistFilePath: m3uPath,
       knownHashes: {
@@ -1420,20 +1482,19 @@ for video) to keep a complete backup.
       final current = await _db.getTrack(trackId);
       if (current?.chaptersJson != null) {
         final old = ChapterData.decode(current!.chaptersJson);
-        await _db.writeTrackChapters(
-          trackId,
-          ChapterData(
-            downloaded: old.downloaded,
-            custom: old.valid ? null : old.custom,
-            shuffleChapters: old.shuffleChapters,
-            checkedAt: old.checkedAt,
-            durationMs: old.durationMs,
-            undoChapters: old.valid ? null : old.undoChapters,
-            undoFollowsDownloaded: !old.valid && old.undoFollowsDownloaded,
-            recognitionEpoch: old.recognitionEpoch + 1,
-            lastRecognitionRunId: old.lastRecognitionRunId,
-          ),
+        final next = ChapterData(
+          downloaded: old.downloaded,
+          custom: old.valid ? null : old.custom,
+          shuffleChapters: old.shuffleChapters,
+          checkedAt: old.checkedAt,
+          durationMs: old.durationMs,
+          undoChapters: old.valid ? null : old.undoChapters,
+          undoFollowsDownloaded: !old.valid && old.undoFollowsDownloaded,
+          recognitionEpoch: old.recognitionEpoch + 1,
+          lastRecognitionRunId: old.lastRecognitionRunId,
         );
+        await _db.writeTrackChapters(trackId, next);
+        await syncLyricsChapterDocs(_db, trackId, next, previous: old);
       }
     }
     if (wasLocal) {
@@ -1783,6 +1844,7 @@ for video) to keep a complete backup.
           outputPath: discovered.folderPath,
           videoQuality: Value(discovered.videoQuality),
           isTemporary: Value(discovered.isTemporary),
+          lyricsMode: Value(discovered.lyricsMode),
         ),
       );
 
@@ -1862,10 +1924,88 @@ for video) to keep a complete backup.
       return playlistId;
     });
 
+    await _restoreLyrics(playlistId, discovered.folderPath, {
+      for (var i = 0; i < rows.length; i++) indices[i]: rows[i].track,
+    });
+
     // Link files the sidecar did not name (it may be older than the folder).
     final playlist = await _db.getPlaylist(playlistId);
     await reconcilePlaylist(playlist);
     return playlistId;
+  }
+
+  /// Restores lyrics after an import: the docs kept in each track's
+  /// `.lyrics.json`, then the user's choices from the sidecar. A choice
+  /// whose text is missing is stored without lines; the lyrics service
+  /// fetches it again by its source.
+  Future<void> _restoreLyrics(
+    int playlistId,
+    String folder,
+    Map<int, DiscoveredTrack> entryByIndex,
+  ) async {
+    try {
+      final mode =
+          LyricsMode.fromDb(
+            (await _db.getPlaylistOrNull(playlistId))?.lyricsMode,
+          ) ??
+          LyricsMode.lyrics;
+      for (final track in await _db.getTracksForPlaylist(playlistId)) {
+        final active =
+            ChapterData.decode(
+              track.chaptersJson,
+            ).active.map((c) => c.id).toSet();
+        final docs = {
+          for (final doc in await readLyricsFile(
+            folder,
+            track.videoId,
+            track.id,
+          ))
+            if (doc.chapterId == null || active.contains(doc.chapterId))
+              doc.chapterId: doc,
+        };
+        final pins = entryByIndex[track.index]?.lyricsPins ?? const [];
+        for (final pin in pins) {
+          if (pin.chapterId != null && !active.contains(pin.chapterId)) {
+            continue;
+          }
+          final kept = docs[pin.chapterId];
+          final sameChoice =
+              kept != null &&
+              kept.status == pin.status &&
+              kept.source == pin.source &&
+              kept.sourceRef == pin.sourceRef &&
+              kept.timingOff == pin.timingOff;
+          docs[pin.chapterId] = LyricsDocDraft(
+            trackId: track.id,
+            chapterId: pin.chapterId,
+            offsetMs: kept?.offsetMs ?? 0,
+            kind: kept?.kind ?? mode,
+            status: pin.status,
+            source: pin.source,
+            sourceRef: pin.sourceRef,
+            matchedArtist: pin.matchedArtist,
+            matchedTitle: pin.matchedTitle,
+            timeScale: sameChoice ? kept.timeScale : 1.0,
+            synced: sameChoice && kept.synced,
+            pinned: true,
+            shiftMs: pin.shiftMs,
+            timingOff: pin.timingOff,
+            lang: sameChoice ? kept.lang : null,
+            checkedAt: kept?.checkedAt ?? DateTime.now(),
+            // The kept lines carry the file's shift; the sidecar's wins.
+            lines:
+                sameChoice
+                    ? shiftLyricsLines(kept.lines, pin.shiftMs - kept.shiftMs)
+                    : const [],
+          );
+        }
+        for (final doc in docs.values) {
+          await _db.replaceLyricsDoc(doc);
+        }
+      }
+    } catch (_) {
+      // Lyrics can always be fetched again; never fail an import over them.
+    }
   }
 
   /// An image named in a sidecar, resolved against the folder. Only images
@@ -1931,6 +2071,12 @@ for video) to keep a complete backup.
           ),
           videoQuality: _optionalInt(m['videoQuality']),
           downloadedMaxHeight: _optionalInt(m['downloadedMaxHeight']),
+          lyricsPins: [
+            if (m['lyricsPins'] case final List<dynamic> pins)
+              for (final pin in pins)
+                if (DiscoveredLyricsPin.fromJson(pin) case final parsed?)
+                  parsed,
+          ],
         ),
       );
     }
@@ -1961,6 +2107,9 @@ for video) to keep a complete backup.
       tracks: tracks,
       videoQuality: _optionalInt(pl['videoQuality']),
       isTemporary: pl['temporary'] == true || pl['url'] == temporaryPlaylistUrl,
+      lyricsMode: LyricsMode.toDb(
+        LyricsMode.fromDb(pl['lyricsMode'] is String ? pl['lyricsMode'] : null),
+      ),
     );
   }
 
@@ -2060,11 +2209,15 @@ class SidecarJob {
     required this.playlistFilePath,
     required this.knownHashes,
     required this.tempSuffix,
+    this.lyricsPinsByTrack = const {},
   });
 
   final Playlist playlist;
   final List<Track> tracks;
   final Map<int, List<SponsorBlockSegment>> segmentsByTrack;
+
+  /// Pinned lyrics docs per track (the user's choices).
+  final Map<int, List<LyricsDoc>> lyricsPinsByTrack;
   final String metaPath;
   final String playlistFilePath;
 
@@ -2077,8 +2230,9 @@ class SidecarJob {
 String buildSidecarJson(
   Playlist playlist,
   List<Track> tracks,
-  Map<int, List<SponsorBlockSegment>> segmentsByTrack,
-) {
+  Map<int, List<SponsorBlockSegment>> segmentsByTrack, {
+  Map<int, List<LyricsDoc>> lyricsPinsByTrack = const {},
+}) {
   String? relative(String? path) =>
       MetadataService.fileNameRelativeTo(playlist.outputPath, path);
   final tracksJson = <Map<String, dynamic>>[];
@@ -2121,6 +2275,21 @@ String buildSidecarJson(
             'createdAt': s.createdAt.toUtc().toIso8601String(),
           },
       ],
+      // Only the user's lyrics choices; the text is in `.woolytube_info`.
+      if (lyricsPinsByTrack[t.id] case final pins? when pins.isNotEmpty)
+        'lyricsPins': [
+          for (final doc in pins)
+            {
+              'chapterId': doc.chapterId,
+              'status': doc.status,
+              'source': doc.source,
+              'sourceRef': doc.sourceRef,
+              'matchedArtist': doc.matchedArtist,
+              'matchedTitle': doc.matchedTitle,
+              if (doc.shiftMs != 0) 'shiftMs': doc.shiftMs,
+              if (doc.timingOff) 'timingOff': true,
+            },
+        ],
     });
   }
 
@@ -2143,6 +2312,7 @@ String buildSidecarJson(
       'createdAt': playlist.createdAt.toUtc().toIso8601String(),
       if (playlist.videoQuality != null) 'videoQuality': playlist.videoQuality,
       if (playlist.isTemporary) 'temporary': true,
+      if (playlist.lyricsMode != null) 'lyricsMode': playlist.lyricsMode,
     },
     'tracks': tracksJson,
   };
@@ -2159,6 +2329,7 @@ Future<Map<String, int>> writeSidecarFiles(SidecarJob job) async {
       job.playlist,
       job.tracks,
       job.segmentsByTrack,
+      lyricsPinsByTrack: job.lyricsPinsByTrack,
     ),
     job.playlistFilePath: MetadataService.buildPlaylistFile(
       job.playlist,

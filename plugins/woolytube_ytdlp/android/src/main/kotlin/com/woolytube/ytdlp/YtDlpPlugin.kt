@@ -232,6 +232,7 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "download" -> handleDownload(call.arguments as Map<*, *>, result)
             "getVideoInfo" -> handleGetVideoInfo(call.arguments as Map<*, *>, result)
             "getPlaylistInfo" -> handleGetPlaylistInfo(call.arguments as Map<*, *>, result)
+            "getCaptionInfo" -> handleGetCaptionInfo(call.arguments as Map<*, *>, result)
             "cancelDownloads" -> result.success(cancelOwnedDownloads())
             "hasActiveDownloads" -> result.success(hasActiveDownloads())
             "updateYtDlp" -> handleUpdateYtDlp(result)
@@ -435,6 +436,76 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 }
             }
         }
+    }
+
+    /**
+     * Video info for lyrics and transcripts: text fields plus caption
+     * tracks. Only the json3 entry of each manual caption language and of
+     * the original speech-to-text track (`<lang>-orig`) is kept; the
+     * machine translations would be hundreds of entries.
+     */
+    private fun handleGetCaptionInfo(args: Map<*, *>, result: MethodChannel.Result) {
+        val url = args["url"] as? String
+        if (url == null) {
+            result.error("INVALID_ARGS", "url required", null)
+            return
+        }
+        scope.launch {
+            try {
+                val request = YoutubeDLRequest(url)
+                request.addOption("--dump-json")
+                request.addOption("--no-playlist")
+                request.addOption("--skip-download")
+                // Only captions and metadata are needed: a video whose media
+                // formats are gated for this client still has them.
+                request.addOption("--ignore-no-formats-error")
+                val out = executeInfoRequest(request)
+                val full = org.json.JSONObject(out.trim().lineSequence().first { it.isNotBlank() })
+                val trimmed = org.json.JSONObject()
+                for (key in listOf(
+                    "id", "title", "duration", "language", "description", "uploader",
+                    "channel", "artist", "track", "alt_title",
+                )) {
+                    if (full.has(key) && !full.isNull(key)) trimmed.put(key, full.get(key))
+                }
+                trimmed.put("subtitles", json3Captions(full.optJSONObject("subtitles")) { it != "live_chat" })
+                trimmed.put(
+                    "automatic_captions",
+                    json3Captions(full.optJSONObject("automatic_captions")) { it.endsWith("-orig") },
+                )
+                val json = trimmed.toString()
+                withContext(Dispatchers.Main) { result.success(json) }
+            } catch (e: Exception) {
+                withContext(NonCancellable + Dispatchers.Main) {
+                    result.error("INFO_ERROR", e.message, null)
+                }
+            }
+        }
+    }
+
+    /** `{lang: [{ext: json3, url, name}]}` for the kept languages, no HLS. */
+    private fun json3Captions(
+        captions: org.json.JSONObject?,
+        keep: (String) -> Boolean,
+    ): org.json.JSONObject {
+        val trimmed = org.json.JSONObject()
+        if (captions == null) return trimmed
+        for (lang in captions.keys()) {
+            if (!keep(lang)) continue
+            val formats = captions.optJSONArray(lang) ?: continue
+            for (i in 0 until formats.length()) {
+                val format = formats.optJSONObject(i) ?: continue
+                if (format.optString("ext") != "json3") continue
+                if (format.optString("protocol").startsWith("m3u8")) continue
+                val entry = org.json.JSONObject()
+                entry.put("ext", "json3")
+                entry.put("url", format.optString("url"))
+                if (format.has("name")) entry.put("name", format.optString("name"))
+                trimmed.put(lang, org.json.JSONArray().put(entry))
+                break
+            }
+        }
+        return trimmed
     }
 
     private fun handleGetPlaylistInfo(args: Map<*, *>, result: MethodChannel.Result) {

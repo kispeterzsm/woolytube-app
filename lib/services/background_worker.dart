@@ -10,6 +10,7 @@ import 'metadata_service.dart';
 import 'notification_service.dart';
 import 'download_service.dart';
 import 'library_gate.dart';
+import 'lyrics/lyrics_service.dart';
 import 'media_thumbnail_service.dart';
 import 'playlist_service.dart';
 import 'sponsorblock_service.dart';
@@ -166,6 +167,7 @@ Future<AutoUpdateReport> runBackgroundAutoUpdate({
 
   final metadata = MetadataService(db);
   final sponsorBlock = SponsorBlockService(db, logService);
+  final lyrics = LyricsService(db, logService, ytdlp: yt);
   final gate = LibraryGate(
     lock: downloadLock,
     owner: DownloadLock.backgroundOwner,
@@ -190,6 +192,7 @@ Future<AutoUpdateReport> runBackgroundAutoUpdate({
     DownloadLock.backgroundOwner,
     gate,
     thumbnails,
+    lyrics,
   );
 
   final runner = AutoUpdateRunner(
@@ -217,5 +220,6 @@ Future<AutoUpdateReport> runBackgroundAutoUpdate({
     return await runner.run(due);
   } finally {
     sponsorBlock.dispose();
+    lyrics.dispose();
   }
 }

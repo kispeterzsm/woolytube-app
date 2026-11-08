@@ -1,10 +1,13 @@
 import 'dart:io';
+import 'dart:math' show min;
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 import '../services/sponsorblock_categories.dart';
 import '../services/chapters.dart';
+import '../services/lyrics/lyrics_models.dart';
+import '../services/lyrics/lyrics_text.dart';
 
 part 'database.g.dart';
 
@@ -52,6 +55,10 @@ class Playlists extends Table {
   /// The app's own "Temporary" playlist, which has no YouTube playlist
   /// behind it.
   BoolColumn get isTemporary => boolean().withDefault(const Constant(false))();
+
+  /// What text is fetched for search: 'lyrics' (songs) or 'transcript'
+  /// (spoken content); null = off. See `LyricsMode`.
+  TextColumn get lyricsMode => text().nullable()();
 }
 
 class Tracks extends Table {
@@ -138,6 +145,69 @@ class LoudnessMeasurements extends Table {
   Set<Column> get primaryKey => {trackId};
 }
 
+/// Lyrics or a transcript of one track, or of one chapter of a mix.
+class LyricsDocs extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  IntColumn get trackId =>
+      integer().references(Tracks, #id, onDelete: KeyAction.cascade)();
+
+  /// `MediaChapter.id`; null = the whole file.
+  TextColumn get chapterId => text().nullable()();
+
+  /// Chapter start; line times are relative to it.
+  IntColumn get offsetMs => integer().withDefault(const Constant(0))();
+
+  /// 'lyrics' | 'transcript'
+  TextColumn get kind => text()();
+
+  /// 'found' | 'none' | 'instrumental' | 'error'
+  TextColumn get status => text()();
+
+  /// 'lrclib' | 'ytmusic' | 'yt_subs' | 'yt_auto'
+  TextColumn get source => text().nullable()();
+
+  /// LRCLIB id, ytmusic browseId, caption language key, or a video id.
+  TextColumn get sourceRef => text().nullable()();
+  TextColumn get matchedArtist => text().nullable()();
+  TextColumn get matchedTitle => text().nullable()();
+
+  /// Nightcore: local duration / original duration. Line times are already
+  /// scaled by it.
+  RealColumn get timeScale => real().withDefault(const Constant(1.0))();
+  BoolColumn get synced => boolean().withDefault(const Constant(false))();
+
+  /// The user chose this; automatic runs never replace it.
+  BoolColumn get pinned => boolean().withDefault(const Constant(false))();
+
+  /// The user's timing correction. Already added to the lines' `startMs`;
+  /// kept so a restore from `sourceRef` adds it again. Schema 17.
+  IntColumn get shiftMs => integer().withDefault(const Constant(0))();
+
+  /// The user chose the lines without times. Schema 17.
+  BoolColumn get timingOff => boolean().withDefault(const Constant(false))();
+  TextColumn get lang => text().nullable()();
+  DateTimeColumn get checkedAt => dateTime()();
+  IntColumn get attempts => integer().withDefault(const Constant(0))();
+}
+
+/// One line of a [LyricsDocs] row. Indexed by `lyrics_fts`.
+class LyricsLines extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  IntColumn get docId =>
+      integer().references(LyricsDocs, #id, onDelete: KeyAction.cascade)();
+  IntColumn get lineNo => integer()();
+
+  /// Already scaled by the doc's time scale; relative to the doc (add
+  /// `offsetMs` for file time). Null for plain text.
+  IntColumn get startMs => integer().nullable()();
+
+  /// Raw, for display. (`text` in SQL; a Drift getter can't be named so.)
+  TextColumn get lineText => text().named('text')();
+
+  /// Folded line i + ' ' + folded line i+1 (see `buildSearchWindow`).
+  TextColumn get searchText => text()();
+}
+
 const _accentFolding = {
   'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a', 'ã': 'a', 'å': 'a', 'æ': 'ae', //
   'ç': 'c', 'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e', 'í': 'i', 'ì': 'i', //
@@ -177,7 +247,14 @@ bool titleMatchesFileName(String title, String filePath) {
 }
 
 @DriftDatabase(
-  tables: [Playlists, Tracks, SponsorBlockSegments, LoudnessMeasurements],
+  tables: [
+    Playlists,
+    Tracks,
+    SponsorBlockSegments,
+    LyricsDocs,
+    LyricsLines,
+    LoudnessMeasurements,
+  ],
 )
 class AppDatabase extends _$AppDatabase {
   AppDatabase._internal(super.e);
@@ -194,7 +271,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 16;
+  int get schemaVersion => 18;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -214,6 +291,7 @@ class AppDatabase extends _$AppDatabase {
         'CREATE INDEX IF NOT EXISTS idx_sb_track_source ON sponsor_block_segments (track_id, source)',
       );
       await _createRevisionTracking();
+      await _createLyricsSearch();
     },
     onUpgrade: (migrator, from, to) async {
       if (from < 2) {
@@ -308,6 +386,21 @@ class AppDatabase extends _$AppDatabase {
         await customStatement('UPDATE playlists SET sort_order = id');
       }
       if (from < 16) {
+        await migrator.addColumn(playlists, playlists.lyricsMode);
+        await customStatement(
+          'DROP TRIGGER IF EXISTS trg_rev_playlists_update',
+        );
+        await _createRevisionTracking();
+        await migrator.createTable(lyricsDocs);
+        await migrator.createTable(lyricsLines);
+        await _createLyricsSearch();
+      }
+      // Below 16 the lyrics tables were just made with these columns.
+      if (from == 16) {
+        await migrator.addColumn(lyricsDocs, lyricsDocs.shiftMs);
+        await migrator.addColumn(lyricsDocs, lyricsDocs.timingOff);
+      }
+      if (from < 18) {
         await migrator.createTable(loudnessMeasurements);
       }
     },
@@ -369,6 +462,62 @@ class AppDatabase extends _$AppDatabase {
       'trg_rev_playlists_delete':
           'AFTER DELETE ON playlists BEGIN '
           'DELETE FROM playlist_revisions WHERE playlist_id = OLD.id; END',
+    };
+    for (final entry in triggers.entries) {
+      await customStatement(
+        'CREATE TRIGGER IF NOT EXISTS ${entry.key} ${entry.value}',
+      );
+    }
+  }
+
+  /// The lyrics search index and its helpers, which Drift doesn't know.
+  ///
+  /// `lyrics_fts` indexes `lyrics_lines.search_text` (external content,
+  /// kept in sync by triggers); `lyrics_vocab` lists its terms for typo
+  /// correction. Pinned docs (user choices) go into the metadata file, so
+  /// their changes raise the playlist's revision.
+  Future<void> _createLyricsSearch() async {
+    await customStatement(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_lyrics_docs_track_chapter '
+      "ON lyrics_docs (track_id, COALESCE(chapter_id, ''))",
+    );
+    await customStatement(
+      'CREATE INDEX IF NOT EXISTS idx_lyrics_lines_doc '
+      'ON lyrics_lines (doc_id, line_no)',
+    );
+    await customStatement(
+      'CREATE VIRTUAL TABLE IF NOT EXISTS lyrics_fts USING fts5('
+      "search_text, content='lyrics_lines', content_rowid='id', "
+      "tokenize='unicode61 remove_diacritics 2')",
+    );
+    await customStatement(
+      'CREATE VIRTUAL TABLE IF NOT EXISTS lyrics_vocab '
+      "USING fts5vocab(lyrics_fts, 'row')",
+    );
+    const insert =
+        'INSERT INTO lyrics_fts (rowid, search_text) '
+        'VALUES (NEW.id, NEW.search_text);';
+    const remove =
+        "INSERT INTO lyrics_fts (lyrics_fts, rowid, search_text) "
+        "VALUES ('delete', OLD.id, OLD.search_text);";
+    String bump(String row) =>
+        'INSERT INTO playlist_revisions (playlist_id, revision) '
+        'SELECT playlist_id, 1 FROM tracks WHERE id = $row.track_id '
+        'ON CONFLICT(playlist_id) DO UPDATE SET revision = revision + 1;';
+    final triggers = {
+      'trg_lyrics_fts_insert': 'AFTER INSERT ON lyrics_lines BEGIN $insert END',
+      'trg_lyrics_fts_delete': 'AFTER DELETE ON lyrics_lines BEGIN $remove END',
+      'trg_lyrics_fts_update':
+          'AFTER UPDATE ON lyrics_lines BEGIN $remove $insert END',
+      'trg_rev_lyrics_insert':
+          'AFTER INSERT ON lyrics_docs WHEN NEW.pinned BEGIN '
+          '${bump('NEW')} END',
+      'trg_rev_lyrics_update':
+          'AFTER UPDATE ON lyrics_docs WHEN NEW.pinned OR OLD.pinned BEGIN '
+          '${bump('NEW')} END',
+      'trg_rev_lyrics_delete':
+          'AFTER DELETE ON lyrics_docs WHEN OLD.pinned BEGIN '
+          '${bump('OLD')} END',
     };
     for (final entry in triggers.entries) {
       await customStatement(
@@ -575,7 +724,8 @@ class AppDatabase extends _$AppDatabase {
   Future<void> markPlaylistUpdated(int id, DateTime at) =>
       updatePlaylistFields(id, PlaylistsCompanion(lastUpdated: Value(at)));
 
-  /// Removes a playlist together with its tracks and their segments.
+  /// Removes a playlist together with its tracks, their segments and
+  /// lyrics.
   Future<int> deletePlaylist(int id) => transaction(() async {
     final trackIds =
         (await (selectOnly(tracks)
@@ -587,6 +737,7 @@ class AppDatabase extends _$AppDatabase {
     if (trackIds.isNotEmpty) {
       await (delete(sponsorBlockSegments)
         ..where((s) => s.trackId.isIn(trackIds))).go();
+      await (delete(lyricsDocs)..where((d) => d.trackId.isIn(trackIds))).go();
     }
     await (delete(tracks)..where((t) => t.playlistId.equals(id))).go();
     return (delete(playlists)..where((p) => p.id.equals(id))).go();
@@ -618,7 +769,7 @@ class AppDatabase extends _$AppDatabase {
     return getPlaylistOrNull(rows.first.read<int>('id'));
   }
 
-  /// Removes the tracks [trackIds] together with their segments.
+  /// Removes the tracks [trackIds] together with their segments and lyrics.
   Future<void> deleteTracks(List<int> trackIds) => transaction(() async {
     const chunkSize = 500;
     for (var start = 0; start < trackIds.length; start += chunkSize) {
@@ -630,6 +781,7 @@ class AppDatabase extends _$AppDatabase {
       );
       await (delete(sponsorBlockSegments)
         ..where((s) => s.trackId.isIn(chunk))).go();
+      await (delete(lyricsDocs)..where((d) => d.trackId.isIn(chunk))).go();
       await (delete(tracks)..where((t) => t.id.isIn(chunk))).go();
     }
   });
@@ -1267,6 +1419,8 @@ class AppDatabase extends _$AppDatabase {
       TableUpdate.onTable(playlists),
       TableUpdate.onTable(tracks),
       TableUpdate.onTable(sponsorBlockSegments),
+      TableUpdate.onTable(lyricsDocs),
+      TableUpdate.onTable(lyricsLines),
     });
     return true;
   }
@@ -1301,6 +1455,298 @@ class AppDatabase extends _$AppDatabase {
       (delete(sponsorBlockSegments)..where(
         (s) => s.trackId.equals(trackId) & s.source.equals('sponsorblock'),
       )).go();
+
+  // Lyrics
+
+  /// Stores [draft]: the doc of the same track and chapter is updated in
+  /// place (keeping its id) or created, and its lines are replaced, with
+  /// their search windows. One transaction. Returns the doc id.
+  Future<int> replaceLyricsDoc(LyricsDocDraft draft) => transaction(() async {
+    final fields = LyricsDocsCompanion(
+      trackId: Value(draft.trackId),
+      chapterId: Value(draft.chapterId),
+      offsetMs: Value(draft.offsetMs),
+      kind: Value(draft.kind.dbValue),
+      status: Value(draft.status),
+      source: Value(draft.source),
+      sourceRef: Value(draft.sourceRef),
+      matchedArtist: Value(draft.matchedArtist),
+      matchedTitle: Value(draft.matchedTitle),
+      timeScale: Value(draft.timeScale),
+      synced: Value(draft.synced),
+      pinned: Value(draft.pinned),
+      shiftMs: Value(draft.shiftMs),
+      timingOff: Value(draft.timingOff),
+      lang: Value(draft.lang),
+      checkedAt: Value(draft.checkedAt),
+      attempts: Value(draft.attempts),
+    );
+    final existing = await lyricsDocFor(draft.trackId, draft.chapterId);
+    // The user's choice wins over an automatic lookup that started before it.
+    if (existing != null && existing.pinned && !draft.pinned) {
+      return existing.id;
+    }
+    final int docId;
+    if (existing != null) {
+      docId = existing.id;
+      await (update(lyricsDocs)
+        ..where((d) => d.id.equals(docId))).write(fields);
+      await (delete(lyricsLines)..where((l) => l.docId.equals(docId))).go();
+    } else {
+      docId = await into(lyricsDocs).insert(fields);
+    }
+    if (draft.lines.isNotEmpty) {
+      final windows = buildSearchWindows([
+        for (final line in draft.lines) line.text,
+      ]);
+      await batch((b) {
+        b.insertAll(lyricsLines, [
+          for (var i = 0; i < draft.lines.length; i++)
+            LyricsLinesCompanion.insert(
+              docId: docId,
+              lineNo: i,
+              startMs: Value(draft.lines[i].startMs),
+              lineText: draft.lines[i].text,
+              searchText: windows[i],
+            ),
+        ]);
+      });
+    }
+    return docId;
+  });
+
+  /// The doc of [trackId] for [chapterId] (null = the whole file), or null.
+  Future<LyricsDoc?> lyricsDocFor(int trackId, String? chapterId) =>
+      (select(lyricsDocs)..where(
+        (d) =>
+            d.trackId.equals(trackId) &
+            (chapterId == null
+                ? d.chapterId.isNull()
+                : d.chapterId.equals(chapterId)),
+      )).getSingleOrNull();
+
+  /// Every doc of a track: the whole-file one first, then by chapter offset.
+  Future<List<LyricsDoc>> lyricsDocsForTrack(int trackId) =>
+      _lyricsDocsForTrack(trackId).get();
+
+  /// [lyricsDocsForTrack] as a stream.
+  Stream<List<LyricsDoc>> watchLyricsDocsForTrack(int trackId) =>
+      _lyricsDocsForTrack(trackId).watch().distinct(listsEqual);
+
+  SimpleSelectStatement<$LyricsDocsTable, LyricsDoc> _lyricsDocsForTrack(
+    int trackId,
+  ) =>
+      select(lyricsDocs)
+        ..where((d) => d.trackId.equals(trackId))
+        ..orderBy([
+          (d) => OrderingTerm.asc(d.chapterId.isNotNull()),
+          (d) => OrderingTerm.asc(d.offsetMs),
+          (d) => OrderingTerm.asc(d.id),
+        ]);
+
+  /// Docs by id (for search results); missing ids are left out.
+  Future<List<LyricsDoc>> lyricsDocsByIds(Iterable<int> docIds) async {
+    final ids = docIds.toSet().toList();
+    if (ids.isEmpty) return const [];
+    return (select(lyricsDocs)..where((d) => d.id.isIn(ids))).get();
+  }
+
+  /// Every doc of a playlist's tracks.
+  Future<List<LyricsDoc>> lyricsDocsForPlaylist(int playlistId) {
+    final query = select(lyricsDocs).join([
+      innerJoin(tracks, tracks.id.equalsExp(lyricsDocs.trackId)),
+    ])..where(tracks.playlistId.equals(playlistId));
+    return query.map((row) => row.readTable(lyricsDocs)).get();
+  }
+
+  /// The lines of a doc in order.
+  Future<List<LyricsLine>> lyricsLinesForDoc(int docId) =>
+      (select(lyricsLines)
+            ..where((l) => l.docId.equals(docId))
+            ..orderBy([(l) => OrderingTerm.asc(l.lineNo)]))
+          .get();
+
+  /// Lines [fromLineNo]..[toLineNo] (inclusive) of a doc in order.
+  Future<List<LyricsLine>> lyricsLinesInRange(
+    int docId,
+    int fromLineNo,
+    int toLineNo,
+  ) =>
+      (select(lyricsLines)
+            ..where(
+              (l) =>
+                  l.docId.equals(docId) &
+                  l.lineNo.isBetweenValues(fromLineNo, toLineNo),
+            )
+            ..orderBy([(l) => OrderingTerm.asc(l.lineNo)]))
+          .get();
+
+  /// Deletes the doc of [trackId] for [chapterId] (null = the whole file),
+  /// or every doc of the track with [allChapters]. Returns how many.
+  Future<int> deleteLyricsDocs(
+    int trackId, {
+    String? chapterId,
+    bool allChapters = false,
+  }) =>
+      (delete(lyricsDocs)..where((d) {
+        final ofTrack = d.trackId.equals(trackId);
+        if (allChapters) return ofTrack;
+        return ofTrack &
+            (chapterId == null
+                ? d.chapterId.isNull()
+                : d.chapterId.equals(chapterId));
+      })).go();
+
+  /// Notes a failed lookup of a doc without changing what it holds.
+  Future<void> markLyricsDocTried(
+    int docId,
+    DateTime checkedAt,
+    int attempts,
+  ) => (update(lyricsDocs)..where((d) => d.id.equals(docId))).write(
+    LyricsDocsCompanion(checkedAt: Value(checkedAt), attempts: Value(attempts)),
+  );
+
+  /// When the last timed line of each of [docIds] starts (doc time);
+  /// docs without timed lines are left out.
+  Future<Map<int, int>> lyricsLastLineStarts(Iterable<int> docIds) async {
+    final ids = docIds.toSet().toList();
+    final result = <int, int>{};
+    for (var i = 0; i < ids.length; i += 500) {
+      final chunk = ids.sublist(i, min(i + 500, ids.length));
+      final rows =
+          await customSelect(
+            'SELECT doc_id, MAX(start_ms) AS last_ms FROM lyrics_lines '
+            'WHERE start_ms IS NOT NULL AND doc_id IN '
+            '(${List.filled(chunk.length, '?').join(', ')}) GROUP BY doc_id',
+            variables: [for (final id in chunk) Variable.withInt(id)],
+            readsFrom: {lyricsLines},
+          ).get();
+      for (final row in rows) {
+        result[row.read<int>('doc_id')] = row.read<int>('last_ms');
+      }
+    }
+    return result;
+  }
+
+  /// Moves a doc to [offsetMs] (its chapter's new start).
+  Future<void> setLyricsDocOffset(int docId, int offsetMs) =>
+      (update(lyricsDocs)..where(
+        (d) => d.id.equals(docId),
+      )).write(LyricsDocsCompanion(offsetMs: Value(offsetMs)));
+
+  /// Deletes the docs of [trackId] timed to its old media after the file
+  /// was replaced: chapter docs, transcripts and unpinned synced whole-file
+  /// docs. Returns how many.
+  Future<int> deleteLyricsDocsTimedToMedia(int trackId) =>
+      (delete(lyricsDocs)..where(
+        (d) =>
+            d.trackId.equals(trackId) &
+            (d.chapterId.isNotNull() |
+                d.kind.equals(LyricsMode.transcript.dbValue) |
+                (d.pinned.equals(false) & d.synced.equals(true))),
+      )).go();
+
+  /// Deletes the chapter docs of [trackId] whose chapter is not in
+  /// [activeChapterIds] (after a chapter edit or re-recognition). The
+  /// whole-file doc stays. Returns how many were deleted.
+  Future<int> pruneLyricsChapterDocs(
+    int trackId,
+    Set<String> activeChapterIds,
+  ) =>
+      (delete(lyricsDocs)..where(
+        (d) =>
+            d.trackId.equals(trackId) &
+            d.chapterId.isNotNull() &
+            d.chapterId.isNotIn(activeChapterIds),
+      )).go();
+
+  /// Lines whose search window matches the FTS5 [matchExpr], best first,
+  /// from playlists with lyrics on (only [playlistId] when given), in docs
+  /// of the playlist's current mode. At most [perDoc] lines of one doc, so
+  /// a long transcript repeating the words cannot crowd out other songs.
+  /// The cap applies to the best [overFetch] times [limit] matches, which
+  /// keeps a common word from ranking every matching line twice.
+  Future<List<LyricsFtsCandidate>> lyricsFtsCandidates(
+    String matchExpr, {
+    int limit = 150,
+    int perDoc = 4,
+    int overFetch = 20,
+    int? playlistId,
+  }) async {
+    final rows =
+        await customSelect(
+          'WITH matched AS ('
+          'SELECT l.id AS line_id, l.doc_id AS doc_id, l.line_no AS line_no, '
+          'bm25(lyrics_fts) AS rank FROM lyrics_fts '
+          'JOIN lyrics_lines l ON l.id = lyrics_fts.rowid '
+          'JOIN lyrics_docs d ON d.id = l.doc_id '
+          'JOIN tracks t ON t.id = d.track_id '
+          'JOIN playlists p ON p.id = t.playlist_id '
+          'WHERE lyrics_fts MATCH ? AND d.kind = p.lyrics_mode '
+          '${playlistId == null ? '' : 'AND p.id = ? '}'
+          'ORDER BY rank LIMIT ?), '
+          'ranked AS (SELECT *, ROW_NUMBER() OVER '
+          '(PARTITION BY doc_id ORDER BY rank, line_no) AS per_doc '
+          'FROM matched) '
+          'SELECT line_id, doc_id, line_no, rank FROM ranked '
+          'WHERE per_doc <= ? ORDER BY rank LIMIT ?',
+          variables: [
+            Variable<String>(matchExpr),
+            if (playlistId != null) Variable<int>(playlistId),
+            Variable<int>(limit * overFetch),
+            Variable<int>(perDoc),
+            Variable<int>(limit),
+          ],
+          readsFrom: {lyricsLines, lyricsDocs, tracks, playlists},
+        ).get();
+    return [
+      for (final row in rows)
+        LyricsFtsCandidate(
+          lineId: row.read<int>('line_id'),
+          docId: row.read<int>('doc_id'),
+          lineNo: row.read<int>('line_no'),
+          bm25: row.read<double>('rank'),
+        ),
+    ];
+  }
+
+  /// Every indexed term with the number of lines whose window holds it.
+  Future<Map<String, int>> lyricsVocabulary() async {
+    final rows =
+        await customSelect(
+          'SELECT term, doc FROM lyrics_vocab',
+          readsFrom: {lyricsLines},
+        ).get();
+    return {
+      for (final row in rows) row.read<String>('term'): row.read<int>('doc'),
+    };
+  }
+
+  /// Fires after any write to the lyrics tables (for caches).
+  Stream<void> watchLyricsChanges() => tableUpdates(
+    TableUpdateQuery.onAllTables([lyricsDocs, lyricsLines]),
+  ).map((_) {});
+}
+
+/// A line found by [AppDatabase.lyricsFtsCandidates].
+class LyricsFtsCandidate {
+  final int lineId;
+  final int docId;
+  final int lineNo;
+
+  /// FTS5 rank: lower is better.
+  final double bm25;
+
+  const LyricsFtsCandidate({
+    required this.lineId,
+    required this.docId,
+    required this.lineNo,
+    required this.bm25,
+  });
+
+  @override
+  String toString() =>
+      'LyricsFtsCandidate(line $lineId, doc $docId #$lineNo, $bm25)';
 }
 
 LazyDatabase _openConnection() {

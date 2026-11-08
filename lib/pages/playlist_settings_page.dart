@@ -9,11 +9,13 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../database/database.dart';
 import '../providers/chapter_fetch_jobs.dart';
+import '../providers/lyrics_fetch_jobs.dart';
 import '../providers/playback_providers.dart';
 import '../providers/providers.dart';
 import '../services/download_errors.dart';
 import '../services/download_service.dart';
 import '../services/library_gate.dart';
+import '../services/lyrics/lyrics_models.dart';
 import '../services/playback_service.dart';
 import '../services/playlist_service.dart';
 import '../services/sponsorblock_categories.dart';
@@ -63,9 +65,10 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
   bool _reloadWhenSaved = false;
   bool _switchingFormat = false;
   bool _deleting = false;
+  bool _switchingLyricsMode = false;
   bool _isForceInserting = false;
 
-  bool get _busy => _switchingFormat || _deleting;
+  bool get _busy => _switchingFormat || _deleting || _switchingLyricsMode;
 
   @override
   void initState() {
@@ -254,10 +257,21 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
     );
     if (confirmed != true || !mounted) return;
     setState(() => _switchingFormat = true);
+    Future<void> write(PlaylistService playlists) =>
+        playlists.updatePlaylistSettings(id: playlist.id, audioOnly: value);
+    // A running lyrics job would write its files into the old folder.
+    final lyricsJobs = ref.read(lyricsFetchJobsProvider.notifier);
+    if (lyricsJobs.isRunning(playlist.id)) {
+      await lyricsJobs.stop(playlist.id);
+      if (!mounted) {
+        // The page was closed meanwhile: the switch still happens.
+        unawaited(_queueSave(write, failure: 'Could not save'));
+        return;
+      }
+    }
     final saved = await _update(
-      playlist.copyWith(audioOnly: value),
-      (playlists) =>
-          playlists.updatePlaylistSettings(id: playlist.id, audioOnly: value),
+      (_playlist ?? playlist).copyWith(audioOnly: value),
+      write,
     );
     if (!mounted) return;
     setState(() => _switchingFormat = false);
@@ -453,9 +467,11 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
     if (confirmed != true || !mounted) return;
     setState(() => _deleting = true);
     final chapterJobs = ref.read(chapterFetchJobsProvider.notifier);
+    final lyricsJobs = ref.read(lyricsFetchJobsProvider.notifier);
     try {
-      // Both would keep writing into a playlist that is going away.
+      // They would keep writing into a playlist that is going away.
       await chapterJobs.stop(widget.playlistId);
+      await lyricsJobs.stop(widget.playlistId);
       if (!await _stopDownloadOfThisPlaylist(downloads)) {
         if (!mounted) return;
         setState(() => _deleting = false);
@@ -550,7 +566,8 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
       // The job keeps running if the page is closed; the result is still
       // reported.
       final result = await jobs.start(widget.playlistId);
-      // Null: stopped because the playlist is being deleted.
+      // Null: stopped for a mode switch or because the playlist is being
+      // deleted.
       if (result == null) return;
       messenger.showSnackBar(
         SnackBar(content: Text(chapterFetchSummary(result))),
@@ -563,6 +580,91 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
           ),
         ),
       );
+    }
+  }
+
+  /// Saves a new lyrics mode at once. Turning it on starts fetching.
+  Future<void> _chooseLyricsMode() async {
+    final playlist = _playlist;
+    if (playlist == null || _busy) return;
+    final current = LyricsMode.fromDb(playlist.lyricsMode);
+    final picked = await showLyricsModePicker(context, current: current);
+    if (picked == null || !mounted) return;
+    final mode = picked.mode;
+    if (mode == current) return;
+    final jobs = ref.read(lyricsFetchJobsProvider.notifier);
+    Future<void> write(PlaylistService playlists) => playlists
+        .updatePlaylistSettings(id: playlist.id, lyricsMode: Value(mode));
+    const failure = 'Could not save the lyrics mode';
+    // Deleting or switching the format waits until the new mode is saved.
+    setState(() => _switchingLyricsMode = true);
+    final bool saved;
+    try {
+      // A running job would go on with the old mode. Wait for it to end
+      // (after its current track), so the new mode's fetch can start; its
+      // own summary is dropped.
+      if (jobs.isRunning(playlist.id)) {
+        await jobs.stop(playlist.id);
+        if (!mounted) {
+          // The page was closed meanwhile: the choice is still saved.
+          unawaited(_queueSave(write, failure: failure));
+          return;
+        }
+      }
+      // Settings changed during the wait are on the latest copy.
+      final latest = _playlist ?? playlist;
+      saved = await _update(
+        latest.copyWith(lyricsMode: Value(LyricsMode.toDb(mode))),
+        write,
+        failure: failure,
+      );
+    } finally {
+      if (mounted) setState(() => _switchingLyricsMode = false);
+    }
+    if (!saved || !mounted || mode == null) return;
+    await _fetchLyrics(mode, startedBySwitch: true);
+  }
+
+  Future<void> _fetchLyrics(
+    LyricsMode mode, {
+    bool startedBySwitch = false,
+  }) async {
+    final jobs = ref.read(lyricsFetchJobsProvider.notifier);
+    if (jobs.isRunning(widget.playlistId)) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final what = mode == LyricsMode.transcript ? 'Transcripts' : 'Lyrics';
+    try {
+      if (!await confirmManualDownload(
+        context,
+        ref.read(downloadNetworkPolicyProvider),
+      )) {
+        if (startedBySwitch) {
+          _showMessage('$what are fetched at the next update.');
+        }
+        return;
+      }
+      // A delete started meanwhile: no new job on a playlist going away.
+      if (!mounted || _deleting) return;
+      // The job keeps running if the page is closed; the result is still
+      // reported.
+      final result = await jobs.start(widget.playlistId);
+      // Null: stopped because the playlist is being deleted.
+      if (result == null) return;
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(content: Text(lyricsFetchSummary(result, mode: mode))),
+        );
+    } catch (e) {
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(
+              'Could not fetch ${what.toLowerCase()}: ${_errorText(e)}',
+            ),
+          ),
+        );
     }
   }
 
@@ -866,12 +968,30 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
                     trailing: const Icon(Icons.chevron_right),
                     onTap: _openSkipSegments,
                   ),
+                  ListTile(
+                    key: const ValueKey('playlist-lyrics-mode'),
+                    leading: const Icon(Icons.lyrics_outlined),
+                    title: const Text('Lyrics'),
+                    subtitle: Text(
+                      lyricsModeLabel(LyricsMode.fromDb(playlist.lyricsMode)),
+                    ),
+                    enabled: !busy,
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: _chooseLyricsMode,
+                  ),
                   const SettingsSectionHeader('Tools'),
                   _FetchChaptersTile(
                     playlistId: playlist.id,
                     enabled: !busy,
                     onStart: _fetchMissingChapters,
                   ),
+                  if (LyricsMode.fromDb(playlist.lyricsMode) case final mode?)
+                    _FetchLyricsTile(
+                      playlistId: playlist.id,
+                      mode: mode,
+                      enabled: !busy,
+                      onStart: () => _fetchLyrics(mode),
+                    ),
                   ListTile(
                     key: const ValueKey('force-insert-button'),
                     leading:
@@ -987,6 +1107,128 @@ class _FetchChaptersTile extends ConsumerWidget {
       ),
     );
   }
+}
+
+/// "Fetch lyrics now", with the running job's progress and Stop.
+class _FetchLyricsTile extends ConsumerWidget {
+  const _FetchLyricsTile({
+    required this.playlistId,
+    required this.mode,
+    required this.enabled,
+    required this.onStart,
+  });
+
+  final int playlistId;
+  final LyricsMode mode;
+  final bool enabled;
+  final VoidCallback onStart;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final progress = ref.watch(
+      lyricsFetchJobsProvider.select((jobs) => jobs[playlistId]),
+    );
+    final what = mode == LyricsMode.transcript ? 'transcripts' : 'lyrics';
+    if (progress == null) {
+      return ListTile(
+        key: const ValueKey('fetch-lyrics'),
+        leading: const Icon(Icons.lyrics_outlined),
+        title: Text('Fetch $what now'),
+        subtitle: Text(
+          'Look up $what for downloaded tracks that have none yet. Updates '
+          'do this too',
+        ),
+        enabled: enabled,
+        onTap: onStart,
+      );
+    }
+    final status =
+        progress.cancelling
+            ? 'Stopping after this track…'
+            : progress.total == 0
+            ? 'Getting ready…'
+            : 'Checking ${progress.done} of ${progress.total}…';
+    return ListTile(
+      key: const ValueKey('fetch-lyrics'),
+      leading: const SizedBox(
+        width: 24,
+        height: 24,
+        child: CircularProgressIndicator(strokeWidth: 2),
+      ),
+      title: Text('Fetching $what'),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(status),
+          const SizedBox(height: 6),
+          LinearProgressIndicator(value: progress.fraction),
+        ],
+      ),
+      trailing: TextButton(
+        key: const ValueKey('fetch-lyrics-stop'),
+        onPressed:
+            progress.cancelling
+                ? null
+                : () => ref
+                    .read(lyricsFetchJobsProvider.notifier)
+                    .cancel(playlistId),
+        child: const Text('Stop'),
+      ),
+    );
+  }
+}
+
+/// The lyrics mode as shown under the setting.
+String lyricsModeLabel(LyricsMode? mode) => switch (mode) {
+  null => 'Off',
+  LyricsMode.lyrics => 'Song lyrics',
+  LyricsMode.transcript => 'Spoken transcript',
+};
+
+/// Asks for a lyrics mode. Returns null when cancelled, otherwise the
+/// chosen mode in a record (null inside = off).
+Future<({LyricsMode? mode})?> showLyricsModePicker(
+  BuildContext context, {
+  required LyricsMode? current,
+}) async {
+  Widget option(
+    BuildContext ctx,
+    String id,
+    LyricsMode? mode,
+    String explanation,
+  ) => RadioListTile<String>(
+    key: ValueKey('lyrics-mode-option-$id'),
+    value: id,
+    groupValue: current?.dbValue ?? 'off',
+    title: Text(lyricsModeLabel(mode)),
+    subtitle: Text(explanation),
+    onChanged: (_) => Navigator.pop(ctx, (mode: mode)),
+  );
+  return showDialog<({LyricsMode? mode})>(
+    context: context,
+    builder:
+        (ctx) => SimpleDialog(
+          key: const ValueKey('lyrics-mode-picker'),
+          title: const Text('Lyrics'),
+          children: [
+            option(ctx, 'off', null, 'Nothing is fetched'),
+            option(
+              ctx,
+              'lyrics',
+              LyricsMode.lyrics,
+              'For music. Finds the words of each song, so you can search '
+                  'for a line you remember',
+            ),
+            option(
+              ctx,
+              'transcript',
+              LyricsMode.transcript,
+              'For podcasts, talks and audiobooks. Uses the video\'s '
+                  'captions, so you can search for what was said',
+            ),
+          ],
+        ),
+  );
 }
 
 /// The message of an error meant for the owner, without Dart's "Bad state:"

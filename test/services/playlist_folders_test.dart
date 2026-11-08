@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:drift/drift.dart' show Value;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -8,6 +9,10 @@ import 'package:woolytube/database/database.dart';
 import 'package:woolytube/services/download_service.dart';
 import 'package:woolytube/services/library_layout.dart';
 import 'package:woolytube/services/log_service.dart';
+import 'package:woolytube/services/lyrics/lyrics_files.dart';
+import 'package:woolytube/services/lyrics/lyrics_models.dart';
+import 'package:woolytube/services/lyrics/lyrics_service.dart'
+    show persistLyricsFile;
 import 'package:woolytube/services/metadata_service.dart';
 import 'package:woolytube/services/playlist_service.dart';
 
@@ -82,6 +87,27 @@ void main() {
   Set<String> namesIn(String dir) => {
     for (final e in Directory(dir).listSync()) p.basename(e.path),
   };
+
+  test('the lyrics mode is set, kept and turned off', () async {
+    final folder = p.join(audioBase, 'Lyrics');
+    await Directory(folder).create(recursive: true);
+    final playlist = await insertTestPlaylist(db, outputPath: folder);
+
+    await service.updatePlaylistSettings(
+      id: playlist.id,
+      lyricsMode: const Value(LyricsMode.lyrics),
+    );
+    expect((await db.getPlaylist(playlist.id)).lyricsMode, 'lyrics');
+
+    await service.updatePlaylistSettings(id: playlist.id, name: 'Renamed');
+    expect((await db.getPlaylist(playlist.id)).lyricsMode, 'lyrics');
+
+    await service.updatePlaylistSettings(
+      id: playlist.id,
+      lyricsMode: const Value(null),
+    );
+    expect((await db.getPlaylist(playlist.id)).lyricsMode, isNull);
+  });
 
   group('adding playlists', () {
     test('two playlists with the same name get their own folders', () async {
@@ -423,6 +449,40 @@ void main() {
     Future<Map<String, Track>> tracks() async => {
       for (final t in await db.getTracksForPlaylist(playlist.id)) t.videoId: t,
     };
+
+    test('lyrics files follow the switch; stale ones in a reused folder '
+        'go', () async {
+      final normal = before['normal']!;
+      LyricsDocDraft doc(String text) => LyricsDocDraft(
+        trackId: normal.id,
+        kind: LyricsMode.transcript,
+        status: LyricsStatus.found,
+        pinned: true,
+        checkedAt: DateTime(2026),
+        lines: [LyricsLineDraft(text)],
+      );
+      await db.replaceLyricsDoc(doc('spoken'));
+      await persistLyricsFile(db, normal.id);
+
+      await service.updatePlaylistSettings(id: playlist.id, audioOnly: false);
+      expect(
+        (await readLyricsFile(newFolder, 'normal', normal.id)).single.lines,
+        const [LyricsLineDraft('spoken')],
+      );
+
+      // The pin is cleared in the video folder; the audio folder's copy is
+      // now stale and must not come back on a switch back.
+      await db.deleteLyricsDocs(normal.id);
+      await persistLyricsFile(db, normal.id);
+      await service.updatePlaylistSettings(id: playlist.id, audioOnly: true);
+      final back = await db.getPlaylist(playlist.id);
+      expect(
+        File(
+          LibraryLayout.lyricsJsonPath(back.outputPath, 'normal'),
+        ).existsSync(),
+        isFalse,
+      );
+    });
 
     test('tracks YouTube can give again keep their file until replaced; the '
         'others take their file along', () async {

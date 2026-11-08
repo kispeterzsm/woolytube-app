@@ -421,6 +421,39 @@ void main() {
     expect(read!.isTemporary, isFalse);
   });
 
+  test('the lyrics mode round-trips and is left out when off', () async {
+    final source = await insertTestPlaylist(
+      db,
+      outputPath: folder,
+      lyricsMode: 'transcript',
+    );
+    await metadata.writeMetadata(source, const []);
+    final file = File(p.join(folder, 'woolytube_meta.json'));
+    final sidecar =
+        jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+    expect((sidecar['playlist'] as Map)['lyricsMode'], 'transcript');
+    await db.deletePlaylist(source.id);
+
+    final id = await metadata.importPlaylist(
+      (await metadata.readFolder(folder))!,
+    );
+    expect((await db.getPlaylist(id)).lyricsMode, 'transcript');
+
+    await db.updatePlaylistFields(
+      id,
+      const PlaylistsCompanion(lyricsMode: Value(null)),
+    );
+    await metadata.writeMetadata(await db.getPlaylist(id), const []);
+    final off = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+    expect((off['playlist'] as Map).containsKey('lyricsMode'), isFalse);
+    expect((await metadata.readFolder(folder))!.lyricsMode, isNull);
+
+    // An unknown value from a newer app reads as off.
+    (off['playlist'] as Map)['lyricsMode'] = 'karaoke';
+    await file.writeAsString(jsonEncode(off));
+    expect((await metadata.readFolder(folder))!.lyricsMode, isNull);
+  });
+
   test('import gives a repeated index to the entry whose file carries that '
       'number', () async {
     await write(p.join(folder, '00001_A.m4a'));

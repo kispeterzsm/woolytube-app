@@ -22,15 +22,18 @@ import '../services/chapters.dart';
 import '../services/download_errors.dart';
 import '../services/download_service.dart';
 import '../services/library_gate.dart';
+import '../services/lyrics/lyrics_models.dart';
 import '../services/media_thumbnail_service.dart';
 import '../services/playlist_service.dart';
 import '../services/sponsorblock_service.dart';
 import '../services/track_search.dart';
 import '../services/video_quality.dart';
+import '../widgets/lyrics_line_text.dart';
 import '../widgets/mobile_data_download_guard.dart';
 import '../widgets/tap_to_place_cursor_text_field.dart';
 import '../widgets/video_quality_picker.dart';
 import 'chapters_page.dart';
+import 'lyrics_page.dart';
 import 'playlist_settings_page.dart';
 
 part 'playlist_detail/track_row.dart';
@@ -73,14 +76,16 @@ bool _isProblemTrack(Track track) =>
     track.status == 'error' || track.status == 'unavailable';
 
 class _TrackListView {
-  _TrackListView(this.tracks, this.query) {
+  _TrackListView(this.tracks, this.query, [this.lyricMatches = const {}]) {
     final matches = <int, MediaChapter>{};
     if (query.isEmpty) {
       visible = tracks;
     } else {
       visible = [
         for (final track in tracks)
-          if (matchesNormalizedTrackSearch(track, query)) track,
+          if (matchesNormalizedTrackSearch(track, query) ||
+              lyricMatches.containsKey(track.id))
+            track,
       ];
       for (final track in visible) {
         if (track.chaptersJson == null) continue;
@@ -123,6 +128,9 @@ class _TrackListView {
 
   final List<Track> tracks;
   final String query;
+
+  /// The best lyric line of each track whose lyrics match [query].
+  final Map<int, LyricsHit> lyricMatches;
   late final List<Track> visible;
   late final Map<int, int> rowOf;
 
@@ -180,6 +188,13 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
 
   /// The normalized (trimmed, lower-case) query; empty when not filtering.
   String _searchQuery = '';
+
+  // Lyric lines matching the query, searched after a short pause in typing.
+  static const _lyricsDebounce = Duration(milliseconds: 200);
+  Timer? _lyricsTimer;
+  int _lyricsGeneration = 0;
+  Map<int, LyricsHit> _lyricMatches = const {};
+  String _lyricMatchesQuery = '';
   bool _showSearch = false;
   double? _offsetBeforeSearch;
   bool _isUpdating = false;
@@ -201,7 +216,11 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
   /// list).
   DateTime? _forceFollowUntil;
   DateTime? _lastUserScroll;
-  int? _lastProblemRow;
+  int? _lastJumpRow;
+
+  /// Tracks of this playlist whose lyrics need nothing more (see
+  /// [lyricsSettledTracksProvider]); null until first loaded.
+  Set<int>? _lyricsSettled;
   final ValueNotifier<bool> _showJumpToPlaying = ValueNotifier(false);
 
   @override
@@ -219,6 +238,13 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
       currentTrackProvider,
       (previous, next) =>
           _onCurrentTrackChanged(previous?.valueOrNull, next.valueOrNull),
+    );
+    // Kept without rebuilding the page: only the menu and the jump read it,
+    // and a lyrics fetch changes it once per track.
+    ref.listenManual<AsyncValue<Set<int>>>(
+      lyricsSettledTracksProvider(widget.playlistId),
+      (_, next) => _lyricsSettled = next.valueOrNull ?? _lyricsSettled,
+      fireImmediately: true,
     );
     _lastOverlay = _overlayHeight;
     audioPlayerOverlayHeightNotifier.addListener(_onOverlayChanged);
@@ -285,6 +311,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
   @override
   void dispose() {
     audioPlayerOverlayHeightNotifier.removeListener(_onOverlayChanged);
+    _lyricsTimer?.cancel();
     _searchController.dispose();
     _listController?.dispose();
     _showJumpToPlaying.dispose();
@@ -293,12 +320,17 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
 
   _TrackListView _viewFor(List<Track> tracks) {
     final cached = _view;
+    final lyrics =
+        _lyricMatchesQuery == _searchQuery
+            ? _lyricMatches
+            : const <int, LyricsHit>{};
     if (cached != null &&
         identical(cached.tracks, tracks) &&
-        cached.query == _searchQuery) {
+        cached.query == _searchQuery &&
+        identical(cached.lyricMatches, lyrics)) {
       return cached;
     }
-    return _view = _TrackListView(tracks, _searchQuery);
+    return _view = _TrackListView(tracks, _searchQuery, lyrics);
   }
 
   // ---------------------------------------------------------------------
@@ -550,6 +582,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
 
   void _closeSearch() {
     _searchController.clear();
+    _scheduleLyricsSearch('');
     final restore = _offsetBeforeSearch;
     setState(() {
       _showSearch = false;
@@ -579,6 +612,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
       return;
     }
     setState(() => _searchQuery = query);
+    _scheduleLyricsSearch(query);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final position = _position;
       if (position != null && position.pixels != 0) {
@@ -588,22 +622,72 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
     });
   }
 
+  /// Searches this playlist's lyrics for [query] once typing pauses, when
+  /// the playlist has lyrics on.
+  void _scheduleLyricsSearch(String query) {
+    _lyricsTimer?.cancel();
+    final generation = ++_lyricsGeneration;
+    if (query.length < 2 || _playlist?.lyricsMode == null) {
+      _lyricMatches = const {};
+      _lyricMatchesQuery = '';
+      return;
+    }
+    _lyricsTimer = Timer(_lyricsDebounce, () async {
+      List<LyricsHit> hits;
+      try {
+        hits = await ref
+            .read(lyricsSearchProvider)
+            .search(query, playlistId: widget.playlistId);
+      } catch (_) {
+        hits = const [];
+      }
+      if (!mounted || generation != _lyricsGeneration) return;
+      final matches = <int, LyricsHit>{};
+      for (final hit in hits) {
+        matches.putIfAbsent(hit.trackId, () => hit);
+      }
+      setState(() {
+        _lyricMatches = matches;
+        _lyricMatchesQuery = query;
+      });
+    });
+  }
+
   // ---------------------------------------------------------------------
   // Playback actions
   // ---------------------------------------------------------------------
 
-  void _onTrackTap(Track track, bool isCurrent, MediaChapter? chapter) {
+  void _onTrackTap(
+    Track track,
+    bool isCurrent,
+    MediaChapter? chapter,
+    LyricsHit? lyricMatch,
+  ) {
     if (track.status != 'complete') {
       _showTrackActions(track);
       return;
     }
     final playback = ref.read(playbackServiceProvider);
+    final allTracks = _view?.tracks ?? [track];
+    if (chapter == null && lyricMatch != null) {
+      // Plays from just before the matched line.
+      final target = lyricsHitTarget(track, lyricMatch);
+      unawaited(
+        playback.playTrack(
+          track,
+          allTracks,
+          playlist: _playlist,
+          chapterId: target.chapter?.id,
+          startAt: target.startAt,
+        ),
+      );
+      return;
+    }
     if (isCurrent && chapter == null) {
       // Tapping the playing row never reloads the file.
       unawaited(playback.togglePlayPause());
       return;
     }
-    final allTracks = _view?.tracks ?? [track];
     unawaited(
       playback.playTrack(
         track,
@@ -626,8 +710,46 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
   /// middle of the list, wrapping around to the top after the last one.
   void _jumpToNextProblem() {
     final view = _view;
+    if (view == null) return;
+    _jumpToNextRow(
+      view,
+      view.problemRows,
+      (track) =>
+          track.status == 'unavailable' ? 'unavailable' : 'download failed',
+    );
+  }
+
+  /// Rows (in the visible list) of downloaded tracks that have no lyrics
+  /// yet, when the playlist has lyrics on. Instrumental songs and songs the
+  /// user marked as having none don't count.
+  List<int> _missingLyricsRows(_TrackListView view) {
+    if (_playlist?.lyricsMode == null) return const [];
+    final settled = _lyricsSettled;
+    if (settled == null) return const [];
+    return [
+      for (var i = 0; i < view.visible.length; i++)
+        if (view.visible[i].status == 'complete' &&
+            !settled.contains(view.visible[i].id))
+          i,
+    ];
+  }
+
+  void _jumpToNextMissingLyrics() {
+    final view = _view;
+    if (view == null) return;
+    _jumpToNextRow(view, _missingLyricsRows(view), (_) => 'no lyrics');
+  }
+
+  /// Scrolls to the first of [rows] below the row in the middle of the
+  /// list, wrapping around to the top after the last one, and says which
+  /// track it is with [describe].
+  void _jumpToNextRow(
+    _TrackListView view,
+    List<int> rows,
+    String Function(Track) describe,
+  ) {
     final position = _position;
-    if (view == null || view.problemRows.isEmpty) return;
+    if (rows.isEmpty) return;
     var anchor = -1;
     if (position != null && _rowExtent > 0) {
       final visibleHeight = math.max(
@@ -639,25 +761,23 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
                   _rowExtent)
               .round();
       // At either end the list cannot centre the row; use the last jump.
-      final last = _lastProblemRow;
+      final last = _lastJumpRow;
       if (last != null && _rowFullyVisible(last)) {
         anchor = math.max(anchor, last);
       }
     }
-    final rows = view.problemRows;
     var index = rows.indexWhere((row) => row > anchor);
     final wrapped = index == -1;
     if (wrapped) index = 0;
     final row = rows[index];
-    _lastProblemRow = row;
+    _lastJumpRow = row;
     // A jump the user asked for counts as browsing: auto-follow waits.
     _lastUserScroll = DateTime.now();
     _scrollToRow(row, animate: true);
     final track = view.visible[row];
     _showModeFeedback(
       '${wrapped && rows.length > 1 ? 'Back to the first · ' : ''}'
-      '${index + 1} of ${rows.length}: #${track.index} '
-      '${track.status == 'unavailable' ? 'unavailable' : 'download failed'}',
+      '${index + 1} of ${rows.length}: #${track.index} ${describe(track)}',
     );
   }
 
@@ -817,6 +937,8 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
                 _openPlaylistSettings();
               case 'next-problem':
                 _jumpToNextProblem();
+              case 'next-missing-lyrics':
+                _jumpToNextMissingLyrics();
               case 'retry-removed':
                 unawaited(_retryRemovedTracks());
               case 'clear':
@@ -848,6 +970,19 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
                       ),
                       title: Text(
                         'Jump to next failed (${view.problemRows.length})',
+                      ),
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                  ),
+                if (view != null && _missingLyricsRows(view).isNotEmpty)
+                  PopupMenuItem(
+                    key: const ValueKey('playlist-detail-next-missing-lyrics'),
+                    value: 'next-missing-lyrics',
+                    child: ListTile(
+                      leading: const Icon(Icons.lyrics_outlined),
+                      title: Text(
+                        'Jump to next without lyrics '
+                        '(${_missingLyricsRows(view).length})',
                       ),
                       contentPadding: EdgeInsets.zero,
                     ),
@@ -1044,6 +1179,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
                             track: track,
                             metrics: metrics,
                             chapterMatch: view.chapterMatches[track.id],
+                            lyricMatch: view.lyricMatches[track.id],
                             onTap: _onTrackTap,
                             onActions: _showTrackActions,
                           );

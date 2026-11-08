@@ -13,6 +13,8 @@ import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/download_errors.dart';
 import 'package:woolytube/services/download_service.dart';
 import 'package:woolytube/services/log_service.dart';
+import 'package:woolytube/services/lyrics/lyrics_models.dart';
+import 'package:woolytube/services/lyrics/lyrics_service.dart';
 import 'package:woolytube/services/metadata_service.dart';
 import 'package:woolytube/services/notification_service.dart';
 import 'package:woolytube/services/playlist_service.dart';
@@ -81,6 +83,24 @@ class FakeSponsorBlockService extends SponsorBlockService {
     fetchedVideoIds.add(videoId);
     onFetch?.call();
     return segmentsByVideoId[videoId] ?? const [];
+  }
+}
+
+/// Records lyrics backfills instead of fetching.
+class RecordingLyricsService extends LyricsService {
+  RecordingLyricsService(super.db, super.log);
+
+  final backfills = <(int, Duration?, LyricsCancellation?)>[];
+
+  @override
+  Future<LyricsBackfillResult> backfillPlaylist(
+    int playlistId, {
+    void Function(LyricsFetchProgress progress)? onProgress,
+    LyricsCancellation? cancellation,
+    Duration? budget,
+  }) async {
+    backfills.add((playlistId, budget, cancellation));
+    return const LyricsBackfillResult();
   }
 }
 
@@ -307,6 +327,43 @@ void main() {
     expect(updated.isLocalReplacement, isTrue);
     expect(await db.getSegmentsForTrack(track.id), isEmpty);
   });
+
+  test(
+    'a playlist run fetches due lyrics when the playlist has them on',
+    () async {
+      final lyrics = RecordingLyricsService(db, log);
+      final withLyrics = DownloadService(
+        db,
+        ytdlp,
+        log,
+        MetadataService(db),
+        notifications,
+        sponsorBlock,
+        null,
+        lock,
+        DownloadLock.foregroundOwner,
+        null,
+        thumbnails,
+        lyrics,
+      );
+      final off = await insertTestPlaylist(db, outputPath: folder);
+      await withLyrics.downloadPlaylist(off);
+      expect(lyrics.backfills, isEmpty);
+
+      final on = await insertTestPlaylist(
+        db,
+        url: 'https://www.youtube.com/playlist?list=lyrics',
+        outputPath: p.join(libraryDir, 'Lyrics Playlist'),
+        lyricsMode: 'lyrics',
+      );
+      await withLyrics.downloadPlaylist(on);
+      final (playlistId, budget, cancellation) = lyrics.backfills.single;
+      expect(playlistId, on.id);
+      expect(budget, DownloadService.lyricsBackfillBudget);
+      expect(cancellation!.isCancelled, isFalse);
+      withLyrics.dispose();
+    },
+  );
 
   test(
     'playlist update backfills SponsorBlock for already complete tracks',

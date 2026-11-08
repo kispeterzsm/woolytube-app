@@ -292,8 +292,24 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
       }
       throw await _staleReason(afterTrack);
     }
+    unawaited(_fetchLyricsOfNewChapters(fresh.id));
     await _stopPreview();
     if (mounted) Navigator.of(context).pop(_proposals.length);
+  }
+
+  /// Drops lyrics of chapters that are gone and, when the playlist has
+  /// lyrics on and the network may be used without asking, fetches the new
+  /// ones now; otherwise (or when this fails) the next update fetches them.
+  Future<void> _fetchLyricsOfNewChapters(int trackId) async {
+    // Read before the page closes.
+    final lyrics = ref.read(lyricsServiceProvider);
+    final policy = ref.read(downloadNetworkPolicyProvider);
+    try {
+      // Saving the chapters already dropped the docs of chapters that are
+      // gone.
+      if (!await policy.allowsAutomaticNetworkUse()) return;
+      await lyrics.onChaptersChanged(trackId);
+    } catch (_) {}
   }
 
   /// Why the run no longer fits [track]: a replaced file needs a new scan,

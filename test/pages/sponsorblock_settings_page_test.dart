@@ -1,11 +1,13 @@
 import 'dart:async';
 
+import 'package:drift/drift.dart' show Value;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/pages/sponsorblock_settings_page.dart';
 import 'package:woolytube/providers/providers.dart';
+import 'package:woolytube/services/lyrics/lyrics_models.dart';
 import 'package:woolytube/services/playlist_service.dart';
 import 'package:woolytube/services/sponsorblock_categories.dart';
 
@@ -187,6 +189,7 @@ class _Playlists implements PlaylistService {
     bool? sponsorBlockEnabled,
     List<String>? sponsorBlockCategories,
     Map<String, SponsorBlockCategoryAction>? sponsorBlockCategoryActions,
+    Value<LyricsMode?> lyricsMode = const Value.absent(),
   }) async {
     await beforeWrite?.call();
     final current = await db.getPlaylist(id);

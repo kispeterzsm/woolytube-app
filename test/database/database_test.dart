@@ -11,7 +11,7 @@ import '../helpers/test_database.dart';
 void main() {
   group('loudness measurements', () {
     test('an existing database gets the table on upgrade', () async {
-      final dir = await Directory.systemTemp.createTemp('woolytube-db16-');
+      final dir = await Directory.systemTemp.createTemp('woolytube-db17-');
       addTearDown(() => dir.delete(recursive: true));
       final file = File('${dir.path}/library.sqlite');
       final fresh = AppDatabase.forTesting(NativeDatabase(file));
@@ -22,9 +22,9 @@ void main() {
         status: 'complete',
         filePath: '/music/a.m4a',
       );
-      // Make it look like a version 15 database.
+      // Make it look like a version 17 (release 1.5.2) database.
       await fresh.customStatement('DROP TABLE loudness_measurements');
-      await fresh.customStatement('PRAGMA user_version = 15');
+      await fresh.customStatement('PRAGMA user_version = 17');
       await fresh.close();
 
       final upgraded = AppDatabase.forTesting(NativeDatabase(file));

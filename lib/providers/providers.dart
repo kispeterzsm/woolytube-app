@@ -24,6 +24,9 @@ import '../services/thumbnail_backfill_service.dart';
 import '../services/recognition/audio_window_decoder.dart';
 import '../services/recognition/shazam_client.dart';
 import '../services/recognition/song_recognition_service.dart';
+import '../services/lyrics/lyrics_models.dart';
+import '../services/lyrics/lyrics_search.dart';
+import '../services/lyrics/lyrics_service.dart';
 
 final chapterServiceProvider = Provider<ChapterService>(
   (ref) => ChapterService(
@@ -134,6 +137,7 @@ final downloadServiceProvider = Provider<DownloadService>((ref) {
     DownloadLock.foregroundOwner,
     ref.watch(libraryGateProvider),
     ref.watch(mediaThumbnailServiceProvider),
+    ref.watch(lyricsServiceProvider),
   );
   ref.onDispose(() => service.dispose());
   return service;
@@ -666,6 +670,46 @@ final songRecognitionServiceProvider = Provider<SongRecognitionService>((ref) {
   );
   ref.onDispose(service.dispose);
   return service;
+});
+
+/// Fetches lyrics and transcripts and applies the user's corrections.
+final lyricsServiceProvider = Provider<LyricsService>((ref) {
+  final service = LyricsService(
+    ref.watch(databaseProvider),
+    ref.watch(logServiceProvider),
+    ytdlp: ref.watch(ytdlpServiceProvider),
+  );
+  ref.onDispose(service.dispose);
+  return service;
+});
+
+/// Ids of the tracks in [docs] whose lyrics need nothing more: lyrics were
+/// found, the song is instrumental, or the user said it has none.
+Set<int> lyricsSettledTrackIds(List<LyricsDoc> docs) => {
+  for (final doc in docs)
+    if (doc.status == LyricsStatus.found ||
+        doc.status == LyricsStatus.instrumental ||
+        (doc.status == LyricsStatus.none && doc.pinned))
+      doc.trackId,
+};
+
+/// [lyricsSettledTrackIds] of a playlist's tracks, again after every change.
+final lyricsSettledTracksProvider = StreamProvider.autoDispose
+    .family<Set<int>, int>((ref, playlistId) async* {
+      final db = ref.watch(databaseProvider);
+      // Re-read on each lyrics write rather than keeping a live query open.
+      final changes = db.watchLyricsChanges();
+      yield lyricsSettledTrackIds(await db.lyricsDocsForPlaylist(playlistId));
+      await for (final _ in changes) {
+        yield lyricsSettledTrackIds(await db.lyricsDocsForPlaylist(playlistId));
+      }
+    });
+
+/// Searches stored lyrics and transcripts.
+final lyricsSearchProvider = Provider<LyricsSearch>((ref) {
+  final search = LyricsSearch(ref.watch(databaseProvider));
+  ref.onDispose(search.dispose);
+  return search;
 });
 
 final recognitionProgressProvider = StreamProvider<RecognitionProgress>((ref) {
