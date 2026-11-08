@@ -22,6 +22,7 @@ import '../services/thumbnail_backfill_service.dart';
 import '../services/recognition/audio_window_decoder.dart';
 import '../services/recognition/shazam_client.dart';
 import '../services/recognition/song_recognition_service.dart';
+import '../services/lyrics/lyrics_models.dart';
 import '../services/lyrics/lyrics_search.dart';
 import '../services/lyrics/lyrics_service.dart';
 
@@ -637,6 +638,25 @@ final lyricsServiceProvider = Provider<LyricsService>((ref) {
   ref.onDispose(service.dispose);
   return service;
 });
+
+/// Ids of the tracks in [docs] whose lyrics need nothing more: lyrics were
+/// found, the song is instrumental, or the user said it has none.
+Set<int> lyricsSettledTrackIds(List<LyricsDoc> docs) => {
+  for (final doc in docs)
+    if (doc.status == LyricsStatus.found ||
+        doc.status == LyricsStatus.instrumental ||
+        (doc.status == LyricsStatus.none && doc.pinned))
+      doc.trackId,
+};
+
+/// [lyricsSettledTrackIds] of a playlist's tracks, again after every change.
+final lyricsSettledTracksProvider = StreamProvider.autoDispose
+    .family<Set<int>, int>(
+      (ref, playlistId) => ref
+          .watch(databaseProvider)
+          .watchLyricsDocsForPlaylist(playlistId)
+          .map(lyricsSettledTrackIds),
+    );
 
 /// Searches stored lyrics and transcripts.
 final lyricsSearchProvider = Provider<LyricsSearch>((ref) {

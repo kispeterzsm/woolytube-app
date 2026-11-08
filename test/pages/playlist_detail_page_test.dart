@@ -79,6 +79,12 @@ void main() {
     syncingPlaylistsProvider.overrideWith((ref) => syncing.stream),
     downloadQueueProvider.overrideWith((ref) => queued.stream),
     lyricsSearchProvider.overrideWithValue(lyrics),
+    // A one-shot read: a live Drift query leaves a timer behind at dispose.
+    lyricsSettledTracksProvider.overrideWith(
+      (ref, id) => Stream.fromFuture(
+        db.lyricsDocsForPlaylist(id),
+      ).map(lyricsSettledTrackIds),
+    ),
   ];
 
   List<Override> overrides(
@@ -1169,6 +1175,105 @@ void main() {
     await jump();
     expect(find.byKey(ValueKey('track-row-${tracks[29].id}')), findsOneWidget);
     expect(find.textContaining('Back to the first'), findsOneWidget);
+  });
+
+  testWidgets('the menu jumps from one track without lyrics to the next', (
+    tester,
+  ) async {
+    playlist = await insertTestPlaylist(
+      db,
+      url: 'lyrics-jump',
+      name: 'Songs',
+      lyricsMode: 'lyrics',
+    );
+    final tracks = [
+      for (var i = 1; i <= 60; i++)
+        await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: i,
+          videoId: 'v$i',
+          title: 'Track $i',
+          status: i == 10 ? 'error' : 'complete',
+          filePath: i == 10 ? null : '/tmp/$i.m4a',
+        ),
+    ];
+    final checkedAt = DateTime(2026, 11, 8);
+    Future<void> doc(int index, String status, {bool pinned = false}) =>
+        db.replaceLyricsDoc(
+          LyricsDocDraft(
+            trackId: tracks[index - 1].id,
+            kind: LyricsMode.lyrics,
+            status: status,
+            pinned: pinned,
+            checkedAt: checkedAt,
+            lines:
+                status == LyricsStatus.found
+                    ? const [LyricsLineDraft('la la la')]
+                    : const [],
+          ),
+        );
+    for (var i = 1; i <= 60; i++) {
+      switch (i) {
+        case 20:
+          await doc(i, LyricsStatus.none);
+        case 40:
+          break; // Not fetched yet.
+        case 45:
+          await doc(i, LyricsStatus.instrumental);
+        case 50:
+          await doc(i, LyricsStatus.none, pinned: true); // User said none.
+        case 55:
+          await doc(i, LyricsStatus.error);
+        default:
+          await doc(i, LyricsStatus.found);
+      }
+    }
+    await pumpPage(tester, tracks: tracks);
+    await tester.pumpAndSettle();
+
+    Future<void> jump() async {
+      await tester.tap(find.byKey(const ValueKey('playlist-detail-menu')));
+      await tester.pumpAndSettle();
+      // Not the failed download (#10), the instrumental (#45) or the one
+      // marked as having no lyrics (#50).
+      expect(find.text('Jump to next without lyrics (3)'), findsOneWidget);
+      await tester.tap(find.text('Jump to next without lyrics (3)'));
+      await tester.pumpAndSettle();
+    }
+
+    await jump();
+    expect(find.byKey(ValueKey('track-row-${tracks[19].id}')), findsOneWidget);
+    expect(find.textContaining('1 of 3: #20 no lyrics'), findsOneWidget);
+
+    await jump();
+    expect(find.byKey(ValueKey('track-row-${tracks[39].id}')), findsOneWidget);
+    expect(find.textContaining('2 of 3: #40 no lyrics'), findsOneWidget);
+
+    await jump();
+    expect(find.textContaining('3 of 3: #55 no lyrics'), findsOneWidget);
+
+    await jump();
+    expect(find.byKey(ValueKey('track-row-${tracks[19].id}')), findsOneWidget);
+    expect(find.textContaining('Back to the first'), findsOneWidget);
+  });
+
+  testWidgets('no lyrics jump while the playlist has lyrics off', (
+    tester,
+  ) async {
+    final tracks = [
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        status: 'complete',
+        filePath: '/tmp/1.m4a',
+      ),
+    ];
+    await pumpPage(tester, tracks: tracks);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('playlist-detail-menu')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('without lyrics'), findsNothing);
   });
 
   group('temporary playlist', () {

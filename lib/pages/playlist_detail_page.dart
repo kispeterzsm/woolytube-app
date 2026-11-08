@@ -216,7 +216,11 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
   /// list).
   DateTime? _forceFollowUntil;
   DateTime? _lastUserScroll;
-  int? _lastProblemRow;
+  int? _lastJumpRow;
+
+  /// Tracks of this playlist whose lyrics need nothing more (see
+  /// [lyricsSettledTracksProvider]); null until first loaded.
+  Set<int>? _lyricsSettled;
   final ValueNotifier<bool> _showJumpToPlaying = ValueNotifier(false);
 
   @override
@@ -234,6 +238,13 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
       currentTrackProvider,
       (previous, next) =>
           _onCurrentTrackChanged(previous?.valueOrNull, next.valueOrNull),
+    );
+    // Kept without rebuilding the page: only the menu and the jump read it,
+    // and a lyrics fetch changes it once per track.
+    ref.listenManual<AsyncValue<Set<int>>>(
+      lyricsSettledTracksProvider(widget.playlistId),
+      (_, next) => _lyricsSettled = next.valueOrNull ?? _lyricsSettled,
+      fireImmediately: true,
     );
     _lastOverlay = _overlayHeight;
     audioPlayerOverlayHeightNotifier.addListener(_onOverlayChanged);
@@ -699,8 +710,46 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
   /// middle of the list, wrapping around to the top after the last one.
   void _jumpToNextProblem() {
     final view = _view;
+    if (view == null) return;
+    _jumpToNextRow(
+      view,
+      view.problemRows,
+      (track) =>
+          track.status == 'unavailable' ? 'unavailable' : 'download failed',
+    );
+  }
+
+  /// Rows (in the visible list) of downloaded tracks that have no lyrics
+  /// yet, when the playlist has lyrics on. Instrumental songs and songs the
+  /// user marked as having none don't count.
+  List<int> _missingLyricsRows(_TrackListView view) {
+    if (_playlist?.lyricsMode == null) return const [];
+    final settled = _lyricsSettled;
+    if (settled == null) return const [];
+    return [
+      for (var i = 0; i < view.visible.length; i++)
+        if (view.visible[i].status == 'complete' &&
+            !settled.contains(view.visible[i].id))
+          i,
+    ];
+  }
+
+  void _jumpToNextMissingLyrics() {
+    final view = _view;
+    if (view == null) return;
+    _jumpToNextRow(view, _missingLyricsRows(view), (_) => 'no lyrics');
+  }
+
+  /// Scrolls to the first of [rows] below the row in the middle of the
+  /// list, wrapping around to the top after the last one, and says which
+  /// track it is with [describe].
+  void _jumpToNextRow(
+    _TrackListView view,
+    List<int> rows,
+    String Function(Track) describe,
+  ) {
     final position = _position;
-    if (view == null || view.problemRows.isEmpty) return;
+    if (rows.isEmpty) return;
     var anchor = -1;
     if (position != null && _rowExtent > 0) {
       final visibleHeight = math.max(
@@ -712,25 +761,23 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
                   _rowExtent)
               .round();
       // At either end the list cannot centre the row; use the last jump.
-      final last = _lastProblemRow;
+      final last = _lastJumpRow;
       if (last != null && _rowFullyVisible(last)) {
         anchor = math.max(anchor, last);
       }
     }
-    final rows = view.problemRows;
     var index = rows.indexWhere((row) => row > anchor);
     final wrapped = index == -1;
     if (wrapped) index = 0;
     final row = rows[index];
-    _lastProblemRow = row;
+    _lastJumpRow = row;
     // A jump the user asked for counts as browsing: auto-follow waits.
     _lastUserScroll = DateTime.now();
     _scrollToRow(row, animate: true);
     final track = view.visible[row];
     _showModeFeedback(
       '${wrapped && rows.length > 1 ? 'Back to the first · ' : ''}'
-      '${index + 1} of ${rows.length}: #${track.index} '
-      '${track.status == 'unavailable' ? 'unavailable' : 'download failed'}',
+      '${index + 1} of ${rows.length}: #${track.index} ${describe(track)}',
     );
   }
 
@@ -890,6 +937,8 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
                 _openPlaylistSettings();
               case 'next-problem':
                 _jumpToNextProblem();
+              case 'next-missing-lyrics':
+                _jumpToNextMissingLyrics();
               case 'retry-removed':
                 unawaited(_retryRemovedTracks());
               case 'clear':
@@ -921,6 +970,19 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
                       ),
                       title: Text(
                         'Jump to next failed (${view.problemRows.length})',
+                      ),
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                  ),
+                if (view != null && _missingLyricsRows(view).isNotEmpty)
+                  PopupMenuItem(
+                    key: const ValueKey('playlist-detail-next-missing-lyrics'),
+                    value: 'next-missing-lyrics',
+                    child: ListTile(
+                      leading: const Icon(Icons.lyrics_outlined),
+                      title: Text(
+                        'Jump to next without lyrics '
+                        '(${_missingLyricsRows(view).length})',
                       ),
                       contentPadding: EdgeInsets.zero,
                     ),

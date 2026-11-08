@@ -1508,6 +1508,14 @@ class AppDatabase extends _$AppDatabase {
     return query.map((row) => row.readTable(lyricsDocs)).get();
   }
 
+  /// [lyricsDocsForPlaylist], again after every change.
+  Stream<List<LyricsDoc>> watchLyricsDocsForPlaylist(int playlistId) {
+    final query = select(lyricsDocs).join([
+      innerJoin(tracks, tracks.id.equalsExp(lyricsDocs.trackId)),
+    ])..where(tracks.playlistId.equals(playlistId));
+    return query.map((row) => row.readTable(lyricsDocs)).watch();
+  }
+
   /// The lines of a doc in order.
   Future<List<LyricsLine>> lyricsLinesForDoc(int docId) =>
       (select(lyricsLines)
