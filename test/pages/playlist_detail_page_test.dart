@@ -536,6 +536,7 @@ void main() {
       'Add to queue',
       'Always skip',
       'Chapters…',
+      'Lyrics…',
       'Skip segments…',
       'File',
       'Edit title & file name',

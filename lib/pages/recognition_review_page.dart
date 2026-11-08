@@ -11,6 +11,7 @@ import '../providers/providers.dart';
 import '../services/chapter_preview_player.dart';
 import '../services/chapter_service.dart';
 import '../services/chapters.dart';
+import '../services/lyrics/lyrics_models.dart';
 import '../services/recognition/chapter_estimator.dart';
 import '../services/recognition/song_recognition_service.dart';
 import 'chapter_editor_page.dart';
@@ -292,8 +293,23 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
       }
       throw await _staleReason(afterTrack);
     }
+    unawaited(_fetchLyricsOfNewChapters(fresh.id));
     await _stopPreview();
     if (mounted) Navigator.of(context).pop(_proposals.length);
+  }
+
+  /// The new chapters get their lyrics now when the playlist has lyrics
+  /// on; otherwise (or when this fails) the next update fetches them.
+  Future<void> _fetchLyricsOfNewChapters(int trackId) async {
+    try {
+      final db = ref.read(databaseProvider);
+      final lyrics = ref.read(lyricsServiceProvider);
+      final track = await db.getTrack(trackId);
+      if (track == null) return;
+      final playlist = await db.getPlaylist(track.playlistId);
+      if (!lyricsModeIsOn(playlist.lyricsMode)) return;
+      await lyrics.fetchTrack(track);
+    } catch (_) {}
   }
 
   /// Why the run no longer fits [track]: a replaced file needs a new scan,

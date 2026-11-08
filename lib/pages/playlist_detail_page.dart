@@ -31,6 +31,7 @@ import '../widgets/mobile_data_download_guard.dart';
 import '../widgets/tap_to_place_cursor_text_field.dart';
 import '../widgets/video_quality_picker.dart';
 import 'chapters_page.dart';
+import 'lyrics_page.dart';
 import 'playlist_settings_page.dart';
 
 part 'playlist_detail/track_row.dart';
