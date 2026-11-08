@@ -3249,6 +3249,541 @@ class SponsorBlockSegmentsCompanion
   }
 }
 
+class $LoudnessMeasurementsTable extends LoudnessMeasurements
+    with TableInfo<$LoudnessMeasurementsTable, LoudnessMeasurement> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $LoudnessMeasurementsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _trackIdMeta = const VerificationMeta(
+    'trackId',
+  );
+  @override
+  late final GeneratedColumn<int> trackId = GeneratedColumn<int>(
+    'track_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'REFERENCES tracks (id) ON DELETE CASCADE',
+    ),
+  );
+  static const VerificationMeta _filePathMeta = const VerificationMeta(
+    'filePath',
+  );
+  @override
+  late final GeneratedColumn<String> filePath = GeneratedColumn<String>(
+    'file_path',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _fileSizeMeta = const VerificationMeta(
+    'fileSize',
+  );
+  @override
+  late final GeneratedColumn<int> fileSize = GeneratedColumn<int>(
+    'file_size',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _fileModifiedMsMeta = const VerificationMeta(
+    'fileModifiedMs',
+  );
+  @override
+  late final GeneratedColumn<int> fileModifiedMs = GeneratedColumn<int>(
+    'file_modified_ms',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _integratedLufsMeta = const VerificationMeta(
+    'integratedLufs',
+  );
+  @override
+  late final GeneratedColumn<double> integratedLufs = GeneratedColumn<double>(
+    'integrated_lufs',
+    aliasedName,
+    true,
+    type: DriftSqlType.double,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _cabinLufsMeta = const VerificationMeta(
+    'cabinLufs',
+  );
+  @override
+  late final GeneratedColumn<double> cabinLufs = GeneratedColumn<double>(
+    'cabin_lufs',
+    aliasedName,
+    true,
+    type: DriftSqlType.double,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _peakDbMeta = const VerificationMeta('peakDb');
+  @override
+  late final GeneratedColumn<double> peakDb = GeneratedColumn<double>(
+    'peak_db',
+    aliasedName,
+    true,
+    type: DriftSqlType.double,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _measuredAtMeta = const VerificationMeta(
+    'measuredAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> measuredAt = GeneratedColumn<DateTime>(
+    'measured_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    trackId,
+    filePath,
+    fileSize,
+    fileModifiedMs,
+    integratedLufs,
+    cabinLufs,
+    peakDb,
+    measuredAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'loudness_measurements';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<LoudnessMeasurement> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('track_id')) {
+      context.handle(
+        _trackIdMeta,
+        trackId.isAcceptableOrUnknown(data['track_id']!, _trackIdMeta),
+      );
+    }
+    if (data.containsKey('file_path')) {
+      context.handle(
+        _filePathMeta,
+        filePath.isAcceptableOrUnknown(data['file_path']!, _filePathMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_filePathMeta);
+    }
+    if (data.containsKey('file_size')) {
+      context.handle(
+        _fileSizeMeta,
+        fileSize.isAcceptableOrUnknown(data['file_size']!, _fileSizeMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_fileSizeMeta);
+    }
+    if (data.containsKey('file_modified_ms')) {
+      context.handle(
+        _fileModifiedMsMeta,
+        fileModifiedMs.isAcceptableOrUnknown(
+          data['file_modified_ms']!,
+          _fileModifiedMsMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_fileModifiedMsMeta);
+    }
+    if (data.containsKey('integrated_lufs')) {
+      context.handle(
+        _integratedLufsMeta,
+        integratedLufs.isAcceptableOrUnknown(
+          data['integrated_lufs']!,
+          _integratedLufsMeta,
+        ),
+      );
+    }
+    if (data.containsKey('cabin_lufs')) {
+      context.handle(
+        _cabinLufsMeta,
+        cabinLufs.isAcceptableOrUnknown(data['cabin_lufs']!, _cabinLufsMeta),
+      );
+    }
+    if (data.containsKey('peak_db')) {
+      context.handle(
+        _peakDbMeta,
+        peakDb.isAcceptableOrUnknown(data['peak_db']!, _peakDbMeta),
+      );
+    }
+    if (data.containsKey('measured_at')) {
+      context.handle(
+        _measuredAtMeta,
+        measuredAt.isAcceptableOrUnknown(data['measured_at']!, _measuredAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_measuredAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {trackId};
+  @override
+  LoudnessMeasurement map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return LoudnessMeasurement(
+      trackId:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.int,
+            data['${effectivePrefix}track_id'],
+          )!,
+      filePath:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.string,
+            data['${effectivePrefix}file_path'],
+          )!,
+      fileSize:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.int,
+            data['${effectivePrefix}file_size'],
+          )!,
+      fileModifiedMs:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.int,
+            data['${effectivePrefix}file_modified_ms'],
+          )!,
+      integratedLufs: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}integrated_lufs'],
+      ),
+      cabinLufs: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}cabin_lufs'],
+      ),
+      peakDb: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}peak_db'],
+      ),
+      measuredAt:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.dateTime,
+            data['${effectivePrefix}measured_at'],
+          )!,
+    );
+  }
+
+  @override
+  $LoudnessMeasurementsTable createAlias(String alias) {
+    return $LoudnessMeasurementsTable(attachedDatabase, alias);
+  }
+}
+
+class LoudnessMeasurement extends DataClass
+    implements Insertable<LoudnessMeasurement> {
+  final int trackId;
+  final String filePath;
+  final int fileSize;
+  final int fileModifiedMs;
+
+  /// EBU R128 integrated loudness, LUFS; null for a silent file.
+  final double? integratedLufs;
+
+  /// Loudness above about 300 Hz, LUFS (see `MeasuredLoudness.cabinLufs`).
+  final double? cabinLufs;
+
+  /// Highest sample, dBFS; null for a silent file.
+  final double? peakDb;
+  final DateTime measuredAt;
+  const LoudnessMeasurement({
+    required this.trackId,
+    required this.filePath,
+    required this.fileSize,
+    required this.fileModifiedMs,
+    this.integratedLufs,
+    this.cabinLufs,
+    this.peakDb,
+    required this.measuredAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['track_id'] = Variable<int>(trackId);
+    map['file_path'] = Variable<String>(filePath);
+    map['file_size'] = Variable<int>(fileSize);
+    map['file_modified_ms'] = Variable<int>(fileModifiedMs);
+    if (!nullToAbsent || integratedLufs != null) {
+      map['integrated_lufs'] = Variable<double>(integratedLufs);
+    }
+    if (!nullToAbsent || cabinLufs != null) {
+      map['cabin_lufs'] = Variable<double>(cabinLufs);
+    }
+    if (!nullToAbsent || peakDb != null) {
+      map['peak_db'] = Variable<double>(peakDb);
+    }
+    map['measured_at'] = Variable<DateTime>(measuredAt);
+    return map;
+  }
+
+  LoudnessMeasurementsCompanion toCompanion(bool nullToAbsent) {
+    return LoudnessMeasurementsCompanion(
+      trackId: Value(trackId),
+      filePath: Value(filePath),
+      fileSize: Value(fileSize),
+      fileModifiedMs: Value(fileModifiedMs),
+      integratedLufs:
+          integratedLufs == null && nullToAbsent
+              ? const Value.absent()
+              : Value(integratedLufs),
+      cabinLufs:
+          cabinLufs == null && nullToAbsent
+              ? const Value.absent()
+              : Value(cabinLufs),
+      peakDb:
+          peakDb == null && nullToAbsent ? const Value.absent() : Value(peakDb),
+      measuredAt: Value(measuredAt),
+    );
+  }
+
+  factory LoudnessMeasurement.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return LoudnessMeasurement(
+      trackId: serializer.fromJson<int>(json['trackId']),
+      filePath: serializer.fromJson<String>(json['filePath']),
+      fileSize: serializer.fromJson<int>(json['fileSize']),
+      fileModifiedMs: serializer.fromJson<int>(json['fileModifiedMs']),
+      integratedLufs: serializer.fromJson<double?>(json['integratedLufs']),
+      cabinLufs: serializer.fromJson<double?>(json['cabinLufs']),
+      peakDb: serializer.fromJson<double?>(json['peakDb']),
+      measuredAt: serializer.fromJson<DateTime>(json['measuredAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'trackId': serializer.toJson<int>(trackId),
+      'filePath': serializer.toJson<String>(filePath),
+      'fileSize': serializer.toJson<int>(fileSize),
+      'fileModifiedMs': serializer.toJson<int>(fileModifiedMs),
+      'integratedLufs': serializer.toJson<double?>(integratedLufs),
+      'cabinLufs': serializer.toJson<double?>(cabinLufs),
+      'peakDb': serializer.toJson<double?>(peakDb),
+      'measuredAt': serializer.toJson<DateTime>(measuredAt),
+    };
+  }
+
+  LoudnessMeasurement copyWith({
+    int? trackId,
+    String? filePath,
+    int? fileSize,
+    int? fileModifiedMs,
+    Value<double?> integratedLufs = const Value.absent(),
+    Value<double?> cabinLufs = const Value.absent(),
+    Value<double?> peakDb = const Value.absent(),
+    DateTime? measuredAt,
+  }) => LoudnessMeasurement(
+    trackId: trackId ?? this.trackId,
+    filePath: filePath ?? this.filePath,
+    fileSize: fileSize ?? this.fileSize,
+    fileModifiedMs: fileModifiedMs ?? this.fileModifiedMs,
+    integratedLufs:
+        integratedLufs.present ? integratedLufs.value : this.integratedLufs,
+    cabinLufs: cabinLufs.present ? cabinLufs.value : this.cabinLufs,
+    peakDb: peakDb.present ? peakDb.value : this.peakDb,
+    measuredAt: measuredAt ?? this.measuredAt,
+  );
+  LoudnessMeasurement copyWithCompanion(LoudnessMeasurementsCompanion data) {
+    return LoudnessMeasurement(
+      trackId: data.trackId.present ? data.trackId.value : this.trackId,
+      filePath: data.filePath.present ? data.filePath.value : this.filePath,
+      fileSize: data.fileSize.present ? data.fileSize.value : this.fileSize,
+      fileModifiedMs:
+          data.fileModifiedMs.present
+              ? data.fileModifiedMs.value
+              : this.fileModifiedMs,
+      integratedLufs:
+          data.integratedLufs.present
+              ? data.integratedLufs.value
+              : this.integratedLufs,
+      cabinLufs: data.cabinLufs.present ? data.cabinLufs.value : this.cabinLufs,
+      peakDb: data.peakDb.present ? data.peakDb.value : this.peakDb,
+      measuredAt:
+          data.measuredAt.present ? data.measuredAt.value : this.measuredAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('LoudnessMeasurement(')
+          ..write('trackId: $trackId, ')
+          ..write('filePath: $filePath, ')
+          ..write('fileSize: $fileSize, ')
+          ..write('fileModifiedMs: $fileModifiedMs, ')
+          ..write('integratedLufs: $integratedLufs, ')
+          ..write('cabinLufs: $cabinLufs, ')
+          ..write('peakDb: $peakDb, ')
+          ..write('measuredAt: $measuredAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    trackId,
+    filePath,
+    fileSize,
+    fileModifiedMs,
+    integratedLufs,
+    cabinLufs,
+    peakDb,
+    measuredAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is LoudnessMeasurement &&
+          other.trackId == this.trackId &&
+          other.filePath == this.filePath &&
+          other.fileSize == this.fileSize &&
+          other.fileModifiedMs == this.fileModifiedMs &&
+          other.integratedLufs == this.integratedLufs &&
+          other.cabinLufs == this.cabinLufs &&
+          other.peakDb == this.peakDb &&
+          other.measuredAt == this.measuredAt);
+}
+
+class LoudnessMeasurementsCompanion
+    extends UpdateCompanion<LoudnessMeasurement> {
+  final Value<int> trackId;
+  final Value<String> filePath;
+  final Value<int> fileSize;
+  final Value<int> fileModifiedMs;
+  final Value<double?> integratedLufs;
+  final Value<double?> cabinLufs;
+  final Value<double?> peakDb;
+  final Value<DateTime> measuredAt;
+  const LoudnessMeasurementsCompanion({
+    this.trackId = const Value.absent(),
+    this.filePath = const Value.absent(),
+    this.fileSize = const Value.absent(),
+    this.fileModifiedMs = const Value.absent(),
+    this.integratedLufs = const Value.absent(),
+    this.cabinLufs = const Value.absent(),
+    this.peakDb = const Value.absent(),
+    this.measuredAt = const Value.absent(),
+  });
+  LoudnessMeasurementsCompanion.insert({
+    this.trackId = const Value.absent(),
+    required String filePath,
+    required int fileSize,
+    required int fileModifiedMs,
+    this.integratedLufs = const Value.absent(),
+    this.cabinLufs = const Value.absent(),
+    this.peakDb = const Value.absent(),
+    required DateTime measuredAt,
+  }) : filePath = Value(filePath),
+       fileSize = Value(fileSize),
+       fileModifiedMs = Value(fileModifiedMs),
+       measuredAt = Value(measuredAt);
+  static Insertable<LoudnessMeasurement> custom({
+    Expression<int>? trackId,
+    Expression<String>? filePath,
+    Expression<int>? fileSize,
+    Expression<int>? fileModifiedMs,
+    Expression<double>? integratedLufs,
+    Expression<double>? cabinLufs,
+    Expression<double>? peakDb,
+    Expression<DateTime>? measuredAt,
+  }) {
+    return RawValuesInsertable({
+      if (trackId != null) 'track_id': trackId,
+      if (filePath != null) 'file_path': filePath,
+      if (fileSize != null) 'file_size': fileSize,
+      if (fileModifiedMs != null) 'file_modified_ms': fileModifiedMs,
+      if (integratedLufs != null) 'integrated_lufs': integratedLufs,
+      if (cabinLufs != null) 'cabin_lufs': cabinLufs,
+      if (peakDb != null) 'peak_db': peakDb,
+      if (measuredAt != null) 'measured_at': measuredAt,
+    });
+  }
+
+  LoudnessMeasurementsCompanion copyWith({
+    Value<int>? trackId,
+    Value<String>? filePath,
+    Value<int>? fileSize,
+    Value<int>? fileModifiedMs,
+    Value<double?>? integratedLufs,
+    Value<double?>? cabinLufs,
+    Value<double?>? peakDb,
+    Value<DateTime>? measuredAt,
+  }) {
+    return LoudnessMeasurementsCompanion(
+      trackId: trackId ?? this.trackId,
+      filePath: filePath ?? this.filePath,
+      fileSize: fileSize ?? this.fileSize,
+      fileModifiedMs: fileModifiedMs ?? this.fileModifiedMs,
+      integratedLufs: integratedLufs ?? this.integratedLufs,
+      cabinLufs: cabinLufs ?? this.cabinLufs,
+      peakDb: peakDb ?? this.peakDb,
+      measuredAt: measuredAt ?? this.measuredAt,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (trackId.present) {
+      map['track_id'] = Variable<int>(trackId.value);
+    }
+    if (filePath.present) {
+      map['file_path'] = Variable<String>(filePath.value);
+    }
+    if (fileSize.present) {
+      map['file_size'] = Variable<int>(fileSize.value);
+    }
+    if (fileModifiedMs.present) {
+      map['file_modified_ms'] = Variable<int>(fileModifiedMs.value);
+    }
+    if (integratedLufs.present) {
+      map['integrated_lufs'] = Variable<double>(integratedLufs.value);
+    }
+    if (cabinLufs.present) {
+      map['cabin_lufs'] = Variable<double>(cabinLufs.value);
+    }
+    if (peakDb.present) {
+      map['peak_db'] = Variable<double>(peakDb.value);
+    }
+    if (measuredAt.present) {
+      map['measured_at'] = Variable<DateTime>(measuredAt.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('LoudnessMeasurementsCompanion(')
+          ..write('trackId: $trackId, ')
+          ..write('filePath: $filePath, ')
+          ..write('fileSize: $fileSize, ')
+          ..write('fileModifiedMs: $fileModifiedMs, ')
+          ..write('integratedLufs: $integratedLufs, ')
+          ..write('cabinLufs: $cabinLufs, ')
+          ..write('peakDb: $peakDb, ')
+          ..write('measuredAt: $measuredAt')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -3256,6 +3791,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $TracksTable tracks = $TracksTable(this);
   late final $SponsorBlockSegmentsTable sponsorBlockSegments =
       $SponsorBlockSegmentsTable(this);
+  late final $LoudnessMeasurementsTable loudnessMeasurements =
+      $LoudnessMeasurementsTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -3264,6 +3801,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     playlists,
     tracks,
     sponsorBlockSegments,
+    loudnessMeasurements,
   ];
   @override
   StreamQueryUpdateRules get streamUpdateRules => const StreamQueryUpdateRules([
@@ -3273,6 +3811,13 @@ abstract class _$AppDatabase extends GeneratedDatabase {
         limitUpdateKind: UpdateKind.delete,
       ),
       result: [TableUpdate('sponsor_block_segments', kind: UpdateKind.delete)],
+    ),
+    WritePropagation(
+      on: TableUpdateQuery.onTableName(
+        'tracks',
+        limitUpdateKind: UpdateKind.delete,
+      ),
+      result: [TableUpdate('loudness_measurements', kind: UpdateKind.delete)],
     ),
   ]);
 }
@@ -3986,6 +4531,34 @@ final class $$TracksTableReferences
       manager.$state.copyWith(prefetchedData: cache),
     );
   }
+
+  static MultiTypedResultKey<
+    $LoudnessMeasurementsTable,
+    List<LoudnessMeasurement>
+  >
+  _loudnessMeasurementsRefsTable(_$AppDatabase db) =>
+      MultiTypedResultKey.fromTable(
+        db.loudnessMeasurements,
+        aliasName: $_aliasNameGenerator(
+          db.tracks.id,
+          db.loudnessMeasurements.trackId,
+        ),
+      );
+
+  $$LoudnessMeasurementsTableProcessedTableManager
+  get loudnessMeasurementsRefs {
+    final manager = $$LoudnessMeasurementsTableTableManager(
+      $_db,
+      $_db.loudnessMeasurements,
+    ).filter((f) => f.trackId.id.sqlEquals($_itemColumn<int>('id')!));
+
+    final cache = $_typedResult.readTableOrNull(
+      _loudnessMeasurementsRefsTable($_db),
+    );
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: cache),
+    );
+  }
 }
 
 class $$TracksTableFilterComposer
@@ -4136,6 +4709,31 @@ class $$TracksTableFilterComposer
           }) => $$SponsorBlockSegmentsTableFilterComposer(
             $db: $db,
             $table: $db.sponsorBlockSegments,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return f(composer);
+  }
+
+  Expression<bool> loudnessMeasurementsRefs(
+    Expression<bool> Function($$LoudnessMeasurementsTableFilterComposer f) f,
+  ) {
+    final $$LoudnessMeasurementsTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.id,
+      referencedTable: $db.loudnessMeasurements,
+      getReferencedColumn: (t) => t.trackId,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$LoudnessMeasurementsTableFilterComposer(
+            $db: $db,
+            $table: $db.loudnessMeasurements,
             $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
             joinBuilder: joinBuilder,
             $removeJoinBuilderFromRootComposer:
@@ -4422,6 +5020,32 @@ class $$TracksTableAnnotationComposer
         );
     return f(composer);
   }
+
+  Expression<T> loudnessMeasurementsRefs<T extends Object>(
+    Expression<T> Function($$LoudnessMeasurementsTableAnnotationComposer a) f,
+  ) {
+    final $$LoudnessMeasurementsTableAnnotationComposer composer =
+        $composerBuilder(
+          composer: this,
+          getCurrentColumn: (t) => t.id,
+          referencedTable: $db.loudnessMeasurements,
+          getReferencedColumn: (t) => t.trackId,
+          builder:
+              (
+                joinBuilder, {
+                $addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer,
+              }) => $$LoudnessMeasurementsTableAnnotationComposer(
+                $db: $db,
+                $table: $db.loudnessMeasurements,
+                $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+                joinBuilder: joinBuilder,
+                $removeJoinBuilderFromRootComposer:
+                    $removeJoinBuilderFromRootComposer,
+              ),
+        );
+    return f(composer);
+  }
 }
 
 class $$TracksTableTableManager
@@ -4440,6 +5064,7 @@ class $$TracksTableTableManager
           PrefetchHooks Function({
             bool playlistId,
             bool sponsorBlockSegmentsRefs,
+            bool loudnessMeasurementsRefs,
           })
         > {
   $$TracksTableTableManager(_$AppDatabase db, $TracksTable table)
@@ -4558,11 +5183,13 @@ class $$TracksTableTableManager
           prefetchHooksCallback: ({
             playlistId = false,
             sponsorBlockSegmentsRefs = false,
+            loudnessMeasurementsRefs = false,
           }) {
             return PrefetchHooks(
               db: db,
               explicitlyWatchedTables: [
                 if (sponsorBlockSegmentsRefs) db.sponsorBlockSegments,
+                if (loudnessMeasurementsRefs) db.loudnessMeasurements,
               ],
               addJoins: <
                 T extends TableManagerState<
@@ -4618,6 +5245,28 @@ class $$TracksTableTableManager
                           ),
                       typedResults: items,
                     ),
+                  if (loudnessMeasurementsRefs)
+                    await $_getPrefetchedData<
+                      Track,
+                      $TracksTable,
+                      LoudnessMeasurement
+                    >(
+                      currentTable: table,
+                      referencedTable: $$TracksTableReferences
+                          ._loudnessMeasurementsRefsTable(db),
+                      managerFromTypedResult:
+                          (p0) =>
+                              $$TracksTableReferences(
+                                db,
+                                table,
+                                p0,
+                              ).loudnessMeasurementsRefs,
+                      referencedItemsForCurrentItem:
+                          (item, referencedItems) => referencedItems.where(
+                            (e) => e.trackId == item.id,
+                          ),
+                      typedResults: items,
+                    ),
                 ];
               },
             );
@@ -4638,7 +5287,11 @@ typedef $$TracksTableProcessedTableManager =
       $$TracksTableUpdateCompanionBuilder,
       (Track, $$TracksTableReferences),
       Track,
-      PrefetchHooks Function({bool playlistId, bool sponsorBlockSegmentsRefs})
+      PrefetchHooks Function({
+        bool playlistId,
+        bool sponsorBlockSegmentsRefs,
+        bool loudnessMeasurementsRefs,
+      })
     >;
 typedef $$SponsorBlockSegmentsTableCreateCompanionBuilder =
     SponsorBlockSegmentsCompanion Function({
@@ -5131,6 +5784,404 @@ typedef $$SponsorBlockSegmentsTableProcessedTableManager =
       SponsorBlockSegment,
       PrefetchHooks Function({bool trackId})
     >;
+typedef $$LoudnessMeasurementsTableCreateCompanionBuilder =
+    LoudnessMeasurementsCompanion Function({
+      Value<int> trackId,
+      required String filePath,
+      required int fileSize,
+      required int fileModifiedMs,
+      Value<double?> integratedLufs,
+      Value<double?> cabinLufs,
+      Value<double?> peakDb,
+      required DateTime measuredAt,
+    });
+typedef $$LoudnessMeasurementsTableUpdateCompanionBuilder =
+    LoudnessMeasurementsCompanion Function({
+      Value<int> trackId,
+      Value<String> filePath,
+      Value<int> fileSize,
+      Value<int> fileModifiedMs,
+      Value<double?> integratedLufs,
+      Value<double?> cabinLufs,
+      Value<double?> peakDb,
+      Value<DateTime> measuredAt,
+    });
+
+final class $$LoudnessMeasurementsTableReferences
+    extends
+        BaseReferences<
+          _$AppDatabase,
+          $LoudnessMeasurementsTable,
+          LoudnessMeasurement
+        > {
+  $$LoudnessMeasurementsTableReferences(
+    super.$_db,
+    super.$_table,
+    super.$_typedResult,
+  );
+
+  static $TracksTable _trackIdTable(_$AppDatabase db) => db.tracks.createAlias(
+    $_aliasNameGenerator(db.loudnessMeasurements.trackId, db.tracks.id),
+  );
+
+  $$TracksTableProcessedTableManager get trackId {
+    final $_column = $_itemColumn<int>('track_id')!;
+
+    final manager = $$TracksTableTableManager(
+      $_db,
+      $_db.tracks,
+    ).filter((f) => f.id.sqlEquals($_column));
+    final item = $_typedResult.readTableOrNull(_trackIdTable($_db));
+    if (item == null) return manager;
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: [item]),
+    );
+  }
+}
+
+class $$LoudnessMeasurementsTableFilterComposer
+    extends Composer<_$AppDatabase, $LoudnessMeasurementsTable> {
+  $$LoudnessMeasurementsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get filePath => $composableBuilder(
+    column: $table.filePath,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get fileSize => $composableBuilder(
+    column: $table.fileSize,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get fileModifiedMs => $composableBuilder(
+    column: $table.fileModifiedMs,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get integratedLufs => $composableBuilder(
+    column: $table.integratedLufs,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get cabinLufs => $composableBuilder(
+    column: $table.cabinLufs,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get peakDb => $composableBuilder(
+    column: $table.peakDb,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get measuredAt => $composableBuilder(
+    column: $table.measuredAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  $$TracksTableFilterComposer get trackId {
+    final $$TracksTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.trackId,
+      referencedTable: $db.tracks,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$TracksTableFilterComposer(
+            $db: $db,
+            $table: $db.tracks,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$LoudnessMeasurementsTableOrderingComposer
+    extends Composer<_$AppDatabase, $LoudnessMeasurementsTable> {
+  $$LoudnessMeasurementsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get filePath => $composableBuilder(
+    column: $table.filePath,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get fileSize => $composableBuilder(
+    column: $table.fileSize,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get fileModifiedMs => $composableBuilder(
+    column: $table.fileModifiedMs,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get integratedLufs => $composableBuilder(
+    column: $table.integratedLufs,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get cabinLufs => $composableBuilder(
+    column: $table.cabinLufs,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get peakDb => $composableBuilder(
+    column: $table.peakDb,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get measuredAt => $composableBuilder(
+    column: $table.measuredAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  $$TracksTableOrderingComposer get trackId {
+    final $$TracksTableOrderingComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.trackId,
+      referencedTable: $db.tracks,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$TracksTableOrderingComposer(
+            $db: $db,
+            $table: $db.tracks,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$LoudnessMeasurementsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $LoudnessMeasurementsTable> {
+  $$LoudnessMeasurementsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get filePath =>
+      $composableBuilder(column: $table.filePath, builder: (column) => column);
+
+  GeneratedColumn<int> get fileSize =>
+      $composableBuilder(column: $table.fileSize, builder: (column) => column);
+
+  GeneratedColumn<int> get fileModifiedMs => $composableBuilder(
+    column: $table.fileModifiedMs,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<double> get integratedLufs => $composableBuilder(
+    column: $table.integratedLufs,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<double> get cabinLufs =>
+      $composableBuilder(column: $table.cabinLufs, builder: (column) => column);
+
+  GeneratedColumn<double> get peakDb =>
+      $composableBuilder(column: $table.peakDb, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get measuredAt => $composableBuilder(
+    column: $table.measuredAt,
+    builder: (column) => column,
+  );
+
+  $$TracksTableAnnotationComposer get trackId {
+    final $$TracksTableAnnotationComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.trackId,
+      referencedTable: $db.tracks,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$TracksTableAnnotationComposer(
+            $db: $db,
+            $table: $db.tracks,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$LoudnessMeasurementsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $LoudnessMeasurementsTable,
+          LoudnessMeasurement,
+          $$LoudnessMeasurementsTableFilterComposer,
+          $$LoudnessMeasurementsTableOrderingComposer,
+          $$LoudnessMeasurementsTableAnnotationComposer,
+          $$LoudnessMeasurementsTableCreateCompanionBuilder,
+          $$LoudnessMeasurementsTableUpdateCompanionBuilder,
+          (LoudnessMeasurement, $$LoudnessMeasurementsTableReferences),
+          LoudnessMeasurement,
+          PrefetchHooks Function({bool trackId})
+        > {
+  $$LoudnessMeasurementsTableTableManager(
+    _$AppDatabase db,
+    $LoudnessMeasurementsTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer:
+              () => $$LoudnessMeasurementsTableFilterComposer(
+                $db: db,
+                $table: table,
+              ),
+          createOrderingComposer:
+              () => $$LoudnessMeasurementsTableOrderingComposer(
+                $db: db,
+                $table: table,
+              ),
+          createComputedFieldComposer:
+              () => $$LoudnessMeasurementsTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<int> trackId = const Value.absent(),
+                Value<String> filePath = const Value.absent(),
+                Value<int> fileSize = const Value.absent(),
+                Value<int> fileModifiedMs = const Value.absent(),
+                Value<double?> integratedLufs = const Value.absent(),
+                Value<double?> cabinLufs = const Value.absent(),
+                Value<double?> peakDb = const Value.absent(),
+                Value<DateTime> measuredAt = const Value.absent(),
+              }) => LoudnessMeasurementsCompanion(
+                trackId: trackId,
+                filePath: filePath,
+                fileSize: fileSize,
+                fileModifiedMs: fileModifiedMs,
+                integratedLufs: integratedLufs,
+                cabinLufs: cabinLufs,
+                peakDb: peakDb,
+                measuredAt: measuredAt,
+              ),
+          createCompanionCallback:
+              ({
+                Value<int> trackId = const Value.absent(),
+                required String filePath,
+                required int fileSize,
+                required int fileModifiedMs,
+                Value<double?> integratedLufs = const Value.absent(),
+                Value<double?> cabinLufs = const Value.absent(),
+                Value<double?> peakDb = const Value.absent(),
+                required DateTime measuredAt,
+              }) => LoudnessMeasurementsCompanion.insert(
+                trackId: trackId,
+                filePath: filePath,
+                fileSize: fileSize,
+                fileModifiedMs: fileModifiedMs,
+                integratedLufs: integratedLufs,
+                cabinLufs: cabinLufs,
+                peakDb: peakDb,
+                measuredAt: measuredAt,
+              ),
+          withReferenceMapper:
+              (p0) =>
+                  p0
+                      .map(
+                        (e) => (
+                          e.readTable(table),
+                          $$LoudnessMeasurementsTableReferences(db, table, e),
+                        ),
+                      )
+                      .toList(),
+          prefetchHooksCallback: ({trackId = false}) {
+            return PrefetchHooks(
+              db: db,
+              explicitlyWatchedTables: [],
+              addJoins: <
+                T extends TableManagerState<
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic,
+                  dynamic
+                >
+              >(state) {
+                if (trackId) {
+                  state =
+                      state.withJoin(
+                            currentTable: table,
+                            currentColumn: table.trackId,
+                            referencedTable:
+                                $$LoudnessMeasurementsTableReferences
+                                    ._trackIdTable(db),
+                            referencedColumn:
+                                $$LoudnessMeasurementsTableReferences
+                                    ._trackIdTable(db)
+                                    .id,
+                          )
+                          as T;
+                }
+
+                return state;
+              },
+              getPrefetchedDataCallback: (items) async {
+                return [];
+              },
+            );
+          },
+        ),
+      );
+}
+
+typedef $$LoudnessMeasurementsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $LoudnessMeasurementsTable,
+      LoudnessMeasurement,
+      $$LoudnessMeasurementsTableFilterComposer,
+      $$LoudnessMeasurementsTableOrderingComposer,
+      $$LoudnessMeasurementsTableAnnotationComposer,
+      $$LoudnessMeasurementsTableCreateCompanionBuilder,
+      $$LoudnessMeasurementsTableUpdateCompanionBuilder,
+      (LoudnessMeasurement, $$LoudnessMeasurementsTableReferences),
+      LoudnessMeasurement,
+      PrefetchHooks Function({bool trackId})
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -5141,4 +6192,6 @@ class $AppDatabaseManager {
       $$TracksTableTableManager(_db, _db.tracks);
   $$SponsorBlockSegmentsTableTableManager get sponsorBlockSegments =>
       $$SponsorBlockSegmentsTableTableManager(_db, _db.sponsorBlockSegments);
+  $$LoudnessMeasurementsTableTableManager get loudnessMeasurements =>
+      $$LoudnessMeasurementsTableTableManager(_db, _db.loudnessMeasurements);
 }

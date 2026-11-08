@@ -9,6 +9,84 @@ import 'package:woolytube/services/sponsorblock_categories.dart';
 import '../helpers/test_database.dart';
 
 void main() {
+  group('loudness measurements', () {
+    test('an existing database gets the table on upgrade', () async {
+      final dir = await Directory.systemTemp.createTemp('woolytube-db16-');
+      addTearDown(() => dir.delete(recursive: true));
+      final file = File('${dir.path}/library.sqlite');
+      final fresh = AppDatabase.forTesting(NativeDatabase(file));
+      final playlist = await insertTestPlaylist(fresh);
+      final track = await insertTestTrack(
+        fresh,
+        playlistId: playlist.id,
+        status: 'complete',
+        filePath: '/music/a.m4a',
+      );
+      // Make it look like a version 15 database.
+      await fresh.customStatement('DROP TABLE loudness_measurements');
+      await fresh.customStatement('PRAGMA user_version = 15');
+      await fresh.close();
+
+      final upgraded = AppDatabase.forTesting(NativeDatabase(file));
+      addTearDown(upgraded.close);
+      expect(await upgraded.getLoudnessMeasurement(track.id), isNull);
+      await upgraded.saveLoudnessMeasurement(
+        LoudnessMeasurementsCompanion.insert(
+          trackId: Value(track.id),
+          filePath: '/music/a.m4a',
+          fileSize: 10,
+          fileModifiedMs: 20,
+          integratedLufs: const Value(-9.5),
+          measuredAt: DateTime(2026),
+        ),
+      );
+      final row = await upgraded.getLoudnessMeasurement(track.id);
+      expect(row?.integratedLufs, -9.5);
+      expect(row?.cabinLufs, isNull);
+      expect((await upgraded.getAllTracks()).single.id, track.id);
+    });
+
+    test('a newer measurement replaces the old one', () async {
+      final db = openTestDatabase();
+      addTearDown(db.close);
+      final playlist = await insertTestPlaylist(db);
+      final track = await insertTestTrack(db, playlistId: playlist.id);
+      for (final lufs in [-10.0, -12.0]) {
+        await db.saveLoudnessMeasurement(
+          LoudnessMeasurementsCompanion.insert(
+            trackId: Value(track.id),
+            filePath: '/music/a.m4a',
+            fileSize: 10,
+            fileModifiedMs: lufs.toInt(),
+            integratedLufs: Value(lufs),
+            measuredAt: DateTime(2026),
+          ),
+        );
+      }
+      final all = await db.getLoudnessMeasurements();
+      expect(all.keys, [track.id]);
+      expect(all[track.id]!.integratedLufs, -12);
+    });
+
+    test('measurements go with their playlist', () async {
+      final db = openTestDatabase();
+      addTearDown(db.close);
+      final playlist = await insertTestPlaylist(db);
+      final track = await insertTestTrack(db, playlistId: playlist.id);
+      await db.saveLoudnessMeasurement(
+        LoudnessMeasurementsCompanion.insert(
+          trackId: Value(track.id),
+          filePath: '/music/a.m4a',
+          fileSize: 10,
+          fileModifiedMs: 20,
+          measuredAt: DateTime(2026),
+        ),
+      );
+      await db.deletePlaylist(playlist.id);
+      expect(await db.getLoudnessMeasurements(), isEmpty);
+    });
+  });
+
   late AppDatabase db;
 
   setUp(() {

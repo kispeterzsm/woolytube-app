@@ -32,6 +32,8 @@ class _GatedStore implements PlaybackSettingsStore {
   @override
   Future<void> saveAudioOnly(bool enabled) => inner.saveAudioOnly(enabled);
   @override
+  Future<void> savePlaneMode(bool enabled) => inner.savePlaneMode(enabled);
+  @override
   Future<void> saveSession(PlaybackSession? session) =>
       inner.saveSession(session);
 }

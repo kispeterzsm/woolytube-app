@@ -2,6 +2,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:woolytube/services/app_settings_service.dart';
+import 'package:woolytube/services/audio_processing.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -70,6 +71,42 @@ void main() {
       AppSettingsService.subtitleLanguagesKey: ' de, en ,',
     });
     expect(await settings.getSubtitleLanguages(), 'de,en');
+  });
+
+  test('sound settings default to off and standard and persist', () async {
+    final settings = AppSettingsService();
+    expect(await settings.getEvenOutVolume(), isFalse);
+    expect(await settings.getPlaneModeStrength(), PlaneModeStrength.standard);
+    expect(await settings.getPlaneModeTipShown(), isFalse);
+    await settings.setEvenOutVolume(true);
+    await settings.setPlaneModeStrength(PlaneModeStrength.strong);
+    await settings.setPlaneModeTipShown();
+    final reloaded = AppSettingsService();
+    expect(await reloaded.getEvenOutVolume(), isTrue);
+    expect(await reloaded.getPlaneModeStrength(), PlaneModeStrength.strong);
+    expect(await reloaded.getPlaneModeTipShown(), isTrue);
+  });
+
+  test('restoring settings brings back the sound preferences only', () async {
+    final settings = AppSettingsService();
+    final applied = await settings.importSettings({
+      AppSettingsService.evenOutVolumeKey: true,
+      AppSettingsService.planeModeStrengthKey: 'strong',
+      AppSettingsService.planeModeTipShownKey: true,
+    });
+    expect(applied, 2);
+    expect(await settings.getEvenOutVolume(), isTrue);
+    expect(await settings.getPlaneModeStrength(), PlaneModeStrength.strong);
+    expect(await settings.getPlaneModeTipShown(), isFalse);
+
+    // A hand-edited backup with an unknown strength changes nothing.
+    expect(
+      await settings.importSettings({
+        AppSettingsService.planeModeStrengthKey: 'max',
+      }),
+      0,
+    );
+    expect(await settings.getPlaneModeStrength(), PlaneModeStrength.strong);
   });
 
   test('mobile-data auto download is off by default', () async {

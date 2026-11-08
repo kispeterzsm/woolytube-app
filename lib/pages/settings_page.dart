@@ -12,10 +12,12 @@ import '../providers/playback_providers.dart';
 import '../providers/providers.dart';
 import '../services/update_service.dart';
 import '../services/app_settings_service.dart';
+import '../services/audio_processing.dart';
 import '../services/library_export_service.dart';
 import '../services/library_layout.dart';
 import '../services/metadata_service.dart';
 import '../services/playback_service.dart';
+import '../widgets/plane_mode_button.dart';
 import '../widgets/settings_section_header.dart';
 import 'debug_log_page.dart';
 
@@ -30,6 +32,8 @@ Future<void> _applyRestoredSettings(
     await player.setPauseOnAudioInterruption(
       await settings.getPauseOnAudioInterruption(),
     );
+    await player.setEvenOutVolume(await settings.getEvenOutVolume());
+    await player.setPlaneModeStrength(await settings.getPlaneModeStrength());
   } catch (_) {
     // Applies at the next start.
   }
@@ -49,6 +53,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   AppUpdate? _availableUpdate;
   bool _autoDownloadWithMobileData = false;
   bool _pauseOnAudioInterruption = true;
+  bool _evenOutVolume = false;
+  PlaneModeStrength _planeModeStrength = PlaneModeStrength.standard;
   bool _downloadSubtitles = false;
   String _subtitleLanguages = 'en';
   DateTime? _lastYtDlpUpdateCheck;
@@ -81,8 +87,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       ]);
       final languages = await settings.getSubtitleLanguages();
       final lastCheck = await settings.getLastYtDlpUpdateAttempt();
+      final evenOutVolume = await settings.getEvenOutVolume();
+      final strength = await settings.getPlaneModeStrength();
       if (mounted) {
         setState(() {
+          _evenOutVolume = evenOutVolume;
+          _planeModeStrength = strength;
           _downloadSubtitles = values[2];
           _subtitleLanguages = languages;
           _autoDownloadWithMobileData = values[0];
@@ -150,6 +160,49 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     // latest at the next start.
     try {
       await player?.setPauseOnAudioInterruption(enabled);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Saved. The player could not use it yet, so it applies after '
+            'the app restarts ($error).',
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<void> _setEvenOutVolume(bool enabled) async {
+    final player = _playerOrNull();
+    final saved = await _save(
+      apply: () => _evenOutVolume = enabled,
+      revert: () => _evenOutVolume = !enabled,
+      write:
+          () => ref.read(appSettingsServiceProvider).setEvenOutVolume(enabled),
+    );
+    if (saved) await _tellPlayer(() => player?.setEvenOutVolume(enabled));
+  }
+
+  Future<void> _setPlaneModeStrength(PlaneModeStrength strength) async {
+    final player = _playerOrNull();
+    final previous = _planeModeStrength;
+    final saved = await _save(
+      apply: () => _planeModeStrength = strength,
+      revert: () => _planeModeStrength = previous,
+      write:
+          () => ref
+              .read(appSettingsServiceProvider)
+              .setPlaneModeStrength(strength),
+    );
+    if (saved) await _tellPlayer(() => player?.setPlaneModeStrength(strength));
+  }
+
+  /// Hands a saved sound setting to the player. The choice is stored
+  /// either way; the player picks it up at the latest at the next start.
+  Future<void> _tellPlayer(Future<void>? Function() apply) async {
+    try {
+      await apply();
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -296,6 +349,47 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         value: _pauseOnAudioInterruption,
         onChanged: saving ? null : _setPauseOnAudioInterruption,
       ),
+      const SettingsSectionHeader('Sound'),
+      _PlaneModeTile(enabled: !saving),
+      ListTile(
+        key: const ValueKey('plane-mode-strength'),
+        leading: const Icon(Icons.tune),
+        title: const Text('Plane mode strength'),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(switch (_planeModeStrength) {
+              PlaneModeStrength.standard =>
+                'Standard: gentle, fine for a whole flight.',
+              PlaneModeStrength.strong =>
+                'Strong: lifts quiet parts further; can sound squeezed.',
+            }),
+            const SizedBox(height: 8),
+            SegmentedButton<PlaneModeStrength>(
+              showSelectedIcon: false,
+              segments: [
+                for (final strength in PlaneModeStrength.values)
+                  ButtonSegment(value: strength, label: Text(strength.label)),
+              ],
+              selected: {_planeModeStrength},
+              onSelectionChanged:
+                  saving ? null : (value) => _setPlaneModeStrength(value.first),
+            ),
+          ],
+        ),
+      ),
+      SwitchListTile(
+        key: const ValueKey('even-out-volume'),
+        secondary: const Icon(Icons.equalizer),
+        title: const Text('Even out volume'),
+        subtitle: const Text(
+          'Plays every song at a similar loudness, so a loud song does not '
+          'follow a quiet one.',
+        ),
+        value: _evenOutVolume,
+        onChanged: saving ? null : _setEvenOutVolume,
+      ),
+      const _LoudnessProgressTile(),
       const SettingsSectionHeader('Downloads and updates'),
       SwitchListTile(
         secondary: const Icon(Icons.network_cell),
@@ -1106,6 +1200,64 @@ class _SubtitleLanguagesDialogState extends State<_SubtitleLanguagesDialog> {
         ),
         FilledButton(onPressed: _save, child: const Text('Save')),
       ],
+    );
+  }
+}
+
+/// Plane mode on or off, in step with the player's button.
+class _PlaneModeTile extends ConsumerWidget {
+  const _PlaneModeTile({required this.enabled});
+
+  final bool enabled;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final on = ref.watch(planeModeProvider).valueOrNull ?? false;
+    return SwitchListTile(
+      key: const ValueKey('plane-mode-setting'),
+      secondary: const Icon(Icons.flight_rounded),
+      title: const Text('Plane mode'),
+      subtitle: const Text(
+        'Evens out songs and lifts their quiet parts, so music stays clear '
+        'over engine noise at a lower volume. Also in the player.',
+      ),
+      value: on,
+      onChanged:
+          enabled ? (_) => togglePlaneModeWithFeedback(context, ref) : null,
+    );
+  }
+}
+
+/// How many songs have their loudness measured, while measuring is on.
+class _LoudnessProgressTile extends ConsumerWidget {
+  const _LoudnessProgressTile();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final measuring =
+        ref.watch(audioProcessingSettingsProvider).valueOrNull?.needsLoudness ??
+        false;
+    if (!measuring) return const SizedBox.shrink();
+    final progress = ref.watch(loudnessProgressProvider).valueOrNull;
+    if (progress == null) return const SizedBox.shrink();
+    final String text;
+    if (progress.total == 0) {
+      if (!progress.working) return const SizedBox.shrink();
+      text = 'Measuring songs\u2026';
+    } else if (progress.measured >= progress.total && !progress.working) {
+      text = 'All ${progress.total} songs measured';
+    } else {
+      text = 'Measured ${progress.measured} of ${progress.total} songs';
+    }
+    return ListTile(
+      key: const ValueKey('loudness-progress'),
+      dense: true,
+      leading: const SizedBox(width: 24),
+      title: Text(text),
+      subtitle: const Text(
+        'Each song is measured once, in the background, while plane mode or '
+        'Even out volume is on.',
+      ),
     );
   }
 }

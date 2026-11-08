@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:math';
-import 'package:flutter/foundation.dart' show listEquals;
+import 'package:flutter/foundation.dart' show debugPrint, listEquals;
 import 'package:media_kit/media_kit.dart' hide Track, Playlist, Tracks;
 import 'package:media_kit/media_kit.dart' as media show Tracks;
 import 'package:media_kit_video/media_kit_video.dart';
@@ -8,8 +8,10 @@ import 'package:rxdart/rxdart.dart';
 import 'package:path/path.dart' as p;
 import '../database/database.dart';
 import 'audio_focus_controller.dart';
+import 'audio_processing.dart';
 import 'chapter_playback.dart';
 import 'chapters.dart';
+import 'loudness_service.dart';
 import 'metadata_service.dart';
 import 'playback_notification_controller.dart';
 import 'playback_settings_store.dart';
@@ -279,6 +281,9 @@ class PlaybackService
   final _shuffleEnabled = BehaviorSubject<bool>.seeded(false);
   final _autoplayEnabled = BehaviorSubject<bool>.seeded(true);
   final _audioOnlyMode = BehaviorSubject<bool>.seeded(false);
+  final _audioSettings = BehaviorSubject<AudioProcessingSettings>.seeded(
+    const AudioProcessingSettings(),
+  );
   final _stopAfterCurrent = BehaviorSubject<bool>.seeded(false);
   final _pendingSegmentMarkStart = BehaviorSubject<Duration?>.seeded(null);
   final _sponsorBlockSegments =
@@ -305,6 +310,17 @@ class PlaybackService
   Stream<bool> get shuffleEnabledStream => _shuffleEnabled.stream.distinct();
   Stream<bool> get autoplayEnabledStream => _autoplayEnabled.stream.distinct();
   Stream<bool> get audioOnlyModeStream => _audioOnlyMode.stream.distinct();
+
+  /// Plane mode: songs are evened out and their quiet parts lifted, so they
+  /// stay clear over engine noise at a lower volume.
+  Stream<bool> get planeModeStream =>
+      _audioSettings.stream.map((s) => s.planeMode).distinct();
+  bool get planeMode => _audioSettings.value.planeMode;
+
+  /// Plane mode, its strength and "Even out volume" together.
+  Stream<AudioProcessingSettings> get audioProcessingSettingsStream =>
+      _audioSettings.stream.distinct();
+  AudioProcessingSettings get audioProcessingSettings => _audioSettings.value;
 
   /// "Stop after this song": playback pauses when the current item ends.
   Stream<bool> get stopAfterCurrentStream =>
@@ -384,6 +400,18 @@ class PlaybackService
   Duration? get sleepTimerRemaining => _sleepTimer.remaining;
 
   Future<void> _videoTrackTransition = Future.value();
+
+  final Future<void> Function(String name, String value)?
+  _setMpvPropertyOverride;
+
+  /// Where measured loudness comes from; see [attachLoudness].
+  TrackLoudnessSource? _loudness;
+
+  /// The filters and gain mpv has now. mpv keeps them across files.
+  AudioProcessingPlan _appliedAudioPlan = AudioProcessingPlan.none;
+
+  /// Keeps changes to mpv's filters in order.
+  Future<void> _audioPlanTransition = Future.value();
   List<_SkipSegment> _activeSegments = [];
 
   /// Queue items the user picked although they are marked Always skip (a
@@ -411,14 +439,19 @@ class PlaybackService
   /// song across restarts. When it is omitted, the app's shared preferences
   /// are used for a real player and nothing is remembered when a test passes
   /// its own [player].
+  ///
+  /// [setMpvProperty] replaces setting an mpv option on the real player (for
+  /// tests, whose players have no mpv behind them).
   PlaybackService(
     this._db, {
     Random? random,
     Player? player,
     PlaybackSettingsStore? settingsStore,
+    Future<void> Function(String name, String value)? setMpvProperty,
   }) : _settingsStore =
            settingsStore ??
-           (player == null ? SharedPreferencesPlaybackSettingsStore() : null) {
+           (player == null ? SharedPreferencesPlaybackSettingsStore() : null),
+       _setMpvPropertyOverride = setMpvProperty {
     _player = player ?? Player();
     _albumQueue = AlbumPlaybackQueue(random: random);
     // Route the sleep timer through the transition chain so a track change
@@ -1106,6 +1139,9 @@ class PlaybackService
     try {
       await _player.pause();
       await _loadActiveSegments(item.track);
+      // The new song's level and filters are in place before its first
+      // sample is decoded.
+      await _applyAudioProcessing(item.track.id, filePath);
       // A pause pressed until now (or "stop after this song") opens the file
       // paused, so not even a moment of it is heard.
       playOnOpen = !(_pauseAfterLoad || _pauseAfterLoadKeepFocus);
@@ -1161,6 +1197,7 @@ class PlaybackService
     _syncPlaying();
     _armLoadWatch();
     _saveSession(force: true);
+    _prioritizeLoudness();
     return _LoadResult.opened;
   }
 
@@ -2186,6 +2223,119 @@ class PlaybackService
   Future<void> toggleAudioOnlyMode() =>
       setAudioOnlyPreference(!_audioOnlyMode.value);
 
+  /// Switches plane mode on or off for the song that is playing and the
+  /// ones after it, without remembering the choice.
+  Future<void> setPlaneMode(bool enabled) =>
+      _updateAudioSettings(_audioSettings.value.copyWith(planeMode: enabled));
+
+  /// The user's own plane mode choice: applied and remembered across
+  /// restarts.
+  Future<void> setPlaneModePreference(bool enabled) {
+    _remember((store) => store.savePlaneMode(enabled));
+    return setPlaneMode(enabled);
+  }
+
+  Future<void> togglePlaneMode() =>
+      setPlaneModePreference(!_audioSettings.value.planeMode);
+
+  /// How hard plane mode works. Remembered by the app settings.
+  Future<void> setPlaneModeStrength(PlaneModeStrength strength) =>
+      _updateAudioSettings(_audioSettings.value.copyWith(strength: strength));
+
+  /// "Even out volume": every song at a similar loudness. Remembered by the
+  /// app settings.
+  Future<void> setEvenOutVolume(bool enabled) => _updateAudioSettings(
+    _audioSettings.value.copyWith(evenOutVolume: enabled),
+  );
+
+  /// Lets the player use measured loudness, and asks for the songs it
+  /// plays to be measured first.
+  void attachLoudness(TrackLoudnessSource source) {
+    _loudness = source;
+    if (_audioSettings.value.needsLoudness) _prioritizeLoudness();
+  }
+
+  Future<void> _updateAudioSettings(AudioProcessingSettings settings) async {
+    if (_audioSettings.isClosed || _audioSettings.value == settings) return;
+    _audioSettings.add(settings);
+    if (settings.needsLoudness) _prioritizeLoudness();
+    // The song that is playing (or opening) changes at once.
+    final trackId = currentItem?.track.id;
+    final path = _currentFilePath;
+    if (trackId == null || path == null) return;
+    await _applyAudioProcessing(trackId, path);
+  }
+
+  /// Gives mpv the filters and gain for [trackId]'s file at [path]. Never
+  /// throws: playback goes on unprocessed rather than not at all.
+  Future<void> _applyAudioProcessing(int trackId, String path) {
+    final next = _audioPlanTransition.then((_) async {
+      try {
+        final settings = _audioSettings.value;
+        MeasuredLoudness? loudness;
+        if (settings.needsLoudness) {
+          try {
+            loudness = await _loudness?.loudnessFor(trackId, path);
+          } catch (_) {}
+        }
+        await _setAudioPlan(planAudioProcessing(settings, loudness));
+      } catch (e) {
+        debugPrint('Could not apply audio processing: $e');
+      }
+    });
+    _audioPlanTransition = next;
+    return next;
+  }
+
+  Future<void> _setAudioPlan(AudioProcessingPlan plan) async {
+    final applied = _appliedAudioPlan;
+    if (plan.filters != applied.filters) {
+      if (!await _setMpvProperty('af', plan.filters)) return;
+      _appliedAudioPlan = AudioProcessingPlan(
+        filters: plan.filters,
+        gainDb: applied.gainDb,
+      );
+    }
+    if (plan.gainDb != _appliedAudioPlan.gainDb) {
+      if (!await _setMpvProperty('replaygain-fallback', plan.gainText)) return;
+      _appliedAudioPlan = plan;
+    }
+  }
+
+  /// Sets an mpv option on the main player. False when there is no mpv
+  /// (tests and platforms without libmpv).
+  Future<bool> _setMpvProperty(String name, String value) async {
+    final override = _setMpvPropertyOverride;
+    if (override != null) {
+      await override(name, value);
+      return true;
+    }
+    final native = _nativePlayer;
+    if (native == null) return false;
+    await native.setProperty(name, value);
+    return true;
+  }
+
+  /// Asks for the current song and the next few to be measured first.
+  void _prioritizeLoudness() {
+    final loudness = _loudness;
+    if (loudness == null || !_audioSettings.value.needsLoudness) return;
+    final items = _albumQueue.items;
+    final start = _albumQueue.current == null ? 0 : _albumQueue.index;
+    final jobs = <LoudnessJob>[];
+    final seen = <int>{};
+    for (var i = start; i < items.length && jobs.length < 4; i++) {
+      final track = items[i].track;
+      if (!seen.add(track.id) || !isTrackPlayable(track)) continue;
+      final path =
+          track.id == _loadedTrackId && _currentFilePath != null
+              ? _currentFilePath
+              : _resolveTrackFile(track);
+      if (path != null) jobs.add(LoudnessJob(track.id, path));
+    }
+    if (jobs.isNotEmpty) loudness.prioritize(jobs);
+  }
+
   /// Audio-only for a situation without a screen (car, picture-in-picture
   /// headphone button). [restoreTemporaryAudioOnly] undoes it, unless the
   /// user changed the mode in between. Does nothing when audio-only is on
@@ -2336,6 +2486,9 @@ class PlaybackService
     if (audioOnly) {
       unawaited(setAudioOnlyMode(true).catchError((Object _) {}));
     }
+    if (preferences.planeMode == true) {
+      unawaited(setPlaneMode(true).catchError((Object _) {}));
+    }
     final session = preferences.session;
     if (session != null && currentItem == null) {
       try {
@@ -2418,6 +2571,7 @@ class PlaybackService
       _shuffleEnabled.close(),
       _autoplayEnabled.close(),
       _audioOnlyMode.close(),
+      _audioSettings.close(),
       _stopAfterCurrent.close(),
       _pendingSegmentMarkStart.close(),
       _sponsorBlockSegments.close(),

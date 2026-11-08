@@ -4,10 +4,12 @@ import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../database/database.dart';
 import '../services/ytdlp_service.dart';
+import 'playback_providers.dart';
 import '../services/chapter_service.dart';
 import '../services/playlist_service.dart';
 import '../services/download_service.dart';
 import '../services/log_service.dart';
+import '../services/loudness_service.dart';
 import '../services/metadata_service.dart';
 import '../services/notification_service.dart';
 import '../services/update_service.dart';
@@ -159,6 +161,54 @@ final thumbnailBackfillServiceProvider = Provider<ThumbnailBackfillService>((
           !_backfillPausingOperationsExempt.contains(operation);
     },
   );
+});
+
+/// Measures songs' loudness for plane mode and "Even out volume". Waits
+/// while files are moved or deleted, like the cover backfill.
+final loudnessServiceProvider = Provider<LoudnessService>((ref) {
+  final gate = ref.watch(libraryGateProvider);
+  final service = LoudnessService(
+    ref.watch(databaseProvider),
+    log: ref.watch(logServiceProvider),
+    shouldPause: () {
+      final operation = gate.activeOperation;
+      return operation != null &&
+          !_backfillPausingOperationsExempt.contains(operation);
+    },
+  );
+  ref.onDispose(service.dispose);
+  return service;
+});
+
+/// How far measuring the library's loudness has come.
+final loudnessProgressProvider = StreamProvider<LoudnessProgress>((ref) {
+  return ref.watch(loudnessServiceProvider).progressStream;
+});
+
+/// Connects the player to the loudness measurements once the library is
+/// ready: measuring runs while plane mode or "Even out volume" is on, and
+/// looks for new songs whenever the download queue empties.
+final playbackLoudnessLinkProvider = Provider<void>((ref) {
+  final loudness = ref.watch(loudnessServiceProvider);
+  final playback = ref.watch(playbackServiceProvider);
+  final downloads = ref.watch(downloadServiceProvider);
+  playback.attachLoudness(loudness);
+  final settings = playback.audioProcessingSettingsStream.listen(
+    (s) => loudness.setEnabled(s.needsLoudness),
+  );
+  var downloading = false;
+  final queue = downloads.queueStream.listen((ids) {
+    if (ids.isNotEmpty) {
+      downloading = true;
+    } else if (downloading) {
+      downloading = false;
+      loudness.rescan();
+    }
+  });
+  ref.onDispose(() {
+    settings.cancel();
+    queue.cancel();
+  });
 });
 
 /// Rewrites each playlist folder's metadata file and playlist file shortly

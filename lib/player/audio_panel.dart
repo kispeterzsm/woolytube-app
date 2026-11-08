@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/playback_providers.dart';
 import '../widgets/chapters_button.dart';
 import '../widgets/next_file_button.dart';
+import '../widgets/plane_mode_button.dart';
 import '../widgets/player_controls.dart';
 import '../widgets/segment_mark_button.dart';
 import '../widgets/sleep_timer_button.dart';
@@ -149,15 +150,24 @@ class _PanelHeader extends StatelessWidget {
         Positioned(
           right: 8,
           top: 8,
-          child: TextButton.icon(
-            key: const ValueKey('player-stop-button'),
-            style: TextButton.styleFrom(
-              foregroundColor: PlayerLayout.secondaryText,
-              minimumSize: const Size(48, 48),
-            ),
-            onPressed: onStop,
-            icon: const Icon(Icons.stop_rounded, size: 20),
-            label: const Text('Stop'),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const PlaneModeButton(
+                activeColor: PlayerLayout.activeToggle,
+                inactiveColor: PlayerLayout.secondaryText,
+              ),
+              TextButton.icon(
+                key: const ValueKey('player-stop-button'),
+                style: TextButton.styleFrom(
+                  foregroundColor: PlayerLayout.secondaryText,
+                  minimumSize: const Size(48, 48),
+                ),
+                onPressed: onStop,
+                icon: const Icon(Icons.stop_rounded, size: 20),
+                label: const Text('Stop'),
+              ),
+            ],
           ),
         ),
       ],
