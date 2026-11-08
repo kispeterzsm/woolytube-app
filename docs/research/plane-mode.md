@@ -6,9 +6,11 @@ Research date: 2026-11-08. Written for a listener with passive wired in-ear buds
 
 Ship three things, in this order of benefit:
 
-1. **Tell the listener about fit.** A good ear-tip seal lowers the engine noise in the ear by 7–9 dB, more than any processing. Plane mode shows this once, the first time it is switched on.
-2. **Even out loudness between songs**, measured once per file on the phone. Without it, the volume ends up set for the quietest song, and every louder song plays too loud. Plane mode levels songs by the part of their sound that is not masked by the rumble ("cabin loudness"). That cut music exposure by about 6 dB in a playlist simulation, against about 0 dB for plain loudness levelling.
-3. **Compress gently inside mpv**: lift quiet passages, add a small low-mid lift, and stop clipping with a limiter. This is worth about 2.5 dB of exposure on a typical song, about 5 dB in quiet passages, and 4–7 dB on dynamic music such as classical.
+1. **Tell the listener about fit.** In the model, a good seal let the music play about 7 dB (6–9 dB) quieter than a poor one, more than any processing. A poor seal was assumed to give half the isolation. Plane mode shows this once, the first time it is switched on.
+2. **Even out loudness between songs**, measured once per file on the phone. Without it, the volume ends up set for the quietest song, and every louder song plays too loud. Plane mode levels songs by integrated loudness plus a correction for bass the rumble masks ("cabin loudness", capped at −3/+5 dB). In a playlist simulation that cut music exposure by about 6.5 dB, against about 0 dB for plain loudness levelling.
+3. **Compress gently inside mpv**: lift quiet passages, add a small low-mid lift, and stop clipping with a limiter.
+   - About 2.5 dB of exposure on a typical song, and about 5 dB in its quiet passages.
+   - Classical and piano: 2–3.5 dB overall and 5–6.5 dB in quiet passages.
 
 Do not ship bass boost, presence boost, EQ-only presets, Android's `LoudnessEnhancer`, `dynaudnorm`, or microphone-adaptive EQ (reasons below).
 
@@ -41,7 +43,7 @@ Inference from a model, not a listening test. Seven CC-licensed music clips (cla
 | `LoudnessEnhancer`-style +10 dB into a limiter | −0.6 dB (the knob drops 9.6 dB) | | |
 | `dynaudnorm` | −0.1 to +0.1 dB, +2.6 dB on piano | | |
 | EQ only, possible with the stock libmpv build | −0.2 to −0.3 dB | | |
-| Good seal instead of a poor one | **−7.4 dB** | | |
+| Good seal instead of a poor one (music level needed) | **−7.4 dB** [−6.1..−8.8] | | |
 
 Already loud, compressed pop and electronic music gains 0–1 dB from compression. Classical and piano gain 2–3.5 dB. Compression helps mainly with dynamic recordings ([Taylor & Miranda](https://www.aes.org/e-lib/browse.cfm?elib=18461) found no benefit of hyper-compressed pop for earbuds in noise).
 
@@ -51,7 +53,9 @@ Already loud, compressed pop and electronic music gains 0–1 dB from compressio
 |---|---|
 | None | 0 dB |
 | Integrated loudness (EBU R128, LUFS) | −0.1 dB |
-| **Loudness above 300 Hz ("cabin loudness")** | **−6.3 dB** (−7.7 dB with compression) |
+| **Loudness above 300 Hz ("cabin loudness")** | **−6.3 dB** (about −7 dB with compression) |
+| Integrated loudness + cabin correction capped at ±3 dB | −4.7 dB |
+| Integrated loudness + cabin correction capped at −3/+5 dB (shipped) | −6.5 dB |
 
 Bass-heavy mixes need up to 10 dB more level in the cabin than LUFS predicts, because LUFS counts bass that cannot be heard there. After LUFS levelling the needed gain still differed by 10.9 dB between songs; after cabin levelling, by 4.6 dB. This result comes from 7 clips and from a model whose audibility is itself driven by the bands above 250 Hz, so it needs a listening check on a real flight.
 
@@ -81,7 +85,10 @@ WoolyTube plays through media_kit's libmpv. Three routes were checked in source:
 
 **Measuring loudness:**
 - A new Kotlin decoder (MediaExtractor and MediaCodec at full rate, float output where possible) feeds an ITU-R BS.1770-4 meter. The meter's K-weighting follows libebur128, with 400 ms blocks and −70 LUFS / −10 LU gates. It also measures cabin loudness: the same meter after a 2nd-order 300 Hz high-pass, gated on its own.
-- It matches FFmpeg's `ebur128` within 0.006 LU on music, noise, mono and 5.1 at 22.05–48 kHz. The meter runs at about 1000× real time on a desktop JVM. On a phone, decoding dominates: an estimated 1.5–3 s per 4-minute song on a mid-range phone, not yet measured.
+- It matches FFmpeg's `ebur128` within 0.006 LU on music, noise, mono and 5.1 at 22.05–48 kHz.
+- Mono is measured as one channel, as BS.1770 defines it. mpv plays mono on both ears at −3 dB each, which has the same loudness.
+- WAV files, and FLAC files through Android's own extractor, arrive as raw PCM. They are read in the extractor's encoding, because asking the raw decoder for float only relabels 16-bit samples.
+- The meter runs at about 1000× real time on a desktop JVM. On a phone, decoding dominates: an estimated 1.5–3 s per 4-minute song on a mid-range phone, not yet measured.
 - The existing 16 kHz mono decoder for song recognition reads 3–5 dB low, so it is not used.
 
 **Applying it:**
@@ -102,10 +109,10 @@ WoolyTube plays through media_kit's libmpv. Three routes were checked in source:
 ```
 
 - `L = -20 - integrated LUFS`, clamped to −24…+12 dB. It brings every song to the same level at the compressor, so its threshold means the same on every song.
-- `C = (integrated − cabin loudness) − 3`, clamped to ±3 dB. Songs with more masked bass get a little more level, and bass-light songs a little less.
+- `C = (integrated − cabin loudness) − 3`, clamped to −3…+5 dB. Songs with more masked bass get more level, and bass-light songs a little less. At +5 dB the limiter took at most 0.4 LU off drum & bass.
 - An unmeasured song is planned as if at −14 LUFS with C = 0. The limiter keeps it safe.
 - **Strong** uses −32 dB, 3:1, 10/250 ms, a +6 dB low-mid lift and 13 dB of output gain.
-- **Output level:** a typical song comes out at about −15 LUFS (Standard) or −14 LUFS (Strong). In the calibration the limiter took at most 0.3 LU of loudness. Loud masters therefore get quieter when plane mode is switched on, and quiet recordings louder. The first-time tips ask the listener to set the volume so the quiet parts are just clear.
+- **Output level:** a typical song comes out at about −15 LUFS (Standard) or −14 LUFS (Strong). Loud recent masters (−7 to −10 LUFS) therefore get quieter when plane mode is switched on and may need the volume a little higher, while quiet recordings get louder. The first-time tips ask the listener to set the volume so the quiet parts are just clear, and no louder.
 - The limiter ceiling is −1.5 dBFS, because the sample-peak limiter misses up to about 1 dB of inter-sample peaks.
 
 **Even out volume** (Settings > Sound) brings songs to −14 LUFS with `replaygain-fallback`:
@@ -115,8 +122,11 @@ WoolyTube plays through media_kit's libmpv. Three routes were checked in source:
 
 **Measuring:**
 - Measuring runs only while plane mode or Even out volume is on.
-- The playing song and the next three come first, then every other downloaded song, one at a time with a pause in between. The library scan runs in a background isolate.
-- Measuring waits while the library moves or deletes files, and looks for new songs whenever the download queue empties.
+- The player switches measuring on and off with its settings, then asks for the playing song and the next three. Those are measured right away, even on battery.
+- The rest of the library is measured one song at a time, and only while the phone is charging. A one-time pass is about 1.5–3 s of decoding per song (estimated), which is hours of CPU for a large library. The player's look-ahead covers what is actually played.
+- The library scan runs in a background isolate.
+- Measuring waits while the library moves or deletes files, and scans again afterwards, since paths may have changed. It looks for new songs whenever a download run ends.
+- A song is never re-levelled while it plays. One that was not measured yet keeps the typical level until its next play.
 - Results are stored in a `loudness_measurements` table with the file's path, size and modification time. A replaced file is measured again, and measurements are deleted with their track.
 
 **Unchanged:**
@@ -131,6 +141,7 @@ WoolyTube plays through media_kit's libmpv. Three routes were checked in source:
 - **The `alimiter` in FFmpeg 6.0** lacks a bounds check added in 6.1, which can, rarely, cause a brief extra gain dip. Output is still hard-limited.
 - **A missing filter means silence:** if a build ever went back to the default libmpv, mpv would accept the filter string and then play the next song with no sound. `test/plane_mode_build_test.dart` fails if the vendored libmpv override is removed.
 - **Compressor state resets on every seek** (mpv rebuilds the lavfi graph). The first 15 ms after a seek play at full make-up gain, caught by the limiter.
+- **Measuring without a charger** covers only the playing and next songs. A song chosen out of order, for example by tapping it, plays at the typical level the first time.
 - **Vendor effects** (Samsung SoundAlive, Dolby) still run after plane mode.
 
 ## Implementation order and verification

@@ -186,29 +186,23 @@ final loudnessProgressProvider = StreamProvider<LoudnessProgress>((ref) {
 });
 
 /// Connects the player to the loudness measurements once the library is
-/// ready: measuring runs while plane mode or "Even out volume" is on, and
-/// looks for new songs whenever the download queue empties.
+/// ready. The player switches measuring on and off with its settings; new
+/// downloads are looked for whenever a download run ends.
 final playbackLoudnessLinkProvider = Provider<void>((ref) {
   final loudness = ref.watch(loudnessServiceProvider);
   final playback = ref.watch(playbackServiceProvider);
   final downloads = ref.watch(downloadServiceProvider);
   playback.attachLoudness(loudness);
-  final settings = playback.audioProcessingSettingsStream.listen(
-    (s) => loudness.setEnabled(s.needsLoudness),
-  );
-  var downloading = false;
-  final queue = downloads.queueStream.listen((ids) {
-    if (ids.isNotEmpty) {
-      downloading = true;
-    } else if (downloading) {
-      downloading = false;
+  var busy = false;
+  final runs = downloads.progressStream.listen((progress) {
+    if (progress.isBusy) {
+      busy = true;
+    } else if (busy) {
+      busy = false;
       loudness.rescan();
     }
   });
-  ref.onDispose(() {
-    settings.cancel();
-    queue.cancel();
-  });
+  ref.onDispose(runs.cancel);
 });
 
 /// Rewrites each playlist folder's metadata file and playlist file shortly

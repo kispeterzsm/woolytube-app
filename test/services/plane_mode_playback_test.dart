@@ -22,8 +22,27 @@ class _FakeLoudness implements TrackLoudnessSource {
   Future<MeasuredLoudness?> loudnessFor(int trackId, String path) async =>
       values[trackId];
 
+  bool enabled = false;
+
   @override
-  void prioritize(List<LoudnessJob> files) => requests.add(files);
+  void prioritize(List<LoudnessJob> files) {
+    if (enabled) requests.add(files);
+  }
+
+  @override
+  void setEnabled(bool enabled) => this.enabled = enabled;
+}
+
+class _RecordingAnalyzer implements LoudnessAnalyzer {
+  _RecordingAnalyzer(this.paths);
+
+  final List<String> paths;
+
+  @override
+  Future<MeasuredLoudness> analyze(String path) async {
+    paths.add(path);
+    return const MeasuredLoudness(integratedLufs: -12, cabinLufs: -15);
+  }
 }
 
 void main() {
@@ -219,6 +238,38 @@ void main() {
     await playback.next();
     expect(loudness.requests.last.first.trackId, tracks[2].id);
   });
+
+  test(
+    'switching plane mode on measures the playing and next songs first',
+    () async {
+      final analyzed = <String>[];
+      final loudness = LoudnessService(
+        db,
+        analyzer: _RecordingAnalyzer(analyzed),
+        isCharging: () async => true,
+        pauseBetween: Duration.zero,
+      );
+      addTearDown(loudness.dispose);
+      final tracks = [for (var i = 0; i < 8; i++) await addTrack('t$i')];
+      playback.attachLoudness(loudness);
+      await playback.playTrack(tracks[5], tracks);
+      expect(loudness.enabled, isFalse);
+
+      await playback.setPlaneMode(true);
+      expect(loudness.enabled, isTrue);
+      for (var i = 0; i < 100 && analyzed.length < 3; i++) {
+        await settle(10);
+      }
+      expect(analyzed.take(3), [
+        tracks[5].filePath,
+        tracks[6].filePath,
+        tracks[7].filePath,
+      ]);
+
+      await playback.setPlaneMode(false);
+      expect(loudness.enabled, isFalse);
+    },
+  );
 
   test('a failing mpv option does not stop the song from playing', () async {
     await playback.dispose();

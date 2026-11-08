@@ -19,8 +19,8 @@ import kotlin.math.tan
  * Filters and sums are in double precision. Memory grows by two doubles per
  * 100 ms, under 2 MB for three hours.
  *
- * Mono is measured as dual mono, because mpv plays it on both ears: it reads
- * 3 dB above the same signal in one channel of a stereo file.
+ * Mono is measured as one channel, as BS.1770 defines it. mpv plays mono on
+ * both ears at 3 dB less each, which has the same loudness.
  */
 class LoudnessMeter(sampleRate: Int, channels: Int) {
     class Result(
@@ -62,9 +62,9 @@ class LoudnessMeter(sampleRate: Int, channels: Int) {
 
         private fun powerToLufs(power: Double): Double = -0.691 + 10.0 * log10(power)
 
-        /** BS.1770 channel weights; one channel counts twice (dual mono). */
+        /** BS.1770 channel weights. */
         private fun channelWeights(channels: Int): DoubleArray = when (channels) {
-            1 -> doubleArrayOf(2.0)
+            1 -> doubleArrayOf(1.0)
             // Android's 5.1 order: FL FR FC LFE BL BR.
             6 -> doubleArrayOf(1.0, 1.0, 1.0, 0.0, 1.41, 1.41)
             else -> DoubleArray(channels) { 1.0 }

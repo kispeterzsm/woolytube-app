@@ -36,6 +36,19 @@ class PlatformLoudnessAnalyzer implements LoudnessAnalyzer {
   }
 }
 
+/// Whether the phone is charging, from the yt-dlp plugin. True when it
+/// cannot be told, so measuring is not held back for good.
+Future<bool> platformIsCharging() async {
+  try {
+    return await const MethodChannel(
+          'com.woolytube/ytdlp',
+        ).invokeMethod<bool>('isCharging') ??
+        true;
+  } catch (_) {
+    return true;
+  }
+}
+
 /// Reads the plugin's reply. Missing or non-finite numbers read as unknown.
 MeasuredLoudness measuredLoudnessFromMap(Map<String, Object?> map) {
   double? number(Object? value) =>
@@ -56,6 +69,9 @@ abstract interface class TrackLoudnessSource {
   /// Measures these files first, in order (the song that is playing, then
   /// the next ones). Ignored while measuring is off.
   void prioritize(List<LoudnessJob> files);
+
+  /// Turns measuring on while a setting needs loudness, off otherwise.
+  void setEnabled(bool enabled);
 }
 
 /// A file to measure for a track.
@@ -87,26 +103,45 @@ class LoudnessProgress {
   /// Whether songs are being measured right now.
   final bool working;
 
+  /// Songs are left to measure, but the library is only measured while the
+  /// phone charges and it does not.
+  final bool waitingForCharger;
+
   const LoudnessProgress({
     this.measured = 0,
     this.total = 0,
     this.working = false,
+    this.waitingForCharger = false,
   });
 
   static const unknown = LoudnessProgress();
+
+  LoudnessProgress copyWith({
+    int? measured,
+    bool? working,
+    bool? waitingForCharger,
+  }) => LoudnessProgress(
+    measured: measured ?? this.measured,
+    total: total,
+    working: working ?? this.working,
+    waitingForCharger: waitingForCharger ?? this.waitingForCharger,
+  );
 
   @override
   bool operator ==(Object other) =>
       other is LoudnessProgress &&
       other.measured == measured &&
       other.total == total &&
-      other.working == working;
+      other.working == working &&
+      other.waitingForCharger == waitingForCharger;
 
   @override
-  int get hashCode => Object.hash(measured, total, working);
+  int get hashCode => Object.hash(measured, total, working, waitingForCharger);
 
   @override
-  String toString() => 'LoudnessProgress($measured/$total, working: $working)';
+  String toString() =>
+      'LoudnessProgress($measured/$total, working: $working, '
+      'waitingForCharger: $waitingForCharger)';
 }
 
 /// Size and modification time of a file, to tell whether a measurement
@@ -180,30 +215,39 @@ _ScanResult _scanLibrary(
 /// volume", and hands the stored measurements to the player.
 ///
 /// Nothing is measured while both are off. When one is on, the song that is
-/// playing and the next ones come first, then every other downloaded song,
-/// one at a time with a short pause in between, so a phone on battery is
-/// not kept busy. Measurements are stored per track with the file's size
-/// and modification time; a replaced file is measured again.
+/// playing and the next ones are measured right away. The rest of the
+/// library is measured one song at a time, and only while the phone is
+/// charging: decoding thousands of songs costs real battery, and the player
+/// asks for each song before it is needed anyway. Measuring also waits while
+/// the library moves or deletes files. Measurements are stored per track
+/// with the file's path, size and modification time; a replaced or moved
+/// file is measured again.
 class LoudnessService implements TrackLoudnessSource {
   LoudnessService(
     this._db, {
     LoudnessAnalyzer analyzer = const PlatformLoudnessAnalyzer(),
     LogService? log,
     bool Function()? shouldPause,
+    Future<bool> Function()? isCharging,
     Duration pauseBetween = const Duration(milliseconds: 500),
     Duration pausePoll = const Duration(seconds: 5),
+    Duration chargerPoll = const Duration(minutes: 5),
   }) : _analyzer = analyzer,
        _log = log,
        _shouldPause = shouldPause,
+       _isCharging = isCharging ?? platformIsCharging,
        _pauseBetween = pauseBetween,
-       _pausePoll = pausePoll;
+       _pausePoll = pausePoll,
+       _chargerPoll = chargerPoll;
 
   final AppDatabase _db;
   final LoudnessAnalyzer _analyzer;
   final LogService? _log;
   final bool Function()? _shouldPause;
+  final Future<bool> Function() _isCharging;
   final Duration _pauseBetween;
   final Duration _pausePoll;
+  final Duration _chargerPoll;
 
   final _progress = BehaviorSubject<LoudnessProgress>.seeded(
     LoudnessProgress.unknown,
@@ -224,6 +268,9 @@ class LoudnessService implements TrackLoudnessSource {
   var _disposed = false;
   var _platformMissing = false;
 
+  /// Looks again whether the phone is charging while the library waits.
+  Timer? _chargerCheck;
+
   /// Bumped whenever the backlog is thrown away, so a scan that finishes
   /// late does not bring back an outdated list.
   var _scanGeneration = 0;
@@ -234,7 +281,7 @@ class LoudnessService implements TrackLoudnessSource {
 
   bool get enabled => _enabled;
 
-  /// Turns background measuring on or off.
+  @override
   void setEnabled(bool enabled) {
     if (_disposed || _enabled == enabled) return;
     _enabled = enabled;
@@ -244,7 +291,9 @@ class LoudnessService implements TrackLoudnessSource {
     } else {
       _priority.clear();
       _invalidateBacklog();
-      _publish(working: false);
+      _chargerCheck?.cancel();
+      _chargerCheck = null;
+      _publish(working: false, waitingForCharger: false);
     }
   }
 
@@ -300,10 +349,17 @@ class LoudnessService implements TrackLoudnessSource {
   Future<void> _run() async {
     try {
       while (_enabled && !_disposed && !_platformMissing) {
+        // Files may have been moved or renamed while the library was busy,
+        // so a list made before that is thrown away.
+        if (await _waitWhilePaused()) _invalidateBacklog();
+        if (!_enabled || _disposed) break;
         final job = await _nextJob();
         if (job == null) break;
-        await _waitWhilePaused();
-        if (!_enabled || _disposed) break;
+        if (_isPaused) {
+          // The library got busy meanwhile: ask for this file again later.
+          _priority.insert(0, job);
+          continue;
+        }
         _publish(working: true);
         await _measure(job);
         if (_pauseBetween > Duration.zero) {
@@ -322,10 +378,17 @@ class LoudnessService implements TrackLoudnessSource {
     }
   }
 
-  Future<void> _waitWhilePaused() async {
-    while (_enabled && !_disposed && (_shouldPause?.call() ?? false)) {
+  bool get _isPaused => _shouldPause?.call() ?? false;
+
+  /// Waits while the library moves or deletes files. Returns whether it
+  /// had to wait.
+  Future<bool> _waitWhilePaused() async {
+    var waited = false;
+    while (_enabled && !_disposed && _isPaused) {
+      waited = true;
       await Future<void>.delayed(_pausePoll);
     }
+    return waited;
   }
 
   Future<LoudnessJob?> _nextJob() async {
@@ -345,12 +408,26 @@ class LoudnessService implements TrackLoudnessSource {
         LoudnessProgress(
           measured: scan.measured,
           total: scan.total,
-          working: scan.todo.isNotEmpty,
+          working: _progress.value.working,
         ),
       );
     }
     // Player requests may have arrived while scanning.
     if (_priority.isNotEmpty) return _nextJob();
+    if (backlog.isEmpty) {
+      _publish(waitingForCharger: false);
+      return null;
+    }
+    if (!await _charging()) {
+      _publish(waitingForCharger: true);
+      _chargerCheck?.cancel();
+      _chargerCheck = Timer(_chargerPoll, () {
+        _chargerCheck = null;
+        _kick();
+      });
+      return _priority.isNotEmpty ? _nextJob() : null;
+    }
+    _publish(waitingForCharger: false);
     while (backlog.isNotEmpty) {
       final job = backlog.removeAt(0);
       // It may have been measured on the player's request meanwhile.
@@ -358,6 +435,14 @@ class LoudnessService implements TrackLoudnessSource {
       if (!_enabled || _disposed || _priority.isNotEmpty) break;
     }
     return _priority.isNotEmpty ? _nextJob() : null;
+  }
+
+  Future<bool> _charging() async {
+    try {
+      return await _isCharging();
+    } catch (_) {
+      return true;
+    }
   }
 
   /// Whether [job]'s file exists and has no measurement of its current
@@ -435,32 +520,24 @@ class LoudnessService implements TrackLoudnessSource {
     }
     final current = _progress.value;
     if (current.total > 0 && current.measured < current.total) {
-      _progress.add(
-        LoudnessProgress(
-          measured: current.measured + 1,
-          total: current.total,
-          working: true,
-        ),
-      );
+      _progress.add(current.copyWith(measured: current.measured + 1));
     }
   }
 
-  void _publish({required bool working}) {
+  void _publish({bool? working, bool? waitingForCharger}) {
     if (_progress.isClosed) return;
     final current = _progress.value;
-    if (current.working != working) {
-      _progress.add(
-        LoudnessProgress(
-          measured: current.measured,
-          total: current.total,
-          working: working,
-        ),
-      );
-    }
+    final next = current.copyWith(
+      working: working,
+      waitingForCharger: waitingForCharger,
+    );
+    if (next != current) _progress.add(next);
   }
 
   void dispose() {
     _disposed = true;
+    _chargerCheck?.cancel();
+    _chargerCheck = null;
     _priority.clear();
     _backlog = null;
     _progress.close();

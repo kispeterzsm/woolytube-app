@@ -2252,12 +2252,17 @@ class PlaybackService
   /// plays to be measured first.
   void attachLoudness(TrackLoudnessSource source) {
     _loudness = source;
-    if (_audioSettings.value.needsLoudness) _prioritizeLoudness();
+    final needed = _audioSettings.value.needsLoudness;
+    source.setEnabled(needed);
+    if (needed) _prioritizeLoudness();
   }
 
   Future<void> _updateAudioSettings(AudioProcessingSettings settings) async {
     if (_audioSettings.isClosed || _audioSettings.value == settings) return;
     _audioSettings.add(settings);
+    // Measuring is switched before the request, which it would drop while
+    // off.
+    _loudness?.setEnabled(settings.needsLoudness);
     if (settings.needsLoudness) _prioritizeLoudness();
     // The song that is playing (or opening) changes at once.
     final trackId = currentItem?.track.id;

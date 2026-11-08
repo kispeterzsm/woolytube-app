@@ -59,15 +59,15 @@ The result is a list of **proposed** chapters with the evidence behind each one.
 ## Plane mode and even volume
 
 Earbuds without noise cancelling let engine rumble through, so quiet passages disappear and the volume ends up high. Tap the plane icon at the top of the player (or use **Settings > Sound**) to switch on **Plane mode**:
-- Every song is brought to the same level, judged by the part you can still hear over the rumble.
+- Every song is brought to the same level, with extra level for bass-heavy songs, whose bass the rumble hides.
 - A gentle compressor lifts quiet parts, and a small low-mid lift keeps voices and instruments clear.
 - A limiter stops anything from clipping.
 
-Set the volume so the quiet parts are just clear; that is usually several steps lower than before. **Plane mode strength** offers Standard and Strong. A tight earbud fit (a bigger tip size, or foam tips) blocks more noise than any setting.
+Set the volume so the quiet parts are just clear, and no louder. Loud recent songs may need it a little higher than before, quiet recordings lower. **Plane mode strength** offers Standard and Strong. A tight earbud fit (a bigger tip size, or foam tips) blocks more noise than any setting.
 
 **Even out volume** plays every song at about the level YouTube uses. Loud songs are turned down, and quiet ones are turned up as far as they can go without clipping.
 
-Both measure each song's loudness once, on the phone, in the background. The playing song and the next ones go first, and nothing is uploaded or written into your files. The research behind the settings is in [docs/research/plane-mode.md](docs/research/plane-mode.md).
+Both measure each song's loudness once, on the phone. The playing song and the next ones are measured right away; the rest of the library only while the phone is charging. Nothing is uploaded or written into your files. The research behind the settings is in [docs/research/plane-mode.md](docs/research/plane-mode.md).
 
 ## Building from Source
 

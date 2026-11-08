@@ -13,12 +13,17 @@ class PlaneModeButton extends ConsumerWidget {
   final bool showLabel;
   final VoidCallback? onAction;
 
+  /// Whether a short message confirms each switch. Off over a full-screen
+  /// video, where it would cover the controls; the icon shows the state.
+  final bool announce;
+
   const PlaneModeButton({
     super.key,
     this.activeColor = const Color(0xFF2196F3),
     this.inactiveColor = const Color(0xFF888888),
     this.iconSize = 24,
     this.showLabel = false,
+    this.announce = true,
     this.onAction,
   });
 
@@ -40,23 +45,25 @@ class PlaneModeButton extends ConsumerWidget {
       iconSize: iconSize,
       onPressed: () {
         onAction?.call();
-        togglePlaneModeWithFeedback(context, ref);
+        togglePlaneModeWithFeedback(context, ref, announce: announce);
       },
     );
   }
 }
 
-/// Toggles plane mode and says what changed. The first time it is switched
-/// on, explains how to get the most out of it.
+/// Toggles plane mode and, when [announce], says what changed. The first
+/// time it is switched on, explains how to get the most out of it.
 Future<void> togglePlaneModeWithFeedback(
   BuildContext context,
-  WidgetRef ref,
-) async {
+  WidgetRef ref, {
+  bool announce = true,
+}) async {
   final service = ref.read(playbackServiceProvider);
   final enable = !service.planeMode;
   final messenger = ScaffoldMessenger.maybeOf(context);
   await service.setPlaneModePreference(enable);
   if (!enable) {
+    if (!announce) return;
     messenger?.hideCurrentSnackBar();
     messenger?.showSnackBar(const SnackBar(content: Text('Plane mode off')));
     return;
@@ -73,6 +80,7 @@ Future<void> togglePlaneModeWithFeedback(
     await showPlaneModeTips(context);
     return;
   }
+  if (!announce) return;
   messenger?.hideCurrentSnackBar();
   messenger?.showSnackBar(
     const SnackBar(
@@ -99,9 +107,9 @@ Future<void> showPlaneModeTips(BuildContext context) {
               children: [
                 Text(
                   'Songs now play at an even level and their quiet parts are '
-                  'lifted, so they stay clear over engine noise. Turn the '
-                  'volume down until the quiet parts are just clear: that is '
-                  'easier on your ears on a long flight.',
+                  'lifted, so they stay clear over engine noise. Set the '
+                  'volume so the quiet parts are just clear, and no louder: '
+                  'that is easier on your ears on a long flight.',
                 ),
                 SizedBox(height: 12),
                 Text(
@@ -111,8 +119,10 @@ Future<void> showPlaneModeTips(BuildContext context) {
                 ),
                 SizedBox(height: 12),
                 Text(
-                  'Each song is measured once in the background, the playing '
-                  'one first. Until then it plays at a typical level.',
+                  'Each song is measured once, the playing and next ones '
+                  'first; the rest of the library while the phone charges. '
+                  'A song not measured yet plays at a typical level, and '
+                  'evened out from its next play.',
                 ),
               ],
             ),

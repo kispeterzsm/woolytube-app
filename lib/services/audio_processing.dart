@@ -144,7 +144,12 @@ const _typicalCabinGapDb = 3.0;
 /// Limits for the per-song gains, in dB.
 const _minLevelGainDb = -24.0;
 const _maxLevelGainDb = 12.0;
-const _maxCabinCorrectionDb = 3.0;
+
+/// Bass-heavy songs may get up to 5 dB more; the limiter then takes at most
+/// about 0.4 dB of loudness off drum & bass. Bass-light songs at most 3 dB
+/// less.
+const _maxCabinBoostDb = 5.0;
+const _maxCabinCutDb = -3.0;
 
 /// Ceiling for plane mode's output, dBFS. 1.5 dB below full scale leaves
 /// room for the peaks between samples that a sample-peak limiter misses.
@@ -269,8 +274,8 @@ String planeModeFilters(
           ? 0.0
           : _clamp(
             (integrated - cabin) - _typicalCabinGapDb,
-            -_maxCabinCorrectionDb,
-            _maxCabinCorrectionDb,
+            _maxCabinCutDb,
+            _maxCabinBoostDb,
           );
   final outputGain = preset.makeupDb + cabinCorrection;
   final graph = [

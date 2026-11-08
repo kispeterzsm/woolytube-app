@@ -385,6 +385,13 @@ class _VideoControls extends ConsumerWidget {
                     ),
                   ),
                   SubtitleButton(onOpened: onHoldOpen, onClosed: onAnyAction),
+                  // In the top bar: the bottom row is full on narrow phones.
+                  PlaneModeButton(
+                    inactiveColor: Colors.white,
+                    activeColor: PlayerLayout.accent,
+                    announce: false,
+                    onAction: onAnyAction,
+                  ),
                   IconButton(
                     icon: const Icon(Icons.lock_open, color: Colors.white),
                     tooltip: 'Lock controls',
@@ -488,11 +495,6 @@ class _VideoControls extends ConsumerWidget {
                         ),
                         SleepTimerButton(
                           inactiveColor: Colors.white,
-                          onAction: onAnyAction,
-                        ),
-                        PlaneModeButton(
-                          inactiveColor: Colors.white,
-                          activeColor: PlayerLayout.accent,
                           onAction: onAnyAction,
                         ),
                         PlayerActionButton(

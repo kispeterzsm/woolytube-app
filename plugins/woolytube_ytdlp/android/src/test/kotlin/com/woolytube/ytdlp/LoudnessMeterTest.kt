@@ -63,11 +63,15 @@ class LoudnessMeterTest {
     }
 
     @Test
-    fun monoIsMeasuredAsDualMono() {
+    fun monoReadsLikeMpvsStereoUpmix() {
+        // mpv plays a mono file on both ears at -3 dB each (power kept), so
+        // the mono signal reads 3 dB below the same signal at full level in
+        // both channels.
         val stereo = measure(48_000, 2, sine(48_000, 2, 10.0, 997.0))
         val mono = measure(48_000, 1, sine(48_000, 1, 10.0, 997.0))
-        assertEquals(stereo.integratedLufs!!, mono.integratedLufs!!, 1e-9)
-        assertEquals(stereo.cabinLufs!!, mono.cabinLufs!!, 1e-9)
+        val upmixGainDb = 10.0 * log10(2.0)
+        assertEquals(stereo.integratedLufs!! - upmixGainDb, mono.integratedLufs!!, 1e-9)
+        assertEquals(stereo.cabinLufs!! - upmixGainDb, mono.cabinLufs!!, 1e-9)
         assertEquals(stereo.peakDb!!, mono.peakDb!!, 1e-9)
     }
 

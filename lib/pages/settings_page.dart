@@ -269,9 +269,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           (ctx) => AlertDialog(
             title: const Text('Restore settings?'),
             content: const Text(
-              'Replaces the playback, subtitle and mobile data settings with '
-              'the ones saved by the last library backup. Playlists are not '
-              'changed.',
+              'Replaces the playback, sound, subtitle and mobile data '
+              'settings with the ones saved by the last library backup. '
+              'Playlists are not changed.',
             ),
             actions: [
               TextButton(
@@ -1009,7 +1009,8 @@ class _RestorePlaylistsPageState extends ConsumerState<_RestorePlaylistsPage> {
                     leading: const Icon(Icons.settings_backup_restore),
                     title: const Text('Restore settings from this folder'),
                     subtitle: const Text(
-                      'Playback, subtitle and mobile data settings from its backup',
+                      'Playback, sound, subtitle and mobile data settings from '
+                      'its backup',
                     ),
                     enabled: idle,
                     onTap: _restoreSettings,
@@ -1254,9 +1255,12 @@ class _LoudnessProgressTile extends ConsumerWidget {
       dense: true,
       leading: const SizedBox(width: 24),
       title: Text(text),
-      subtitle: const Text(
-        'Each song is measured once, in the background, while plane mode or '
-        'Even out volume is on.',
+      subtitle: Text(
+        progress.waitingForCharger
+            ? 'The playing and next songs are measured right away; the rest '
+                'of the library while the phone charges.'
+            : 'Each song is measured once, in the background, while plane '
+                'mode or Even out volume is on.',
       ),
     );
   }

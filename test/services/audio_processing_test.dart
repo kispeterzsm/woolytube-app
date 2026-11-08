@@ -105,10 +105,12 @@ void main() {
       // A typical gap of 3 dB gets no correction.
       expect(output(-14, -17), 9.5);
       // Bass-heavy electronic music: much of it is masked by the engines.
-      expect(output(-17, -26), 12.5); // +6 dB gap, capped at +3
+      expect(output(-17, -26), 14.5); // +6 dB over typical, capped at +5
+      expect(output(-14, -23), 14.5); // exactly +5
       expect(output(-17, -22), 11.5);
       // Piano or classical: nearly all of it is above the rumble.
       expect(output(-21, -21.5), 7.0);
+      expect(output(-20, -20), 6.5); // capped at -3
     });
 
     test('an unmeasured song is planned at a typical loudness', () {

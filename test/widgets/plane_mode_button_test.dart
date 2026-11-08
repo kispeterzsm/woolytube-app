@@ -36,12 +36,14 @@ void main() {
     player = _Player();
   });
 
-  Future<void> pumpButton(WidgetTester tester) async {
+  Future<void> pumpButton(WidgetTester tester, {bool announce = true}) async {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [playbackServiceProvider.overrideWithValue(player)],
-        child: const MaterialApp(
-          home: Scaffold(body: Center(child: PlaneModeButton())),
+        child: MaterialApp(
+          home: Scaffold(
+            body: Center(child: PlaneModeButton(announce: announce)),
+          ),
         ),
       ),
     );
@@ -71,7 +73,7 @@ void main() {
     expect(player.choices, [true]);
     expect(find.byKey(const ValueKey('plane-mode-tips')), findsOneWidget);
     expect(find.textContaining('tight fit'), findsOneWidget);
-    expect(find.textContaining('Turn the volume down'), findsOneWidget);
+    expect(find.textContaining('quiet parts are just clear'), findsOneWidget);
     await tester.tap(find.text('Got it'));
     await tester.pumpAndSettle();
 
@@ -87,6 +89,25 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('plane-mode-tips')), findsNothing);
     expect(find.textContaining('Plane mode on.'), findsOneWidget);
+    expect(player.choices, [true, false, true]);
+  });
+
+  testWidgets('over a video only the first-time tips are shown', (
+    tester,
+  ) async {
+    await pumpButton(tester, announce: false);
+    final button = find.byKey(const ValueKey('plane-mode-button'));
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('plane-mode-tips')), findsOneWidget);
+    await tester.tap(find.text('Got it'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(find.byType(SnackBar), findsNothing);
     expect(player.choices, [true, false, true]);
   });
 }

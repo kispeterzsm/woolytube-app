@@ -165,4 +165,20 @@ void main() {
     );
     expect(find.text('All 10 songs measured'), findsOneWidget);
   });
+
+  testWidgets('says when the rest of the library waits for a charger', (
+    tester,
+  ) async {
+    await player.setEvenOutVolume(true);
+    await pumpSettings(
+      tester,
+      progress: const LoudnessProgress(
+        measured: 4,
+        total: 10,
+        waitingForCharger: true,
+      ),
+    );
+    expect(find.text('Measured 4 of 10 songs'), findsOneWidget);
+    expect(find.textContaining('while the phone charges'), findsOneWidget);
+  });
 }

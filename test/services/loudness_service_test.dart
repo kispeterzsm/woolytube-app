@@ -49,13 +49,18 @@ void main() {
   late Playlist playlist;
   final services = <LoudnessService>[];
 
-  LoudnessService create({bool Function()? shouldPause}) {
+  LoudnessService create({
+    bool Function()? shouldPause,
+    Future<bool> Function()? isCharging,
+  }) {
     final service = LoudnessService(
       db,
       analyzer: analyzer,
       shouldPause: shouldPause,
+      isCharging: isCharging ?? () async => true,
       pauseBetween: Duration.zero,
       pausePoll: const Duration(milliseconds: 20),
+      chargerPoll: const Duration(milliseconds: 50),
     );
     services.add(service);
     return service;
@@ -259,6 +264,52 @@ void main() {
     expect(analyzer.calls, isEmpty);
     busy = false;
     await _until(() => analyzer.calls.length == 1);
+  });
+
+  test('on battery only the songs the player asks for are measured', () async {
+    await downloaded(1);
+    await downloaded(2);
+    final (wanted, wantedPath) = await downloaded(3);
+    var charging = false;
+    final service = create(isCharging: () async => charging);
+    service.setEnabled(true);
+    service.prioritize([LoudnessJob(wanted.id, wantedPath)]);
+    await _until(() => service.progress.waitingForCharger);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    expect(analyzer.calls, [wantedPath]);
+    expect(service.progress.measured, 1);
+    expect(service.progress.total, 3);
+
+    // Plugged in: the rest of the library follows.
+    charging = true;
+    await _until(() => analyzer.calls.length == 3, reason: 'library measured');
+    await _until(() => !service.progress.waitingForCharger);
+    expect(service.progress.measured, 3);
+  });
+
+  test('files moved while the library was busy are found again', () async {
+    final (track, path) = await downloaded(1);
+    final (other, otherPath) = await downloaded(2);
+    var busy = false;
+    final service = create(shouldPause: () => busy);
+    // The first file is being read when the library starts moving files.
+    analyzer.gate = Completer<void>();
+    service.setEnabled(true);
+    await _until(() => analyzer.calls.isNotEmpty);
+    expect(analyzer.calls.single, path);
+    busy = true;
+    final moved = p.join(tempDir.path, '7_song.m4a');
+    File(path).renameSync(moved);
+    await db.updateTrackFilePaths({track.id: moved});
+    analyzer.gate!.complete();
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    expect(analyzer.calls, hasLength(1), reason: 'waits while busy');
+    busy = false;
+    await _until(() => analyzer.calls.length == 3, reason: 'both files');
+    expect(analyzer.calls.skip(1), unorderedEquals([moved, otherPath]));
+    await _until(() => !service.progress.working);
+    expect(await service.loudnessFor(track.id, moved), isNotNull);
+    expect(await service.loudnessFor(other.id, otherPath), isNotNull);
   });
 
   test('switching off stops before the next song', () async {

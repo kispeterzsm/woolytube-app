@@ -2,6 +2,7 @@ package com.woolytube.ytdlp
 
 import android.content.Context
 import android.content.Intent
+import android.os.BatteryManager
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -240,6 +241,7 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "decodeAudioWindow" -> handleDecodeAudioWindow(call.arguments as Map<*, *>, result)
             "probeMediaDurationMs" -> handleProbeMediaDuration(call.arguments as Map<*, *>, result)
             "analyzeLoudness" -> handleAnalyzeLoudness(call.arguments as? Map<*, *>, result)
+            "isCharging" -> result.success(isCharging())
             else -> result.notImplemented()
         }
     }
@@ -876,6 +878,17 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 withContext(Dispatchers.Main) { result.error("PROBE_ERROR", e.message, null) }
             }
         }
+    }
+
+    /**
+     * Whether the phone is charging. Measuring a whole library's loudness
+     * waits for this; true when it cannot be told.
+     */
+    private fun isCharging(): Boolean = try {
+        (context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager).isCharging
+    } catch (e: Exception) {
+        Log.w(TAG, "Cannot read the charging state", e)
+        true
     }
 
     private fun handleAnalyzeLoudness(args: Map<*, *>?, result: MethodChannel.Result) {

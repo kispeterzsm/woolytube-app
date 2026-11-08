@@ -97,6 +97,20 @@ object LoudnessAnalyzer {
      * configured again for 16-bit.
      */
     private fun createDecoder(mime: String, format: MediaFormat): MediaCodec {
+        if (mime == MediaFormat.MIMETYPE_AUDIO_RAW) {
+            // WAV, and FLAC through Android's own extractor, arrive as raw PCM
+            // in the encoding the extractor states. The raw "decoder" passes
+            // the bytes through, so asking it for float would only relabel
+            // 16-bit samples as float.
+            val raw = MediaCodec.createDecoderByType(mime)
+            try {
+                raw.configure(format, null, null, 0)
+                return raw
+            } catch (e: Throwable) {
+                raw.release()
+                throw e
+            }
+        }
         format.setInteger(MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_FLOAT)
         val codec = MediaCodec.createDecoderByType(mime)
         try {
