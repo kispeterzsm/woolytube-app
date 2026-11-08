@@ -639,9 +639,11 @@ final lyricsServiceProvider = Provider<LyricsService>((ref) {
 });
 
 /// Searches stored lyrics and transcripts.
-final lyricsSearchProvider = Provider<LyricsSearch>(
-  (ref) => LyricsSearch(ref.watch(databaseProvider)),
-);
+final lyricsSearchProvider = Provider<LyricsSearch>((ref) {
+  final search = LyricsSearch(ref.watch(databaseProvider));
+  ref.onDispose(search.dispose);
+  return search;
+});
 
 final recognitionProgressProvider = StreamProvider<RecognitionProgress>((ref) {
   return ref.watch(songRecognitionServiceProvider).progressStream;
