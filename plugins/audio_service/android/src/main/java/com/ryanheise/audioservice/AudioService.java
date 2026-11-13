@@ -60,6 +60,10 @@ public class AudioService extends MediaBrowserServiceCompat {
     private static final String SHARED_PREFERENCES_NAME = "audio_service_preferences";
 
     private static final int NOTIFICATION_ID = 1124;
+    // WoolyTube: how long the CPU is kept awake after playback pauses, or
+    // after a media button arrives while paused. Covers the short pause
+    // between two songs and the time the app needs to act on a button.
+    private static final long IDLE_WAKE_LOCK_MS = 10000;
     private static final int REQUEST_CONTENT_INTENT = 1000;
     public static final String NOTIFICATION_CLICK_ACTION = "com.ryanheise.audioservice.NOTIFICATION_CLICK";
     public static final String CUSTOM_ACTION_STOP = "com.ryanheise.audioservice.action.STOP";
@@ -314,6 +318,11 @@ public class AudioService extends MediaBrowserServiceCompat {
 
         configure(new AudioServiceConfig(getApplicationContext()));
 
+        // WoolyTube: a new service instance has posted nothing yet, so a
+        // notification with our id is an orphan left by an earlier instance.
+        // Its buttons reach no media session, so remove it.
+        getNotificationManager().cancel(NOTIFICATION_ID);
+
         mediaSession.setFlags(MediaSessionCompat.FLAG_HANDLES_QUEUE_COMMANDS);
         PlaybackStateCompat.Builder stateBuilder = new PlaybackStateCompat.Builder()
                 .setActions(AUTO_ENABLED_ACTIONS);
@@ -324,6 +333,9 @@ public class AudioService extends MediaBrowserServiceCompat {
 
         PowerManager pm = (PowerManager)getSystemService(Context.POWER_SERVICE);
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, AudioService.class.getName());
+        // WoolyTube: a single lock, so a timed acquire (see
+        // holdWakeLockBriefly) and an untimed one replace each other.
+        wakeLock.setReferenceCounted(false);
 
         // Get max available VM memory, exceeding this amount will throw an
         // OutOfMemory exception. Stored in kilobytes as LruCache takes an
@@ -353,6 +365,13 @@ public class AudioService extends MediaBrowserServiceCompat {
     }
 
     public void stop() {
+        // WoolyTube: stopSelf() alone does not end the service while the app's
+        // activity is still bound to it, and Android ignores cancel() for a
+        // foreground notification. Leave the foreground state here, so the
+        // notification goes away and the CPU may sleep.
+        ServiceCompat.stopForeground(this, STOP_FOREGROUND_REMOVE);
+        releaseWakeLock();
+        notificationCreated = false;
         deactivateMediaSession();
         stopSelf();
     }
@@ -372,7 +391,9 @@ public class AudioService extends MediaBrowserServiceCompat {
         artBitmapCache.evictAll();
         compactActionIndices = null;
         releaseMediaSession();
-        ServiceCompat.stopForeground(this, config.androidResumeOnClick ? STOP_FOREGROUND_DETACH : STOP_FOREGROUND_REMOVE);
+        // WoolyTube: always remove. A detached notification outlives the
+        // media session released above, so its buttons would do nothing.
+        ServiceCompat.stopForeground(this, STOP_FOREGROUND_REMOVE);
         // This still does not solve the Android 11 problem.
         // if (notificationCreated) {
         //     NotificationManager notificationManager = getNotificationManager();
@@ -703,11 +724,13 @@ public class AudioService extends MediaBrowserServiceCompat {
     }
 
     private void enterPlayingState() {
+        // WoolyTube: take the wake lock first, so playback keeps the CPU awake
+        // even if starting the foreground service throws.
+        acquireWakeLock();
         ContextCompat.startForegroundService(this, new Intent(AudioService.this, AudioService.class));
         if (!mediaSession.isActive())
             mediaSession.setActive(true);
 
-        acquireWakeLock();
         mediaSession.setSessionActivity(contentIntent);
         internalStartForeground();
     }
@@ -715,6 +738,11 @@ public class AudioService extends MediaBrowserServiceCompat {
     private void exitPlayingState() {
         if (config.androidStopForegroundOnPause) {
             exitForegroundState();
+        } else {
+            // WoolyTube: stay in the foreground while paused, so resuming from
+            // the notification or the background needs no new foreground
+            // start, but let the CPU sleep after a short grace period.
+            holdWakeLockBriefly();
         }
     }
 
@@ -729,8 +757,17 @@ public class AudioService extends MediaBrowserServiceCompat {
     }
 
     private void acquireWakeLock() {
-        if (!wakeLock.isHeld())
-            wakeLock.acquire();
+        // WoolyTube: acquire even when held, which cancels a timed release.
+        wakeLock.acquire();
+    }
+
+    // WoolyTube: keeps the CPU awake for IDLE_WAKE_LOCK_MS while nothing
+    // plays, so a pause between songs or a media button pressed while paused
+    // (for example a headset click with the screen off) is handled before the
+    // phone sleeps. Playing takes an untimed lock instead.
+    private void holdWakeLockBriefly() {
+        if (playing || wakeLock == null) return;
+        wakeLock.acquire(IDLE_WAKE_LOCK_MS);
     }
 
     private void releaseWakeLock() {
@@ -919,12 +956,14 @@ public class AudioService extends MediaBrowserServiceCompat {
         @Override
         public void onPlay() {
             if (listener == null) return;
+            holdWakeLockBriefly(); // WoolyTube
             listener.onPlay();
         }
 
         @Override
         public void onPlayFromMediaId(final String mediaId, final Bundle extras) {
             if (listener == null) return;
+            holdWakeLockBriefly(); // WoolyTube
             listener.onPlayFromMediaId(mediaId, extras);
         }
 
@@ -943,6 +982,7 @@ public class AudioService extends MediaBrowserServiceCompat {
         @Override
         public boolean onMediaButtonEvent(Intent mediaButtonEvent) {
             if (listener == null) return false;
+            holdWakeLockBriefly(); // WoolyTube
             // TODO: use typesafe version once SDK 33 is released.
             @SuppressWarnings("deprecation")
             final KeyEvent event = (KeyEvent)mediaButtonEvent.getExtras().getParcelable(Intent.EXTRA_KEY_EVENT);

@@ -392,6 +392,16 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
     }
   }
 
+  /// Called only when the user swipes the notification away (Android does
+  /// not report it when stopping removes the notification). The default
+  /// stops playback, which also forgets the saved session; keep the current
+  /// item for "resume where I left off" instead. Playing, pausing or a new
+  /// song shows the notification again.
+  @override
+  Future<void> onNotificationDeleted() async {
+    _cancelPendingMediaButtonClick();
+  }
+
   void dispose() {
     _cancelPendingMediaButtonClick();
     for (final sub in _subscriptions) {

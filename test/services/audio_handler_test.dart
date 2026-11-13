@@ -1,7 +1,7 @@
 import 'dart:io';
 
 import 'package:audio_service/audio_service.dart';
-import 'package:drift/drift.dart';
+import 'package:drift/drift.dart' show Value;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rxdart/rxdart.dart';
 import 'package:woolytube/database/database.dart';
@@ -116,6 +116,70 @@ void main() {
 
     await Future<void>.delayed(const Duration(milliseconds: 30));
     expect(playback.resumeCalls, 0);
+  });
+
+  test('pausing keeps the notification ready to resume', () async {
+    playback.setPlaying(true);
+    await _flushStreams();
+    await handler.pause();
+    await _flushStreams();
+
+    final state = handler.playbackState.value;
+    expect(state.playing, isFalse);
+    // The native service removes the notification only on idle.
+    expect(state.processingState, AudioProcessingState.ready);
+    expect(state.controls[1].action, MediaAction.play);
+    expect(playback.stopCalls, 0);
+  });
+
+  test('stopping in the app publishes idle after not playing', () async {
+    playback.setPlaying(true);
+    await _flushStreams();
+    final states = <PlaybackState>[];
+    final sub = handler.playbackState.listen(states.add);
+    addTearDown(sub.cancel);
+
+    // Swiping the mini player away or deleting the playing song.
+    await playback.stop();
+    await _flushStreams();
+
+    // Idle is what makes the native service leave the foreground and remove
+    // the notification; it must never be published as still playing.
+    expect(states.last.processingState, AudioProcessingState.idle);
+    expect(states.last.playing, isFalse);
+    expect(
+      states.where(
+        (s) => s.processingState == AudioProcessingState.idle && s.playing,
+      ),
+      isEmpty,
+    );
+    expect(handler.mediaItem.value, isNull);
+  });
+
+  test('swiping the notification away keeps the paused item', () async {
+    await handler.click(MediaButton.media);
+    await handler.onNotificationDeleted();
+    await _flushStreams();
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+
+    expect(playback.stopCalls, 0);
+    expect(playback.resumeCalls, 0, reason: 'a pending click is cancelled');
+    expect(playback.currentTrack, isNotNull);
+    expect(
+      handler.playbackState.value.processingState,
+      AudioProcessingState.ready,
+    );
+  });
+
+  test('closing the app keeps a paused item in the notification', () async {
+    await handler.onTaskRemoved();
+    expect(playback.stopCalls, 0);
+    expect(playback.currentTrack, isNotNull);
+
+    playback.setCurrentTrack(null);
+    await _flushStreams();
+    await handler.onTaskRemoved();
+    expect(playback.stopCalls, 1);
   });
 
   test('the next-file control appears only for a chapter item', () async {

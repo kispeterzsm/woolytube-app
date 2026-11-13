@@ -53,6 +53,8 @@ void main() async {
         // Keep the media service foregrounded across a pause. Android 12+
         // can reject an attempt to promote a paused service again while the
         // app is in the background, leaving playback without a wake lock.
+        // The patched plugin (plugins/audio_service) still lets the CPU sleep
+        // while paused, and leaves the foreground when playback is stopped.
         androidNotificationOngoing: false,
         androidStopForegroundOnPause: false,
       ),
