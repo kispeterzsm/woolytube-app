@@ -12,6 +12,7 @@ import '../providers/playback_providers.dart';
 import '../providers/providers.dart';
 import '../services/update_service.dart';
 import '../services/audio_processing.dart';
+import '../services/backup_check_service.dart';
 import '../services/library_export_service.dart';
 import '../services/library_layout.dart';
 import '../services/library_restore_service.dart';
@@ -46,9 +47,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   bool _isSavingSettings = false;
   bool _isCheckingForUpdate = false;
   bool _isDownloadingUpdate = false;
-  bool _isExporting = false;
+  _BackupWork? _backupWork;
   bool _isRestoringSettings = false;
-  LibraryExportProgress? _exportProgress;
+  LibraryExportProgress? _backupProgress;
+
+  /// The newest change to the app's files in the library folders.
+  DateTime? _libraryFoldersUpdated;
 
   static final _dateFormat = DateFormat('d MMM y, HH:mm');
 
@@ -58,6 +62,16 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _availableUpdate = widget.initialUpdate;
     unawaited(_loadSettings());
     unawaited(_loadVersion());
+    unawaited(_loadLibraryFoldersUpdated());
+  }
+
+  Future<void> _loadLibraryFoldersUpdated() async {
+    try {
+      final updated = await ref.read(backupCheckServiceProvider).lastUpdated();
+      if (mounted) setState(() => _libraryFoldersUpdated = updated);
+    } catch (_) {
+      // Shown without a time.
+    }
   }
 
   Future<void> _loadSettings() async {
@@ -394,23 +408,25 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     return [
       const SettingsSectionHeader('Backup and restore'),
       ListTile(
-        leading: const Icon(Icons.save_alt),
-        title: const Text('Back up library'),
-        subtitle: Text(_exportStatusText),
+        key: const ValueKey('check-backup'),
+        leading: const Icon(Icons.fact_check_outlined),
+        title: const Text('Check backup'),
+        subtitle: Text(_backupStatusText),
+        isThreeLine: _backupWork == null && _libraryFoldersUpdated != null,
         trailing:
-            _isExporting
+            _backupWork != null
                 ? const SizedBox(
                   width: 22,
                   height: 22,
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
                 : null,
-        onTap: _isExporting ? null : _exportLibrary,
+        onTap: _backupWork != null ? null : _checkBackup,
       ),
-      if (_isExporting)
+      if (_backupWork != null)
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: LinearProgressIndicator(value: _exportFraction),
+          child: LinearProgressIndicator(value: _backupFraction),
         ),
       ListTile(
         leading: const Icon(Icons.restore),
@@ -558,79 +574,128 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     ];
   }
 
-  String get _exportStatusText {
-    final progress = _exportProgress;
-    if (!_isExporting) {
-      return 'Saves covers, playlist files and a copy of the app data next '
-          'to your downloads';
+  String get _backupStatusText {
+    final work = _backupWork;
+    if (work == null) {
+      final updated = _libraryFoldersUpdated;
+      const always = 'Everything is saved in the library folders as you go.';
+      if (updated == null) return always;
+      return '$always\nLibrary folders last updated: '
+          '${_dateFormat.format(updated)}';
     }
+    final progress = _backupProgress;
+    final verb = work == _BackupWork.checking ? 'Checking' : 'Fixing';
     if (progress == null) return 'Getting ready';
-    if (progress.done >= progress.total) return 'Saving a copy of the app data';
-    return 'Playlist ${progress.done + 1} of ${progress.total}: '
+    if (progress.done >= progress.total) {
+      return work == _BackupWork.checking
+          ? 'Checking the settings'
+          : 'Saving the settings, lyrics and loudness';
+    }
+    return '$verb playlist ${progress.done + 1} of ${progress.total}: '
         '${progress.current ?? ''}';
   }
 
-  double? get _exportFraction {
-    final progress = _exportProgress;
+  double? get _backupFraction {
+    final progress = _backupProgress;
     if (progress == null || progress.total == 0) return null;
     return progress.done / progress.total;
   }
 
-  Future<void> _exportLibrary() async {
-    // The export keeps running if the page is closed; a snack bar then
-    // still reports the end.
+  void _onBackupProgress(LibraryExportProgress progress) {
+    if (mounted) setState(() => _backupProgress = progress);
+  }
+
+  void _endBackupWork() {
+    if (!mounted) return;
+    setState(() {
+      _backupWork = null;
+      _backupProgress = null;
+    });
+    unawaited(_loadLibraryFoldersUpdated());
+  }
+
+  /// Looks for anything missing in the library folders, without writing,
+  /// and offers to fix it.
+  Future<void> _checkBackup() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final service = ref.read(backupCheckServiceProvider);
+    setState(() {
+      _backupWork = _BackupWork.checking;
+      _backupProgress = null;
+    });
+    BackupReport report;
+    try {
+      report = await service.check(onProgress: _onBackupProgress);
+    } catch (error) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('Could not check the backup: $error')),
+      );
+      _endBackupWork();
+      return;
+    }
+    _endBackupWork();
+    if (!mounted) return;
+    final fix = await showDialog<bool>(
+      context: context,
+      builder: (_) => _BackupCheckDialog(report: report),
+    );
+    if (fix == true && mounted) await _fixBackup();
+  }
+
+  /// Writes what the library folders lack (no copy of the database), then
+  /// checks again and shows what is left.
+  Future<void> _fixBackup() async {
+    // The fix keeps running if the page is closed; a snack bar then still
+    // reports the end.
     final messenger = ScaffoldMessenger.of(context);
     final networkPolicy = ref.read(downloadNetworkPolicyProvider);
-    final exporter = ref.read(libraryExportServiceProvider);
+    final service = ref.read(backupCheckServiceProvider);
     setState(() {
-      _isExporting = true;
-      _exportProgress = null;
+      _backupWork = _BackupWork.fixing;
+      _backupProgress = null;
     });
     try {
       var allowNetwork = false;
       try {
         allowNetwork = await networkPolicy.allowsAutomaticNetworkUse();
       } catch (_) {
-        // Offline export: covers come from the files and the image cache.
+        // Covers come from the files and the image cache.
       }
-      final result = await exporter.exportLibrary(
+      final result = await service.fix(
         allowNetwork: allowNetwork,
-        onProgress: (progress) {
-          if (mounted) setState(() => _exportProgress = progress);
-        },
+        onProgress: _onBackupProgress,
       );
+      if (mounted) {
+        setState(() {
+          _backupWork = _BackupWork.checking;
+          _backupProgress = null;
+        });
+      }
+      final report = await service.check(onProgress: _onBackupProgress);
       if (!mounted) {
         messenger.showSnackBar(
           SnackBar(
             content: Text(
-              result.problems.isEmpty
-                  ? 'Library backed up.'
-                  : 'Library backed up with '
-                      '${_count(result.problems.length, 'problem')}.',
+              report.problems.isEmpty && result.problems.isEmpty
+                  ? 'Backup fixed.'
+                  : 'Backup fixed in part: '
+                      '${_count(report.problems.length + result.problems.length, 'problem')} left.',
             ),
           ),
         );
         return;
       }
-      setState(() {
-        _isExporting = false;
-        _exportProgress = null;
-      });
+      _endBackupWork();
       await showDialog<void>(
         context: context,
-        builder: (_) => _ExportSummaryDialog(result: result),
+        builder: (_) => _BackupCheckDialog(report: report, fixed: result),
       );
     } catch (error) {
       messenger.showSnackBar(
-        SnackBar(content: Text('Could not back up the library: $error')),
+        SnackBar(content: Text('Could not fix the backup: $error')),
       );
     } finally {
-      if (mounted && _isExporting) {
-        setState(() {
-          _isExporting = false;
-          _exportProgress = null;
-        });
-      }
+      if (_backupWork != null) _endBackupWork();
     }
   }
 
@@ -811,87 +876,191 @@ String _displayPath(String path) {
       : path;
 }
 
-String _count(int count, String noun) => '$count $noun${count == 1 ? '' : 's'}';
+String _count(int count, String noun, [String? plural]) =>
+    '$count ${count == 1 ? noun : plural ?? '${noun}s'}';
 
-class _ExportSummaryDialog extends StatelessWidget {
-  const _ExportSummaryDialog({required this.result});
+enum _BackupWork { checking, fixing }
 
-  final LibraryExportResult result;
+/// What "Check backup" found, with a "Fix" button when something can be
+/// written. After a fix ([fixed]), what was done and what is left.
+class _BackupCheckDialog extends StatelessWidget {
+  const _BackupCheckDialog({required this.report, this.fixed});
+
+  final BackupReport report;
+  final LibraryExportResult? fixed;
+
+  static String _time(DateTime time) =>
+      _SettingsPageState._dateFormat.format(time);
+
+  static String _megabytes(int bytes) {
+    final mb = bytes / (1024 * 1024);
+    return mb >= 10 ? '${mb.round()} MB' : '${mb.toStringAsFixed(1)} MB';
+  }
 
   @override
   Widget build(BuildContext context) {
-    final covers = result.trackCovers + result.playlistCovers;
     const strong = TextStyle(fontWeight: FontWeight.w600);
+    final problems = report.problems;
+    final fixed = this.fixed;
+    final canFix = fixed == null && report.needsFix;
+    final String title;
+    if (fixed == null) {
+      title = problems.isEmpty ? 'Backup is complete' : 'Backup needs fixing';
+    } else {
+      title =
+          problems.isEmpty && fixed.problems.isEmpty
+              ? 'Backup fixed'
+              : 'Backup fixed in part';
+    }
+    final missingInfo = report.playlists.fold(
+      0,
+      (sum, pl) => sum + (pl.folderMissing ? 0 : pl.missingInfoFiles),
+    );
+    final newer = [
+      for (final pl in report.playlists)
+        if (pl.newerMetadataVersion != null) pl.name,
+    ];
+    final libraryFileSaved = report.libraryFiles
+        .map((file) => file.savedAt)
+        .whereType<DateTime>()
+        .fold<DateTime?>(
+          null,
+          (newest, time) =>
+              newest == null || time.isAfter(newest) ? time : newest,
+        );
+    final outside = report.foldersOutsideLibrary;
+
+    Widget gap([double height = 12]) => SizedBox(height: height);
+    Widget bullet(String text) => Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Text('• $text'),
+    );
+
     return AlertDialog(
-      title: Text(
-        result.problems.isEmpty
-            ? 'Library exported'
-            : 'Library exported with problems',
-      ),
+      title: Text(title),
       content: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              '${_count(result.playlists, 'playlist')}, '
-              '${_count(result.tracks, 'track')} and '
-              '${_count(covers, 'cover')}'
-              '${result.newCovers > 0 ? ' (${result.newCovers} new)' : ''}.',
+              '${_count(report.playlists.length, 'playlist')} and '
+              '${_count(report.tracks, 'downloaded track')}.',
             ),
-            const SizedBox(height: 12),
-            const Text(
-              'Each playlist folder holds its files with covers, a playlist '
-              'file (.m3u8) in your order and woolytube_meta.json.',
+            if (report.lastUpdated case final updated?)
+              Text('Library folders last updated: ${_time(updated)}.'),
+            if (fixed != null && fixed.newCovers > 0) ...[
+              gap(),
+              Text('Saved ${_count(fixed.newCovers, 'new cover')}.'),
+            ],
+            if (problems.isNotEmpty) ...[
+              gap(16),
+              Text(
+                fixed == null
+                    ? 'Missing or out of date:'
+                    : 'Still missing or out of date:',
+                style: strong,
+              ),
+              gap(4),
+              for (final problem in problems) bullet(problem),
+            ],
+            if (fixed != null && fixed.problems.isNotEmpty) ...[
+              gap(16),
+              const Text('Could not fix:', style: strong),
+              gap(4),
+              for (final problem in fixed.problems) bullet(problem),
+            ],
+            if (report.writeErrors.isNotEmpty) ...[
+              gap(16),
+              const Text(
+                'Could not be saved since the app started:',
+                style: strong,
+              ),
+              gap(4),
+              for (final error in report.writeErrors)
+                bullet(
+                  '${error.what}: ${error.message}'
+                  '${error.count > 1 ? ' (${error.count} times)' : ''}'
+                  '${error.resolved ? '. Saved again later.' : ''}',
+                ),
+            ],
+            gap(16),
+            const Text('Saved files:', style: strong),
+            gap(4),
+            Text(
+              report.settingsWaitForRestore
+                  ? 'Settings: kept from the copied library until you '
+                      'restore it.'
+                  : report.settingsSavedAt == null
+                  ? 'Settings: not saved yet.'
+                  : 'Settings: ${_time(report.settingsSavedAt!)}.',
             ),
-            const SizedBox(height: 12),
-            const Text('Everything is in these two folders:'),
-            const SizedBox(height: 4),
+            Text(
+              libraryFileSaved == null
+                  ? 'Home order and last song: not saved yet.'
+                  : 'Home order and last song: ${_time(libraryFileSaved)}.',
+            ),
+            if (newer.isNotEmpty) ...[
+              gap(),
+              Text(
+                'A newer version of the app wrote the playlist file of '
+                '${newer.map((name) => '"$name"').join(', ')}. Update the app '
+                'to keep ${newer.length == 1 ? 'it' : 'them'} up to date.',
+              ),
+            ],
+            if (missingInfo > 0) ...[
+              gap(),
+              Text(
+                '${_count(missingInfo, 'track')} '
+                '${missingInfo == 1 ? 'has' : 'have'} no YouTube description '
+                'saved. Older downloads did not keep it.',
+              ),
+            ],
+            gap(16),
+            Text(
+              outside.isEmpty
+                  ? 'Everything is in these two folders:'
+                  : 'Everything is in these folders:',
+            ),
+            gap(4),
             Text(_displayPath(LibraryLayout.audioBasePath), style: strong),
             Text(_displayPath(LibraryLayout.videoBasePath), style: strong),
-            if (result.databaseCopyPath != null) ...[
-              const SizedBox(height: 12),
-              Text(
-                'A copy of the app data and settings is in '
-                '${_displayPath(LibraryExportService.backupDir)}.',
-              ),
-            ],
-            if (result.foldersOutsideLibrary.isNotEmpty) ...[
-              const SizedBox(height: 12),
-              const Text(
-                'These playlists were restored from other folders and are '
-                'still there:',
-              ),
-              const SizedBox(height: 4),
-              for (final folder in result.foldersOutsideLibrary)
-                Text(_displayPath(folder), style: strong),
-            ],
-            const SizedBox(height: 12),
-            Text(
-              result.foldersOutsideLibrary.isEmpty
-                  ? 'Copy these two folders to keep a complete backup that '
-                      'plays without the app.'
-                  : 'Copy all of these folders to keep a complete backup that '
-                      'plays without the app.',
+            for (final folder in outside)
+              Text(_displayPath(folder), style: strong),
+            gap(),
+            const Text(
+              'Copy them to a computer to back up the library, and onto '
+              'another phone to move it there.',
             ),
-            if (result.problems.isNotEmpty) ...[
-              const SizedBox(height: 16),
-              const Text('Not exported:', style: strong),
-              const SizedBox(height: 4),
-              for (final problem in result.problems)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 4),
-                  child: Text(problem),
-                ),
+            if (report.oldDatabaseCopies > 0) ...[
+              gap(),
+              Text(
+                'Older versions of the app also saved '
+                '${_count(report.oldDatabaseCopies, 'copy', 'copies')} of the '
+                'app data (${_megabytes(report.oldDatabaseCopyBytes)}) in '
+                '${_displayPath(LibraryExportService.backupDir)}. Nothing '
+                'uses them any more, so you can delete them.',
+              ),
             ],
           ],
         ),
       ),
       actions: [
-        FilledButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('OK'),
-        ),
+        if (canFix) ...[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Close'),
+          ),
+          FilledButton(
+            key: const ValueKey('fix-backup'),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Fix'),
+          ),
+        ] else
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('OK'),
+          ),
       ],
     );
   }

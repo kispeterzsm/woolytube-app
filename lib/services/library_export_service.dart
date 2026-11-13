@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:intl/intl.dart';
 import 'package:path/path.dart' as p;
 
 import '../database/database.dart';
@@ -22,7 +21,7 @@ class LibraryExportProgress {
   final int done;
   final int total;
 
-  /// What is being worked on: a playlist name, or the app data copy.
+  /// What is being worked on: a playlist name, or the settings.
   final String? current;
 }
 
@@ -33,7 +32,6 @@ class LibraryExportResult {
     required this.trackCovers,
     required this.playlistCovers,
     required this.newCovers,
-    required this.databaseCopyPath,
     required this.settingsPath,
     required this.problems,
     this.foldersOutsideLibrary = const [],
@@ -52,7 +50,7 @@ class LibraryExportResult {
   /// Covers saved during this export.
   final int newCovers;
 
-  final String? databaseCopyPath;
+  /// The settings file, or null when it was not written.
   final String? settingsPath;
 
   /// One line per thing that could not be exported.
@@ -65,31 +63,34 @@ class LibraryExportResult {
 }
 
 /// Makes the library folders a complete backup: every playlist folder gets
-/// an up-to-date sidecar, `.m3u8` and offline covers, and a copy of the
-/// app's database and settings goes into `Music/WoolyTube/.woolytube_backup`.
+/// an up-to-date sidecar, `.m3u8` and offline covers, and the settings go
+/// into `Music/WoolyTube/.woolytube_backup`. The mirrors keep all of this
+/// up to date as the library changes; "Check backup" runs an export to
+/// fill whatever they missed.
+///
+/// Older versions also put copies of the app's database there. Nothing
+/// restores from them, so none are made any more, and the ones there are
+/// left alone: they are the owner's files.
 class LibraryExportService {
   LibraryExportService(
     this._db,
     this._metadata,
     this._thumbnails,
     this._settings,
-    this._log, {
-    DateTime Function()? clock,
-  }) : _clock = clock ?? DateTime.now;
+    this._log,
+  );
 
   final AppDatabase _db;
   final MetadataService _metadata;
   final ThumbnailBackfillService _thumbnails;
   final AppSettingsService _settings;
   final LogService _log;
-  final DateTime Function() _clock;
 
   static const backupDirName = '.woolytube_backup';
   static const settingsFileName = 'woolytube_settings.json';
-  static const keptDatabaseCopies = 3;
-  static final _copyNamePattern = RegExp(r'^woolytube-\d{8}-\d{4}\.sqlite$');
-  static const _partialCopyName = 'woolytube-copy.partial';
-  static const _stagingCopyName = 'woolytube-export.tmp.sqlite';
+
+  /// The database copies older versions made, named by their time.
+  static final databaseCopyPattern = RegExp(r'^woolytube-\d{8}-\d{4}\.sqlite$');
 
   static String get backupDir =>
       p.join(LibraryLayout.audioBasePath, backupDirName);
@@ -97,19 +98,24 @@ class LibraryExportService {
   Future<LibraryExportResult>? _running;
 
   /// Exports everything. Covers may be downloaded only when [allowNetwork].
-  /// A failing playlist is listed in the result and the rest still export.
+  /// The settings file is left alone without [writeSettings] (a copied
+  /// library waiting to be restored brought its own). A failing playlist is
+  /// listed in the result and the rest still export.
   Future<LibraryExportResult> exportLibrary({
     bool allowNetwork = false,
+    bool writeSettings = true,
     void Function(LibraryExportProgress progress)? onProgress,
   }) {
     return _running ??= _export(
       allowNetwork,
+      writeSettings,
       onProgress,
     ).whenComplete(() => _running = null);
   }
 
   Future<LibraryExportResult> _export(
     bool allowNetwork,
+    bool writeSettings,
     void Function(LibraryExportProgress progress)? onProgress,
   ) async {
     final playlists = await _db.getAllPlaylists();
@@ -165,22 +171,17 @@ class LibraryExportService {
       LibraryExportProgress(
         done: playlists.length,
         total: playlists.length,
-        current: 'Copy of the app data',
+        current: 'Settings',
       ),
     );
-    String? databaseCopy;
     String? settingsFile;
-    try {
-      databaseCopy = await writeDatabaseCopy();
-    } catch (e) {
-      problems.add('Database copy: $e');
-      _log.warn('database copy failed: $e');
-    }
-    try {
-      settingsFile = await writeSettingsFile();
-    } catch (e) {
-      problems.add('Settings: $e');
-      _log.warn('settings export failed: $e');
+    if (writeSettings) {
+      try {
+        settingsFile = await writeSettingsFile();
+      } catch (e) {
+        problems.add('Settings: $e');
+        _log.warn('settings export failed: $e');
+      }
     }
     _log.info(
       'library export: $exported playlists, $tracks tracks, '
@@ -200,75 +201,31 @@ class LibraryExportService {
       trackCovers: trackCovers,
       playlistCovers: playlistCovers,
       newCovers: newCovers,
-      databaseCopyPath: databaseCopy,
       settingsPath: settingsFile,
       problems: problems,
     );
   }
 
-  /// Writes a consistent copy of the database to
-  /// `.woolytube_backup/woolytube-<yyyyMMdd-HHmm>.sqlite` and keeps only the
-  /// newest [keptDatabaseCopies] copies. Returns the copy's path.
-  Future<String> writeDatabaseCopy() async {
-    final dir = await _prepareBackupDir();
-    final stamp = DateFormat('yyyyMMdd-HHmm').format(_clock());
-    final target = p.join(dir.path, 'woolytube-$stamp.sqlite');
-    final partial = File(p.join(dir.path, _partialCopyName));
-    if (await partial.exists()) await partial.delete();
-
-    // SQLite writes the copy beside the app's own database, where it always
-    // works; a plain file copy then moves it to shared storage.
-    final staging = await _stagingPath();
-    if (staging == null) {
-      await _db.customStatement('VACUUM INTO ?', [partial.path]);
-    } else {
-      final stagingFile = File(staging);
-      try {
-        if (await stagingFile.exists()) await stagingFile.delete();
-        await _db.customStatement('VACUUM INTO ?', [staging]);
-        await stagingFile.copy(partial.path);
-      } finally {
-        try {
-          if (await stagingFile.exists()) await stagingFile.delete();
-        } catch (_) {
-          // Replaced by the next export.
+  /// The database copies older versions left in the backup folder: how
+  /// many, and their size in bytes. They are never deleted by the app.
+  Future<({int count, int bytes})> oldDatabaseCopies() async {
+    var count = 0;
+    var bytes = 0;
+    final dir = Directory(backupDir);
+    try {
+      if (!await dir.exists()) return (count: 0, bytes: 0);
+      await for (final entity in dir.list(followLinks: false)) {
+        if (entity is! File ||
+            !databaseCopyPattern.hasMatch(p.basename(entity.path))) {
+          continue;
         }
+        count++;
+        bytes += await entity.length();
       }
+    } catch (_) {
+      // Only mentioned in the check.
     }
-    await partial.rename(target);
-    await _pruneDatabaseCopies(dir);
-    return target;
-  }
-
-  /// A path in the database's own folder, or null for an in-memory database.
-  Future<String?> _stagingPath() async {
-    final rows = await _db.customSelect('PRAGMA database_list').get();
-    for (final row in rows) {
-      if (row.data['name'] != 'main') continue;
-      final file = row.data['file'];
-      if (file is! String || file.isEmpty) return null;
-      return p.join(p.dirname(file), _stagingCopyName);
-    }
-    return null;
-  }
-
-  Future<void> _pruneDatabaseCopies(Directory dir) async {
-    final copies = <File>[];
-    await for (final entity in dir.list(followLinks: false)) {
-      if (entity is File &&
-          _copyNamePattern.hasMatch(p.basename(entity.path))) {
-        copies.add(entity);
-      }
-    }
-    // The names carry the time, so name order is age order.
-    copies.sort((a, b) => p.basename(b.path).compareTo(p.basename(a.path)));
-    for (final old in copies.skip(keptDatabaseCopies)) {
-      try {
-        await old.delete();
-      } catch (_) {
-        // Tried again on the next export.
-      }
-    }
+    return (count: count, bytes: bytes);
   }
 
   /// Restores the app settings saved in the library's backup folder, or in
@@ -338,9 +295,9 @@ class LibraryExportService {
     return next;
   }
 
-  Future<String> _writeSettingsFileNow() async {
+  Future<String> _settingsFileContent() async {
     final sections = await _settings.exportSettingsBySection();
-    final content = const JsonEncoder.withIndent('  ').convert({
+    return const JsonEncoder.withIndent('  ').convert({
       'app': 'WoolyTube',
       'version': settingsFileVersion,
       'sections': sections,
@@ -348,6 +305,25 @@ class LibraryExportService {
       // of this file read them.
       'settings': {for (final section in sections.values) ...section},
     });
+  }
+
+  /// The settings file in the library's backup folder: when it was last
+  /// written, and whether it holds the current settings. Writes nothing.
+  Future<({DateTime? savedAt, bool upToDate})> settingsFileState() async {
+    final file = File(p.join(backupDir, settingsFileName));
+    try {
+      if (!await file.exists()) return (savedAt: null, upToDate: false);
+      final savedAt = await file.lastModified();
+      final upToDate =
+          await file.readAsString() == await _settingsFileContent();
+      return (savedAt: savedAt, upToDate: upToDate);
+    } catch (_) {
+      return (savedAt: null, upToDate: false);
+    }
+  }
+
+  Future<String> _writeSettingsFileNow() async {
+    final content = await _settingsFileContent();
     final hash = contentHash(content);
     final target = p.join(backupDir, settingsFileName);
     final file = File(target);

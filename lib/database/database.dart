@@ -1673,6 +1673,34 @@ class AppDatabase extends _$AppDatabase {
             ..orderBy([(l) => OrderingTerm.asc(l.lineNo)]))
           .get();
 
+  /// The lines of several docs, each doc's in order, by doc id. Docs
+  /// without lines are left out.
+  Future<Map<int, List<LyricsLine>>> lyricsLinesForDocs(
+    Iterable<int> docIds,
+  ) async {
+    final ids = docIds.toSet().toList();
+    final result = <int, List<LyricsLine>>{};
+    // SQLite limits the number of bound variables per statement.
+    for (var start = 0; start < ids.length; start += 500) {
+      final chunk = ids.sublist(
+        start,
+        start + 500 > ids.length ? ids.length : start + 500,
+      );
+      final rows =
+          await (select(lyricsLines)
+                ..where((l) => l.docId.isIn(chunk))
+                ..orderBy([
+                  (l) => OrderingTerm.asc(l.docId),
+                  (l) => OrderingTerm.asc(l.lineNo),
+                ]))
+              .get();
+      for (final row in rows) {
+        result.putIfAbsent(row.docId, () => []).add(row);
+      }
+    }
+    return result;
+  }
+
   /// Lines [fromLineNo]..[toLineNo] (inclusive) of a doc in order.
   Future<List<LyricsLine>> lyricsLinesInRange(
     int docId,
@@ -1874,8 +1902,7 @@ LazyDatabase _openConnection() {
 /// timeout makes a write wait for the other side's transaction instead of
 /// failing at once with "database is locked". The busy timeout is set first:
 /// the first switch to WAL needs a moment of exclusive access and would
-/// otherwise fail at once if the other side is writing. The backup copy uses
-/// VACUUM INTO, which works with WAL.
+/// otherwise fail at once if the other side is writing.
 void configureConnection(void Function(String sql) execute) {
   execute('PRAGMA busy_timeout=5000');
   execute('PRAGMA journal_mode=WAL');

@@ -2,7 +2,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:drift/drift.dart' show driftRuntimeOptions;
-import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -45,7 +44,6 @@ void main() {
   late String videoBase;
   late AppDatabase db;
   late _FakeMediaThumbnails media;
-  late DateTime now;
 
   LibraryExportService exporterFor(AppDatabase database) {
     final metadata = MetadataService(database);
@@ -62,7 +60,6 @@ void main() {
       ),
       AppSettingsService(),
       LogService(),
-      clock: () => now,
     );
   }
 
@@ -131,7 +128,6 @@ void main() {
     });
     db = openTestDatabase();
     media = _FakeMediaThumbnails();
-    now = DateTime(2026, 11, 5, 14, 30);
   });
 
   tearDown(() async {
@@ -140,8 +136,7 @@ void main() {
     await tempDir.delete(recursive: true);
   });
 
-  test('writes sidecars, playlist files, covers, a database copy and the '
-      'settings', () async {
+  test('writes sidecars, playlist files, covers and the settings', () async {
     final music = await addPlaylist(db, 'Music', tracks: 2);
     final videos = await addPlaylist(db, 'Videos', audioOnly: false);
     final firstTrack = (await db.getTracksForPlaylist(music.id)).first;
@@ -175,16 +170,6 @@ void main() {
       '00002_Music 2.m4a',
     ]);
 
-    final copyPath = p.join(backupDir(), 'woolytube-20261105-1430.sqlite');
-    expect(result.databaseCopyPath, copyPath);
-    final copy = AppDatabase.forTesting(NativeDatabase(File(copyPath)));
-    addTearDown(copy.close);
-    expect((await copy.getAllPlaylists()).map((pl) => pl.name), [
-      'Music',
-      'Videos',
-    ]);
-    expect(await copy.getAllTracks(), hasLength(3));
-
     final settingsPath = p.join(
       backupDir(),
       LibraryExportService.settingsFileName,
@@ -203,37 +188,51 @@ void main() {
     );
     expect((file['sections'] as Map)[AppSettingsService.appSection], settings);
 
-    expect(backupNames(), [
-      '.nomedia',
-      'woolytube-20261105-1430.sqlite',
-      LibraryExportService.settingsFileName,
-    ]);
+    // No copy of the database any more: nothing restores from it.
+    expect(backupNames(), ['.nomedia', LibraryExportService.settingsFileName]);
   });
 
-  test('keeps only the newest three database copies', () async {
+  test('leaves the database copies of older versions alone', () async {
     await addPlaylist(db, 'Music');
     await Directory(backupDir()).create(recursive: true);
-    for (final name in [
+    final copies = [
       'woolytube-20260101-0900.sqlite',
-      'woolytube-20260301-0900.sqlite',
       'woolytube-20260201-0900.sqlite',
-      'notes.txt',
-    ]) {
-      File(p.join(backupDir(), name)).writeAsStringSync('old');
+      'woolytube-20260301-0900.sqlite',
+      'woolytube-20260401-0900.sqlite',
+    ];
+    for (final name in copies) {
+      File(p.join(backupDir(), name)).writeAsStringSync('old $name');
     }
     final exporter = exporterFor(db);
 
-    await exporter.writeDatabaseCopy();
-    now = DateTime(2026, 11, 6, 8, 5);
-    await exporter.writeDatabaseCopy();
+    await exporter.exportLibrary();
+    await exporter.exportLibrary();
 
     expect(backupNames(), [
       '.nomedia',
-      'notes.txt',
-      'woolytube-20260301-0900.sqlite',
-      'woolytube-20261105-1430.sqlite',
-      'woolytube-20261106-0805.sqlite',
+      ...copies,
+      LibraryExportService.settingsFileName,
     ]);
+    for (final name in copies) {
+      expect(File(p.join(backupDir(), name)).readAsStringSync(), 'old $name');
+    }
+    expect(await exporter.oldDatabaseCopies(), (count: 4, bytes: 4 * 34));
+  });
+
+  test('keeps the settings file of a library waiting to be restored', () async {
+    await Directory(backupDir()).create(recursive: true);
+    final settings = File(
+      p.join(backupDir(), LibraryExportService.settingsFileName),
+    )..writeAsStringSync('{"settings": {"even_out_volume": false}}');
+
+    final result = await exporterFor(db).exportLibrary(writeSettings: false);
+
+    expect(result.settingsPath, isNull);
+    expect(
+      settings.readAsStringSync(),
+      '{"settings": {"even_out_volume": false}}',
+    );
   });
 
   test('a playlist that cannot be exported does not stop the rest', () async {
@@ -250,32 +249,9 @@ void main() {
       File(p.join(kept.outputPath, MetadataService.metaFileName)).existsSync(),
       isTrue,
     );
-    expect(result.databaseCopyPath, isNotNull);
     expect(result.settingsPath, isNotNull);
     // The missing folder is not created.
     expect(Directory(p.join(audioBase, 'Gone')).existsSync(), isFalse);
-  });
-
-  test('copies a database file through its own folder', () async {
-    final dbDir = await Directory(
-      p.join(tempDir.path, 'app_data'),
-    ).create(recursive: true);
-    final fileDb = AppDatabase.forTesting(
-      NativeDatabase(File(p.join(dbDir.path, 'woolytube.sqlite'))),
-    );
-    addTearDown(fileDb.close);
-    await addPlaylist(fileDb, 'Music', tracks: 2);
-
-    final copyPath = await exporterFor(fileDb).writeDatabaseCopy();
-
-    // The staging copy beside the database is gone again.
-    expect(
-      dbDir.listSync().map((entity) => p.basename(entity.path)),
-      isNot(contains(contains('export'))),
-    );
-    final copy = AppDatabase.forTesting(NativeDatabase(File(copyPath)));
-    addTearDown(copy.close);
-    expect(await copy.getAllTracks(), hasLength(2));
   });
 
   testWidgets('restore lists dismissed playlists and imports them', (

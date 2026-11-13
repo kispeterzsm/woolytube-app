@@ -6,6 +6,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 
 import '../../database/database.dart';
 import '../chapters.dart';
+import '../folder_write_errors.dart';
 import '../library_layout.dart';
 import '../log_service.dart';
 import '../playlist_service.dart';
@@ -1346,9 +1347,15 @@ class LyricsService {
           draftFromDoc(doc, await _db.lyricsLinesForDoc(doc.id)),
       ];
       await writeLyricsFile(playlist.outputPath, track.videoId, drafts);
+      FolderWriteErrors.succeeded(lyricsFileErrorKey(track.id));
     } catch (e) {
       _log.warn(
         'Lyrics: could not save the lyrics file of ${track.displayTitle}: $e',
+      );
+      FolderWriteErrors.failed(
+        lyricsFileErrorKey(track.id),
+        'Lyrics file of "${track.displayTitle}"',
+        e,
       );
     }
   }

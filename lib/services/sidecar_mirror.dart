@@ -5,6 +5,7 @@ import 'package:drift/drift.dart';
 import 'package:path/path.dart' as p;
 
 import '../database/database.dart';
+import 'folder_write_errors.dart';
 import 'library_gate.dart';
 import 'log_service.dart';
 import 'metadata_service.dart';
@@ -46,6 +47,10 @@ class SidecarMirror {
   /// Wait before the first pass after [start], so it does not compete with
   /// the app opening.
   final Duration startDelay;
+
+  /// The [FolderWriteErrors] key of [playlistId]'s metadata file.
+  static String metadataErrorKey(int playlistId) => 'metadata:$playlistId';
+  static const _mirrorErrorKey = 'metadata';
 
   StreamSubscription<Set<TableUpdate>>? _subscription;
   Timer? _timer;
@@ -125,12 +130,20 @@ class SidecarMirror {
         }
         try {
           await _metadata.writeMetadataFor(playlist.id);
+          FolderWriteErrors.succeeded(metadataErrorKey(playlist.id));
         } catch (e) {
           _log?.warn('Could not update metadata of "${playlist.name}": $e');
+          FolderWriteErrors.failed(
+            metadataErrorKey(playlist.id),
+            'Metadata file of "${playlist.name}"',
+            e,
+          );
         }
       }
+      FolderWriteErrors.succeeded(_mirrorErrorKey);
     } catch (e) {
       _log?.warn('Metadata mirror failed: $e');
+      FolderWriteErrors.failed(_mirrorErrorKey, 'Metadata files', e);
     } finally {
       _running = false;
       if (_pending) {

@@ -5,6 +5,7 @@ import 'package:permission_handler/permission_handler.dart';
 import '../database/database.dart';
 import '../services/ytdlp_service.dart';
 import 'playback_providers.dart';
+import '../services/backup_check_service.dart';
 import '../services/chapter_service.dart';
 import '../services/playlist_service.dart';
 import '../services/download_service.dart';
@@ -297,6 +298,20 @@ final libraryMirrorProvider = Provider<LibraryMirror>((ref) {
   return mirror;
 });
 
+/// "Check backup": whether the library folders hold everything, and the
+/// fix for what they lack.
+final backupCheckServiceProvider = Provider<BackupCheckService>((ref) {
+  return BackupCheckService(
+    ref.watch(databaseProvider),
+    ref.watch(metadataServiceProvider),
+    ref.watch(libraryExportServiceProvider),
+    ref.watch(libraryFileServiceProvider),
+    ref.watch(libraryGateProvider),
+    log: ref.watch(logServiceProvider),
+    libraryWaitsForRestore: () => ref.read(pendingImportsProvider).isNotEmpty,
+  );
+});
+
 /// Imports a copied library with its order, settings and last song.
 final libraryRestoreServiceProvider = Provider<LibraryRestoreService>((ref) {
   return LibraryRestoreService(
@@ -526,6 +541,19 @@ class LibraryStartup {
     _ref.read(loudnessMirrorProvider).start();
     // Offline covers for older downloads; not urgent.
     unawaited(_backfillThumbnails());
+    // Lyrics files a failed write left missing; not urgent either.
+    unawaited(_repairLyricsFiles());
+  }
+
+  /// Writes the lyrics files that are missing (a write failed earlier).
+  Future<void> _repairLyricsFiles() async {
+    try {
+      await Future<void>.delayed(const Duration(seconds: 40));
+      if (_disposed) return;
+      await _ref.read(backupCheckServiceProvider).repairMissingLyricsFiles();
+    } catch (e) {
+      _log.warn('lyrics file repair failed: $e');
+    }
   }
 
   /// Gives the existing library offline covers. Covers are downloaded only

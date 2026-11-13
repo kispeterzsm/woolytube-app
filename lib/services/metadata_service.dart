@@ -484,37 +484,15 @@ class MetadataService {
     final dir = Directory(playlist.outputPath);
     if (!await dir.exists()) return;
 
-    final tracks = await _db.getTracksForPlaylist(playlistId);
-    final segmentsByTrack = await _segmentsByTrack(tracks);
-    final lyricsPinsByTrack = <int, List<LyricsDoc>>{};
-    for (final doc in await _db.lyricsDocsForPlaylist(playlistId)) {
-      if (!doc.pinned) continue;
-      lyricsPinsByTrack.putIfAbsent(doc.trackId, () => []).add(doc);
-    }
-    final metaPath = p.join(playlist.outputPath, _metaFileName);
-    final m3uPath = playlistFilePath(playlist.outputPath);
-    final job = SidecarJob(
-      playlist: playlist,
-      tracks: tracks,
-      segmentsByTrack: segmentsByTrack,
-      lyricsPinsByTrack: lyricsPinsByTrack,
-      metaPath: metaPath,
-      playlistFilePath: m3uPath,
-      knownHashes: {
-        metaPath: _writtenHashes[metaPath],
-        m3uPath: _writtenHashes[m3uPath],
-      },
-      tempSuffix:
-          '${DateTime.now().microsecondsSinceEpoch}.${_metadataWriteCounter++}',
-    );
+    final job = await _sidecarJob(playlist);
     final result =
-        tracks.length >= isolateTrackThreshold
+        job.tracks.length >= isolateTrackThreshold
             ? await Isolate.run(() => writeSidecarFiles(job))
             : await writeSidecarFiles(job);
     _writtenHashes.addAll(result.hashes);
     if (result.newerVersionKept case final version?) {
       // Said once per run: the mirror tries again after every change.
-      if (_newerSidecarsReported.add(metaPath)) {
+      if (_newerSidecarsReported.add(job.metaPath)) {
         _log?.warn(
           'Left the metadata file of "${playlist.name}" as it is: a newer '
           'app wrote it (format $version, this app knows $sidecarVersion). '
@@ -524,6 +502,58 @@ class MetadataService {
     }
     _writtenRevisions[playlistId] = revision;
     await _writeLibraryReadme(p.dirname(playlist.outputPath));
+  }
+
+  /// What writing the files of [playlist] now would change, without
+  /// writing anything: the files on disk are compared with what the
+  /// database holds. Null when the playlist folder is gone.
+  Future<SidecarCheck?> checkMetadataOf(Playlist playlist) async {
+    if (!await Directory(playlist.outputPath).exists()) return null;
+    final job = await _sidecarJob(playlist, dryRun: true);
+    final result =
+        job.tracks.length >= isolateTrackThreshold
+            ? await Isolate.run(() => writeSidecarFiles(job))
+            : await writeSidecarFiles(job);
+    return (
+      sidecarOutOfDate: result.changed.contains(job.metaPath),
+      playlistFileOutOfDate: result.changed.contains(job.playlistFilePath),
+      newerVersionKept: result.newerVersionKept,
+    );
+  }
+
+  Future<SidecarJob> _sidecarJob(
+    Playlist playlist, {
+    bool dryRun = false,
+  }) async {
+    final tracks = await _db.getTracksForPlaylist(playlist.id);
+    final segmentsByTrack = await _segmentsByTrack(tracks);
+    final lyricsPinsByTrack = <int, List<LyricsDoc>>{};
+    for (final doc in await _db.lyricsDocsForPlaylist(playlist.id)) {
+      if (!doc.pinned) continue;
+      lyricsPinsByTrack.putIfAbsent(doc.trackId, () => []).add(doc);
+    }
+    final metaPath = p.join(playlist.outputPath, _metaFileName);
+    final m3uPath = playlistFilePath(playlist.outputPath);
+    return SidecarJob(
+      playlist: playlist,
+      tracks: tracks,
+      segmentsByTrack: segmentsByTrack,
+      lyricsPinsByTrack: lyricsPinsByTrack,
+      metaPath: metaPath,
+      playlistFilePath: m3uPath,
+      // A check compares with the files on disk, not with what this run
+      // last wrote: they may have changed since.
+      knownHashes:
+          dryRun
+              ? const {}
+              : {
+                metaPath: _writtenHashes[metaPath],
+                m3uPath: _writtenHashes[m3uPath],
+              },
+      tempSuffix:
+          '${DateTime.now().microsecondsSinceEpoch}.${_metadataWriteCounter++}',
+      dryRun: dryRun,
+    );
   }
 
   Future<Map<int, List<SponsorBlockSegment>>> _segmentsByTrack(
@@ -615,11 +645,17 @@ Each folder is one playlist:
     playlist: order, titles, chapters, skip segments and settings.
     WoolyTube restores a playlist from it after a reinstall.
   - .woolytube_thumbnails holds the cover images, .woolytube_info the
-    original YouTube descriptions (uploader, upload date, description) and
+    original YouTube descriptions (uploader, upload date, description),
+    lyrics, song recognition results and loudness measurements, and
     .woolytube_replaced earlier files that were replaced.
 
-Copy the whole WoolyTube folder (Music/WoolyTube for audio, Movies/WoolyTube
-for video) to keep a complete backup.
+woolytube_library.json holds the home screen order and the last song
+played, and .woolytube_backup/woolytube_settings.json the app settings.
+WoolyTube keeps all of these files up to date as you use it.
+
+Copy both WoolyTube folders (Music/WoolyTube for audio, Movies/WoolyTube
+for video) to keep a complete backup. To move the library to another
+phone, copy them there, install WoolyTube and tap "Import all".
 ''';
 
   Future<void> _writeLibraryReadme(String basePath) async {
@@ -2286,6 +2322,7 @@ class SidecarJob {
     required this.knownHashes,
     required this.tempSuffix,
     this.lyricsPinsByTrack = const {},
+    this.dryRun = false,
   });
 
   final Playlist playlist;
@@ -2300,6 +2337,9 @@ class SidecarJob {
   /// Hash of what was last written at each path, if known.
   final Map<String, int?> knownHashes;
   final String tempSuffix;
+
+  /// Only find out which files would change; write nothing.
+  final bool dryRun;
 }
 
 /// The sidecar format version this build writes. A sidecar with a higher
@@ -2547,13 +2587,31 @@ typedef SidecarWriteResult =
       /// The version of the sidecar left alone because a newer app wrote
       /// it, or null.
       int? newerVersionKept,
+
+      /// The files whose content changed (or, for a dry run, would
+      /// change).
+      List<String> changed,
+    });
+
+/// What [MetadataService.checkMetadataOf] found.
+typedef SidecarCheck =
+    ({
+      /// `woolytube_meta.json` is missing or differs from the database.
+      bool sidecarOutOfDate,
+
+      /// The `.m3u8` is missing or differs from the database.
+      bool playlistFileOutOfDate,
+
+      /// The format of a sidecar a newer app wrote, which is left alone.
+      int? newerVersionKept,
     });
 
 /// Builds and writes a playlist's sidecar and `.m3u8` (see [SidecarJob]).
 /// A file whose content is unchanged is not rewritten; when its last hash
 /// is not known, the file on disk is compared. Keys a newer app added to the
 /// sidecar are kept, and a sidecar of a newer format version is not
-/// overwritten at all. Runs on any isolate.
+/// overwritten at all. A [SidecarJob.dryRun] only reports which files
+/// would change. Runs on any isolate.
 Future<SidecarWriteResult> writeSidecarFiles(SidecarJob job) async {
   final data = buildSidecarData(
     job.playlist,
@@ -2569,6 +2627,7 @@ Future<SidecarWriteResult> writeSidecarFiles(SidecarJob job) async {
     ),
   };
   final hashes = <String, int>{};
+  final changed = <String>[];
   int? newerVersionKept;
   for (final entry in contents.entries) {
     final path = entry.key;
@@ -2609,6 +2668,8 @@ Future<SidecarWriteResult> writeSidecarFiles(SidecarJob job) async {
       }
       unchanged = existing == content;
     }
+    if (!unchanged) changed.add(path);
+    if (job.dryRun) continue;
     if (!unchanged) {
       final tmpFile = File('$path.tmp.${job.tempSuffix}');
       try {
@@ -2625,7 +2686,7 @@ Future<SidecarWriteResult> writeSidecarFiles(SidecarJob job) async {
     }
     hashes[path] = hash;
   }
-  return (hashes: hashes, newerVersionKept: newerVersionKept);
+  return (hashes: hashes, newerVersionKept: newerVersionKept, changed: changed);
 }
 
 /// A content hash of [content]: two independent 30-bit hashes (FNV-1a and

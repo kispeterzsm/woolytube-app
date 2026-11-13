@@ -4,6 +4,7 @@ import 'package:drift/drift.dart';
 import 'package:path/path.dart' as p;
 
 import '../database/database.dart';
+import 'folder_write_errors.dart';
 import 'library_gate.dart';
 import 'log_service.dart';
 import 'loudness_file.dart';
@@ -50,6 +51,9 @@ class LoudnessMirror {
   /// Called with how many measurements the first pass took back from the
   /// folders, when it took any.
   final void Function(int seeded)? onSeeded;
+
+  /// The [FolderWriteErrors] key of [playlistId]'s loudness file.
+  static String errorKey(int playlistId) => 'loudness:$playlistId';
 
   StreamSubscription<Set<TableUpdate>>? _subscription;
   Timer? _timer;
@@ -140,7 +144,13 @@ class LoudnessMirror {
             measurements: measurements,
           );
           _lastError = null;
+          FolderWriteErrors.succeeded(errorKey(playlist.id));
         } catch (e) {
+          FolderWriteErrors.failed(
+            errorKey(playlist.id),
+            'Loudness file of "${playlist.name}"',
+            e,
+          );
           // Said once until it works again: it is tried after every batch.
           final error = '$e';
           if (error != _lastError) {

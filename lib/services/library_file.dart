@@ -174,6 +174,28 @@ class LibraryFileData {
   }
 }
 
+/// What [LibraryFileService.check] found about one library file.
+class LibraryFileState {
+  const LibraryFileState({
+    required this.path,
+    required this.upToDate,
+    this.savedAt,
+    this.newerFormat = false,
+  });
+
+  final String path;
+
+  /// When its content last changed; null when there is no readable file.
+  final DateTime? savedAt;
+
+  /// It holds the library as it is now (or a newer app wrote it, and it is
+  /// left alone).
+  final bool upToDate;
+
+  /// A newer app wrote it; this one leaves it alone.
+  final bool newerFormat;
+}
+
 /// Keeps `woolytube_library.json` in the top folder of both library roots
 /// (`Music/WoolyTube` and `Movies/WoolyTube`): what belongs to the library
 /// as a whole and not to one playlist folder. That is the home page order,
@@ -345,13 +367,7 @@ class LibraryFileService {
     final body = await build(existing: existing);
     final bodyText = _encode(body);
     // Nothing worth a file yet (a new library): no folder is made for it.
-    final labels = body['labels'];
-    final empty =
-        (body['playlists'] as List).isEmpty &&
-        body['resume'] == null &&
-        labels is List &&
-        labels.isEmpty &&
-        body.length == _emptyBodyKeys;
+    final empty = _isEmpty(body);
     var written = 0;
     for (final root in roots) {
       final dir = Directory(root);
@@ -405,6 +421,65 @@ class LibraryFileService {
   /// The keys of [build] for an empty library: app, version, playlists
   /// and labels.
   static const _emptyBodyKeys = 4;
+
+  static bool _isEmpty(Map<String, dynamic> body) {
+    final labels = body['labels'];
+    return (body['playlists'] as List).isEmpty &&
+        body['resume'] == null &&
+        labels is List &&
+        labels.isEmpty &&
+        body.length == _emptyBodyKeys;
+  }
+
+  /// The library file in each library root, without writing anything:
+  /// when it was saved and whether it holds the library as it is now. A
+  /// root that gets no file (the video root when it does not exist, or
+  /// any root while the library has nothing to keep) is left out.
+  ///
+  /// The "where I was" point is not compared: while something plays it is
+  /// saved only every half minute, which is not a missing backup.
+  Future<List<LibraryFileState>> check() async {
+    final body = await build(existing: await read());
+    final empty = _isEmpty(body);
+    String withoutResume(Map<String, dynamic> json) => _encode(
+      Map.of(json)
+        ..remove('updatedAt')
+        ..remove('resume'),
+    );
+    final expected = withoutResume(body);
+    final states = <LibraryFileState>[];
+    for (final root in roots) {
+      if (root != LibraryLayout.audioBasePath &&
+          !await Directory(root).exists()) {
+        continue;
+      }
+      final path = pathIn(root);
+      final onDisk = await _readJson(path);
+      if (onDisk == null) {
+        if (empty && !await File(path).exists()) continue;
+        states.add(LibraryFileState(path: path, upToDate: false));
+        continue;
+      }
+      final newer = _versionOf(onDisk) > fileVersion;
+      final updatedAt = onDisk['updatedAt'];
+      var savedAt =
+          updatedAt is String ? DateTime.tryParse(updatedAt)?.toLocal() : null;
+      try {
+        savedAt ??= await File(path).lastModified();
+      } catch (_) {
+        // Shown without a time.
+      }
+      states.add(
+        LibraryFileState(
+          path: path,
+          savedAt: savedAt,
+          upToDate: newer || withoutResume(onDisk) == expected,
+          newerFormat: newer,
+        ),
+      );
+    }
+    return states;
+  }
 
   static String _encode(Map<String, dynamic> json) =>
       const JsonEncoder.withIndent('  ').convert(json);

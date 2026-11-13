@@ -11,14 +11,23 @@ import 'package:path/path.dart' as p;
 import '../library_layout.dart';
 import 'lyrics_models.dart';
 
-const _fileVersion = 1;
+/// The lyrics file format this app writes. A file of a newer format is
+/// not replaced by a repair (see `lyrics_file_repair.dart`).
+const lyricsFileVersion = 1;
+
+/// The `FolderWriteErrors` key of [trackId]'s lyrics file.
+String lyricsFileErrorKey(int trackId) => 'lyrics:$trackId';
+
+/// The content [writeLyricsFile] writes for [docs].
+String encodeLyricsFile(String videoId, List<LyricsDocDraft> docs) =>
+    jsonEncode(lyricsFileJson(videoId, docs));
 
 /// The file's JSON for [docs] (their track ids are not stored).
 Map<String, dynamic> lyricsFileJson(
   String videoId,
   List<LyricsDocDraft> docs,
 ) => {
-  'version': _fileVersion,
+  'version': lyricsFileVersion,
   'videoId': videoId,
   'docs': [
     for (final doc in docs)
@@ -119,7 +128,7 @@ Future<void> writeLyricsFile(
   final noMedia = File(p.join(dir.path, '.nomedia'));
   if (!await noMedia.exists()) await noMedia.create();
   final tmp = File('${target.path}.tmp');
-  await tmp.writeAsString(jsonEncode(lyricsFileJson(videoId, docs)));
+  await tmp.writeAsString(encodeLyricsFile(videoId, docs));
   await tmp.rename(target.path);
 }
 

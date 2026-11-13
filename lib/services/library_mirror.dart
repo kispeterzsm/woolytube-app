@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:drift/drift.dart';
 
 import '../database/database.dart';
+import 'folder_write_errors.dart';
 import 'library_file.dart';
 import 'log_service.dart';
 import 'settings_changes.dart';
@@ -41,6 +42,9 @@ class LibraryMirror {
 
   /// Shortest time between two writes for a new "where I was" point.
   final Duration resumeInterval;
+
+  /// The [FolderWriteErrors] key of the library file.
+  static const errorKey = 'library';
 
   final _subscriptions = <StreamSubscription<Object?>>[];
   final _clock = Stopwatch()..start();
@@ -97,7 +101,9 @@ class LibraryMirror {
       await _file.write();
       _lastWriteAt = _clock.elapsed;
       _lastError = null;
+      FolderWriteErrors.succeeded(errorKey);
     } catch (e) {
+      FolderWriteErrors.failed(errorKey, 'Library file', e);
       // Said once until it works again: it is tried after every change.
       final error = '$e';
       if (error != _lastError) {

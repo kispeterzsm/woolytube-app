@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../database/database.dart';
+import 'folder_write_errors.dart';
 import 'library_export_service.dart';
 import 'log_service.dart';
 import 'settings_changes.dart';
@@ -47,6 +48,9 @@ class SettingsMirror {
   /// the app opening.
   final Duration startDelay;
 
+  /// The [FolderWriteErrors] key of the settings file.
+  static const errorKey = 'settings';
+
   StreamSubscription<void>? _subscription;
   Timer? _timer;
   bool _running = false;
@@ -76,7 +80,9 @@ class SettingsMirror {
       if (await _waitsForRestore()) return;
       await _exporter.writeSettingsFile();
       _lastError = null;
+      FolderWriteErrors.succeeded(errorKey);
     } catch (e) {
+      FolderWriteErrors.failed(errorKey, 'Settings file', e);
       // Said once until it works again: it is tried after every change.
       final error = '$e';
       if (error != _lastError) {
