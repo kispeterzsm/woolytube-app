@@ -318,4 +318,92 @@ void main() {
       expect(mixed.skippedChapterIds, {'youtube-0-0'});
     });
   });
+
+  group('chapter labels', () {
+    const rock = '0f0e2c1a-6c1b-4d7e-9a43-2b1c5d6e7f80';
+    const live = '7a1c9e2b-3d4f-4a5b-8c6d-e7f8091a2b3c';
+
+    test('round-trip by chapter id and are left out when there are none', () {
+      final data = const ChapterData(
+        downloaded: youtube,
+      ).withChapterLabels('youtube-1-60000', [rock, live, rock]);
+      expect(data.labelsOf('youtube-1-60000'), [rock, live]);
+      final json = data.toJson();
+      expect(json['chapterLabels'], {
+        'youtube-1-60000': [rock, live],
+      });
+      final back = ChapterData.fromJson(jsonDecode(jsonEncode(json)));
+      expect(back.labelsOf('youtube-1-60000'), [rock, live]);
+      expect(back.labelsOf('youtube-0-0'), isEmpty);
+
+      final cleared = back.withChapterLabels('youtube-1-60000', const []);
+      expect(cleared.chapterLabels, isEmpty);
+      expect(cleared.toJson().containsKey('chapterLabels'), isFalse);
+      // Unchanged labels give the same object back (nothing to write).
+      expect(
+        identical(
+          back.withChapterLabels('youtube-1-60000', [rock, live]),
+          back,
+        ),
+        isTrue,
+      );
+    });
+
+    test('chapter data from before labels reads as unlabelled', () {
+      final data = ChapterData.fromJson({
+        'downloaded': [
+          {'id': 'youtube-0-0', 'title': 'Intro', 'startMs': 0, 'endMs': 1000},
+        ],
+        'custom': null,
+        'valid': true,
+      });
+      expect(data.chapterLabels, isEmpty);
+      expect(data.toJson().containsKey('chapterLabels'), isFalse);
+    });
+
+    test('labels of chapters in no list are dropped when written; the undo '
+        'step and the downloaded list keep theirs', () {
+      final data = ChapterData(
+        downloaded: youtube,
+        custom: const [
+          MediaChapter(id: 'mine', title: 'Mine', startMs: 0, endMs: 1000),
+        ],
+        undoChapters: const [
+          MediaChapter(id: 'old', title: 'Old', startMs: 0, endMs: 1000),
+        ],
+        chapterLabels: const {
+          'mine': [rock],
+          'old': [live],
+          'youtube-0-0': [rock],
+          'gone': [rock],
+        },
+      );
+      expect(data.toJson()['chapterLabels'], {
+        'mine': [rock],
+        'old': [live],
+        'youtube-0-0': [rock],
+      });
+    });
+
+    test('a replaced file keeps them; malformed entries are skipped', () {
+      final data = ChapterData.fromJson({
+        'downloaded': [
+          {'id': 'youtube-0-0', 'title': 'Intro', 'startMs': 0, 'endMs': 1000},
+        ],
+        'chapterLabels': {
+          'youtube-0-0': [rock, 5, '', rock],
+          'bad': 'not a list',
+        },
+      });
+      expect(data.chapterLabels, {
+        'youtube-0-0': [rock],
+      });
+      final invalid = data.invalidate();
+      expect(invalid.active, isEmpty);
+      expect(invalid.labelsOf('youtube-0-0'), [rock]);
+      expect(ChapterData.decode(invalid.encode()).labelsOf('youtube-0-0'), [
+        rock,
+      ]);
+    });
+  });
 }

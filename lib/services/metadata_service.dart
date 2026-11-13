@@ -6,6 +6,8 @@ import 'package:path/path.dart' as p;
 import '../database/database.dart';
 import 'sponsorblock_categories.dart';
 import 'chapters.dart';
+import 'label_service.dart';
+import 'labels.dart';
 import 'library_layout.dart';
 import 'log_service.dart';
 import 'loudness_file.dart';
@@ -45,6 +47,10 @@ class DiscoveredTrack {
   /// Lyrics the user chose for the track or its chapters.
   final List<DiscoveredLyricsPin> lyricsPins;
 
+  /// The uids of the labels the file carries (see `Tracks.labelUids`).
+  /// Its chapters' labels are in [chaptersJson].
+  final List<String> labelUids;
+
   DiscoveredTrack({
     required this.index,
     required this.videoId,
@@ -66,6 +72,7 @@ class DiscoveredTrack {
     this.videoQuality,
     this.downloadedMaxHeight,
     this.lyricsPins = const [],
+    this.labelUids = const [],
   });
 }
 
@@ -177,6 +184,10 @@ class DiscoveredPlaylist {
   /// `Playlists.shuffleChapters`.
   final bool shuffleChapters;
 
+  /// The names and colors of the labels the playlist's files and chapters
+  /// carry.
+  final List<PortableLabel> labels;
+
   DiscoveredPlaylist({
     required this.folderPath,
     required this.url,
@@ -200,6 +211,7 @@ class DiscoveredPlaylist {
     this.downloadSubtitles = false,
     this.subtitleLanguages,
     this.shuffleChapters = false,
+    this.labels = const [],
   });
 }
 
@@ -387,6 +399,9 @@ class MetadataService {
       recognitionEpoch:
           wasLocal ? old.recognitionEpoch + 1 : old.recognitionEpoch,
       lastRecognitionRunId: old.lastRecognitionRunId,
+      // Labels stay with the chapters still listed (YouTube's keep their
+      // ids); the others' are dropped when written.
+      chapterLabels: old.chapterLabels,
     );
     await _db.writeTrackChapters(trackId, next);
     await syncLyricsChapterDocs(_db, trackId, next, previous: old);
@@ -543,6 +558,7 @@ class MetadataService {
       tracks: tracks,
       segmentsByTrack: segmentsByTrack,
       lyricsPinsByTrack: lyricsPinsByTrack,
+      labels: await _db.getLabels(),
       metaPath: metaPath,
       playlistFilePath: m3uPath,
       // A check compares with the files on disk, not with what this run
@@ -646,15 +662,16 @@ Each folder is one playlist:
   - Files carry title, artist, album (= playlist name), track number
     (= position), date and the YouTube link as tags, plus cover art.
   - woolytube_meta.json holds everything WoolyTube knows about the
-    playlist: order, titles, chapters, skip segments and settings.
+    playlist: order, titles, chapters, skip segments, labels and
+    settings.
     WoolyTube restores a playlist from it after a reinstall.
   - .woolytube_thumbnails holds the cover images, .woolytube_info the
     original YouTube descriptions (uploader, upload date, description),
     lyrics, song recognition results and loudness measurements, and
     .woolytube_replaced earlier files that were replaced.
 
-woolytube_library.json holds the home screen order and the last song
-played, and .woolytube_backup/woolytube_settings.json the app settings.
+woolytube_library.json holds the home screen order, your labels and the
+last song played, and .woolytube_backup/woolytube_settings.json the app settings.
 WoolyTube keeps all of these files up to date as you use it.
 
 Copy both WoolyTube folders (Music/WoolyTube for audio, Movies/WoolyTube
@@ -1583,6 +1600,7 @@ phone, copy them there, install WoolyTube and tap "Import all".
           undoFollowsDownloaded: !old.valid && old.undoFollowsDownloaded,
           recognitionEpoch: old.recognitionEpoch + 1,
           lastRecognitionRunId: old.lastRecognitionRunId,
+          chapterLabels: old.chapterLabels,
         );
         await _db.writeTrackChapters(trackId, next);
         await syncLyricsChapterDocs(_db, trackId, next, previous: old);
@@ -1913,6 +1931,10 @@ phone, copy them there, install WoolyTube and tap "Import all".
       discovered.thumbnailFileName,
     );
 
+    // The folder's labels first: a label already here under another uid
+    // (made on each phone with the same name) is the same label.
+    final labels = await importLabels(_db, discovered.labels);
+
     final playlistId = await _db.transaction(() async {
       final playlistId = await _db.insertPlaylist(
         PlaylistsCompanion.insert(
@@ -1962,7 +1984,7 @@ phone, copy them there, install WoolyTube and tap "Import all".
             unavailableReason: Value(dt.unavailableReason),
             isLocalReplacement: Value(dt.isLocalReplacement),
             alwaysSkip: Value(dt.alwaysSkip),
-            chaptersJson: Value(dt.chaptersJson),
+            chaptersJson: Value(labels.applyToChapters(dt.chaptersJson)),
             chaptersEnabled: Value(dt.chaptersEnabled),
             filePath: Value(filePaths[i]),
             downloadedAt: Value(
@@ -1974,6 +1996,9 @@ phone, copy them there, install WoolyTube and tap "Import all".
             downloadedMaxHeight: Value(
               complete ? dt.downloadedMaxHeight : null,
             ),
+            // A uid whose label is unknown here is kept: a library file
+            // copied later may still name it.
+            labelUids: Value(encodeLabelUids(labels.apply(dt.labelUids))),
           ),
         );
       }
@@ -2189,6 +2214,7 @@ phone, copy them there, install WoolyTube and tap "Import all".
                 if (DiscoveredLyricsPin.fromJson(pin) case final parsed?)
                   parsed,
           ],
+          labelUids: labelUidList(m['labels']),
         ),
       );
     }
@@ -2226,6 +2252,7 @@ phone, copy them there, install WoolyTube and tap "Import all".
       // A hand-edited list must not reach yt-dlp unchecked.
       subtitleLanguages: subtitleLanguagesOrNull(pl['subtitleLanguages']),
       shuffleChapters: pl['shuffleChapters'] == true,
+      labels: PortableLabel.listFromJson(json['labels']),
     );
   }
 
@@ -2326,12 +2353,16 @@ class SidecarJob {
     required this.knownHashes,
     required this.tempSuffix,
     this.lyricsPinsByTrack = const {},
+    this.labels = const [],
     this.dryRun = false,
   });
 
   final Playlist playlist;
   final List<Track> tracks;
   final Map<int, List<SponsorBlockSegment>> segmentsByTrack;
+
+  /// The labels in use; the sidecar lists those its tracks carry.
+  final List<Label> labels;
 
   /// Pinned lyrics docs per track (the user's choices).
   final Map<int, List<LyricsDoc>> lyricsPinsByTrack;
@@ -2354,7 +2385,7 @@ const sidecarVersion = 2;
 /// in a sidecar comes from a newer app and is kept when the file is
 /// rewritten (see [keepUnknownSidecarKeys]). A key written only when set
 /// must be listed too, or clearing it would bring the old value back.
-const sidecarTopLevelKeys = {'version', 'playlist', 'tracks'};
+const sidecarTopLevelKeys = {'version', 'playlist', 'tracks', 'labels'};
 const sidecarPlaylistKeys = {
   'url',
   'name',
@@ -2398,6 +2429,7 @@ const sidecarTrackKeys = {
   'downloadedMaxHeight',
   'sponsorBlockSegments',
   'lyricsPins',
+  'labels',
 };
 
 /// The sidecar JSON of a playlist.
@@ -2406,12 +2438,14 @@ String buildSidecarJson(
   List<Track> tracks,
   Map<int, List<SponsorBlockSegment>> segmentsByTrack, {
   Map<int, List<LyricsDoc>> lyricsPinsByTrack = const {},
+  List<Label> labels = const [],
 }) => encodeSidecar(
   buildSidecarData(
     playlist,
     tracks,
     segmentsByTrack,
     lyricsPinsByTrack: lyricsPinsByTrack,
+    labels: labels,
   ),
 );
 
@@ -2419,17 +2453,31 @@ String encodeSidecar(Map<String, Object?> data) =>
     const JsonEncoder.withIndent('  ').convert(data);
 
 /// The sidecar of a playlist, before it is encoded.
+///
+/// [labels] are the labels in use. The labels of each file (`labels`) and
+/// of its chapters (`chapterLabels` in `chapters`) are written as stored,
+/// and the top-level `labels` lists the name and color of those of them
+/// that are in use, in the owner's order, so the folder alone tells what
+/// they are. Each is left out when empty.
 Map<String, Object?> buildSidecarData(
   Playlist playlist,
   List<Track> tracks,
   Map<int, List<SponsorBlockSegment>> segmentsByTrack, {
   Map<int, List<LyricsDoc>> lyricsPinsByTrack = const {},
+  List<Label> labels = const [],
 }) {
   String? relative(String? path) =>
       MetadataService.fileNameRelativeTo(playlist.outputPath, path);
   final tracksJson = <Map<String, Object?>>[];
+  final usedLabels = <String>{};
   for (final t in tracks) {
     final segments = segmentsByTrack[t.id] ?? const <SponsorBlockSegment>[];
+    final chapters = ChapterData.decode(t.chaptersJson);
+    final fileLabels = decodeLabelUids(t.labelUids);
+    usedLabels.addAll(fileLabels);
+    for (final uids in chapters.keptChapterLabels.values) {
+      usedLabels.addAll(uids);
+    }
     tracksJson.add({
       'index': t.index,
       'videoId': t.videoId,
@@ -2443,7 +2491,7 @@ Map<String, Object?> buildSidecarData(
       'unavailableReason': t.unavailableReason,
       'isLocalReplacement': t.isLocalReplacement,
       'alwaysSkip': t.alwaysSkip,
-      'chapters': ChapterData.decode(t.chaptersJson).toJson(),
+      'chapters': chapters.toJson(),
       'chaptersEnabled': t.chaptersEnabled,
       'sponsorBlockCheckedAt':
           t.sponsorBlockCheckedAt?.toUtc().toIso8601String(),
@@ -2484,8 +2532,14 @@ Map<String, Object?> buildSidecarData(
               if (doc.timingOff) 'timingOff': true,
             },
         ],
+      if (fileLabels.isNotEmpty) 'labels': fileLabels,
     });
   }
+  final labelsJson = [
+    for (final label in labels)
+      if (label.deletedAt == null && usedLabels.contains(label.uid))
+        PortableLabel.of(label).toJson(),
+  ];
 
   return {
     'version': sidecarVersion,
@@ -2513,6 +2567,7 @@ Map<String, Object?> buildSidecarData(
       if (playlist.shuffleChapters) 'shuffleChapters': true,
     },
     'tracks': tracksJson,
+    if (labelsJson.isNotEmpty) 'labels': labelsJson,
   };
 }
 
@@ -2622,6 +2677,7 @@ Future<SidecarWriteResult> writeSidecarFiles(SidecarJob job) async {
     job.tracks,
     job.segmentsByTrack,
     lyricsPinsByTrack: job.lyricsPinsByTrack,
+    labels: job.labels,
   );
   final contents = {
     job.metaPath: encodeSidecar(data),

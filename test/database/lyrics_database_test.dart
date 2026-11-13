@@ -314,7 +314,7 @@ void main() {
 
 /// Turns a current database into what schema 15 left on a device: no
 /// lyrics tables, no `playlists.lyrics_mode`, no subtitle columns and no
-/// `playlists.shuffle_chapters`.
+/// `playlists.shuffle_chapters`, and no labels.
 Future<void> downgradeToSchema15(AppDatabase db) async {
   for (final name in [
     'trg_lyrics_fts_insert',
@@ -344,5 +344,6 @@ Future<void> downgradeToSchema15(AppDatabase db) async {
   ]) {
     await db.customStatement('ALTER TABLE playlists DROP COLUMN $column');
   }
+  await removeLabelSchema(db);
   await db.customStatement('PRAGMA user_version = 15');
 }

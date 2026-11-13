@@ -23,6 +23,7 @@ import '../services/info_backfill_service.dart';
 import '../services/library_gate.dart';
 import '../services/settings_mirror.dart';
 import '../services/sidecar_mirror.dart';
+import '../services/label_service.dart';
 import '../services/library_export_service.dart';
 import '../services/library_file.dart';
 import '../services/library_mirror.dart';
@@ -350,6 +351,11 @@ final infoBackfillSchedulerProvider = Provider<InfoBackfillScheduler>((ref) {
   ref.onDispose(scheduler.stop);
   return scheduler;
 });
+
+/// The owner's labels on files and chapters.
+final labelServiceProvider = Provider<LabelService>(
+  (ref) => LabelService(ref.watch(databaseProvider)),
+);
 
 /// Imports a copied library with its order, settings and last song.
 final libraryRestoreServiceProvider = Provider<LibraryRestoreService>((ref) {

@@ -9,7 +9,7 @@ import 'log_service.dart';
 import 'settings_changes.dart';
 
 /// Keeps `woolytube_library.json` (see [LibraryFileService]) in step with
-/// the home page order and the player's "where I was" point.
+/// the home page order, the player's "where I was" point and the labels.
 ///
 /// The file is written a few seconds after the playlists change, and once
 /// after [start]. The "where I was" point changes every few seconds while
@@ -60,7 +60,9 @@ class LibraryMirror {
     _subscriptions
       ..add(
         _db
-            .tableUpdates(TableUpdateQuery.onAllTables([_db.playlists]))
+            .tableUpdates(
+              TableUpdateQuery.onAllTables([_db.playlists, _db.labels]),
+            )
             .listen((_) => _schedule(delay)),
       )
       ..add(_resumeChanges.listen((_) => _scheduleResume()));

@@ -10,6 +10,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/services/app_settings_service.dart';
 import 'package:woolytube/services/audio_processing.dart';
+import 'package:woolytube/services/label_service.dart';
+import 'package:woolytube/services/labels.dart';
 import 'package:woolytube/services/library_export_service.dart';
 import 'package:woolytube/services/library_file.dart';
 import 'package:woolytube/services/library_layout.dart';
@@ -264,7 +266,12 @@ void main() {
             'version': 1,
             'playlists': <Object?>[],
             'labels': [
-              {'uid': 'l-1', 'name': 'Rock', 'color': 4294198070},
+              {
+                'uid': 'label-0001',
+                'name': 'Rock',
+                'color': 4294198070,
+                'icon': 'guitar',
+              },
             ],
             'playCounts': {'rock-a': 3},
           }),
@@ -281,13 +288,77 @@ void main() {
 
         final music = readJson(libraryPath(audioBase));
         expect(music['labels'], [
-          {'uid': 'l-1', 'name': 'Rock', 'color': 4294198070},
+          {
+            'uid': 'label-0001',
+            'name': 'Rock',
+            'color': 4294198070,
+            'icon': 'guitar',
+          },
         ]);
         expect(music['playCounts'], {'rock-a': 3});
         expect((music['playlists'] as List).single['folder'], 'Rock');
         expect(File(libraryPath(videoBase)).readAsStringSync(), newer);
       },
     );
+
+    test('holds the labels in the owner\'s order without deleted ones, and '
+        'keeps copied ones this library never had', () async {
+      final db = newDatabase();
+      await addPlaylist(db, 'Rock', list: 'rock');
+      final labels = LabelService(db);
+      final punk = await labels.create('Punk', 0xffe53935);
+      final folk = await labels.create('Folk', 0xff43a047);
+      final gone = await labels.create('Gone', 0xff000000);
+      await labels.reorder([folk.uid, punk.uid]);
+      await labels.delete(gone.uid);
+      const copiedUid = '11111111-2222-4333-8444-555555555555';
+      File(libraryPath(audioBase))
+        ..parent.createSync(recursive: true)
+        ..writeAsStringSync(
+          jsonEncode({
+            'app': 'WoolyTube',
+            'version': 1,
+            'playlists': <Object?>[],
+            'labels': [
+              // Deleted here: stays out.
+              {'uid': gone.uid, 'name': 'Gone', 'color': '#000000'},
+              // The same name as a label here: the same label.
+              {
+                'uid': 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+                'name': 'punk',
+                'color': '#ffffff',
+              },
+              {'uid': copiedUid, 'name': 'Jazz', 'color': '#1e88e5'},
+            ],
+          }),
+        );
+      final file = LibraryFileService(
+        db,
+        log: log,
+        playbackStore: MemoryPlaybackSettingsStore(),
+      );
+      await file.write();
+
+      final music = readJson(libraryPath(audioBase));
+      expect(music['labels'], [
+        PortableLabel.of((await db.getLabel(folk.uid))!).toJson(),
+        PortableLabel.of((await db.getLabel(punk.uid))!).toJson(),
+        {'uid': copiedUid, 'name': 'Jazz', 'color': '#1e88e5'},
+      ]);
+      expect((music['labels'] as List).first, {
+        'uid': folk.uid,
+        'name': 'Folk',
+        'color': '#43a047',
+        'updatedAt': folk.updatedAt.toUtc().toIso8601String(),
+      });
+      final read = (await file.read())!;
+      expect(read.labels.map((l) => l.name), ['Folk', 'Punk', 'Jazz']);
+      expect((await file.check()).every((state) => state.upToDate), isTrue);
+
+      // A label change makes the file out of date.
+      await labels.rename(folk.uid, 'Folk rock');
+      expect((await file.check()).every((state) => state.upToDate), isFalse);
+    });
 
     test('a fresh install keeps the copied order and last song until they '
         'are restored', () async {
@@ -459,6 +530,45 @@ void main() {
       expect(result.message, 'Imported 3 playlists. Restored the home order.');
     });
 
+    test('brings back the labels in their order, also ones no file carries, '
+        'and the files keep theirs', () async {
+      final old = newDatabase();
+      final alpha = await addPlaylist(old, 'Alpha', list: 'alpha');
+      final labels = LabelService(old);
+      final rock = await labels.create('Rock', 0xffe53935);
+      final unused = await labels.create('Unused', 0xff43a047);
+      await labels.reorder([unused.uid, rock.uid]);
+      final song = (await old.getTracksForPlaylist(alpha.id)).first;
+      await labels.setTrackLabel(song.id, rock.uid, true);
+      await MetadataService(old).writeMetadataFor(alpha.id);
+      await LibraryFileService(
+        old,
+        playbackStore: MemoryPlaybackSettingsStore(),
+      ).write();
+
+      final db = newDatabase();
+      // This phone already made a label of the same name.
+      final mine = await LabelService(db).create('rock', 0xff000000);
+      final metadata = MetadataService(db);
+      final restore = LibraryRestoreService(
+        db,
+        metadata,
+        exporterFor(db),
+        LibraryFileService(db, playbackStore: MemoryPlaybackSettingsStore()),
+        log: log,
+      );
+      final result = await restore.importAll(
+        await metadata.findUnimportedPlaylists(),
+      );
+      expect(result.labelsAdded, 1);
+      expect(result.message, contains('Restored 1 label'));
+      expect((await db.getLabels()).map((l) => l.name), ['rock', 'Unused']);
+      final imported = (await db.getAllTracks()).firstWhere(
+        (t) => t.videoId == song.videoId,
+      );
+      expect(decodeLabelUids(imported.labelUids), [mine.uid]);
+    });
+
     test('one playlist restored on its own goes where it was', () async {
       await copiedLibrary();
       final db = newDatabase();
@@ -547,6 +657,18 @@ void main() {
       if ((await folders()).first == 'Jazz') break;
     }
     expect(await folders(), ['Jazz', 'Rock']);
+
+    await LabelService(db).create('Rock', 0xffe53935);
+    var labels = const <Object?>[];
+    for (var i = 0; i < 200 && labels.isEmpty; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      try {
+        labels = readJson(libraryPath(audioBase))['labels'] as List;
+      } catch (_) {
+        // Being written.
+      }
+    }
+    expect((labels.single as Map)['name'], 'Rock');
   });
 
   test('a new last song is written at most every resume interval', () async {

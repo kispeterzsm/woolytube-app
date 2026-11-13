@@ -856,6 +856,7 @@ void main() {
     ]) {
       await old.customStatement('ALTER TABLE playlists DROP COLUMN $column');
     }
+    await removeLabelSchema(old);
     await old.customStatement('PRAGMA user_version = 16');
     await old.close();
 

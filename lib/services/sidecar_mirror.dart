@@ -67,6 +67,8 @@ class SidecarMirror {
             _db.sponsorBlockSegments,
             // Pinned docs go into the sidecar as lyricsPins.
             _db.lyricsDocs,
+            // Names and colors of the labels a playlist uses.
+            _db.labels,
           ]),
         )
         .listen((_) => _schedule());

@@ -396,6 +396,9 @@ class ChapterService {
       skippedChapterIds: Set.unmodifiable(
         old.skippedChapterIds.where(keptIds.contains),
       ),
+      // Labels follow chapter ids too, and are dropped when written once
+      // their chapter is in none of the lists (see `keptChapterLabels`).
+      chapterLabels: old.chapterLabels,
     );
   }
 
@@ -647,6 +650,9 @@ class ChapterService {
         data.copyWith(
           recognitionEpoch:
               math.max(current.recognitionEpoch, data.recognitionEpoch) + 1,
+          // Labelling is not a chapter edit: labels given since [data] was
+          // taken stay, and chapters it brings back get theirs back.
+          chapterLabels: {...data.chapterLabels, ...current.chapterLabels},
         ),
       );
     });

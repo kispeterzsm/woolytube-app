@@ -115,6 +115,12 @@ class Tracks extends Table {
   /// The height cap the current file was downloaded under: 0 = no cap,
   /// null = unknown (downloaded before caps existed, or audio).
   IntColumn get downloadedMaxHeight => integer().nullable()();
+
+  /// The owner's labels on this file: a JSON list of [Labels.uid]s, null
+  /// when it has none. A uid whose label was deleted is ignored. Labels of
+  /// the file's chapters are in [chaptersJson] (`ChapterData.chapterLabels`).
+  /// Schema 21.
+  TextColumn get labelUids => text().nullable()();
 }
 
 class SponsorBlockSegments extends Table {
@@ -158,6 +164,38 @@ class LoudnessMeasurements extends Table {
 
   @override
   Set<Column> get primaryKey => {trackId};
+}
+
+/// A label the owner made (a genre, a band, ...) to mark files and chapters
+/// with. Files and chapters refer to it by [uid], which is the same on
+/// every phone the library is copied to; the integer id is this database's
+/// own. Schema 21.
+///
+/// A deleted label stays as a row with [deletedAt] set, so the files and
+/// chapters that carry it keep its uid (ignored meanwhile, and brought back
+/// by an Undo), and a copied library file or metadata file that still lists
+/// it does not make it again unless it was changed after the deletion.
+@DataClassName('Label')
+class Labels extends Table {
+  IntColumn get id => integer().autoIncrement()();
+
+  /// A random UUID, never reused.
+  TextColumn get uid => text().unique()();
+  TextColumn get name => text()();
+
+  /// ARGB, as Flutter's `Color.value`.
+  IntColumn get color => integer()();
+
+  /// Position in the owner's list of labels: lower comes first, ties by id.
+  IntColumn get sortOrder => integer().withDefault(const Constant(0))();
+  DateTimeColumn get createdAt => dateTime()();
+
+  /// When the name or color last changed. When two copies of a label meet
+  /// (an import), the newer one wins.
+  DateTimeColumn get updatedAt => dateTime()();
+
+  /// When the owner deleted it; null while it is in use.
+  DateTimeColumn get deletedAt => dateTime().nullable()();
 }
 
 /// Lyrics or a transcript of one track, or of one chapter of a mix.
@@ -269,6 +307,7 @@ bool titleMatchesFileName(String title, String filePath) {
     LyricsDocs,
     LyricsLines,
     LoudnessMeasurements,
+    Labels,
   ],
 )
 class AppDatabase extends _$AppDatabase {
@@ -286,7 +325,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 20;
+  int get schemaVersion => 21;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -307,6 +346,7 @@ class AppDatabase extends _$AppDatabase {
       );
       await _createRevisionTracking();
       await _createLyricsSearch();
+      await _createLabelTracking();
     },
     onUpgrade: (migrator, from, to) async {
       if (from < 2) {
@@ -433,6 +473,13 @@ class AppDatabase extends _$AppDatabase {
         );
         await _createRevisionTracking();
       }
+      if (from < 21) {
+        await migrator.createTable(labels);
+        await migrator.addColumn(tracks, tracks.labelUids);
+        // The track triggers fire on any column, so the new one is
+        // already counted; the label triggers are new.
+        await _createLabelTracking();
+      }
     },
   );
 
@@ -548,6 +595,42 @@ class AppDatabase extends _$AppDatabase {
       'trg_rev_lyrics_delete':
           'AFTER DELETE ON lyrics_docs WHEN OLD.pinned BEGIN '
           '${bump('OLD')} END',
+    };
+    for (final entry in triggers.entries) {
+      await customStatement(
+        'CREATE TRIGGER IF NOT EXISTS ${entry.key} ${entry.value}',
+      );
+    }
+  }
+
+  /// The label index and triggers, which Drift doesn't know.
+  ///
+  /// The metadata file of a playlist lists the name and color of every
+  /// label its files and chapters carry, so a change to a label (or its
+  /// deletion, or its coming back) raises the revision of the playlists
+  /// that use it. Its place in the owner's list is not in that file.
+  Future<void> _createLabelTracking() async {
+    // Two labels in use never share a name (ASCII case ignored here; the
+    // app also compares other letters).
+    await customStatement(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_labels_name '
+      'ON labels (name COLLATE NOCASE) WHERE deleted_at IS NULL',
+    );
+    // A uid is a UUID: no other text in the chapter data contains one.
+    String bump(String row) =>
+        'INSERT INTO playlist_revisions (playlist_id, revision) '
+        'SELECT DISTINCT playlist_id, 1 FROM tracks '
+        "WHERE instr(COALESCE(label_uids, ''), $row.uid) > 0 "
+        "OR instr(COALESCE(chapters_json, ''), $row.uid) > 0 "
+        'ON CONFLICT(playlist_id) DO UPDATE SET revision = revision + 1;';
+    final triggers = {
+      'trg_rev_labels_insert':
+          'AFTER INSERT ON labels BEGIN ${bump('NEW')} END',
+      'trg_rev_labels_update':
+          'AFTER UPDATE OF uid, name, color, updated_at, deleted_at '
+          'ON labels BEGIN ${bump('NEW')} END',
+      'trg_rev_labels_delete':
+          'AFTER DELETE ON labels BEGIN ${bump('OLD')} END',
     };
     for (final entry in triggers.entries) {
       await customStatement(
@@ -1514,8 +1597,100 @@ class AppDatabase extends _$AppDatabase {
       TableUpdate.onTable(sponsorBlockSegments),
       TableUpdate.onTable(lyricsDocs),
       TableUpdate.onTable(lyricsLines),
+      TableUpdate.onTable(labels),
     });
     return true;
+  }
+
+  // Labels
+
+  /// The labels in the owner's order; deleted ones only with
+  /// [includeDeleted].
+  Future<List<Label>> getLabels({bool includeDeleted = false}) =>
+      _labelsInOrder(includeDeleted: includeDeleted).get();
+
+  /// The labels in use, in the owner's order.
+  Stream<List<Label>> watchLabels() =>
+      _labelsInOrder().watch().distinct(listsEqual);
+
+  SimpleSelectStatement<$LabelsTable, Label> _labelsInOrder({
+    bool includeDeleted = false,
+  }) {
+    final query = select(labels)..orderBy([
+      (l) => OrderingTerm.asc(l.sortOrder),
+      (l) => OrderingTerm.asc(l.id),
+    ]);
+    if (!includeDeleted) query.where((l) => l.deletedAt.isNull());
+    return query;
+  }
+
+  /// The label with [uid], deleted or not.
+  Future<Label?> getLabel(String uid) =>
+      (select(labels)..where((l) => l.uid.equals(uid))).getSingleOrNull();
+
+  Future<int> insertLabel(LabelsCompanion label) => into(labels).insert(label);
+
+  /// Changes only the given [fields] of the label with [uid].
+  Future<void> updateLabelFields(String uid, LabelsCompanion fields) =>
+      (update(labels)..where((l) => l.uid.equals(uid))).write(fields);
+
+  /// Saves the owner's order of labels: [orderedUids] first, in that order,
+  /// then the others as they were. Only labels whose place changes are
+  /// written.
+  Future<void> setLabelOrder(List<String> orderedUids) => transaction(() async {
+    final all = await getLabels(includeDeleted: true);
+    final byUid = {for (final label in all) label.uid: label};
+    final order = [
+      for (final uid in orderedUids)
+        if (byUid.containsKey(uid)) uid,
+      for (final label in all)
+        if (!orderedUids.contains(label.uid)) label.uid,
+    ];
+    for (var i = 0; i < order.length; i++) {
+      if (byUid[order[i]]!.sortOrder == i) continue;
+      await updateLabelFields(order[i], LabelsCompanion(sortOrder: Value(i)));
+    }
+  });
+
+  /// The next free place at the end of the owner's order.
+  Future<int> nextLabelSortOrder() async {
+    final row =
+        await customSelect(
+          'SELECT MAX(sort_order) AS max_order FROM labels',
+        ).getSingle();
+    final max = row.readNullable<int>('max_order');
+    return max == null ? 0 : max + 1;
+  }
+
+  /// Stores a file's labels: [labelUidsJson] is a JSON list, or null for
+  /// none.
+  Future<void> setTrackLabelUids(int trackId, String? labelUidsJson) =>
+      (update(tracks)..where(
+        (t) => t.id.equals(trackId),
+      )).write(TracksCompanion(labelUids: Value(labelUidsJson)));
+
+  /// Tracks whose file or chapters may carry one of [uids]: every track
+  /// that does, and nothing else in practice (a uid is a UUID), though the
+  /// caller still checks each one.
+  Future<List<Track>> tracksMentioningLabels(Iterable<String> uids) {
+    final wanted = uids.toSet();
+    if (wanted.isEmpty) return Future.value(const []);
+    return (select(tracks)
+          ..where((t) {
+            Expression<bool>? any;
+            for (final uid in wanted) {
+              final pattern = '%$uid%';
+              final here =
+                  t.labelUids.like(pattern) | t.chaptersJson.like(pattern);
+              any = any == null ? here : any | here;
+            }
+            return any!;
+          })
+          ..orderBy([
+            (t) => OrderingTerm.asc(t.playlistId),
+            (t) => OrderingTerm.asc(t.index),
+          ]))
+        .get();
   }
 
   /// The stored loudness measurement of [trackId]'s file, if any.

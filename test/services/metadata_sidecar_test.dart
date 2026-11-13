@@ -6,6 +6,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/services/chapters.dart';
+import 'package:woolytube/services/label_service.dart';
+import 'package:woolytube/services/labels.dart';
 import 'package:woolytube/services/library_layout.dart';
 import 'package:woolytube/services/log_service.dart';
 import 'package:woolytube/services/metadata_service.dart';
@@ -790,6 +792,224 @@ void main() {
     expect(result.map((d) => p.basename(d.folderPath)), ['Video copy', 'New']);
   });
 
+  group('labels', () {
+    Future<Map<String, dynamic>> readSidecar() async =>
+        jsonDecode(
+              await File(p.join(folder, 'woolytube_meta.json')).readAsString(),
+            )
+            as Map<String, dynamic>;
+
+    const goneUid = '99999999-8888-4777-8666-555555555555';
+
+    /// A playlist whose first file is labelled Rock (and with the uid of a
+    /// deleted label), and whose mix has a Live chapter; Unused labels
+    /// nothing.
+    Future<({Playlist playlist, Label rock, Label live})> seed() async {
+      final labels = LabelService(db);
+      final rock = await labels.create('Rock', 0xffe53935);
+      final live = await labels.create('Live', 0x801e88e5);
+      await labels.create('Unused', 0xff43a047);
+      final playlist = await insertTestPlaylist(
+        db,
+        url: 'https://www.youtube.com/playlist?list=PLlabels',
+        outputPath: folder,
+      );
+      final song = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        videoId: 'song',
+        title: 'Song',
+      );
+      final mix = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 2,
+        videoId: 'mix',
+        title: 'Mix',
+        chaptersJson:
+            const ChapterData(
+              downloaded: [
+                MediaChapter(
+                  id: 'youtube-0-0',
+                  title: 'Opening',
+                  startMs: 0,
+                  endMs: 60000,
+                  origin: ChapterOrigin.original,
+                ),
+                MediaChapter(
+                  id: 'youtube-1-60000',
+                  title: 'Encore',
+                  startMs: 60000,
+                  endMs: 120000,
+                  origin: ChapterOrigin.original,
+                ),
+              ],
+              durationMs: 120000,
+            ).encode(),
+      );
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 3,
+        videoId: 'plain',
+        title: 'Plain',
+      );
+      await db.setTrackLabelUids(song.id, '["${rock.uid}","$goneUid"]');
+      await labels.setChapterLabel(mix.id, 'youtube-1-60000', live.uid, true);
+      return (playlist: playlist, rock: rock, live: live);
+    }
+
+    test('files, chapters and the names and colors of the labels used go '
+        'into the sidecar, and come back from it on a fresh install', () async {
+      final seeded = await seed();
+      await metadata.writeMetadataFor(seeded.playlist.id);
+      final json = await readSidecar();
+      expect(json['labels'], [
+        {
+          'uid': seeded.rock.uid,
+          'name': 'Rock',
+          'color': '#e53935',
+          'updatedAt': seeded.rock.updatedAt.toUtc().toIso8601String(),
+        },
+        {
+          'uid': seeded.live.uid,
+          'name': 'Live',
+          'color': '#801e88e5',
+          'updatedAt': seeded.live.updatedAt.toUtc().toIso8601String(),
+        },
+      ]);
+      final tracks = (json['tracks'] as List).cast<Map<String, dynamic>>();
+      expect(tracks[0]['labels'], [seeded.rock.uid, goneUid]);
+      expect(tracks[1].containsKey('labels'), isFalse);
+      expect((tracks[1]['chapters'] as Map)['chapterLabels'], {
+        'youtube-1-60000': [seeded.live.uid],
+      });
+      expect(tracks[2].containsKey('labels'), isFalse);
+      expect(
+        (tracks[2]['chapters'] as Map).containsKey('chapterLabels'),
+        isFalse,
+      );
+
+      final fresh = openTestDatabase();
+      addTearDown(fresh.close);
+      final restore = MetadataService(fresh);
+      final found = await restore.readFolder(folder);
+      final newId = await restore.importPlaylist(found!);
+
+      final restored = await fresh.getLabels();
+      expect(restored.map((l) => (l.uid, l.name, l.color)), [
+        (seeded.rock.uid, 'Rock', 0xffe53935),
+        (seeded.live.uid, 'Live', 0x801e88e5),
+      ]);
+      expect(
+        restored.first.updatedAt.isAtSameMomentAs(seeded.rock.updatedAt),
+        isTrue,
+      );
+      final importedTracks = await fresh.getTracksForPlaylist(newId);
+      // The deleted label's uid stays, ignored, as it was.
+      expect(decodeLabelUids(importedTracks[0].labelUids), [
+        seeded.rock.uid,
+        goneUid,
+      ]);
+      expect(
+        ChapterData.decode(
+          importedTracks[1].chaptersJson,
+        ).labelsOf('youtube-1-60000'),
+        [seeded.live.uid],
+      );
+      expect(importedTracks[2].labelUids, isNull);
+      expect(await LabelService(fresh).find({seeded.live.uid}), hasLength(1));
+
+      // Written again from the new phone's database, it is the same.
+      await File(p.join(folder, 'woolytube_meta.json')).delete();
+      await restore.writeMetadataFor(newId);
+      final again = await readSidecar();
+      expect(again['labels'], json['labels']);
+      expect(
+        [for (final t in again['tracks'] as List) (t as Map)['labels']],
+        [for (final t in tracks) t['labels']],
+      );
+      expect(
+        [for (final t in again['tracks'] as List) (t as Map)['chapters']],
+        [for (final t in tracks) t['chapters']],
+      );
+    });
+
+    test('a label of the same name already on the phone is used for the '
+        'imported files and chapters', () async {
+      final seeded = await seed();
+      await metadata.writeMetadataFor(seeded.playlist.id);
+
+      final fresh = openTestDatabase();
+      addTearDown(fresh.close);
+      final mine = await LabelService(fresh).create('live', 0xff000000);
+      final restore = MetadataService(fresh);
+      final newId = await restore.importPlaylist(
+        (await restore.readFolder(folder))!,
+      );
+      final importedTracks = await fresh.getTracksForPlaylist(newId);
+      expect(
+        ChapterData.decode(
+          importedTracks[1].chaptersJson,
+        ).labelsOf('youtube-1-60000'),
+        [mine.uid],
+      );
+      expect(decodeLabelUids(importedTracks[0].labelUids), [
+        seeded.rock.uid,
+        goneUid,
+      ]);
+      expect((await fresh.getLabels()).map((l) => l.name), ['live', 'Rock']);
+      expect((await fresh.getLabel(mine.uid))!.color, 0xff000000);
+    });
+
+    test('a sidecar without labels imports unlabelled, and labels a newer '
+        'sidecar carries are not kept once they are removed', () async {
+      final seeded = await seed();
+      await metadata.writeMetadataFor(seeded.playlist.id);
+      final labels = LabelService(db);
+      final tracks = await db.getTracksForPlaylist(seeded.playlist.id);
+      await labels.setTrackLabels(tracks[0].id, const []);
+      await labels.setChapterLabels(tracks[1].id, 'youtube-1-60000', const []);
+      await metadata.writeMetadataFor(seeded.playlist.id);
+      final json = await readSidecar();
+      expect(json.containsKey('labels'), isFalse);
+      expect(
+        (json['tracks'] as List).any((t) => (t as Map).containsKey('labels')),
+        isFalse,
+      );
+
+      final fresh = openTestDatabase();
+      addTearDown(fresh.close);
+      final restore = MetadataService(fresh);
+      final newId = await restore.importPlaylist(
+        (await restore.readFolder(folder))!,
+      );
+      expect(await fresh.getLabels(), isEmpty);
+      expect(
+        (await fresh.getTracksForPlaylist(newId)).map((t) => t.labelUids),
+        everyElement(isNull),
+      );
+    });
+
+    test('renaming a label rewrites the sidecars of the playlists that use '
+        'it', () async {
+      final seeded = await seed();
+      await metadata.writeMetadataFor(seeded.playlist.id);
+      final revision = await db.playlistRevision(seeded.playlist.id);
+      expect(metadata.writtenRevision(seeded.playlist.id), revision);
+      await LabelService(db).rename(seeded.rock.uid, 'Hard rock');
+      expect(
+        await db.playlistRevision(seeded.playlist.id),
+        greaterThan(revision),
+      );
+      await metadata.writeMetadataFor(seeded.playlist.id);
+      expect(
+        ((await readSidecar())['labels'] as List).first['name'],
+        'Hard rock',
+      );
+    });
+  });
+
   group('a sidecar written by a newer app', () {
     Future<Map<String, dynamic>> readSidecar() async =>
         jsonDecode(
@@ -835,13 +1055,13 @@ void main() {
       await metadata.writeMetadataFor(playlist.id);
 
       final json = await readSidecar();
-      json['labels'] = [
+      json['moods'] = [
         {'id': 'l1', 'name': 'Rock'},
       ];
       (json['playlist'] as Map<String, dynamic>)['coverColor'] = 'red';
       final tracks = json['tracks'] as List<dynamic>;
-      (tracks[0] as Map<String, dynamic>)['labels'] = ['l1'];
-      (tracks[2] as Map<String, dynamic>)['labels'] = ['l2'];
+      (tracks[0] as Map<String, dynamic>)['moods'] = ['l1'];
+      (tracks[2] as Map<String, dynamic>)['moods'] = ['l2'];
       await writeSidecar(json);
 
       // A new run of the app has not written the file yet.
@@ -860,7 +1080,7 @@ void main() {
       await metadata.writeMetadataFor(playlist.id);
 
       var written = await readSidecar();
-      expect(written['labels'], [
+      expect(written['moods'], [
         {'id': 'l1', 'name': 'Rock'},
       ]);
       final writtenPlaylist = written['playlist'] as Map<String, dynamic>;
@@ -870,9 +1090,9 @@ void main() {
       var writtenTracks = (written['tracks'] as List).cast<Map>();
       expect(writtenTracks[0]['title'], 'A renamed');
       expect(writtenTracks[0].containsKey('videoQuality'), isFalse);
-      expect(writtenTracks[0]['labels'], ['l1']);
-      expect(writtenTracks[1].containsKey('labels'), isFalse);
-      expect(writtenTracks[2]['labels'], ['l2']);
+      expect(writtenTracks[0]['moods'], ['l1']);
+      expect(writtenTracks[1].containsKey('moods'), isFalse);
+      expect(writtenTracks[2]['moods'], ['l2']);
 
       // And again by the same run, which knows its last hash now.
       await setTrack(
@@ -883,15 +1103,15 @@ void main() {
       written = await readSidecar();
       writtenTracks = (written['tracks'] as List).cast<Map>();
       expect(writtenTracks[0]['title'], 'A renamed twice');
-      expect(writtenTracks[0]['labels'], ['l1']);
-      expect(written['labels'], isNotNull);
+      expect(writtenTracks[0]['moods'], ['l1']);
+      expect(written['moods'], isNotNull);
 
       // A track that left the playlist takes its keys with it.
       await db.deleteTracks([first.id]);
       await metadata.writeMetadataFor(playlist.id);
       writtenTracks = ((await readSidecar())['tracks'] as List).cast<Map>();
       expect(writtenTracks.map((t) => t['title']), ['B', 'A again']);
-      expect(writtenTracks.last['labels'], ['l2']);
+      expect(writtenTracks.last['moods'], ['l2']);
     });
 
     test('of a newer format version is left as it is, and said once in the '
@@ -944,16 +1164,19 @@ void main() {
         subtitleLanguages: 'en',
         shuffleChapters: true,
       );
+      final rock = await LabelService(db).create('Rock', 0xffe53935);
       final track = await insertTestTrack(
         db,
         playlistId: playlist.id,
         videoQuality: 480,
         downloadedMaxHeight: 480,
       );
+      await LabelService(db).setTrackLabel(track.id, rock.uid, true);
       final data = buildSidecarData(
         playlist,
-        [track],
+        [(await db.getTrack(track.id))!],
         const {},
+        labels: [rock],
         lyricsPinsByTrack: {
           track.id: [
             LyricsDoc(

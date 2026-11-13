@@ -1,5 +1,6 @@
 import '../database/database.dart';
 import 'app_settings_service.dart';
+import 'label_service.dart';
 import 'library_export_service.dart';
 import 'library_file.dart';
 import 'log_service.dart';
@@ -15,6 +16,7 @@ class LibraryRestoreResult {
     this.settingsRestored,
     this.orderRestored = false,
     this.resumeRestored = false,
+    this.labelsAdded = 0,
   });
 
   /// Playlists added to the library.
@@ -33,11 +35,15 @@ class LibraryRestoreResult {
   /// Whether the player's "where I was" point came back.
   final bool resumeRestored;
 
+  /// Labels of the library file that were new here.
+  final int labelsAdded;
+
   /// One line for the owner.
   String get message {
     final restored = [
       if (settingsRestored case final count? when count > 0)
         _count(count, 'setting'),
+      if (labelsAdded > 0) _count(labelsAdded, 'label'),
       if (orderRestored) 'the home order',
       if (resumeRestored) 'where you were listening',
     ];
@@ -66,13 +72,15 @@ class LibraryRestoreResult {
 }
 
 /// Brings a copied library back: the playlist folders, and from the
-/// library files the home page order, the settings and where the player
-/// was.
+/// library files the home page order, the labels, the settings and where
+/// the player was.
 ///
 /// Settings and "where I was" come back by themselves only on a fresh
 /// install (no playlist in the database yet): they never replace what the
 /// owner already has. The order of imported playlists comes back always;
-/// playlists already in the library keep their places.
+/// playlists already in the library keep their places. Labels are merged
+/// (see [importLabels]) before the playlists, so labels no file carries
+/// and the owner's order of labels come back too.
 class LibraryRestoreService {
   LibraryRestoreService(
     this._db,
@@ -114,6 +122,8 @@ class LibraryRestoreService {
       }
     }
 
+    final labels = await _importLabels(file);
+
     final failed = <String>[];
     final placed = <int>{};
     for (final discovered in imports) {
@@ -148,7 +158,8 @@ class LibraryRestoreService {
     }
     _log?.info(
       'restore: ${placed.length} playlists, ${failed.length} failed, '
-      'settings ${settings ?? 'not restored'}, order $order, resume $resume',
+      'settings ${settings ?? 'not restored'}, order $order, resume $resume, '
+      'labels $labels',
     );
     return LibraryRestoreResult(
       imported: placed.length,
@@ -156,8 +167,20 @@ class LibraryRestoreService {
       settingsRestored: settings,
       orderRestored: order,
       resumeRestored: resume,
+      labelsAdded: labels,
     );
   });
+
+  /// Merges [file]'s labels into the library; returns how many were new.
+  Future<int> _importLabels(LibraryFileData? file) async {
+    if (file == null || file.labels.isEmpty) return 0;
+    try {
+      return (await importLabels(_db, file.labels)).added;
+    } catch (e) {
+      _log?.warn('Could not restore the labels: $e');
+      return 0;
+    }
+  }
 
   /// Imports one playlist (the Restore playlists page) and puts it where the
   /// library file of [folder] (a copied backup the owner picked) or of the
@@ -170,6 +193,7 @@ class LibraryRestoreService {
         } catch (e) {
           _log?.warn('Could not read the library file: $e');
         }
+        await _importLabels(file);
         final id = await _metadata.importPlaylist(discovered);
         if (file != null) {
           try {

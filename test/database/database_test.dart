@@ -9,6 +9,94 @@ import 'package:woolytube/services/sponsorblock_categories.dart';
 import '../helpers/test_database.dart';
 
 void main() {
+  group('labels', () {
+    test('an existing database gets the table and the column on upgrade, '
+        'and label changes count for the playlists using them', () async {
+      final dir = await Directory.systemTemp.createTemp('woolytube-db20-');
+      addTearDown(() => dir.delete(recursive: true));
+      final file = File('${dir.path}/library.sqlite');
+      final fresh = AppDatabase.forTesting(NativeDatabase(file));
+      final playlist = await insertTestPlaylist(
+        fresh,
+        name: 'Mix',
+        shuffleChapters: true,
+      );
+      const chapters =
+          '{"downloaded":[],"custom":[{"id":"a","title":"A","startMs":0,'
+          '"endMs":1000}],"valid":true,"shuffleChapters":false}';
+      final track = await insertTestTrack(
+        fresh,
+        playlistId: playlist.id,
+        title: 'Kept',
+        chaptersJson: chapters,
+      );
+      // Make it look like a version 20 database.
+      await removeLabelSchema(fresh);
+      await fresh.customStatement('PRAGMA user_version = 20');
+      await fresh.close();
+
+      final upgraded = AppDatabase.forTesting(NativeDatabase(file));
+      addTearDown(upgraded.close);
+      final kept = (await upgraded.getTrack(track.id))!;
+      expect(kept.title, 'Kept');
+      expect(kept.chaptersJson, chapters);
+      expect(kept.labelUids, isNull);
+      expect((await upgraded.getPlaylist(playlist.id)).shuffleChapters, isTrue);
+      expect(await upgraded.getLabels(), isEmpty);
+
+      const uid = '0f0e2c1a-6c1b-4d7e-9a43-2b1c5d6e7f80';
+      await upgraded.insertLabel(
+        LabelsCompanion.insert(
+          uid: uid,
+          name: 'Rock',
+          color: 0xffe53935,
+          createdAt: DateTime(2026),
+          updatedAt: DateTime(2026),
+        ),
+      );
+      // A file's labels are a track column: the track trigger counts them.
+      var revision = await upgraded.playlistRevision(playlist.id);
+      await upgraded.setTrackLabelUids(track.id, '["$uid"]');
+      expect(await upgraded.playlistRevision(playlist.id), revision + 1);
+      revision += 1;
+      // A renamed label changes the metadata file of the playlist using it.
+      await upgraded.updateLabelFields(
+        uid,
+        const LabelsCompanion(name: Value('Hard rock')),
+      );
+      expect(await upgraded.playlistRevision(playlist.id), revision + 1);
+      // Its place in the list of labels does not.
+      await upgraded.setLabelOrder([uid]);
+      await upgraded.updateLabelFields(
+        uid,
+        const LabelsCompanion(sortOrder: Value(5)),
+      );
+      expect(await upgraded.playlistRevision(playlist.id), revision + 1);
+
+      // Two labels in use never share a name; a deleted one frees it.
+      Future<void> insertRock(String uid) => upgraded.insertLabel(
+        LabelsCompanion.insert(
+          uid: uid,
+          name: 'HARD ROCK',
+          color: 0,
+          createdAt: DateTime(2026),
+          updatedAt: DateTime(2026),
+        ),
+      );
+      await expectLater(
+        insertRock('11111111-2222-4333-8444-555555555555'),
+        throwsA(isA<SqliteException>()),
+      );
+      await upgraded.updateLabelFields(
+        uid,
+        LabelsCompanion(deletedAt: Value(DateTime(2026, 2))),
+      );
+      await insertRock('11111111-2222-4333-8444-555555555555');
+      expect((await upgraded.getLabels()).single.name, 'HARD ROCK');
+      expect(await upgraded.getLabels(includeDeleted: true), hasLength(2));
+    });
+  });
+
   group('playlist shuffle chapters', () {
     test('an existing database gets the column, off, on upgrade', () async {
       final dir = await Directory.systemTemp.createTemp('woolytube-db19-');
@@ -45,6 +133,7 @@ void main() {
       await fresh.customStatement(
         trigger.replaceAll(', "shuffle_chapters"', ''),
       );
+      await removeLabelSchema(fresh);
       await fresh.customStatement('PRAGMA user_version = 19');
       await fresh.close();
 
@@ -108,6 +197,7 @@ void main() {
       expect(oldTrigger, isNot(contains('subtitle')));
       expect(oldTrigger, isNot(contains('shuffle')));
       await fresh.customStatement(oldTrigger);
+      await removeLabelSchema(fresh);
       await fresh.customStatement('PRAGMA user_version = 18');
       await fresh.close();
 
@@ -190,6 +280,7 @@ void main() {
           'ALTER TABLE playlists DROP COLUMN $column',
         );
       }
+      await removeLabelSchema(fresh);
       await fresh.customStatement('PRAGMA user_version = 17');
       await fresh.close();
 

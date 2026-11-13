@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import '../database/database.dart';
+import 'labels.dart';
 import 'library_layout.dart';
 import 'log_service.dart';
 import 'metadata_service.dart';
@@ -129,6 +130,7 @@ class LibraryFileData {
   const LibraryFileData({
     this.playlists = const [],
     this.resume,
+    this.labels = const [],
     this.updatedAt,
     this.raw = const {},
   });
@@ -138,6 +140,9 @@ class LibraryFileData {
 
   /// Where the player was, or null.
   final PortableResumePoint? resume;
+
+  /// Every label, in the owner's order.
+  final List<PortableLabel> labels;
 
   /// When the content last changed.
   final DateTime? updatedAt;
@@ -155,6 +160,7 @@ class LibraryFileData {
             if (LibraryPlaylistRef.fromJson(entry) case final ref?) ref,
       ],
       resume: PortableResumePoint.fromJson(json['resume']),
+      labels: PortableLabel.listFromJson(json['labels']),
       updatedAt: updatedAt is String ? DateTime.tryParse(updatedAt) : null,
       raw: json,
     );
@@ -199,7 +205,7 @@ class LibraryFileState {
 /// Keeps `woolytube_library.json` in the top folder of both library roots
 /// (`Music/WoolyTube` and `Movies/WoolyTube`): what belongs to the library
 /// as a whole and not to one playlist folder. That is the home page order,
-/// where the player was, and (later) the labels. Copying either folder to
+/// where the player was, and the labels. Copying either folder to
 /// another phone takes them along, and "Import all" on a fresh install puts
 /// them back.
 ///
@@ -238,13 +244,13 @@ class LibraryFileService {
   static String pathIn(String folder) => p.join(folder, fileName);
 
   /// The keys [build] writes; everything else in the file is kept as it is.
-  /// `labels` belongs to the labels, which a later app version fills in.
   static const _ownKeys = {
     'app',
     'version',
     'updatedAt',
     'playlists',
     'resume',
+    'labels',
   };
 
   /// The newest library file: the one in [folder] (a copied backup the
@@ -485,14 +491,18 @@ class LibraryFileService {
       const JsonEncoder.withIndent('  ').convert(json);
 
   /// What the file holds now, without `updatedAt`: the database's home page
-  /// order and the player's "where I was" point, merged with [existing].
+  /// order, the player's "where I was" point and the labels, merged with
+  /// [existing].
   ///
   /// From [existing], keys this app does not know are kept, and so are
   /// playlists not in the database whose folder is still there (a copied
   /// library waiting to be restored, or a folder whose import was
   /// dismissed), each after the playlist it followed. Its "where I was"
   /// point is kept while the player has none and its playlist is not in
-  /// the database.
+  /// the database. Its labels this library has never had (by uid, and with
+  /// a name no label here has) are kept after the database's: a copied
+  /// library waiting to be restored, or another phone's. A label deleted
+  /// here is left out.
   Future<Map<String, dynamic>> build({LibraryFileData? existing}) async {
     final playlists = await _db.getAllPlaylists();
     final order = [for (final pl in playlists) LibraryPlaylistRef.of(pl)];
@@ -522,12 +532,30 @@ class LibraryFileService {
       'version': fileVersion,
       'playlists': [for (final ref in order) ref.toJson()],
       if (resume != null) 'resume': resume.toJson(),
-      // Filled by the labels; kept as a newer app wrote them.
-      'labels': raw['labels'] ?? const <Object?>[],
+      'labels': await _labels(raw['labels']),
       for (final entry in raw.entries)
-        if (!_ownKeys.contains(entry.key) && entry.key != 'labels')
-          entry.key: entry.value,
+        if (!_ownKeys.contains(entry.key)) entry.key: entry.value,
     };
+  }
+
+  Future<List<Object?>> _labels(Object? existing) async {
+    final all = await _db.getLabels(includeDeleted: true);
+    final known = {for (final label in all) label.uid};
+    final names = {
+      for (final label in all)
+        if (label.deletedAt == null) labelNameKey(label.name),
+    };
+    return [
+      for (final label in all)
+        if (label.deletedAt == null) PortableLabel.of(label).toJson(),
+      if (existing is List)
+        for (final entry in existing)
+          if (PortableLabel.fromJson(entry) case final label?
+              when !known.contains(label.uid) &&
+                  names.add(labelNameKey(label.name)))
+            // As written, with anything a newer app added to it.
+            entry,
+    ];
   }
 
   Future<void> _keepWaitingPlaylists(

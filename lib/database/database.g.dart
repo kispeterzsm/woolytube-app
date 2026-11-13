@@ -1709,6 +1709,17 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
     type: DriftSqlType.int,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _labelUidsMeta = const VerificationMeta(
+    'labelUids',
+  );
+  @override
+  late final GeneratedColumn<String> labelUids = GeneratedColumn<String>(
+    'label_uids',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     chaptersJson,
@@ -1732,6 +1743,7 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
     replaceRequested,
     videoQuality,
     downloadedMaxHeight,
+    labelUids,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -1912,6 +1924,12 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
         ),
       );
     }
+    if (data.containsKey('label_uids')) {
+      context.handle(
+        _labelUidsMeta,
+        labelUids.isAcceptableOrUnknown(data['label_uids']!, _labelUidsMeta),
+      );
+    }
     return context;
   }
 
@@ -2014,6 +2032,10 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, Track> {
         DriftSqlType.int,
         data['${effectivePrefix}downloaded_max_height'],
       ),
+      labelUids: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}label_uids'],
+      ),
     );
   }
 
@@ -2060,6 +2082,12 @@ class Track extends DataClass implements Insertable<Track> {
   /// The height cap the current file was downloaded under: 0 = no cap,
   /// null = unknown (downloaded before caps existed, or audio).
   final int? downloadedMaxHeight;
+
+  /// The owner's labels on this file: a JSON list of [Labels.uid]s, null
+  /// when it has none. A uid whose label was deleted is ignored. Labels of
+  /// the file's chapters are in [chaptersJson] (`ChapterData.chapterLabels`).
+  /// Schema 21.
+  final String? labelUids;
   const Track({
     this.chaptersJson,
     this.chaptersEnabled,
@@ -2082,6 +2110,7 @@ class Track extends DataClass implements Insertable<Track> {
     required this.replaceRequested,
     this.videoQuality,
     this.downloadedMaxHeight,
+    this.labelUids,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -2132,6 +2161,9 @@ class Track extends DataClass implements Insertable<Track> {
     }
     if (!nullToAbsent || downloadedMaxHeight != null) {
       map['downloaded_max_height'] = Variable<int>(downloadedMaxHeight);
+    }
+    if (!nullToAbsent || labelUids != null) {
+      map['label_uids'] = Variable<String>(labelUids);
     }
     return map;
   }
@@ -2195,6 +2227,10 @@ class Track extends DataClass implements Insertable<Track> {
           downloadedMaxHeight == null && nullToAbsent
               ? const Value.absent()
               : Value(downloadedMaxHeight),
+      labelUids:
+          labelUids == null && nullToAbsent
+              ? const Value.absent()
+              : Value(labelUids),
     );
   }
 
@@ -2231,6 +2267,7 @@ class Track extends DataClass implements Insertable<Track> {
       downloadedMaxHeight: serializer.fromJson<int?>(
         json['downloadedMaxHeight'],
       ),
+      labelUids: serializer.fromJson<String?>(json['labelUids']),
     );
   }
   @override
@@ -2260,6 +2297,7 @@ class Track extends DataClass implements Insertable<Track> {
       'replaceRequested': serializer.toJson<bool>(replaceRequested),
       'videoQuality': serializer.toJson<int?>(videoQuality),
       'downloadedMaxHeight': serializer.toJson<int?>(downloadedMaxHeight),
+      'labelUids': serializer.toJson<String?>(labelUids),
     };
   }
 
@@ -2285,6 +2323,7 @@ class Track extends DataClass implements Insertable<Track> {
     bool? replaceRequested,
     Value<int?> videoQuality = const Value.absent(),
     Value<int?> downloadedMaxHeight = const Value.absent(),
+    Value<String?> labelUids = const Value.absent(),
   }) => Track(
     chaptersJson: chaptersJson.present ? chaptersJson.value : this.chaptersJson,
     chaptersEnabled:
@@ -2319,6 +2358,7 @@ class Track extends DataClass implements Insertable<Track> {
         downloadedMaxHeight.present
             ? downloadedMaxHeight.value
             : this.downloadedMaxHeight,
+    labelUids: labelUids.present ? labelUids.value : this.labelUids,
   );
   Track copyWithCompanion(TracksCompanion data) {
     return Track(
@@ -2381,6 +2421,7 @@ class Track extends DataClass implements Insertable<Track> {
           data.downloadedMaxHeight.present
               ? data.downloadedMaxHeight.value
               : this.downloadedMaxHeight,
+      labelUids: data.labelUids.present ? data.labelUids.value : this.labelUids,
     );
   }
 
@@ -2407,7 +2448,8 @@ class Track extends DataClass implements Insertable<Track> {
           ..write('lastError: $lastError, ')
           ..write('replaceRequested: $replaceRequested, ')
           ..write('videoQuality: $videoQuality, ')
-          ..write('downloadedMaxHeight: $downloadedMaxHeight')
+          ..write('downloadedMaxHeight: $downloadedMaxHeight, ')
+          ..write('labelUids: $labelUids')
           ..write(')'))
         .toString();
   }
@@ -2435,6 +2477,7 @@ class Track extends DataClass implements Insertable<Track> {
     replaceRequested,
     videoQuality,
     downloadedMaxHeight,
+    labelUids,
   ]);
   @override
   bool operator ==(Object other) =>
@@ -2460,7 +2503,8 @@ class Track extends DataClass implements Insertable<Track> {
           other.lastError == this.lastError &&
           other.replaceRequested == this.replaceRequested &&
           other.videoQuality == this.videoQuality &&
-          other.downloadedMaxHeight == this.downloadedMaxHeight);
+          other.downloadedMaxHeight == this.downloadedMaxHeight &&
+          other.labelUids == this.labelUids);
 }
 
 class TracksCompanion extends UpdateCompanion<Track> {
@@ -2485,6 +2529,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
   final Value<bool> replaceRequested;
   final Value<int?> videoQuality;
   final Value<int?> downloadedMaxHeight;
+  final Value<String?> labelUids;
   const TracksCompanion({
     this.chaptersJson = const Value.absent(),
     this.chaptersEnabled = const Value.absent(),
@@ -2507,6 +2552,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
     this.replaceRequested = const Value.absent(),
     this.videoQuality = const Value.absent(),
     this.downloadedMaxHeight = const Value.absent(),
+    this.labelUids = const Value.absent(),
   });
   TracksCompanion.insert({
     this.chaptersJson = const Value.absent(),
@@ -2530,6 +2576,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
     this.replaceRequested = const Value.absent(),
     this.videoQuality = const Value.absent(),
     this.downloadedMaxHeight = const Value.absent(),
+    this.labelUids = const Value.absent(),
   }) : playlistId = Value(playlistId),
        index = Value(index),
        videoId = Value(videoId),
@@ -2556,6 +2603,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
     Expression<bool>? replaceRequested,
     Expression<int>? videoQuality,
     Expression<int>? downloadedMaxHeight,
+    Expression<String>? labelUids,
   }) {
     return RawValuesInsertable({
       if (chaptersJson != null) 'chapters_json': chaptersJson,
@@ -2582,6 +2630,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
       if (videoQuality != null) 'video_quality': videoQuality,
       if (downloadedMaxHeight != null)
         'downloaded_max_height': downloadedMaxHeight,
+      if (labelUids != null) 'label_uids': labelUids,
     });
   }
 
@@ -2607,6 +2656,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
     Value<bool>? replaceRequested,
     Value<int?>? videoQuality,
     Value<int?>? downloadedMaxHeight,
+    Value<String?>? labelUids,
   }) {
     return TracksCompanion(
       chaptersJson: chaptersJson ?? this.chaptersJson,
@@ -2631,6 +2681,7 @@ class TracksCompanion extends UpdateCompanion<Track> {
       replaceRequested: replaceRequested ?? this.replaceRequested,
       videoQuality: videoQuality ?? this.videoQuality,
       downloadedMaxHeight: downloadedMaxHeight ?? this.downloadedMaxHeight,
+      labelUids: labelUids ?? this.labelUids,
     );
   }
 
@@ -2702,6 +2753,9 @@ class TracksCompanion extends UpdateCompanion<Track> {
     if (downloadedMaxHeight.present) {
       map['downloaded_max_height'] = Variable<int>(downloadedMaxHeight.value);
     }
+    if (labelUids.present) {
+      map['label_uids'] = Variable<String>(labelUids.value);
+    }
     return map;
   }
 
@@ -2728,7 +2782,8 @@ class TracksCompanion extends UpdateCompanion<Track> {
           ..write('lastError: $lastError, ')
           ..write('replaceRequested: $replaceRequested, ')
           ..write('videoQuality: $videoQuality, ')
-          ..write('downloadedMaxHeight: $downloadedMaxHeight')
+          ..write('downloadedMaxHeight: $downloadedMaxHeight, ')
+          ..write('labelUids: $labelUids')
           ..write(')'))
         .toString();
   }
@@ -5458,6 +5513,520 @@ class LoudnessMeasurementsCompanion
   }
 }
 
+class $LabelsTable extends Labels with TableInfo<$LabelsTable, Label> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $LabelsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<int> id = GeneratedColumn<int>(
+    'id',
+    aliasedName,
+    false,
+    hasAutoIncrement: true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'PRIMARY KEY AUTOINCREMENT',
+    ),
+  );
+  static const VerificationMeta _uidMeta = const VerificationMeta('uid');
+  @override
+  late final GeneratedColumn<String> uid = GeneratedColumn<String>(
+    'uid',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    defaultConstraints: GeneratedColumn.constraintIsAlways('UNIQUE'),
+  );
+  static const VerificationMeta _nameMeta = const VerificationMeta('name');
+  @override
+  late final GeneratedColumn<String> name = GeneratedColumn<String>(
+    'name',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _colorMeta = const VerificationMeta('color');
+  @override
+  late final GeneratedColumn<int> color = GeneratedColumn<int>(
+    'color',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _sortOrderMeta = const VerificationMeta(
+    'sortOrder',
+  );
+  @override
+  late final GeneratedColumn<int> sortOrder = GeneratedColumn<int>(
+    'sort_order',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> createdAt = GeneratedColumn<DateTime>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _deletedAtMeta = const VerificationMeta(
+    'deletedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> deletedAt = GeneratedColumn<DateTime>(
+    'deleted_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    uid,
+    name,
+    color,
+    sortOrder,
+    createdAt,
+    updatedAt,
+    deletedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'labels';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<Label> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('uid')) {
+      context.handle(
+        _uidMeta,
+        uid.isAcceptableOrUnknown(data['uid']!, _uidMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_uidMeta);
+    }
+    if (data.containsKey('name')) {
+      context.handle(
+        _nameMeta,
+        name.isAcceptableOrUnknown(data['name']!, _nameMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_nameMeta);
+    }
+    if (data.containsKey('color')) {
+      context.handle(
+        _colorMeta,
+        color.isAcceptableOrUnknown(data['color']!, _colorMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_colorMeta);
+    }
+    if (data.containsKey('sort_order')) {
+      context.handle(
+        _sortOrderMeta,
+        sortOrder.isAcceptableOrUnknown(data['sort_order']!, _sortOrderMeta),
+      );
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    if (data.containsKey('deleted_at')) {
+      context.handle(
+        _deletedAtMeta,
+        deletedAt.isAcceptableOrUnknown(data['deleted_at']!, _deletedAtMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  Label map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return Label(
+      id:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.int,
+            data['${effectivePrefix}id'],
+          )!,
+      uid:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.string,
+            data['${effectivePrefix}uid'],
+          )!,
+      name:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.string,
+            data['${effectivePrefix}name'],
+          )!,
+      color:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.int,
+            data['${effectivePrefix}color'],
+          )!,
+      sortOrder:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.int,
+            data['${effectivePrefix}sort_order'],
+          )!,
+      createdAt:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.dateTime,
+            data['${effectivePrefix}created_at'],
+          )!,
+      updatedAt:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.dateTime,
+            data['${effectivePrefix}updated_at'],
+          )!,
+      deletedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}deleted_at'],
+      ),
+    );
+  }
+
+  @override
+  $LabelsTable createAlias(String alias) {
+    return $LabelsTable(attachedDatabase, alias);
+  }
+}
+
+class Label extends DataClass implements Insertable<Label> {
+  final int id;
+
+  /// A random UUID, never reused.
+  final String uid;
+  final String name;
+
+  /// ARGB, as Flutter's `Color.value`.
+  final int color;
+
+  /// Position in the owner's list of labels: lower comes first, ties by id.
+  final int sortOrder;
+  final DateTime createdAt;
+
+  /// When the name or color last changed. When two copies of a label meet
+  /// (an import), the newer one wins.
+  final DateTime updatedAt;
+
+  /// When the owner deleted it; null while it is in use.
+  final DateTime? deletedAt;
+  const Label({
+    required this.id,
+    required this.uid,
+    required this.name,
+    required this.color,
+    required this.sortOrder,
+    required this.createdAt,
+    required this.updatedAt,
+    this.deletedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<int>(id);
+    map['uid'] = Variable<String>(uid);
+    map['name'] = Variable<String>(name);
+    map['color'] = Variable<int>(color);
+    map['sort_order'] = Variable<int>(sortOrder);
+    map['created_at'] = Variable<DateTime>(createdAt);
+    map['updated_at'] = Variable<DateTime>(updatedAt);
+    if (!nullToAbsent || deletedAt != null) {
+      map['deleted_at'] = Variable<DateTime>(deletedAt);
+    }
+    return map;
+  }
+
+  LabelsCompanion toCompanion(bool nullToAbsent) {
+    return LabelsCompanion(
+      id: Value(id),
+      uid: Value(uid),
+      name: Value(name),
+      color: Value(color),
+      sortOrder: Value(sortOrder),
+      createdAt: Value(createdAt),
+      updatedAt: Value(updatedAt),
+      deletedAt:
+          deletedAt == null && nullToAbsent
+              ? const Value.absent()
+              : Value(deletedAt),
+    );
+  }
+
+  factory Label.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return Label(
+      id: serializer.fromJson<int>(json['id']),
+      uid: serializer.fromJson<String>(json['uid']),
+      name: serializer.fromJson<String>(json['name']),
+      color: serializer.fromJson<int>(json['color']),
+      sortOrder: serializer.fromJson<int>(json['sortOrder']),
+      createdAt: serializer.fromJson<DateTime>(json['createdAt']),
+      updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
+      deletedAt: serializer.fromJson<DateTime?>(json['deletedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<int>(id),
+      'uid': serializer.toJson<String>(uid),
+      'name': serializer.toJson<String>(name),
+      'color': serializer.toJson<int>(color),
+      'sortOrder': serializer.toJson<int>(sortOrder),
+      'createdAt': serializer.toJson<DateTime>(createdAt),
+      'updatedAt': serializer.toJson<DateTime>(updatedAt),
+      'deletedAt': serializer.toJson<DateTime?>(deletedAt),
+    };
+  }
+
+  Label copyWith({
+    int? id,
+    String? uid,
+    String? name,
+    int? color,
+    int? sortOrder,
+    DateTime? createdAt,
+    DateTime? updatedAt,
+    Value<DateTime?> deletedAt = const Value.absent(),
+  }) => Label(
+    id: id ?? this.id,
+    uid: uid ?? this.uid,
+    name: name ?? this.name,
+    color: color ?? this.color,
+    sortOrder: sortOrder ?? this.sortOrder,
+    createdAt: createdAt ?? this.createdAt,
+    updatedAt: updatedAt ?? this.updatedAt,
+    deletedAt: deletedAt.present ? deletedAt.value : this.deletedAt,
+  );
+  Label copyWithCompanion(LabelsCompanion data) {
+    return Label(
+      id: data.id.present ? data.id.value : this.id,
+      uid: data.uid.present ? data.uid.value : this.uid,
+      name: data.name.present ? data.name.value : this.name,
+      color: data.color.present ? data.color.value : this.color,
+      sortOrder: data.sortOrder.present ? data.sortOrder.value : this.sortOrder,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+      deletedAt: data.deletedAt.present ? data.deletedAt.value : this.deletedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('Label(')
+          ..write('id: $id, ')
+          ..write('uid: $uid, ')
+          ..write('name: $name, ')
+          ..write('color: $color, ')
+          ..write('sortOrder: $sortOrder, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('deletedAt: $deletedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    uid,
+    name,
+    color,
+    sortOrder,
+    createdAt,
+    updatedAt,
+    deletedAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is Label &&
+          other.id == this.id &&
+          other.uid == this.uid &&
+          other.name == this.name &&
+          other.color == this.color &&
+          other.sortOrder == this.sortOrder &&
+          other.createdAt == this.createdAt &&
+          other.updatedAt == this.updatedAt &&
+          other.deletedAt == this.deletedAt);
+}
+
+class LabelsCompanion extends UpdateCompanion<Label> {
+  final Value<int> id;
+  final Value<String> uid;
+  final Value<String> name;
+  final Value<int> color;
+  final Value<int> sortOrder;
+  final Value<DateTime> createdAt;
+  final Value<DateTime> updatedAt;
+  final Value<DateTime?> deletedAt;
+  const LabelsCompanion({
+    this.id = const Value.absent(),
+    this.uid = const Value.absent(),
+    this.name = const Value.absent(),
+    this.color = const Value.absent(),
+    this.sortOrder = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.deletedAt = const Value.absent(),
+  });
+  LabelsCompanion.insert({
+    this.id = const Value.absent(),
+    required String uid,
+    required String name,
+    required int color,
+    this.sortOrder = const Value.absent(),
+    required DateTime createdAt,
+    required DateTime updatedAt,
+    this.deletedAt = const Value.absent(),
+  }) : uid = Value(uid),
+       name = Value(name),
+       color = Value(color),
+       createdAt = Value(createdAt),
+       updatedAt = Value(updatedAt);
+  static Insertable<Label> custom({
+    Expression<int>? id,
+    Expression<String>? uid,
+    Expression<String>? name,
+    Expression<int>? color,
+    Expression<int>? sortOrder,
+    Expression<DateTime>? createdAt,
+    Expression<DateTime>? updatedAt,
+    Expression<DateTime>? deletedAt,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (uid != null) 'uid': uid,
+      if (name != null) 'name': name,
+      if (color != null) 'color': color,
+      if (sortOrder != null) 'sort_order': sortOrder,
+      if (createdAt != null) 'created_at': createdAt,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (deletedAt != null) 'deleted_at': deletedAt,
+    });
+  }
+
+  LabelsCompanion copyWith({
+    Value<int>? id,
+    Value<String>? uid,
+    Value<String>? name,
+    Value<int>? color,
+    Value<int>? sortOrder,
+    Value<DateTime>? createdAt,
+    Value<DateTime>? updatedAt,
+    Value<DateTime?>? deletedAt,
+  }) {
+    return LabelsCompanion(
+      id: id ?? this.id,
+      uid: uid ?? this.uid,
+      name: name ?? this.name,
+      color: color ?? this.color,
+      sortOrder: sortOrder ?? this.sortOrder,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      deletedAt: deletedAt ?? this.deletedAt,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<int>(id.value);
+    }
+    if (uid.present) {
+      map['uid'] = Variable<String>(uid.value);
+    }
+    if (name.present) {
+      map['name'] = Variable<String>(name.value);
+    }
+    if (color.present) {
+      map['color'] = Variable<int>(color.value);
+    }
+    if (sortOrder.present) {
+      map['sort_order'] = Variable<int>(sortOrder.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<DateTime>(createdAt.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    if (deletedAt.present) {
+      map['deleted_at'] = Variable<DateTime>(deletedAt.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('LabelsCompanion(')
+          ..write('id: $id, ')
+          ..write('uid: $uid, ')
+          ..write('name: $name, ')
+          ..write('color: $color, ')
+          ..write('sortOrder: $sortOrder, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('deletedAt: $deletedAt')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -5469,6 +6038,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $LyricsLinesTable lyricsLines = $LyricsLinesTable(this);
   late final $LoudnessMeasurementsTable loudnessMeasurements =
       $LoudnessMeasurementsTable(this);
+  late final $LabelsTable labels = $LabelsTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -5480,6 +6050,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     lyricsDocs,
     lyricsLines,
     loudnessMeasurements,
+    labels,
   ];
   @override
   StreamQueryUpdateRules get streamUpdateRules => const StreamQueryUpdateRules([
@@ -6233,6 +6804,7 @@ typedef $$TracksTableCreateCompanionBuilder =
       Value<bool> replaceRequested,
       Value<int?> videoQuality,
       Value<int?> downloadedMaxHeight,
+      Value<String?> labelUids,
     });
 typedef $$TracksTableUpdateCompanionBuilder =
     TracksCompanion Function({
@@ -6257,6 +6829,7 @@ typedef $$TracksTableUpdateCompanionBuilder =
       Value<bool> replaceRequested,
       Value<int?> videoQuality,
       Value<int?> downloadedMaxHeight,
+      Value<String?> labelUids,
     });
 
 final class $$TracksTableReferences
@@ -6461,6 +7034,11 @@ class $$TracksTableFilterComposer
 
   ColumnFilters<int> get downloadedMaxHeight => $composableBuilder(
     column: $table.downloadedMaxHeight,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get labelUids => $composableBuilder(
+    column: $table.labelUids,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -6672,6 +7250,11 @@ class $$TracksTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get labelUids => $composableBuilder(
+    column: $table.labelUids,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   $$PlaylistsTableOrderingComposer get playlistId {
     final $$PlaylistsTableOrderingComposer composer = $composerBuilder(
       composer: this,
@@ -6790,6 +7373,9 @@ class $$TracksTableAnnotationComposer
     column: $table.downloadedMaxHeight,
     builder: (column) => column,
   );
+
+  GeneratedColumn<String> get labelUids =>
+      $composableBuilder(column: $table.labelUids, builder: (column) => column);
 
   $$PlaylistsTableAnnotationComposer get playlistId {
     final $$PlaylistsTableAnnotationComposer composer = $composerBuilder(
@@ -6946,6 +7532,7 @@ class $$TracksTableTableManager
                 Value<bool> replaceRequested = const Value.absent(),
                 Value<int?> videoQuality = const Value.absent(),
                 Value<int?> downloadedMaxHeight = const Value.absent(),
+                Value<String?> labelUids = const Value.absent(),
               }) => TracksCompanion(
                 chaptersJson: chaptersJson,
                 chaptersEnabled: chaptersEnabled,
@@ -6968,6 +7555,7 @@ class $$TracksTableTableManager
                 replaceRequested: replaceRequested,
                 videoQuality: videoQuality,
                 downloadedMaxHeight: downloadedMaxHeight,
+                labelUids: labelUids,
               ),
           createCompanionCallback:
               ({
@@ -6992,6 +7580,7 @@ class $$TracksTableTableManager
                 Value<bool> replaceRequested = const Value.absent(),
                 Value<int?> videoQuality = const Value.absent(),
                 Value<int?> downloadedMaxHeight = const Value.absent(),
+                Value<String?> labelUids = const Value.absent(),
               }) => TracksCompanion.insert(
                 chaptersJson: chaptersJson,
                 chaptersEnabled: chaptersEnabled,
@@ -7014,6 +7603,7 @@ class $$TracksTableTableManager
                 replaceRequested: replaceRequested,
                 videoQuality: videoQuality,
                 downloadedMaxHeight: downloadedMaxHeight,
+                labelUids: labelUids,
               ),
           withReferenceMapper:
               (p0) =>
@@ -9038,6 +9628,258 @@ typedef $$LoudnessMeasurementsTableProcessedTableManager =
       LoudnessMeasurement,
       PrefetchHooks Function({bool trackId})
     >;
+typedef $$LabelsTableCreateCompanionBuilder =
+    LabelsCompanion Function({
+      Value<int> id,
+      required String uid,
+      required String name,
+      required int color,
+      Value<int> sortOrder,
+      required DateTime createdAt,
+      required DateTime updatedAt,
+      Value<DateTime?> deletedAt,
+    });
+typedef $$LabelsTableUpdateCompanionBuilder =
+    LabelsCompanion Function({
+      Value<int> id,
+      Value<String> uid,
+      Value<String> name,
+      Value<int> color,
+      Value<int> sortOrder,
+      Value<DateTime> createdAt,
+      Value<DateTime> updatedAt,
+      Value<DateTime?> deletedAt,
+    });
+
+class $$LabelsTableFilterComposer
+    extends Composer<_$AppDatabase, $LabelsTable> {
+  $$LabelsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get uid => $composableBuilder(
+    column: $table.uid,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get color => $composableBuilder(
+    column: $table.color,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get sortOrder => $composableBuilder(
+    column: $table.sortOrder,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get deletedAt => $composableBuilder(
+    column: $table.deletedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$LabelsTableOrderingComposer
+    extends Composer<_$AppDatabase, $LabelsTable> {
+  $$LabelsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get uid => $composableBuilder(
+    column: $table.uid,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get color => $composableBuilder(
+    column: $table.color,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get sortOrder => $composableBuilder(
+    column: $table.sortOrder,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get deletedAt => $composableBuilder(
+    column: $table.deletedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$LabelsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $LabelsTable> {
+  $$LabelsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get uid =>
+      $composableBuilder(column: $table.uid, builder: (column) => column);
+
+  GeneratedColumn<String> get name =>
+      $composableBuilder(column: $table.name, builder: (column) => column);
+
+  GeneratedColumn<int> get color =>
+      $composableBuilder(column: $table.color, builder: (column) => column);
+
+  GeneratedColumn<int> get sortOrder =>
+      $composableBuilder(column: $table.sortOrder, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get deletedAt =>
+      $composableBuilder(column: $table.deletedAt, builder: (column) => column);
+}
+
+class $$LabelsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $LabelsTable,
+          Label,
+          $$LabelsTableFilterComposer,
+          $$LabelsTableOrderingComposer,
+          $$LabelsTableAnnotationComposer,
+          $$LabelsTableCreateCompanionBuilder,
+          $$LabelsTableUpdateCompanionBuilder,
+          (Label, BaseReferences<_$AppDatabase, $LabelsTable, Label>),
+          Label,
+          PrefetchHooks Function()
+        > {
+  $$LabelsTableTableManager(_$AppDatabase db, $LabelsTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer:
+              () => $$LabelsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer:
+              () => $$LabelsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer:
+              () => $$LabelsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                Value<String> uid = const Value.absent(),
+                Value<String> name = const Value.absent(),
+                Value<int> color = const Value.absent(),
+                Value<int> sortOrder = const Value.absent(),
+                Value<DateTime> createdAt = const Value.absent(),
+                Value<DateTime> updatedAt = const Value.absent(),
+                Value<DateTime?> deletedAt = const Value.absent(),
+              }) => LabelsCompanion(
+                id: id,
+                uid: uid,
+                name: name,
+                color: color,
+                sortOrder: sortOrder,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                deletedAt: deletedAt,
+              ),
+          createCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                required String uid,
+                required String name,
+                required int color,
+                Value<int> sortOrder = const Value.absent(),
+                required DateTime createdAt,
+                required DateTime updatedAt,
+                Value<DateTime?> deletedAt = const Value.absent(),
+              }) => LabelsCompanion.insert(
+                id: id,
+                uid: uid,
+                name: name,
+                color: color,
+                sortOrder: sortOrder,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                deletedAt: deletedAt,
+              ),
+          withReferenceMapper:
+              (p0) =>
+                  p0
+                      .map(
+                        (e) => (
+                          e.readTable(table),
+                          BaseReferences(db, table, e),
+                        ),
+                      )
+                      .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$LabelsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $LabelsTable,
+      Label,
+      $$LabelsTableFilterComposer,
+      $$LabelsTableOrderingComposer,
+      $$LabelsTableAnnotationComposer,
+      $$LabelsTableCreateCompanionBuilder,
+      $$LabelsTableUpdateCompanionBuilder,
+      (Label, BaseReferences<_$AppDatabase, $LabelsTable, Label>),
+      Label,
+      PrefetchHooks Function()
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -9054,4 +9896,6 @@ class $AppDatabaseManager {
       $$LyricsLinesTableTableManager(_db, _db.lyricsLines);
   $$LoudnessMeasurementsTableTableManager get loudnessMeasurements =>
       $$LoudnessMeasurementsTableTableManager(_db, _db.loudnessMeasurements);
+  $$LabelsTableTableManager get labels =>
+      $$LabelsTableTableManager(_db, _db.labels);
 }

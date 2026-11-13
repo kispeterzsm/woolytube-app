@@ -112,3 +112,11 @@ Future<Track> insertTestTrack(
     playlistId,
   )).singleWhere((track) => track.id == id);
 }
+
+/// Removes what schema 21 added (the labels table with its index and
+/// triggers, and `tracks.label_uids`), so a current database looks like an
+/// older one. Call it before dropping columns the label triggers read.
+Future<void> removeLabelSchema(AppDatabase db) async {
+  await db.customStatement('DROP TABLE labels');
+  await db.customStatement('ALTER TABLE tracks DROP COLUMN label_uids');
+}

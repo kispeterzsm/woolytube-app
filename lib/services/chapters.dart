@@ -174,6 +174,15 @@ class ChapterData {
   /// edit (undo leaves it alone). Ids no longer in [active] are ignored.
   final Set<String> skippedChapterIds;
 
+  /// The owner's labels on chapters: label uids (`Labels.uid`) by chapter
+  /// id. Like [skippedChapterIds] it is kept apart from the chapter lists,
+  /// so followed YouTube chapters can be labelled without copying them into
+  /// [custom], and labelling is not a chapter edit. Entries of chapters
+  /// that are in none of the lists (not even the undo step) are dropped
+  /// when written; a merged chapter keeps the labels of the chapter whose id
+  /// it keeps, and the new part of a split starts without any.
+  final Map<String, List<String>> chapterLabels;
+
   const ChapterData({
     this.downloaded = const [],
     this.custom,
@@ -186,6 +195,7 @@ class ChapterData {
     this.recognitionEpoch = 0,
     this.lastRecognitionRunId,
     this.skippedChapterIds = const {},
+    this.chapterLabels = const {},
   });
 
   List<MediaChapter> get active => valid ? (custom ?? downloaded) : const [];
@@ -208,6 +218,34 @@ class ChapterData {
     );
   }
 
+  /// The label uids of chapter [chapterId].
+  List<String> labelsOf(String chapterId) =>
+      chapterLabels[chapterId] ?? const [];
+
+  /// [chapterId] with exactly [uids] as its labels (none removes the
+  /// entry). Returns this when nothing changes.
+  ChapterData withChapterLabels(String chapterId, Iterable<String> uids) {
+    final seen = <String>{};
+    final next = [
+      for (final uid in uids)
+        if (uid.isNotEmpty && seen.add(uid)) uid,
+    ];
+    final current = labelsOf(chapterId);
+    if (current.length == next.length &&
+        Iterable<int>.generate(
+          next.length,
+        ).every((i) => current[i] == next[i])) {
+      return this;
+    }
+    return copyWith(
+      chapterLabels: {
+        for (final entry in chapterLabels.entries)
+          if (entry.key != chapterId) entry.key: entry.value,
+        if (next.isNotEmpty) chapterId: next,
+      },
+    );
+  }
+
   ChapterData withCustom(List<MediaChapter>? chapters) =>
       copyWith(custom: chapters);
 
@@ -227,6 +265,7 @@ class ChapterData {
     int? recognitionEpoch,
     String? lastRecognitionRunId,
     Set<String>? skippedChapterIds,
+    Map<String, List<String>>? chapterLabels,
   }) => ChapterData(
     downloaded: downloaded ?? this.downloaded,
     custom:
@@ -249,10 +288,23 @@ class ChapterData {
         skippedChapterIds == null
             ? this.skippedChapterIds
             : Set.unmodifiable(skippedChapterIds),
+    chapterLabels:
+        chapterLabels == null
+            ? this.chapterLabels
+            : _frozenLabels(chapterLabels),
   );
 
+  static Map<String, List<String>> _frozenLabels(
+    Map<String, List<String>> labels,
+  ) => Map.unmodifiable({
+    for (final entry in labels.entries)
+      if (entry.value.isNotEmpty)
+        entry.key: List<String>.unmodifiable(entry.value),
+  });
+
   /// The file was replaced: its chapters no longer apply, and neither do
-  /// the skip marks made for them.
+  /// the skip marks made for them. Chapter labels stay with the kept
+  /// lists: they show again if those chapters become valid again.
   ChapterData invalidate() => ChapterData(
     downloaded: downloaded,
     custom: custom,
@@ -262,7 +314,24 @@ class ChapterData {
     shuffleChapters: shuffleChapters,
     recognitionEpoch: recognitionEpoch + 1,
     lastRecognitionRunId: lastRecognitionRunId,
+    chapterLabels: chapterLabels,
   );
+
+  /// [chapterLabels] of the chapters still in one of the lists (the
+  /// downloaded, the custom or the undo step), by chapter id in order.
+  Map<String, List<String>> get keptChapterLabels {
+    if (chapterLabels.isEmpty) return const {};
+    final ids = {
+      for (final c in downloaded) c.id,
+      for (final c in custom ?? const <MediaChapter>[]) c.id,
+      for (final c in undoChapters ?? const <MediaChapter>[]) c.id,
+    };
+    final keys = chapterLabels.keys.where(ids.contains).toList()..sort();
+    return {
+      for (final id in keys)
+        if (chapterLabels[id]!.isNotEmpty) id: chapterLabels[id]!,
+    };
+  }
 
   /// Main's fields are always written; the recognition fields only when
   /// they differ from what [fromJson] assumes when they are missing.
@@ -299,6 +368,8 @@ class ChapterData {
         'lastRecognitionRunId': lastRecognitionRunId,
       if (skippedChapterIds.isNotEmpty)
         'skippedChapterIds': [...skippedChapterIds]..sort(),
+      if (keptChapterLabels case final labels when labels.isNotEmpty)
+        'chapterLabels': labels,
     };
   }
 
@@ -371,7 +442,25 @@ class ChapterData {
             ? (value['skippedChapterIds'] as List).whereType<String>()
             : const <String>[],
       ),
+      chapterLabels: _parseChapterLabels(value['chapterLabels']),
     );
+  }
+
+  static Map<String, List<String>> _parseChapterLabels(Object? value) {
+    if (value is! Map) return const {};
+    final result = <String, List<String>>{};
+    for (final entry in value.entries) {
+      final id = entry.key;
+      final uids = entry.value;
+      if (id is! String || id.isEmpty || uids is! List) continue;
+      final seen = <String>{};
+      final list = [
+        for (final uid in uids)
+          if (uid is String && uid.isNotEmpty && seen.add(uid)) uid,
+      ];
+      if (list.isNotEmpty) result[id] = list;
+    }
+    return _frozenLabels(result);
   }
 
   static ChapterData fromVideoInfo(Map<String, dynamic> info) {

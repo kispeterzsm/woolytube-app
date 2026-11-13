@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/services/chapter_service.dart';
 import 'package:woolytube/services/chapters.dart';
+import 'package:woolytube/services/label_service.dart';
 import 'package:woolytube/services/lyrics/lyrics_models.dart';
 import 'package:woolytube/services/metadata_service.dart';
 import 'package:woolytube/services/recognition/chapter_estimator.dart';
@@ -473,6 +474,8 @@ void main() {
         status: 'complete',
         filePath: media.path,
       );
+      // Added in schema 21 (its triggers read chapters_json).
+      await removeLabelSchema(database);
       await database.customStatement(
         'ALTER TABLE playlists DROP COLUMN play_chapters',
       );
@@ -1711,6 +1714,157 @@ void main() {
         expect(stored.isSkipped('auto-c'), isTrue);
         expect(stored.unskipped.map((c) => c.id), ['auto-a']);
       });
+    });
+  });
+
+  group('chapter labels', () {
+    late LabelService labels;
+    late Label rock;
+    late Label live;
+
+    setUp(() async {
+      labels = LabelService(db);
+      rock = await labels.create('Rock', 0xffe53935);
+      live = await labels.create('Live', 0xff1e88e5);
+    });
+
+    Future<ChapterData> data() async =>
+        ChapterData.decode((await db.getTrack(track.id))!.chaptersJson);
+
+    MediaChapter mine(String id, int startMs, int endMs) =>
+        MediaChapter(id: id, title: id, startMs: startMs, endMs: endMs);
+
+    test('a followed YouTube chapter is labelled without a custom copy or '
+        'an undo step; a fetch keeps its labels', () async {
+      await service.refresh(track);
+      expect((await data()).active.map((c) => c.id), [
+        'youtube-0-0',
+        'youtube-1-30000',
+      ]);
+      expect(
+        await labels.setChapterLabel(
+          track.id,
+          'youtube-1-30000',
+          rock.uid,
+          true,
+        ),
+        isTrue,
+      );
+      await labels.setChapterLabel(track.id, 'youtube-1-30000', live.uid, true);
+      var stored = await data();
+      expect(stored.custom, isNull);
+      expect(stored.undoChapters, isNull);
+      expect(stored.labelsOf('youtube-1-30000'), [rock.uid, live.uid]);
+
+      await service.refresh(track);
+      stored = await data();
+      expect(stored.labelsOf('youtube-1-30000'), [rock.uid, live.uid]);
+      expect(stored.labelsOf('youtube-0-0'), isEmpty);
+
+      await labels.setChapterLabel(
+        track.id,
+        'youtube-1-30000',
+        rock.uid,
+        false,
+      );
+      expect((await data()).labelsOf('youtube-1-30000'), [live.uid]);
+      // Only a chapter the file shows can be labelled.
+      await expectLater(
+        labels.setChapterLabel(track.id, 'gone', rock.uid, true),
+        throwsA(isA<LabelException>()),
+      );
+    });
+
+    test('a merge keeps the labels of the chapter whose id it keeps; undo '
+        'brings the other back with its labels', () async {
+      await db.writeTrackChapters(
+        track.id,
+        ChapterData(
+          custom: [mine('a', 0, 30000), mine('b', 30000, 60000)],
+          durationMs: 60000,
+        ),
+      );
+      await labels.setChapterLabels(track.id, 'a', [rock.uid]);
+      await labels.setChapterLabels(track.id, 'b', [live.uid]);
+      final a = (await data()).active.first;
+      final b = (await data()).active.last;
+      await service.merge(track, a, b, keepEarlier: true, title: 'Both');
+      var stored = await data();
+      expect(stored.active.single.id, 'a');
+      expect(stored.labelsOf('a'), [rock.uid]);
+      // Kept for the undo step only.
+      expect(stored.labelsOf('b'), [live.uid]);
+
+      await service.undo(track);
+      stored = await data();
+      expect(stored.active.map((c) => c.id), ['a', 'b']);
+      expect(stored.labelsOf('b'), [live.uid]);
+
+      await service.merge(
+        track,
+        stored.active.first,
+        stored.active.last,
+        keepEarlier: true,
+        title: 'Both',
+      );
+      await service.rename(track, 'a', 'Both again');
+      // Two edits later the merged-away chapter is in no list any more.
+      stored = await data();
+      expect(stored.labelsOf('a'), [rock.uid]);
+      expect(stored.toJson()['chapterLabels'], {
+        'a': [rock.uid],
+      });
+    });
+
+    test('the new part of a split starts without labels', () async {
+      await db.writeTrackChapters(
+        track.id,
+        ChapterData(custom: [mine('a', 0, 60000)], durationMs: 60000),
+      );
+      await labels.setChapterLabels(track.id, 'a', [rock.uid]);
+      await service.replaceActive(track, [
+        mine('a', 0, 30000),
+        mine('a-split', 30000, 60000),
+      ]);
+      final stored = await data();
+      expect(stored.labelsOf('a'), [rock.uid]);
+      expect(stored.labelsOf('a-split'), isEmpty);
+    });
+
+    test('Undo of a delete keeps labels given since, and the deleted chapter '
+        'comes back with its own', () async {
+      await db.writeTrackChapters(
+        track.id,
+        ChapterData(
+          custom: [mine('a', 0, 30000), mine('b', 30000, 60000)],
+          durationMs: 60000,
+        ),
+      );
+      await labels.setChapterLabels(track.id, 'a', [rock.uid]);
+      final before = await service.delete(track, 'a');
+      await labels.setChapterLabels(track.id, 'b', [live.uid]);
+      await service.replaceChapters(track, before!);
+      final stored = await data();
+      expect(stored.active.map((c) => c.id), ['a', 'b']);
+      expect(stored.labelsOf('a'), [rock.uid]);
+      expect(stored.labelsOf('b'), [live.uid]);
+    });
+
+    test('a replaced file keeps its chapter labels for when its chapters '
+        'fit again', () async {
+      await db.writeTrackChapters(
+        track.id,
+        ChapterData(custom: [mine('a', 0, 60000)], durationMs: 60000),
+      );
+      await labels.setChapterLabels(track.id, 'a', [rock.uid]);
+      await db.invalidateTrackChapters(track.id);
+      final stored = await data();
+      expect(stored.active, isEmpty);
+      expect(stored.labelsOf('a'), [rock.uid]);
+      expect(
+        ChapterData.decode(stored.encode()).copyWith(valid: true).labelsOf('a'),
+        [rock.uid],
+      );
     });
   });
 }
