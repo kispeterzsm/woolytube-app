@@ -575,19 +575,35 @@ void main() {
       );
       expect(applied, isNull);
 
-      // Back as the scan saw it: the run applies around the user's chapter.
+      // Back as the scan saw it: Apply shows what it replaces and asks.
       await db.writeTrackChapters(
         track.id,
         const ChapterData(custom: [mine], durationMs: 180000),
       );
+      final before = (await db.getTrack(track.id))!.chaptersJson;
       await tapApply();
-      expect(applied, 2);
+      expect(find.text('Replace your chapters?'), findsOneWidget);
       expect(
-        ChapterData.decode(
-          (await db.getTrack(track.id))!.chaptersJson,
-        ).active.map((c) => c.title),
-        ['Mine', 'Artist — A', 'Artist — B'],
+        tester.widget<Text>(find.byKey(const ValueKey('replace-summary'))).data,
+        '1 current chapter is replaced by 2 new ones.',
       );
+      expect(find.text('• Mine (0:00)'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await settle(tester);
+      expect(applied, isNull);
+      expect((await db.getTrack(track.id))!.chaptersJson, before);
+
+      // Replacing takes the reviewed set as the whole list; Undo brings the
+      // user's chapter back.
+      await tapApply();
+      await tester.tap(find.byKey(const ValueKey('confirm-replace')));
+      await settle(tester);
+      expect(applied, 2);
+      final data = ChapterData.decode(
+        (await db.getTrack(track.id))!.chaptersJson,
+      );
+      expect(data.active.map((c) => c.title), ['Artist — A', 'Artist — B']);
+      expect(data.undoChapters?.map((c) => c.id), ['mine']);
       await tester.pumpWidget(const SizedBox());
       await tester.pump(const Duration(seconds: 10));
     });

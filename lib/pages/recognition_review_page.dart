@@ -11,12 +11,16 @@ import '../providers/providers.dart';
 import '../services/chapter_preview_player.dart';
 import '../services/chapter_service.dart';
 import '../services/chapters.dart';
+import '../services/lyrics/lyrics_models.dart';
 import '../services/recognition/chapter_estimator.dart';
 import '../services/recognition/song_recognition_service.dart';
 import 'chapter_editor_page.dart';
 
 /// Lets the user check, fix and apply the chapters a recognition scan
-/// proposed. Nothing touches the track's chapters until Apply.
+/// proposed. Nothing touches the track's chapters until Apply, which
+/// replaces them with the reviewed set after showing what goes (one step
+/// that Undo last chapter change takes back). Pops with the number of
+/// chapters the file has afterwards.
 class RecognitionReviewPage extends ConsumerStatefulWidget {
   final Track track;
   final RecognitionRun run;
@@ -271,6 +275,21 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
       _showMessage('These proposals were already applied to this file.');
       return;
     }
+    // Checked again inside the apply; here so a stale run never asks first.
+    if (await SongRecognitionService.currentFileKey(fresh) != run.fileKey) {
+      throw const StaleRecognitionRun.fileChanged();
+    }
+    if (!mounted) return;
+    final proposals = _proposals.map((p) => p.toChapter()).toList();
+    final plan = ChapterService.planRecognition(
+      current,
+      proposals,
+      durationMs: run.durationMs,
+      replaceAll: true,
+    );
+    if (plan.removed.isNotEmpty && !await _confirmReplace(fresh, plan)) {
+      return;
+    }
     final applied = await ref
         .read(chapterServiceProvider)
         .applyRecognition(
@@ -279,7 +298,8 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
           epoch: run.epoch,
           fileKey: run.fileKey,
           durationMs: run.durationMs,
-          proposals: _proposals.map((p) => p.toChapter()).toList(),
+          proposals: proposals,
+          replaceAll: true,
         );
     if (!mounted) return;
     if (!applied) {
@@ -296,7 +316,90 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
     }
     unawaited(_fetchLyricsOfNewChapters(fresh.id));
     await _stopPreview();
-    if (mounted) Navigator.of(context).pop(_proposals.length);
+    if (mounted) Navigator.of(context).pop(plan.chapters.length);
+  }
+
+  /// Shows which current chapters applying replaces, and asks.
+  Future<bool> _confirmReplace(Track track, RecognitionPlan plan) async {
+    final removedIds = {for (final c in plan.removed) c.id};
+    final lyrics = [
+      for (final doc in await ref
+          .read(databaseProvider)
+          .lyricsDocsForTrack(track.id))
+        if (removedIds.contains(doc.chapterId) &&
+            doc.status == LyricsStatus.found)
+          doc,
+    ];
+    final pinned = lyrics.where((d) => d.pinned).length;
+    if (!mounted) return false;
+    const shown = 6;
+    final removed = plan.removed;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder:
+          (ctx) => AlertDialog(
+            title: const Text('Replace your chapters?'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    key: const ValueKey('replace-summary'),
+                    [
+                      '${removed.length} current '
+                          'chapter${removed.length == 1 ? '' : 's'} '
+                          '${removed.length == 1 ? 'is' : 'are'} replaced by '
+                          '${plan.added.length} new '
+                          'one${plan.added.length == 1 ? '' : 's'}.',
+                      if (plan.kept > 0)
+                        '${plan.kept} identical '
+                            'chapter${plan.kept == 1 ? '' : 's'} '
+                            '${plan.kept == 1 ? 'stays' : 'stay'}.',
+                    ].join(' '),
+                  ),
+                  const SizedBox(height: 8),
+                  for (final c in removed.take(shown))
+                    Text(
+                      '• ${c.title} (${chapterTimestamp(c.startMs)})',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  if (removed.length > shown)
+                    Text('…and ${removed.length - shown} more'),
+                  if (lyrics.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      key: const ValueKey('replace-lyrics'),
+                      '${lyrics.length} of them '
+                      '${lyrics.length == 1 ? 'has' : 'have'} lyrics, which '
+                      'are removed with them'
+                      '${pinned == 0 ? '' : ', including $pinned you picked or fixed by hand, which are not looked up again'}'
+                      '.',
+                    ),
+                  ],
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Undo last chapter change brings your chapters back, '
+                    'until you make another chapter change.',
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                key: const ValueKey('confirm-replace'),
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Replace'),
+              ),
+            ],
+          ),
+    );
+    return confirmed == true;
   }
 
   /// Drops lyrics of chapters that are gone and, when the playlist has
@@ -390,8 +493,9 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
                     const Text(
                       'These are suggestions, not changes to your file. A consistent match '
                       'supports a title but does not prove it; listen before you apply. '
-                      'Applying keeps chapters you made or edited and replaces earlier '
-                      'automatic ones.',
+                      'Applying replaces the file\'s current chapters with this set; '
+                      'you see what goes first, and Undo last chapter change takes it '
+                      'back.',
                     ),
                     if (unrecognized > 0 || flagged > 0)
                       Padding(

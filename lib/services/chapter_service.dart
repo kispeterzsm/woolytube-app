@@ -181,8 +181,9 @@ class ChapterService {
             // copyWith keeps the edit history and recognition state.
             await _writeChapters(
               track.id,
-              old.copyWith(
-                downloaded: remote.downloaded,
+              _withFetched(
+                old,
+                remote.downloaded,
                 checkedAt: remote.checkedAt,
                 durationMs: remote.durationMs,
               ),
@@ -248,14 +249,58 @@ class ChapterService {
     final remote = ChapterData.fromVideoInfo(info);
     await _writeChapters(
       track.id,
-      old.copyWith(
-        downloaded: remote.downloaded,
-        custom: old.valid ? old.custom : null,
-        valid: true,
+      _withFetched(
+        old,
+        remote.downloaded,
         checkedAt: remote.checkedAt,
         durationMs: remote.durationMs,
       ),
     );
+  }
+
+  /// [old] with YouTube's chapter list [downloaded] as fetched now.
+  ///
+  /// The user's own list stays in use. A file that follows YouTube shows the
+  /// new list, and when that differs from the list it showed, the old one
+  /// becomes the Undo step (as a copy: Undo must bring back what was shown,
+  /// not follow YouTube to the new list again).
+  static ChapterData _withFetched(
+    ChapterData old,
+    List<MediaChapter> downloaded, {
+    required DateTime? checkedAt,
+    required int? durationMs,
+  }) {
+    final next = old.copyWith(
+      downloaded: downloaded,
+      custom: old.valid ? old.custom : null,
+      valid: true,
+      checkedAt: checkedAt,
+      durationMs: durationMs,
+    );
+    final shownBefore = old.active;
+    if (old.custom != null ||
+        shownBefore.isEmpty ||
+        sameChapters(shownBefore, next.active)) {
+      return next;
+    }
+    return next.copyWith(
+      undoChapters: shownBefore,
+      undoFollowsDownloaded: false,
+    );
+  }
+
+  /// Whether [a] and [b] list the same chapters (ids, titles and times).
+  static bool sameChapters(List<MediaChapter> a, List<MediaChapter> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i].id != b[i].id ||
+          a[i].title != b[i].title ||
+          a[i].startMs != b[i].startMs ||
+          a[i].endMs != b[i].endMs) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /// Runs [action] on the stored chapters in one transaction. [verify], when
@@ -652,15 +697,11 @@ class ChapterService {
   /// and are dropped instead of becoming chapters of their own.
   static const minimumChapterMs = 5000;
 
-  /// Rebases a completed scan onto the current edits.
+  /// Applies a completed scan's reviewed [proposals] as one undoable step
+  /// (see [planRecognition] for what the chapters become).
   ///
-  /// Chapters the user created or edited are never moved or clipped;
-  /// proposals are cut around them. Earlier untouched recognition results
-  /// are replaced wherever a new proposal covers them. Proposals that overlap
-  /// each other or run past the file are clipped rather than rejected, so one
-  /// odd match cannot throw away a whole run. A run is applied once per
-  /// [epoch], which undo, reset and file replacement bump; a stale epoch or
-  /// a repeated run returns false.
+  /// A run is applied once per [epoch], which undo, reset and file
+  /// replacement bump; a stale epoch or a repeated run returns false.
   ///
   /// [fileKey] is the run's [RecognitionRun.fileKey]. When given, the
   /// track's current file must still have that content key, checked inside
@@ -673,15 +714,56 @@ class ChapterService {
     required int durationMs,
     required List<MediaChapter> proposals,
     required String? fileKey,
+    bool replaceAll = false,
   }) => _change(track, (old, _) {
     if (old.recognitionEpoch != epoch ||
         old.lastRecognitionRunId == runId ||
         proposals.isEmpty) {
       return old;
     }
+    final plan = planRecognition(
+      old,
+      proposals,
+      durationMs: durationMs,
+      replaceAll: replaceAll,
+    );
+    return _edited(old, [
+      ...plan.chapters,
+    ], durationMs: plan.durationMs).copyWith(lastRecognitionRunId: runId);
+  }, verify: fileKey == null ? null : (fresh) => _checkRunFile(fresh, fileKey));
+
+  /// The chapters [old] gets when a scan's [proposals] are applied.
+  ///
+  /// With [replaceAll] (the user confirmed replacing their chapters), the
+  /// proposals become the whole list. A proposal with the same start and
+  /// title as a current chapter keeps that chapter (its id, so its lyrics
+  /// and Always skip mark stay; its notes and flags) and takes the
+  /// proposal's end.
+  ///
+  /// Otherwise chapters the user created or edited are never moved or
+  /// clipped; proposals are cut around them, and earlier untouched
+  /// recognition results are replaced wherever a new proposal covers them.
+  ///
+  /// Either way, proposals that overlap each other or run past the file are
+  /// clipped rather than rejected, so one odd match cannot throw away a
+  /// whole run, and pieces shorter than [minimumChapterMs] are dropped.
+  static RecognitionPlan planRecognition(
+    ChapterData old,
+    List<MediaChapter> proposals, {
+    required int durationMs,
+    bool replaceAll = false,
+  }) {
     final protected =
-        old.active.where((c) => c.protectedFromRecognition).toList();
+        replaceAll
+            ? const <MediaChapter>[]
+            : old.active.where((c) => c.protectedFromRecognition).toList();
     final protectedRanges = protected.map((c) => (c.startMs, c.endMs)).toList();
+    // Current chapters a proposal can stand for unchanged: same start and
+    // title. Each is used once.
+    final reusable = <(int, String), MediaChapter>{
+      if (replaceAll)
+        for (final c in old.active) (c.startMs, c.title): c,
+    };
 
     final added = <MediaChapter>[];
     var cursor = 0;
@@ -694,6 +776,11 @@ class ChapterService {
       cursor = end;
       for (final range in _subtractAll((start, end), protectedRanges)) {
         if (range.$2 - range.$1 < minimumChapterMs) continue;
+        final same = reusable.remove((range.$1, proposal.title));
+        if (same != null) {
+          added.add(same.copyWith(endMs: range.$2));
+          continue;
+        }
         added.add(
           proposal.copyWith(
             id: '${proposal.id}-${range.$1}-${range.$2}',
@@ -715,22 +802,24 @@ class ChapterService {
       (durationMs, 1 << 40),
     ];
     final retained = <MediaChapter>[...protected];
-    for (final previous in old.active.where(
-      (c) => !c.protectedFromRecognition,
-    )) {
-      final whole = (previous.startMs, previous.endMs);
-      for (final range in _subtractAll(whole, addedRanges)) {
-        if (range.$2 - range.$1 < minimumChapterMs) continue;
-        retained.add(
-          previous.copyWith(
-            id:
-                range == whole
-                    ? previous.id
-                    : '${previous.id}-${range.$1}-${range.$2}',
-            startMs: range.$1,
-            endMs: range.$2,
-          ),
-        );
+    if (!replaceAll) {
+      for (final previous in old.active.where(
+        (c) => !c.protectedFromRecognition,
+      )) {
+        final whole = (previous.startMs, previous.endMs);
+        for (final range in _subtractAll(whole, addedRanges)) {
+          if (range.$2 - range.$1 < minimumChapterMs) continue;
+          retained.add(
+            previous.copyWith(
+              id:
+                  range == whole
+                      ? previous.id
+                      : '${previous.id}-${range.$1}-${range.$2}',
+              startMs: range.$1,
+              endMs: range.$2,
+            ),
+          );
+        }
       }
     }
     // A YouTube chapter ends at a whole-second length and a user chapter at
@@ -740,11 +829,23 @@ class ChapterService {
       durationMs,
       (longest, c) => math.max(longest, c.endMs),
     );
-    return _edited(old, [
-      ...retained,
-      ...added,
-    ], durationMs: storedDurationMs).copyWith(lastRecognitionRunId: runId);
-  }, verify: fileKey == null ? null : (fresh) => _checkRunFile(fresh, fileKey));
+    final chapters = [...retained, ...added]
+      ..sort((a, b) => a.startMs.compareTo(b.startMs));
+    final oldIds = {for (final c in old.active) c.id};
+    final newIds = {for (final c in chapters) c.id};
+    return RecognitionPlan(
+      chapters: List.unmodifiable(chapters),
+      durationMs: storedDurationMs,
+      removed: [
+        for (final c in old.active)
+          if (!newIds.contains(c.id)) c,
+      ],
+      added: [
+        for (final c in chapters)
+          if (!oldIds.contains(c.id)) c,
+      ],
+    );
+  }
 
   /// Refuses a run made from other content than [track]'s file has now.
   static Future<void> _checkRunFile(Track track, String fileKey) async {
@@ -773,6 +874,33 @@ List<(int, int)> subtractChapterRange((int, int) range, (int, int) removed) {
     if (removed.$1 > range.$1) (range.$1, removed.$1),
     if (removed.$2 < range.$2) (removed.$2, range.$2),
   ];
+}
+
+/// What applying a recognition run does to a file's chapters
+/// ([ChapterService.planRecognition]).
+class RecognitionPlan {
+  /// The chapters after applying, in order.
+  final List<MediaChapter> chapters;
+
+  /// The file length stored with them.
+  final int durationMs;
+
+  /// Current chapters that are not in [chapters] (by id): replaced, cut or
+  /// dropped. Their lyrics go with them.
+  final List<MediaChapter> removed;
+
+  /// Chapters that are new (by id).
+  final List<MediaChapter> added;
+
+  const RecognitionPlan({
+    required this.chapters,
+    required this.durationMs,
+    required this.removed,
+    required this.added,
+  });
+
+  /// Chapters that stay exactly as they are or keep their id.
+  int get kept => chapters.length - added.length;
 }
 
 /// A recognition run that no longer fits the track: its chapters were

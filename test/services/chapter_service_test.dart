@@ -120,6 +120,58 @@ void main() {
     },
   );
 
+  test('a fetch that changes the followed YouTube list can be undone; one '
+      'that leaves the own list in use touches no undo step', () async {
+    const older = [
+      MediaChapter(
+        id: 'youtube-0-0',
+        title: 'Old first',
+        startMs: 0,
+        endMs: 60000,
+        origin: ChapterOrigin.original,
+      ),
+    ];
+    await db.writeTrackChapters(
+      track.id,
+      ChapterData(
+        downloaded: older,
+        checkedAt: DateTime(2026),
+        durationMs: 60000,
+      ),
+    );
+    await service.refresh(track);
+    var data = ChapterData.decode((await db.getTrack(track.id))!.chaptersJson);
+    expect(data.custom, isNull);
+    expect(data.active.map((c) => c.title), ['First', 'Second']);
+    expect(data.undoChapters?.map((c) => c.title), ['Old first']);
+    expect(data.undoFollowsDownloaded, isFalse);
+
+    // Fetching the same list again adds no step and keeps the one there.
+    await service.refresh(track);
+    data = ChapterData.decode((await db.getTrack(track.id))!.chaptersJson);
+    expect(data.undoChapters?.map((c) => c.title), ['Old first']);
+
+    await service.undo(track);
+    data = ChapterData.decode((await db.getTrack(track.id))!.chaptersJson);
+    expect(data.active.map((c) => c.title), ['Old first']);
+
+    // Now the file uses its own list (the copy Undo restored): a fetch
+    // keeps it and adds no undo step.
+    expect(data.custom, isNotNull);
+    await service.rename(track, 'youtube-0-0', 'Mine');
+    final undoBefore =
+        ChapterData.decode(
+          (await db.getTrack(track.id))!.chaptersJson,
+        ).undoChapters;
+    await service.refresh(track);
+    data = ChapterData.decode((await db.getTrack(track.id))!.chaptersJson);
+    expect(data.active.map((c) => c.title), ['Mine']);
+    expect(data.downloaded.map((c) => c.title), ['First', 'Second']);
+    expect(data.undoChapters?.map((c) => c.title), [
+      for (final c in undoBefore!) c.title,
+    ]);
+  });
+
   test('fetching missing chapters reports progress and can stop', () async {
     final others = <Track>[];
     for (var i = 2; i <= 4; i++) {
@@ -879,6 +931,123 @@ void main() {
         (30000, 60000),
       ]);
     });
+
+    test('applyRecognition with replaceAll makes the reviewed set the whole '
+        'list as one undo step; identical chapters keep their id and '
+        'lyrics', () async {
+      final crafted = [
+        chapter('mine', 0, 20000),
+        chapter(
+          'edited',
+          20000,
+          40000,
+          origin: ChapterOrigin.auto,
+          manuallyEdited: true,
+        ),
+        chapter('youtube', 40000, 60000, origin: ChapterOrigin.original),
+      ];
+      await seed(crafted);
+      Future<void> doc(String id, {bool pinned = false}) => db.replaceLyricsDoc(
+        LyricsDocDraft(
+          trackId: track.id,
+          chapterId: id,
+          kind: LyricsMode.lyrics,
+          status: LyricsStatus.found,
+          pinned: pinned,
+          checkedAt: DateTime(2026),
+        ),
+      );
+      await doc('mine', pinned: true);
+      await doc('edited');
+      final proposals = [
+        // Same start and title as 'mine': stands for it.
+        const MediaChapter(
+          id: 'p1',
+          title: 'mine',
+          startMs: 0,
+          endMs: 25000,
+          origin: ChapterOrigin.auto,
+        ),
+        chapter('p2', 25000, 60000, origin: ChapterOrigin.auto),
+      ];
+      final plan = ChapterService.planRecognition(
+        await data(),
+        proposals,
+        durationMs: 60000,
+        replaceAll: true,
+      );
+      expect(plan.removed.map((c) => c.id), ['edited', 'youtube']);
+      expect(plan.added.map((c) => c.id), ['p2-25000-60000']);
+      expect(plan.kept, 1);
+
+      expect(
+        await service.applyRecognition(
+          track,
+          runId: 'run-1',
+          epoch: 0,
+          durationMs: 60000,
+          fileKey: null,
+          proposals: proposals,
+          replaceAll: true,
+        ),
+        isTrue,
+      );
+      final applied = await data();
+      expect(applied.active.map((c) => (c.id, c.startMs, c.endMs)).toList(), [
+        ('mine', 0, 25000),
+        ('p2-25000-60000', 25000, 60000),
+      ]);
+      expect(applied.active.first.origin, ChapterOrigin.user);
+      expect(applied.lastRecognitionRunId, 'run-1');
+      expect(applied.undoChapters?.map((c) => c.id), [
+        'mine',
+        'edited',
+        'youtube',
+      ]);
+      // The kept chapter keeps its (pinned) lyrics; replaced ones lose theirs.
+      expect((await db.lyricsDocsForTrack(track.id)).map((d) => d.chapterId), [
+        'mine',
+      ]);
+
+      await service.undo(track);
+      final undone = await data();
+      expect(undone.active.map((c) => (c.id, c.startMs, c.endMs)).toList(), [
+        ('mine', 0, 20000),
+        ('edited', 20000, 40000),
+        ('youtube', 40000, 60000),
+      ]);
+      expect(undone.active[1].manuallyEdited, isTrue);
+    });
+
+    test(
+      'planRecognition without replaceAll matches applyRecognition',
+      () async {
+        await seed([
+          chapter('old-auto', 0, 30000, origin: ChapterOrigin.auto),
+          chapter('mine', 30000, 40000),
+        ]);
+        final proposals = [chapter('song', 0, 60000)];
+        final plan = ChapterService.planRecognition(
+          await data(),
+          proposals,
+          durationMs: 60000,
+        );
+        await service.applyRecognition(
+          track,
+          runId: 'run-1',
+          epoch: 0,
+          durationMs: 60000,
+          fileKey: null,
+          proposals: proposals,
+        );
+        expect(
+          plan.chapters.map((c) => c.id),
+          (await data()).active.map((c) => c.id),
+        );
+        expect(plan.removed.map((c) => c.id), ['old-auto']);
+        expect(plan.kept, 1);
+      },
+    );
 
     test('applyRecognition ignores stale epochs and repeated runs', () async {
       await seed([chapter('mine', 0, 10000)]);

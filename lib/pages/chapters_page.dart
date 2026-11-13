@@ -15,6 +15,7 @@ import '../services/playlist_service.dart';
 import '../services/recognition/song_recognition_service.dart';
 import '../services/youtube_links.dart';
 import '../widgets/mobile_data_download_guard.dart';
+import '../widgets/recognize_chapter_sheet.dart';
 import '../widgets/settings_section_header.dart';
 import 'chapter_editor_page.dart';
 import 'lyrics_page.dart';
@@ -333,16 +334,13 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
     )) {
       return;
     }
+    final before = ChapterData.decode(track.chaptersJson);
     await _run(() async {
       await _chapters.refresh(track);
       await _afterEdit(track);
       final fresh = await ref.read(databaseProvider).getTrack(track.id);
-      final found = ChapterData.decode(fresh?.chaptersJson).downloaded.length;
-      _showMessage(
-        found == 0
-            ? 'This video has no chapters on YouTube.'
-            : 'Found $found chapters on YouTube.',
-      );
+      final after = ChapterData.decode(fresh?.chaptersJson);
+      _showMessage(fetchedChaptersMessage(before, after));
     });
   }
 
@@ -456,6 +454,13 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                     close();
                     _rename(track, chapter);
                   },
+                  onRecognize:
+                      playable
+                          ? () {
+                            close();
+                            unawaited(_recognizeChapter(track, chapter));
+                          }
+                          : null,
                   onEditTimes: () {
                     close();
                     _editTimes(track, chapter);
@@ -590,9 +595,85 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
     if (applied == null || !mounted) return;
     await _afterEdit(track);
     _showMessage(
-      'Applied $applied chapter${applied == 1 ? '' : 's'}. '
-      'Undo last chapter change takes them back.',
+      'The file now has $applied chapter${applied == 1 ? '' : 's'}. '
+      'Undo last chapter change brings back the ones from before.',
     );
+  }
+
+  /// Recognize from the ⋮ menu, for a file that already has chapters: the
+  /// scan runs only after the user agreed that applying its results
+  /// replaces their chapters, and even then nothing changes until Apply.
+  Future<void> _confirmRecognize(Track track, ChapterData data) async {
+    final count = data.active.length;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder:
+          (ctx) => AlertDialog(
+            title: const Text('Replace your chapters?'),
+            content: Text(
+              'Recognition proposes a new set of chapters for this file. '
+              'Applying it replaces the current '
+              '${count == 1 ? 'chapter' : '$count chapters'}.\n\n'
+              'The scan runs now, but your chapters stay exactly as they are '
+              'until you review the new set and press Apply.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                key: const ValueKey('confirm-recognize'),
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Recognize'),
+              ),
+            ],
+          ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _run(() => _recognizeSongs(track));
+  }
+
+  /// Looks up the song in one chapter and, when the user picks a match,
+  /// renames the chapter (one undoable step; its times never change).
+  Future<void> _recognizeChapter(Track track, MediaChapter chapter) async {
+    if (ref.read(downloadServiceProvider).isDownloading) {
+      _showMessage('Wait for the running download to finish first.');
+      return;
+    }
+    if (ref.read(songRecognitionServiceProvider).isScanning) {
+      _showMessage('Wait for the running scan to finish first.');
+      return;
+    }
+    if (!await confirmManualDownload(
+          context,
+          ref.read(downloadNetworkPolicyProvider),
+        ) ||
+        !mounted) {
+      return;
+    }
+    final title = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: const Color(0xFF2A2A2A),
+      isScrollControlled: true,
+      showDragHandle: true,
+      useSafeArea: true,
+      builder:
+          (sheetContext) => ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.85,
+            ),
+            child: RecognizeChapterSheet(track: track, chapter: chapter),
+          ),
+    );
+    if (title == null || title.trim().isEmpty || !mounted) return;
+    await _run(() async {
+      await _chapters.rename(track, chapter.id, title);
+      await _afterEdit(track);
+      _showMessage(
+        'Renamed to "$title". Undo last chapter change takes it back.',
+      );
+    });
   }
 
   Future<void> _removeAutomatic(Track track) async {
@@ -838,7 +919,7 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                           child: _SourceChip(custom: data.custom != null),
                         ),
                       const Spacer(),
-                      if (canFetch)
+                      if (canFetch || data.active.isNotEmpty)
                         PopupMenuButton<String>(
                           key: const ValueKey('chapters-more'),
                           tooltip: 'More',
@@ -849,18 +930,40 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                                 _fetchFromYouTube(track);
                               case 'revert':
                                 _revertToYouTube(track, data);
+                              case 'recognize':
+                                _confirmRecognize(track, data);
                             }
                           },
                           itemBuilder:
                               (_) => [
-                                const PopupMenuItem(
-                                  value: 'fetch',
-                                  child: Text('Fetch from YouTube'),
-                                ),
-                                if (canRevert)
+                                if (canFetch)
+                                  const PopupMenuItem(
+                                    value: 'fetch',
+                                    child: Text('Fetch from YouTube'),
+                                  ),
+                                if (canFetch && canRevert)
                                   const PopupMenuItem(
                                     value: 'revert',
                                     child: Text('Use YouTube chapters again'),
+                                  ),
+                                // A file with chapters keeps its scan here,
+                                // a deliberate step away from the list.
+                                if (data.active.isNotEmpty)
+                                  PopupMenuItem(
+                                    key: const ValueKey('chapters-recognize'),
+                                    value: 'recognize',
+                                    enabled:
+                                        playable &&
+                                        !ref
+                                            .read(
+                                              songRecognitionServiceProvider,
+                                            )
+                                            .isScanning,
+                                    child: Text(
+                                      _recognitionRun == null
+                                          ? 'Recognize songs…'
+                                          : 'Recognize again…',
+                                    ),
                                   ),
                               ],
                         )
@@ -976,6 +1079,8 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                   data: data,
                   run: _recognitionRun,
                   enabled: !_busy && playable,
+                  // With chapters, Recognize is in the ⋮ menu above.
+                  showRecognizeButton: data.active.isEmpty,
                   onRecognize: () => _run(() => _recognizeSongs(track)),
                   onReview: (run) => _openReview(track, run),
                   onRemoveAutomatic: () => _run(() => _removeAutomatic(track)),
@@ -985,6 +1090,30 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
       ),
     );
   }
+}
+
+/// What a "Fetch from YouTube" did, given the chapter info [before] and
+/// [after] it: whether YouTube's chapters are now shown, and that the
+/// user's own list (when there is one) is untouched and still in use.
+@visibleForTesting
+String fetchedChaptersMessage(ChapterData before, ChapterData after) {
+  final found = after.downloaded.length;
+  final foundText =
+      found == 0
+          ? 'This video has no chapters on YouTube.'
+          : 'Found $found chapter${found == 1 ? '' : 's'} on YouTube.';
+  if (after.custom != null) {
+    return '$foundText Your own chapters are unchanged and still used'
+        '${found == 0 ? '' : '; ⋮ > Use YouTube chapters again switches to '
+                'YouTube\'s'}.';
+  }
+  if (before.valid &&
+      before.active.isNotEmpty &&
+      !ChapterService.sameChapters(before.active, after.active)) {
+    return '$foundText The list below was updated. Undo last chapter change '
+        'brings back the previous one.';
+  }
+  return found == 0 ? foundText : '$foundText They are shown below.';
 }
 
 /// The playing chapter's colour, as in the playlist's track list.
@@ -1131,6 +1260,7 @@ class _RecognitionSection extends ConsumerWidget {
     required this.data,
     required this.run,
     required this.enabled,
+    required this.showRecognizeButton,
     required this.onRecognize,
     required this.onReview,
     required this.onRemoveAutomatic,
@@ -1138,6 +1268,11 @@ class _RecognitionSection extends ConsumerWidget {
 
   final Track track;
   final ChapterData data;
+
+  /// Shows Recognize songs here (a file without chapters). Otherwise it is
+  /// in the chapters' ⋮ menu, and this section only shows while there is a
+  /// scan, a result or a failure to show.
+  final bool showRecognizeButton;
 
   /// The last completed scan of this file, if any.
   final RecognitionRun? run;
@@ -1175,10 +1310,16 @@ class _RecognitionSection extends ConsumerWidget {
     final stale = run != null && data.recognitionEpoch != run.epoch;
     // Applying keeps each proposal's id as the prefix of the chapters made
     // from it, so this tells whether any of the run's chapters are listed.
+    // A proposal applied over an identical chapter (same start and title)
+    // keeps that chapter's id, so that counts too.
     final runShown =
         run != null &&
         data.active.any(
-          (c) => run.proposals.any((p) => c.id.startsWith('${p.id}-')),
+          (c) => run.proposals.any(
+            (p) =>
+                c.id.startsWith('${p.id}-') ||
+                (c.startMs == p.startMs && c.title == p.title),
+          ),
         );
     // A run an older decoder measured in the wrong place is never offered
     // for review, applied or not; chapters already applied from it stay.
@@ -1208,17 +1349,29 @@ class _RecognitionSection extends ConsumerWidget {
     final hasAutomatic = data.active.any(
       (c) => c.origin == ChapterOrigin.auto && !c.manuallyEdited,
     );
+    if (!showRecognizeButton &&
+        scan == null &&
+        failure == null &&
+        run == null &&
+        !hasAutomatic &&
+        !scanningOther) {
+      return const SizedBox.shrink();
+    }
     return Column(
+      key: const ValueKey('recognition-section'),
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const SettingsSectionHeader('Song recognition'),
-        const Padding(
-          padding: EdgeInsets.symmetric(horizontal: 16),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
           child: Text(
-            'Identifies the songs in a long mix by fingerprinting short '
-            'samples and proposes chapters for you to review. Only '
-            'fingerprints are sent, never audio.',
-            style: TextStyle(color: Color(0xFF999999), fontSize: 13),
+            showRecognizeButton
+                ? 'Identifies the songs in a long mix by fingerprinting short '
+                    'samples and proposes chapters for you to review. Only '
+                    'fingerprints are sent, never audio.'
+                : 'To scan this file again, use ⋮ next to Chapters. Your '
+                    'chapters stay until you apply a new set.',
+            style: const TextStyle(color: Color(0xFF999999), fontSize: 13),
           ),
         ),
         if (scan != null)
@@ -1280,7 +1433,7 @@ class _RecognitionSection extends ConsumerWidget {
                   icon: const Icon(Icons.stop),
                   label: const Text('Cancel'),
                 )
-              else
+              else if (showRecognizeButton)
                 TextButton.icon(
                   key: const ValueKey('recognize-songs'),
                   onPressed: enabled && !scanningOther ? onRecognize : null,
@@ -1477,6 +1630,7 @@ class _ChapterActionsSheet extends StatelessWidget {
     required this.onSkipChanged,
     required this.onAdjust,
     required this.onRename,
+    required this.onRecognize,
     required this.onEditTimes,
     required this.onDelete,
     required this.onShare,
@@ -1494,6 +1648,9 @@ class _ChapterActionsSheet extends StatelessWidget {
   final ValueChanged<bool> onSkipChanged;
   final VoidCallback onAdjust;
   final VoidCallback onRename;
+
+  /// Null when the file cannot be played (so not decoded either).
+  final VoidCallback? onRecognize;
   final VoidCallback onEditTimes;
   final VoidCallback onDelete;
 
@@ -1651,6 +1808,15 @@ class _ChapterActionsSheet extends StatelessWidget {
                 title: 'Adjust boundaries…',
                 subtitle: 'Move its start and end while listening',
                 onTap: playable ? onAdjust : null,
+              ),
+              tile(
+                key: const ValueKey('chapter-actions-recognize'),
+                icon: Icons.graphic_eq,
+                title: 'Recognize song…',
+                subtitle:
+                    'Finds the song in this chapter only; its start and end '
+                    'stay',
+                onTap: onRecognize,
               ),
               tile(
                 key: const ValueKey('chapter-actions-rename'),

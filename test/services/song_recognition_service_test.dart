@@ -650,6 +650,134 @@ void main() {
     await service.scan(track);
   });
 
+  group('recognizing one chapter', () {
+    test('plans new windows inside the chapter, away from the grid', () {
+      final grid = service.sampleStartsMs(300000);
+      expect(service.rangeSampleStartsMs(60000, 150000, 300000), [
+        63000,
+        90000,
+        102000,
+        135000,
+      ]);
+      for (final (start, end) in [
+        (0, 300000),
+        (60000, 150000),
+        (31000, 89000),
+        (200000, 260000),
+      ]) {
+        final starts = service.rangeSampleStartsMs(start, end, 300000);
+        expect(starts, isNotEmpty, reason: '$start-$end');
+        expect(starts.length, lessThanOrEqualTo(8 + grid.length));
+        for (final s in starts.where((s) => !grid.contains(s))) {
+          expect(s, greaterThanOrEqualTo(start + 3000), reason: '$s');
+          expect(s + 12000, lessThanOrEqualTo(end - 3000), reason: '$s');
+          for (final g in grid) {
+            expect((s - g).abs(), greaterThanOrEqualTo(12000), reason: '$s');
+          }
+        }
+        for (final s in starts.where(grid.contains)) {
+          expect(s >= start && s + 12000 <= end, isTrue, reason: '$s');
+        }
+      }
+      // Shorter than a window: one window over its middle.
+      expect(service.rangeSampleStartsMs(100000, 110000, 300000), [99000]);
+      // At the very end only the grid's last window fits.
+      expect(service.rangeSampleStartsMs(280000, 300000, 300000), [288000]);
+    });
+
+    test('looks up only new windows, reuses the scan\'s, and changes '
+        'nothing', () async {
+      final run = await service.scan(track);
+      expect(recognizer.calls.length, 6);
+      final stored = (await db.getTrack(track.id))!.chaptersJson;
+      recognizer.byStartMs.addAll({
+        63000: song('A', 'First song', 63),
+        102000: song('A', 'First song', 102),
+        135000: song('B', 'Second song', 4.5),
+      });
+      final events = <RecognitionProgress>[];
+      final streamed = <RecognitionProgress>[];
+      final sub = service.progressStream.listen(streamed.add);
+      final result = await service.recognizeRange(
+        track,
+        startMs: 60000,
+        endMs: 150000,
+        onProgress: events.add,
+      );
+      await sub.cancel();
+
+      expect(recognizer.calls.sublist(6), [63000, 102000, 135000]);
+      expect(result.sampleCount, 4);
+      expect(result.checkedSamples, 4);
+      expect(result.limited, isFalse);
+      expect(result.mixed, isTrue);
+      expect(result.candidates.map((c) => c.title), [
+        'Artist — First song',
+        'Artist — Second song',
+      ]);
+      final first = result.candidates.first;
+      expect(first.matchedAtMs, [63000, 90000, 102000]);
+      expect(first.songStartMs, 0);
+      expect(first.consistent, isTrue);
+      expect(result.candidates.last.songStartMs, 130500);
+      expect(result.candidates.last.consistent, isFalse);
+      expect(events.last.completed, 4);
+      expect(events.last.total, 4);
+      // The scan's progress, run, chapters and epoch are left alone.
+      expect(streamed, isEmpty);
+      expect((await service.loadRun(track))!.runId, run.runId);
+      expect((await db.getTrack(track.id))!.chaptersJson, stored);
+      expect(service.isScanning, isFalse);
+
+      // Asked again, everything comes from the cache.
+      await service.recognizeRange(track, startMs: 60000, endMs: 150000);
+      expect(recognizer.calls.length, 9);
+    });
+
+    test('shares the scan\'s lock and can be cancelled', () async {
+      recognizer.byStartMs[63000] = song('A', 'First song', 63);
+      recognizer.gate = Completer<void>();
+      final scan = service.scan(track);
+      await expectLater(
+        service.recognizeRange(track, startMs: 60000, endMs: 150000),
+        throwsA(isA<StateError>()),
+      );
+      recognizer.gate!.complete();
+      await scan;
+
+      recognizer.gate = Completer<void>();
+      final range = service.recognizeRange(
+        track,
+        startMs: 60000,
+        endMs: 150000,
+      );
+      expect(service.isScanning, isTrue);
+      await expectLater(service.scan(track), throwsA(isA<StateError>()));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      service.cancel();
+      recognizer.gate!.complete();
+      await expectLater(range, throwsA(isA<RecognitionCancelled>()));
+      expect(service.isScanning, isFalse);
+    });
+
+    test('a lasting rate limit returns what was found so far', () async {
+      recognizer.byStartMs[63000] = song('A', 'First song', 63);
+      recognizer.failWhen =
+          (index) => index >= 1 ? const ShazamHttpException(429, '') : null;
+      final result = await service.recognizeRange(
+        track,
+        startMs: 60000,
+        endMs: 150000,
+        rateLimitBudget: Duration.zero,
+      );
+      expect(result.limited, isTrue);
+      expect(result.checkedSamples, 1);
+      expect(result.sampleCount, 4);
+      expect(result.candidates.single.matchedAtMs, [63000]);
+      expect(service.isScanning, isFalse);
+    });
+  });
+
   test('cancel right after starting stops before any lookup', () async {
     final future = service.scan(track);
     service.cancel();

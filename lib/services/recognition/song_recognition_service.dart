@@ -496,59 +496,27 @@ class SongRecognitionService {
       await sampleDir.create(recursive: true);
       for (var i = 0; i < starts.length; i++) {
         _checkCancelled();
-        final startMs = starts[i];
-        final cached = File(p.join(sampleDir.path, '$startMs.json'));
-        Map<String, dynamic>? raw;
-        if (await cached.exists()) {
-          try {
-            raw =
-                jsonDecode(await cached.readAsString()) as Map<String, dynamic>;
-            if (!decoderVersionTrusted(
-              (raw['decoderVersion'] as num?)?.toInt(),
-              mpegAudio: mpegAudio,
-            )) {
-              raw = null;
-            }
-          } catch (_) {
-            raw = null;
-          }
-        }
-        if (raw == null) {
-          final pcm = await _decoder.decode(
-            path,
-            start: Duration(milliseconds: startMs),
-            duration: Duration(seconds: windowSeconds),
-          );
-          _checkCancelled();
-          final ShazamResult result;
-          if (pcm.length < 128) {
-            result = ShazamResult.fromJson(const {});
-          } else {
-            result = await _lookUp(
-              ShazamSignatureGenerator.fromSamples(pcm),
-              retry,
-              trackId: track.id,
-              label: label,
-              completed: i,
-              total: starts.length,
-            );
-          }
-          raw = {
-            'sampleStartMs': startMs,
-            'sampleDurationMs': windowSeconds * 1000,
-            'recordedAt': DateTime.now().toUtc().toIso8601String(),
-            'decoderVersion': decoderAccuracyVersion,
-            'response': result.raw,
-          };
-          await cached.writeAsString(jsonEncode(raw));
-        }
         samples.add(
-          RecognitionSample(
-            sampleStartMs: startMs,
-            sampleDurationMs: windowSeconds * 1000,
-            result: ShazamResult.fromJson(
-              (raw['response'] as Map?)?.cast<String, dynamic>() ?? const {},
-            ),
+          await _sampleAt(
+            path,
+            sampleDir,
+            starts[i],
+            mpegAudio: mpegAudio,
+            lookUp:
+                (signature) => _lookUp(
+                  signature,
+                  retry,
+                  budget: rateLimitBudget,
+                  waitBeforeRetry:
+                      (wait, reason) => _waitBeforeRetry(
+                        wait,
+                        reason,
+                        trackId: track.id,
+                        label: label,
+                        completed: i,
+                        total: starts.length,
+                      ),
+                ),
           ),
         );
         _emit(
@@ -639,16 +607,72 @@ class SongRecognitionService {
     }
   }
 
+  /// The lookup of the window at [startMs]: from the cache when a decoder
+  /// that placed this file's audio correctly made it, otherwise decoded,
+  /// fingerprinted, looked up with [lookUp] and cached.
+  Future<RecognitionSample> _sampleAt(
+    String path,
+    Directory sampleDir,
+    int startMs, {
+    required bool mpegAudio,
+    required Future<ShazamResult> Function(ShazamSignature signature) lookUp,
+  }) async {
+    final cached = File(p.join(sampleDir.path, '$startMs.json'));
+    Map<String, dynamic>? raw;
+    if (await cached.exists()) {
+      try {
+        raw = jsonDecode(await cached.readAsString()) as Map<String, dynamic>;
+        if (!decoderVersionTrusted(
+          (raw['decoderVersion'] as num?)?.toInt(),
+          mpegAudio: mpegAudio,
+        )) {
+          raw = null;
+        }
+      } catch (_) {
+        raw = null;
+      }
+    }
+    if (raw == null) {
+      final pcm = await _decoder.decode(
+        path,
+        start: Duration(milliseconds: startMs),
+        duration: Duration(seconds: windowSeconds),
+      );
+      _checkCancelled();
+      final ShazamResult result;
+      if (pcm.length < 128) {
+        result = ShazamResult.fromJson(const {});
+      } else {
+        result = await lookUp(ShazamSignatureGenerator.fromSamples(pcm));
+      }
+      raw = {
+        'sampleStartMs': startMs,
+        'sampleDurationMs': windowSeconds * 1000,
+        'recordedAt': DateTime.now().toUtc().toIso8601String(),
+        'decoderVersion': decoderAccuracyVersion,
+        'response': result.raw,
+      };
+      await cached.writeAsString(jsonEncode(raw));
+    }
+    return RecognitionSample(
+      sampleStartMs: startMs,
+      sampleDurationMs: windowSeconds * 1000,
+      result: ShazamResult.fromJson(
+        (raw['response'] as Map?)?.cast<String, dynamic>() ?? const {},
+      ),
+    );
+  }
+
   /// Looks [signature] up, waiting and retrying the same lookup while Shazam
   /// rate-limits or the network hiccups. [retry] carries the backoff state
-  /// across samples; a success resets it.
+  /// across samples; a success resets it. [waitBeforeRetry] shows and
+  /// sleeps each wait; [budget] is how long rate limits are waited out.
   Future<ShazamResult> _lookUp(
     ShazamSignature signature,
     _RetryState retry, {
-    required int trackId,
-    required String label,
-    required int completed,
-    required int total,
+    required Duration budget,
+    required Future<void> Function(Duration wait, RecognitionWaitReason reason)
+    waitBeforeRetry,
   }) async {
     while (true) {
       _checkCancelled();
@@ -678,7 +702,7 @@ class SongRecognitionService {
             wait = asked != null && asked > step ? asked : step;
             final now = _clock();
             final since = retry.rateLimitedSince ??= now;
-            if (now.add(wait).difference(since) > rateLimitBudget) {
+            if (now.add(wait).difference(since) > budget) {
               throw const RecognitionRateLimited();
             }
             reason = RecognitionWaitReason.rateLimited;
@@ -692,14 +716,7 @@ class SongRecognitionService {
             rethrow;
         }
       }
-      await _waitBeforeRetry(
-        wait,
-        reason,
-        trackId: trackId,
-        label: label,
-        completed: completed,
-        total: total,
-      );
+      await waitBeforeRetry(wait, reason);
     }
   }
 
@@ -765,6 +782,215 @@ class SongRecognitionService {
           )
           .catchError((_) {}),
     );
+  }
+
+  /// Recognizes the song(s) in [startMs, endMs) of [track]'s file only,
+  /// for naming one chapter.
+  ///
+  /// Samples the windows [rangeSampleStartsMs] picks, through the same
+  /// lookup cache, Shazam pacing and retries as [scan], and shares its lock:
+  /// it is refused while a scan runs, and a scan is refused while it runs.
+  /// [cancel] stops it ([RecognitionCancelled]). It writes no run, never
+  /// touches the chapters or the recognition epoch and reports progress
+  /// only through [onProgress], not [progressStream]. When Shazam keeps
+  /// rate-limiting for longer than [rateLimitBudget], it stops and returns
+  /// what it found so far with [RangeRecognition.limited] set.
+  Future<RangeRecognition> recognizeRange(
+    Track track, {
+    required int startMs,
+    required int endMs,
+    void Function(RecognitionProgress progress)? onProgress,
+    Duration rateLimitBudget = const Duration(minutes: 3),
+  }) async {
+    // Checked and claimed synchronously: nothing may await between the two.
+    if (isScanning) {
+      throw StateError('Another recognition scan is running.');
+    }
+    final path = _filePath(track);
+    if (path == null) {
+      throw StateError('The file for "${track.title}" was not found.');
+    }
+    _activeTrackId = track.id;
+    _cancelRequested = false;
+    _cancelSignal = Completer<void>();
+    try {
+      return await _recognizeRange(
+        track,
+        path,
+        startMs,
+        endMs,
+        onProgress ?? (_) {},
+        rateLimitBudget,
+      );
+    } finally {
+      _activeTrackId = null;
+      _cancelRequested = false;
+    }
+  }
+
+  Future<RangeRecognition> _recognizeRange(
+    Track track,
+    String path,
+    int startMs,
+    int endMs,
+    void Function(RecognitionProgress progress) onProgress,
+    Duration budget,
+  ) async {
+    final durationMs = await _durationMs(track, path);
+    final mpegAudio = await isMpegAudioFile(path);
+    final dir = Directory(await _runDirectory(track, path));
+    final sampleDir = Directory(p.join(dir.path, 'samples'));
+    await sampleDir.create(recursive: true);
+    final from = startMs.clamp(0, durationMs);
+    final to = endMs.clamp(from, durationMs);
+    final starts = rangeSampleStartsMs(from, to, durationMs);
+    final retry = _RetryState();
+    final samples = <RecognitionSample>[];
+    var limited = false;
+    RecognitionProgress progress(
+      RecognitionPhase phase,
+      int completed, {
+      DateTime? resumeAt,
+      RecognitionWaitReason? reason,
+    }) => RecognitionProgress(
+      trackId: track.id,
+      phase: phase,
+      completed: completed,
+      total: starts.length,
+      resumeAt: resumeAt,
+      waitReason: reason,
+    );
+    onProgress(progress(RecognitionPhase.sampling, 0));
+    try {
+      for (var i = 0; i < starts.length; i++) {
+        _checkCancelled();
+        samples.add(
+          await _sampleAt(
+            path,
+            sampleDir,
+            starts[i],
+            mpegAudio: mpegAudio,
+            lookUp:
+                (signature) => _lookUp(
+                  signature,
+                  retry,
+                  budget: budget,
+                  waitBeforeRetry: (wait, reason) async {
+                    onProgress(
+                      progress(
+                        RecognitionPhase.waiting,
+                        i,
+                        resumeAt: _clock().add(wait),
+                        reason: reason,
+                      ),
+                    );
+                    await Future.any([_delay(wait), _cancelSignal.future]);
+                    _checkCancelled();
+                    onProgress(progress(RecognitionPhase.sampling, i));
+                  },
+                ),
+          ),
+        );
+        onProgress(progress(RecognitionPhase.sampling, i + 1));
+      }
+    } on RecognitionRateLimited {
+      limited = true;
+    }
+    onProgress(progress(RecognitionPhase.done, samples.length));
+    return RangeRecognition(
+      startMs: from,
+      endMs: to,
+      sampleCount: starts.length,
+      checkedSamples: samples.length,
+      candidates: groupRangeSamples(samples),
+      limited: limited,
+    );
+  }
+
+  /// Keeps per-chapter lookups this far inside the chapter, away from the
+  /// crossfades into the songs around it.
+  static const rangeEdgeMs = 3000;
+
+  /// About one new window per this much of a chapter...
+  static const rangeSpacingMs = 30000;
+
+  /// ...but never more than this many.
+  static const rangeMaxWindows = 8;
+
+  /// Window starts for recognizing [startMs, endMs) of a file
+  /// [durationMs] long: the scan grid's windows that lie wholly inside (they
+  /// are usually cached, so they cost nothing), plus up to
+  /// [rangeMaxWindows] new ones spread over the chapter, at least
+  /// [rangeEdgeMs] from its edges and a whole window away from every grid
+  /// window and from each other, so they listen to audio the scan did not.
+  /// A chapter too short for that gets one window over its middle.
+  List<int> rangeSampleStartsMs(int startMs, int endMs, int durationMs) {
+    final windowMs = windowSeconds * 1000;
+    final lastStart = math.max(0, durationMs - windowMs);
+    final grid = sampleStartsMs(durationMs);
+    final inside = [
+      for (final g in grid)
+        if (g >= startMs && g + windowMs <= endMs) g,
+    ];
+    final from = startMs + rangeEdgeMs;
+    final to = math.min(endMs - rangeEdgeMs - windowMs, lastStart);
+    final fresh = <int>[];
+    if (to < from) {
+      if (inside.isEmpty) {
+        final middle = startMs + (endMs - startMs - windowMs) ~/ 2;
+        fresh.add(middle.clamp(0, lastStart));
+      }
+    } else {
+      final count = ((to - from) / rangeSpacingMs).ceil().clamp(
+        1,
+        rangeMaxWindows,
+      );
+      bool clear(int s) =>
+          grid.every((g) => (s - g).abs() >= windowMs) &&
+          fresh.every((f) => (s - f).abs() >= windowMs);
+      for (var i = 0; i < count; i++) {
+        final ideal =
+            count == 1
+                ? from + (to - from) ~/ 2
+                : from + (to - from) * i ~/ (count - 1);
+        // The nearest free spot, in whole seconds, within half a spacing.
+        int? best;
+        for (var d = 0; d <= rangeSpacingMs ~/ 2 && best == null; d += 1000) {
+          for (final s in [ideal - d, ideal + d]) {
+            if (s >= from && s <= to && clear(s)) {
+              best = s;
+              break;
+            }
+          }
+        }
+        if (best != null) fresh.add(best);
+      }
+    }
+    return {...inside, ...fresh}.toList()..sort();
+  }
+
+  /// The songs found in [samples], most often matched first (then the one
+  /// matched earliest). Samples without a match are left out.
+  static List<RangeCandidate> groupRangeSamples(
+    List<RecognitionSample> samples,
+  ) {
+    final byKey = <String, List<RecognitionSample>>{};
+    for (final sample in [...samples]
+      ..sort((a, b) => a.sampleStartMs.compareTo(b.sampleStartMs))) {
+      final key = sample.result.trackKey;
+      if (key != null) byKey.putIfAbsent(key, () => []).add(sample);
+    }
+    final candidates = [
+      for (final MapEntry(:key, :value) in byKey.entries)
+        RangeCandidate._fromSamples(key, value),
+    ];
+    candidates.sort((a, b) {
+      final byCount = b.matchedAtMs.length.compareTo(a.matchedAtMs.length);
+      return byCount != 0
+          ? byCount
+          : a.matchedAtMs.first.compareTo(b.matchedAtMs.first);
+    });
+    return candidates;
   }
 
   /// Sample window starts: every [stepSeconds] from [firstStartSeconds], plus
@@ -1008,6 +1234,107 @@ class SongRecognitionService {
   void _emit(RecognitionProgress progress) {
     _current = progress;
     if (!_progress.isClosed) _progress.add(progress);
+  }
+}
+
+/// What [SongRecognitionService.recognizeRange] found in one stretch.
+class RangeRecognition {
+  final int startMs;
+  final int endMs;
+
+  /// Windows planned for the stretch.
+  final int sampleCount;
+
+  /// Windows looked up (fewer than [sampleCount] when [limited]).
+  final int checkedSamples;
+  final List<RangeCandidate> candidates;
+
+  /// Shazam kept rate-limiting, so not every window was checked.
+  final bool limited;
+
+  const RangeRecognition({
+    required this.startMs,
+    required this.endMs,
+    required this.sampleCount,
+    required this.checkedSamples,
+    required this.candidates,
+    this.limited = false,
+  });
+
+  /// More than one song was heard in the stretch.
+  bool get mixed => candidates.length > 1;
+}
+
+/// One song recognized in a stretch, with where it matched.
+class RangeCandidate {
+  final String trackKey;
+  final String? artist;
+  final String? songTitle;
+
+  /// Starts of the sample windows that matched it, in order.
+  final List<int> matchedAtMs;
+
+  /// Where the song itself seems to start in the file, from the catalog's
+  /// offsets (median over the reference that explains most samples).
+  final int? songStartMs;
+
+  /// At least two samples agree on [songStartMs] within 2 s.
+  final bool consistent;
+
+  const RangeCandidate({
+    required this.trackKey,
+    required this.artist,
+    required this.songTitle,
+    required this.matchedAtMs,
+    this.songStartMs,
+    this.consistent = false,
+  });
+
+  factory RangeCandidate._fromSamples(
+    String key,
+    List<RecognitionSample> samples,
+  ) {
+    final first = samples.first.result;
+    final estimatesById = <String, List<double>>{};
+    for (final sample in samples) {
+      for (final offset in sample.result.offsets) {
+        estimatesById
+            .putIfAbsent(offset.referenceId, () => [])
+            .add(sample.sampleStartMs - offset.offsetSeconds * 1000);
+      }
+    }
+    List<double> estimates = const [];
+    for (final list in estimatesById.values) {
+      if (list.length > estimates.length) estimates = list;
+    }
+    int? songStart;
+    var consistent = false;
+    if (estimates.isNotEmpty) {
+      final sorted = [...estimates]..sort();
+      final mid = sorted.length ~/ 2;
+      songStart =
+          (sorted.length.isOdd
+                  ? sorted[mid]
+                  : (sorted[mid - 1] + sorted[mid]) / 2)
+              .round();
+      consistent = sorted.length >= 2 && sorted.last - sorted.first <= 2000;
+    }
+    return RangeCandidate(
+      trackKey: key,
+      artist: first.artist,
+      songTitle: first.title,
+      matchedAtMs: [for (final s in samples) s.sampleStartMs],
+      songStartMs: songStart,
+      consistent: consistent,
+    );
+  }
+
+  /// The chapter title for this song, written like the scan writes it.
+  String get title {
+    final song = songTitle?.trim() ?? '';
+    final by = artist?.trim() ?? '';
+    if (song.isEmpty) return by.isEmpty ? 'Unknown song' : by;
+    return by.isEmpty ? song : '$by — $song';
   }
 }
 
