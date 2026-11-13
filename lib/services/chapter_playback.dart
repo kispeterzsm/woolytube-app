@@ -128,9 +128,16 @@ class PlaybackAlbum {
   /// The playlist's "Shuffle chapters" (`Playlist.shuffleChapters`), which
   /// a file without its own choice follows.
   final bool playlistShuffleChapters;
+
+  /// The chapter ids this album was limited to (such as the chapters a
+  /// search found), or null when it plays the file's chapters as set. Kept
+  /// so a rebuild of the album after a chapter or settings change plays
+  /// the same chapters.
+  final Set<String>? chapterSubset;
   PlaybackAlbum(
     Iterable<PlaybackItem> items, {
     this.playlistShuffleChapters = false,
+    this.chapterSubset,
   }) : items = List.of(items);
   int get trackId => items.first.track.id;
 

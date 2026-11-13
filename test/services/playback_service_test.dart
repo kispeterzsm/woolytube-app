@@ -457,6 +457,37 @@ void main() {
         ]);
       });
 
+      test('the chapters found stay the only ones after the file\'s chapters '
+          'or the playlist settings change', () async {
+        final song = await addTrack('song');
+        final mix = await addTrack('mix', chapters: threeChapters);
+        await playback.playEntries([
+          QueueEntry(song),
+          QueueEntry(mix, const {'one', 'two'}),
+        ]);
+        await settle();
+        expect(playback.queue.map((t) => t.title), [
+          'song',
+          'First song',
+          'Second song',
+        ]);
+
+        // Marking a found chapter Always skip drops it; the other chapters
+        // of the file do not come back.
+        await db.writeTrackChapters(mix.id, await skipping('two'));
+        await playback.trackChaptersChanged(mix);
+        expect(playback.currentTrack!.id, song.id);
+        expect(playback.queue.map((t) => t.title), ['song', 'First song']);
+
+        await db.writeTrackChapters(mix.id, threeChapters);
+        await playback.playlistSettingsChanged(playlist.id);
+        expect(playback.queue.map((t) => t.title), [
+          'song',
+          'First song',
+          'Second song',
+        ]);
+      });
+
       test('Add to Up next adds one entry per file, in order', () async {
         final playing = await addTrack('playing');
         final song = await addTrack('song');

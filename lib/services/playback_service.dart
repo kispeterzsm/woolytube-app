@@ -906,21 +906,29 @@ class PlaybackService
         if (!items.any((i) => i.chapter?.id == chapterId)) return const [];
       }
       final subset = chapterSubsets[track.id];
-      if (subset != null) {
-        final data = ChapterData.decode(fresh.chaptersJson);
-        items = [
-          for (final chapter in data.active)
-            if (subset.contains(chapter.id) && !data.isSkipped(chapter.id))
-              PlaybackItem(fresh, chapter),
-        ];
-      }
+      if (subset != null) items = _subsetItems(fresh, subset);
       // Every chapter of it is marked Always skip.
       if (items.isEmpty) continue;
       groups.add(
-        PlaybackAlbum(items, playlistShuffleChapters: playlist.shuffleChapters),
+        PlaybackAlbum(
+          items,
+          playlistShuffleChapters: playlist.shuffleChapters,
+          chapterSubset: subset,
+        ),
       );
     }
     return groups;
+  }
+
+  /// The active chapters of [track] in [subset] that are not marked Always
+  /// skip, in timeline order.
+  static List<PlaybackItem> _subsetItems(Track track, Set<String> subset) {
+    final data = ChapterData.decode(track.chaptersJson);
+    return [
+      for (final chapter in data.active)
+        if (subset.contains(chapter.id) && !data.isSkipped(chapter.id))
+          PlaybackItem(track, chapter),
+    ];
   }
 
   Future<bool> _requestFocus() async {
@@ -1780,9 +1788,14 @@ class PlaybackService
       if (track.playlistId != playlistId) return null;
       final row = fresh[track.id];
       if (row == null) return null;
+      // An album limited to some chapters (search results) keeps to them.
+      final subset = album.chapterSubset;
       return PlaybackAlbum(
-        chapterPlaybackItems(row, playlist),
+        subset == null
+            ? chapterPlaybackItems(row, playlist)
+            : _subsetItems(row, subset),
         playlistShuffleChapters: playlist.shuffleChapters,
+        chapterSubset: subset,
       );
     });
     _publishQueue();
