@@ -109,6 +109,17 @@ class YtDlpService {
     return decodeYtDlpJson(result!);
   }
 
+  /// A video's whole description for its kept `.info.json` (uploader,
+  /// upload date, description, tags, chapters, ...), without the
+  /// download-only parts. Downloads nothing.
+  Future<Map<String, dynamic>> getVideoInfoToKeep(String url) async {
+    final result = await _methodChannel.invokeMethod<String>(
+      'getVideoInfoToKeep',
+      {'url': url},
+    );
+    return decodeYtDlpJson(result!);
+  }
+
   Future<Map<String, dynamic>> getPlaylistInfo(String url) async {
     final result = await _methodChannel.invokeMethod<String>(
       'getPlaylistInfo',

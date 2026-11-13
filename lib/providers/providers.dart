@@ -19,6 +19,7 @@ import '../services/sponsorblock_service.dart';
 import '../services/media_thumbnail_service.dart';
 import '../services/app_settings_service.dart';
 import '../services/download_network_policy.dart';
+import '../services/info_backfill_service.dart';
 import '../services/library_gate.dart';
 import '../services/settings_mirror.dart';
 import '../services/sidecar_mirror.dart';
@@ -309,7 +310,45 @@ final backupCheckServiceProvider = Provider<BackupCheckService>((ref) {
     ref.watch(libraryGateProvider),
     log: ref.watch(logServiceProvider),
     libraryWaitsForRestore: () => ref.read(pendingImportsProvider).isNotEmpty,
+    infoBackfill: ref.watch(infoBackfillStoreProvider),
   );
+});
+
+/// What the background fetch of YouTube info remembers (shared with the
+/// scheduled update's engine through a file).
+final infoBackfillStoreProvider = Provider<InfoBackfillStore>(
+  (ref) => InfoBackfillStore(),
+);
+
+/// Saves the YouTube description of older downloads, slowly, on Wi-Fi, and
+/// never while a download or another library change runs.
+final infoBackfillServiceProvider = Provider<InfoBackfillService>((ref) {
+  final ytdlp = ref.watch(ytdlpServiceProvider);
+  final gate = ref.watch(libraryGateProvider);
+  final network = ref.watch(downloadNetworkPolicyProvider);
+  return InfoBackfillService(
+    ref.watch(databaseProvider),
+    fetchInfo: ytdlp.getVideoInfoToKeep,
+    isOnWifi:
+        () async =>
+            await network.currentConnection() == DownloadConnection.wifi,
+    store: ref.watch(infoBackfillStoreProvider),
+    // Read only when a fetch is due: building the download service is not
+    // needed before that.
+    isBusy:
+        () => gate.isBusy || ref.read(downloadServiceProvider).isDownloading,
+    prepare: () async => ytdlp.isInitialized,
+    log: ref.watch(logServiceProvider),
+  );
+});
+
+/// Runs [infoBackfillServiceProvider] while the app is open and idle.
+final infoBackfillSchedulerProvider = Provider<InfoBackfillScheduler>((ref) {
+  final scheduler = InfoBackfillScheduler(
+    ref.watch(infoBackfillServiceProvider),
+  );
+  ref.onDispose(scheduler.stop);
+  return scheduler;
 });
 
 /// Imports a copied library with its order, settings and last song.
@@ -543,6 +582,8 @@ class LibraryStartup {
     unawaited(_backfillThumbnails());
     // Lyrics files a failed write left missing; not urgent either.
     unawaited(_repairLyricsFiles());
+    // YouTube info of older downloads, a few minutes later and slowly.
+    _ref.read(infoBackfillSchedulerProvider).start();
   }
 
   /// Writes the lyrics files that are missing (a write failed earlier).
@@ -603,6 +644,8 @@ class LibraryStartup {
     watchExternalChanges();
     if (_ref.read(storageAccessProvider) != true) {
       if (await checkStorageAccess()) unawaited(startLibrary());
+    } else if (_libraryStarted && !_disposed) {
+      _ref.read(infoBackfillSchedulerProvider).wake();
     }
   }
 

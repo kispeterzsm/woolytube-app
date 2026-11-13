@@ -5,6 +5,8 @@ import 'package:flutter/widgets.dart';
 import '../database/database.dart';
 import 'app_settings_service.dart';
 import 'auto_update_runner.dart';
+import 'download_network_policy.dart';
+import 'info_backfill_service.dart';
 import 'ytdlp_service.dart';
 import 'log_service.dart';
 import 'metadata_service.dart';
@@ -117,6 +119,69 @@ Future<void> finishBackgroundRun(
   }
 }
 
+/// How long a scheduled run may spend saving the YouTube info of older
+/// downloads after its update ([InfoBackfillService]): at its pace, a few
+/// videos an hour.
+const backgroundInfoBackfillBudget = Duration(minutes: 4);
+
+/// Makes the [InfoBackfillService] of a headless run.
+typedef InfoBackfillFactory =
+    InfoBackfillService Function(
+      AppDatabase db,
+      YtDlpService ytdlp,
+      LogService log,
+    );
+
+InfoBackfillService _defaultInfoBackfill(
+  AppDatabase db,
+  YtDlpService ytdlp,
+  LogService log,
+) {
+  final network = DownloadNetworkPolicy(AppSettingsService());
+  return InfoBackfillService(
+    db,
+    fetchInfo: ytdlp.getVideoInfoToKeep,
+    isOnWifi:
+        () async =>
+            await network.currentConnection() == DownloadConnection.wifi,
+    // Runs after the update, alone: this engine only exists while the
+    // app's does not, and is stopped when it appears.
+    prepare: () async {
+      await ytdlp.initialize();
+      return true;
+    },
+    log: log,
+  );
+}
+
+/// After the update, saves YouTube info of older downloads for what is
+/// left of the run's time ([backgroundInfoBackfillBudget] at most), unless
+/// the run was asked to stop. Never fails the run.
+Future<void> _backfillInfo({
+  required InfoBackfillFactory create,
+  required AppDatabase db,
+  required YtDlpService ytdlp,
+  required LogService log,
+  required bool Function() isStopRequested,
+  required Stopwatch elapsed,
+}) async {
+  if (isStopRequested()) return;
+  var budget = AutoUpdateRunner.defaultSoftBudget - elapsed.elapsed;
+  if (budget > backgroundInfoBackfillBudget) {
+    budget = backgroundInfoBackfillBudget;
+  }
+  if (budget < const Duration(seconds: 30)) return;
+  try {
+    await create(
+      db,
+      ytdlp,
+      log,
+    ).run(shouldStop: isStopRequested, budget: budget);
+  } catch (e) {
+    log.warn('YouTube info: background fetch failed: $e');
+  }
+}
+
 /// The body of [backgroundMain], separated from the channels.
 @visibleForTesting
 Future<AutoUpdateReport> runBackgroundAutoUpdate({
@@ -131,7 +196,9 @@ Future<AutoUpdateReport> runBackgroundAutoUpdate({
   MediaThumbnailService thumbnails = const MediaThumbnailService(),
   DateTime Function()? clock,
   AppSettingsService? settings,
+  InfoBackfillFactory? infoBackfill,
 }) async {
+  final elapsed = Stopwatch()..start();
   final yt = ytdlp ?? YtDlpService();
   final downloadLock = lock ?? DownloadLock();
   final logService = log ?? LogService(source: LogService.backgroundSource);
@@ -159,7 +226,18 @@ Future<AutoUpdateReport> runBackgroundAutoUpdate({
   // nothing due, and starting yt-dlp and notifications costs time.
   final all = await db.getAllPlaylists();
   final due = duePlaylistsInOrder(all, await attemptLog.read(), now());
-  if (due.isEmpty) return const AutoUpdateReport(AutoUpdateStatus.nothingDue);
+  Future<void> backfillInfo() => _backfillInfo(
+    create: infoBackfill ?? _defaultInfoBackfill,
+    db: db,
+    ytdlp: yt,
+    log: logService,
+    isStopRequested: isStopRequested,
+    elapsed: elapsed,
+  );
+  if (due.isEmpty) {
+    await backfillInfo();
+    return const AutoUpdateReport(AutoUpdateStatus.nothingDue);
+  }
   if (isStopRequested()) {
     return AutoUpdateReport(AutoUpdateStatus.stopped, due: due.length);
   }
@@ -230,10 +308,12 @@ Future<AutoUpdateReport> runBackgroundAutoUpdate({
   onRunner(runner);
   if (isStopRequested()) await runner.requestStop();
   try {
-    return await runner.run(
+    final report = await runner.run(
       due,
       knownIds: [for (final playlist in all) playlist.id],
     );
+    if (report.status == AutoUpdateStatus.finished) await backfillInfo();
+    return report;
   } finally {
     sponsorBlock.dispose();
     lyrics.dispose();

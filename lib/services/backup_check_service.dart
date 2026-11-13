@@ -4,6 +4,7 @@ import 'package:path/path.dart' as p;
 
 import '../database/database.dart';
 import 'folder_write_errors.dart';
+import 'info_backfill_service.dart';
 import 'library_export_service.dart';
 import 'library_file.dart';
 import 'library_gate.dart';
@@ -31,7 +32,9 @@ class PlaylistBackupStatus {
     this.missingPlaylistCover = false,
     this.missingLyricsFiles = 0,
     this.outdatedLyricsFiles = 0,
+    this.infoFiles = 0,
     this.missingInfoFiles = 0,
+    this.unavailableInfoFiles = 0,
   });
 
   final String name;
@@ -64,9 +67,18 @@ class PlaylistBackupStatus {
   final int missingLyricsFiles;
   final int outdatedLyricsFiles;
 
-  /// Downloaded YouTube tracks without their YouTube description
-  /// (`.info.json`). Older downloads never kept one.
+  /// Downloaded YouTube tracks with their YouTube description
+  /// (`.info.json`). Files the owner put in place of a video are not
+  /// counted (see [keepsYouTubeInfo]).
+  final int infoFiles;
+
+  /// Downloaded YouTube tracks without it. Older downloads never kept one;
+  /// it is fetched in the background ([InfoBackfillService]).
   final int missingInfoFiles;
+
+  /// Of [missingInfoFiles], the ones YouTube no longer has (removed,
+  /// private), which the background fetch gave up on.
+  final int unavailableInfoFiles;
 
   /// Something here that "Fix" can write.
   bool get needsFix =>
@@ -90,9 +102,14 @@ class BackupReport {
     required this.oldDatabaseCopies,
     required this.oldDatabaseCopyBytes,
     required this.lastUpdated,
+    this.infoPausedUntil,
   });
 
   final List<PlaylistBackupStatus> playlists;
+
+  /// YouTube asked the background fetch of YouTube info to slow down; it
+  /// waits until then.
+  final DateTime? infoPausedUntil;
 
   /// When the settings file was last written; null when there is none.
   final DateTime? settingsSavedAt;
@@ -116,6 +133,16 @@ class BackupReport {
   final DateTime? lastUpdated;
 
   int get tracks => playlists.fold(0, (sum, pl) => sum + pl.tracks);
+
+  /// YouTube info: [infoSaved] of [infoTotal] tracks have it, and
+  /// [infoUnavailable] of the rest can no longer be fetched.
+  int get infoSaved => _sumOfFolders((pl) => pl.infoFiles);
+  int get infoTotal =>
+      _sumOfFolders((pl) => pl.infoFiles + pl.missingInfoFiles);
+  int get infoUnavailable => _sumOfFolders((pl) => pl.unavailableInfoFiles);
+
+  int _sumOfFolders(int Function(PlaylistBackupStatus pl) count) =>
+      playlists.fold(0, (sum, pl) => sum + (pl.folderMissing ? 0 : count(pl)));
 
   List<String> get foldersOutsideLibrary => [
     for (final playlist in playlists)
@@ -181,8 +208,10 @@ class BackupCheckService {
     this._gate, {
     LogService? log,
     bool Function()? libraryWaitsForRestore,
+    InfoBackfillStore? infoBackfill,
   }) : _log = log,
-       _libraryWaitsForRestore = libraryWaitsForRestore ?? _never;
+       _libraryWaitsForRestore = libraryWaitsForRestore ?? _never,
+       _infoBackfill = infoBackfill;
 
   final AppDatabase _db;
   final MetadataService _metadata;
@@ -191,6 +220,7 @@ class BackupCheckService {
   final LibraryGate _gate;
   final LogService? _log;
   final bool Function() _libraryWaitsForRestore;
+  final InfoBackfillStore? _infoBackfill;
 
   static bool _never() => false;
 
@@ -200,6 +230,11 @@ class BackupCheckService {
     void Function(LibraryExportProgress progress)? onProgress,
   }) async {
     final playlists = await _db.getAllPlaylists();
+    final infoStore = _infoBackfill;
+    final info =
+        infoStore == null
+            ? const InfoBackfillStatus()
+            : await InfoBackfillStatus.read(infoStore);
     final statuses = <PlaylistBackupStatus>[];
     for (var i = 0; i < playlists.length; i++) {
       final playlist = playlists[i];
@@ -210,7 +245,7 @@ class BackupCheckService {
           current: playlist.name,
         ),
       );
-      statuses.add(await _checkPlaylist(playlist));
+      statuses.add(await _checkPlaylist(playlist, info));
     }
     onProgress?.call(
       LibraryExportProgress(
@@ -233,10 +268,14 @@ class BackupCheckService {
       oldDatabaseCopies: copies.count,
       oldDatabaseCopyBytes: copies.bytes,
       lastUpdated: await lastUpdated(playlists: playlists),
+      infoPausedUntil: info.pausedUntil,
     );
   }
 
-  Future<PlaylistBackupStatus> _checkPlaylist(Playlist playlist) async {
+  Future<PlaylistBackupStatus> _checkPlaylist(
+    Playlist playlist,
+    InfoBackfillStatus info,
+  ) async {
     final folder = playlist.outputPath;
     final outside =
         !p.isWithin(LibraryLayout.audioBasePath, folder) &&
@@ -252,16 +291,24 @@ class BackupCheckService {
     final tracks = await _db.getTracksForPlaylist(playlist.id);
     var downloaded = 0;
     var missingCovers = 0;
+    var infoFiles = 0;
     var missingInfo = 0;
+    var unavailableInfo = 0;
     for (final track in tracks) {
       if (track.status != 'complete' || track.filePath == null) continue;
       downloaded++;
       if (!await thumbnailFileExists(track.thumbnailPath)) missingCovers++;
-      if (!track.videoId.startsWith(forcedInsertVideoIdPrefix) &&
-          !await File(
-            LibraryLayout.infoJsonPath(folder, track.videoId),
-          ).exists()) {
+      if (!keepsYouTubeInfo(track)) continue;
+      if (await File(
+        LibraryLayout.infoJsonPath(folder, track.videoId),
+      ).exists()) {
+        infoFiles++;
+      } else {
         missingInfo++;
+        if (track.unavailableReason != null ||
+            info.givenUp.contains(track.videoId)) {
+          unavailableInfo++;
+        }
       }
     }
     final sidecar = await _metadata.checkMetadataOf(playlist);
@@ -281,7 +328,9 @@ class BackupCheckService {
           downloaded > 0 && !await thumbnailFileExists(playlist.thumbnailPath),
       missingLyricsFiles: lyrics.missing,
       outdatedLyricsFiles: lyrics.outdated,
+      infoFiles: infoFiles,
       missingInfoFiles: missingInfo,
+      unavailableInfoFiles: unavailableInfo,
     );
   }
 

@@ -241,6 +241,7 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "getVideoInfo" -> handleGetVideoInfo(call.arguments as Map<*, *>, result)
             "getPlaylistInfo" -> handleGetPlaylistInfo(call.arguments as Map<*, *>, result)
             "getCaptionInfo" -> handleGetCaptionInfo(call.arguments as Map<*, *>, result)
+            "getVideoInfoToKeep" -> handleGetVideoInfoToKeep(call.arguments as Map<*, *>, result)
             "cancelDownloads" -> result.success(cancelOwnedDownloads())
             "hasActiveDownloads" -> result.success(hasActiveDownloads())
             "updateYtDlp" -> handleUpdateYtDlp(result)
@@ -482,6 +483,49 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     json3Captions(full.optJSONObject("automatic_captions")) { it.endsWith("-orig") },
                 )
                 val json = trimmed.toString()
+                withContext(Dispatchers.Main) { result.success(json) }
+            } catch (e: Exception) {
+                withContext(NonCancellable + Dispatchers.Main) {
+                    result.error("INFO_ERROR", e.message, null)
+                }
+            }
+        }
+    }
+
+    /**
+     * A video's whole description (uploader, upload date, description, tags,
+     * chapters, ...) for its kept `.info.json`, without the parts that only
+     * say how to download it: tracks downloaded before the app kept that
+     * file get it this way. Nothing is downloaded or written.
+     */
+    private fun handleGetVideoInfoToKeep(args: Map<*, *>, result: MethodChannel.Result) {
+        val url = args["url"] as? String
+        if (url == null) {
+            result.error("INVALID_ARGS", "url required", null)
+            return
+        }
+        scope.launch {
+            try {
+                val request = YoutubeDLRequest(url)
+                request.addOption("--dump-json")
+                request.addOption("--no-playlist")
+                request.addOption("--skip-download")
+                // Only the description is needed: a video whose media
+                // formats are gated for this client still has it.
+                request.addOption("--ignore-no-formats-error")
+                val out = executeInfoRequest(request)
+                val full = org.json.JSONObject(out.trim().lineSequence().first { it.isNotBlank() })
+                // The same keys Dart drops before writing the file; dropped
+                // here too because they are most of the size.
+                for (key in listOf(
+                    "formats", "requested_formats", "requested_downloads",
+                    "requested_subtitles", "automatic_captions", "subtitles",
+                    "thumbnails", "heatmap", "http_headers", "fragments", "url",
+                    "manifest_url", "_format_sort_fields", "_has_drm", "_version",
+                )) {
+                    full.remove(key)
+                }
+                val json = full.toString()
                 withContext(Dispatchers.Main) { result.success(json) }
             } catch (e: Exception) {
                 withContext(NonCancellable + Dispatchers.Main) {

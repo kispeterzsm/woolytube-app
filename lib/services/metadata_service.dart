@@ -245,6 +245,17 @@ const _downloadOnlyInfoKeys = {
   '_version',
 };
 
+/// [info] (yt-dlp's description of a video) as the content of its kept
+/// `.info.json`: without the download-only parts, which are large and
+/// useless once the file exists.
+String encodeVideoInfo(Map<String, dynamic> info) {
+  final trimmed = {
+    for (final entry in info.entries)
+      if (!_downloadOnlyInfoKeys.contains(entry.key)) entry.key: entry.value,
+  };
+  return const JsonEncoder.withIndent(' ').convert(trimmed);
+}
+
 class MetadataService {
   final AppDatabase _db;
   final LogService? _log;
@@ -390,19 +401,12 @@ class MetadataService {
     Map<String, dynamic> info,
   ) async {
     try {
-      final trimmed = {
-        for (final entry in info.entries)
-          if (!_downloadOnlyInfoKeys.contains(entry.key))
-            entry.key: entry.value,
-      };
       final dir = Directory(LibraryLayout.infoDir(folder));
       await dir.create(recursive: true);
       await _ensureNoMedia(dir.path);
       final target = File(LibraryLayout.infoJsonPath(folder, videoId));
       final tmp = File('${target.path}.tmp');
-      await tmp.writeAsString(
-        const JsonEncoder.withIndent(' ').convert(trimmed),
-      );
+      await tmp.writeAsString(encodeVideoInfo(info));
       await tmp.rename(target.path);
     } catch (_) {
       // Extra information only; never fail a download over it.

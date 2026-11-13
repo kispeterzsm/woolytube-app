@@ -876,6 +876,11 @@ String _displayPath(String path) {
       : path;
 }
 
+final _numberFormat = NumberFormat('#,##0', 'en_US');
+
+/// 1400 as `1,400`.
+String _number(int count) => _numberFormat.format(count);
+
 String _count(int count, String noun, [String? plural]) =>
     '$count ${count == 1 ? noun : plural ?? '${noun}s'}';
 
@@ -912,10 +917,10 @@ class _BackupCheckDialog extends StatelessWidget {
               ? 'Backup fixed'
               : 'Backup fixed in part';
     }
-    final missingInfo = report.playlists.fold(
-      0,
-      (sum, pl) => sum + (pl.folderMissing ? 0 : pl.missingInfoFiles),
-    );
+    final infoTotal = report.infoTotal;
+    final infoMissing = infoTotal - report.infoSaved;
+    final infoToFetch = infoMissing - report.infoUnavailable;
+    final infoPausedUntil = report.infoPausedUntil;
     final newer = [
       for (final pl in report.playlists)
         if (pl.newerMetadataVersion != null) pl.name,
@@ -1000,20 +1005,31 @@ class _BackupCheckDialog extends StatelessWidget {
                   ? 'Home order and last song: not saved yet.'
                   : 'Home order and last song: ${_time(libraryFileSaved)}.',
             ),
+            if (infoTotal > 0)
+              Text(
+                'YouTube info: ${_number(report.infoSaved)} of '
+                '${_number(infoTotal)} saved.',
+              ),
+            if (infoToFetch > 0)
+              Text(
+                infoPausedUntil != null
+                    ? 'YouTube asked to slow down, so the rest is fetched '
+                        'from ${_time(infoPausedUntil)}, on Wi-Fi.'
+                    : 'The rest is fetched slowly in the background, on '
+                        'Wi-Fi.',
+              ),
+            if (report.infoUnavailable > 0)
+              Text(
+                'The info of ${_count(report.infoUnavailable, 'track')} '
+                'cannot be fetched: removed, private or unavailable on '
+                'YouTube.',
+              ),
             if (newer.isNotEmpty) ...[
               gap(),
               Text(
                 'A newer version of the app wrote the playlist file of '
                 '${newer.map((name) => '"$name"').join(', ')}. Update the app '
                 'to keep ${newer.length == 1 ? 'it' : 'them'} up to date.',
-              ),
-            ],
-            if (missingInfo > 0) ...[
-              gap(),
-              Text(
-                '${_count(missingInfo, 'track')} '
-                '${missingInfo == 1 ? 'has' : 'have'} no YouTube description '
-                'saved. Older downloads did not keep it.',
               ),
             ],
             gap(16),

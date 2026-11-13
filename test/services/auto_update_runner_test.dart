@@ -11,6 +11,7 @@ import 'package:woolytube/services/app_settings_service.dart';
 import 'package:woolytube/services/auto_update_runner.dart';
 import 'package:woolytube/services/background_worker.dart';
 import 'package:woolytube/services/download_service.dart';
+import 'package:woolytube/services/info_backfill_service.dart';
 import 'package:woolytube/services/library_gate.dart';
 import 'package:woolytube/services/log_service.dart';
 import 'package:woolytube/services/metadata_service.dart';
@@ -1031,5 +1032,103 @@ void main() {
       expect(report.status, AutoUpdateStatus.nothingDue);
       expect(ytdlp.initializeCalls, 0);
     });
+
+    test('with nothing due it saves YouTube info of older downloads for a '
+        'few minutes, starting yt-dlp only to fetch', () async {
+      final folder = p.join(tempDir.path, 'Mix');
+      await Directory(folder).create();
+      final playlist = await insertTestPlaylist(
+        db,
+        lastUpdated: DateTime.now(),
+        outputPath: folder,
+      );
+      final file = p.join(folder, '00001_Song.m4a');
+      await File(file).writeAsString('media');
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        videoId: 'abc',
+        filePath: file,
+        status: 'complete',
+      );
+      final ytdlp = _ReadyYtDlp();
+      final fetched = <String>[];
+      Duration? budget;
+      var stopRequested = false;
+      final report = await runBackgroundAutoUpdate(
+        openDatabase: () => db,
+        isStopRequested: () => stopRequested,
+        onRunner: (_) {},
+        ytdlp: ytdlp,
+        lock: DownloadLock(directoryProvider: () async => tempDir.path),
+        attempts: attempts,
+        log: log,
+        infoBackfill:
+            (db, yt, log) => _BudgetSpy(
+              db,
+              store: InfoBackfillStore(
+                directoryProvider: () async => tempDir.path,
+              ),
+              fetchInfo: (url) async {
+                fetched.add(url);
+                return {'id': 'abc', 'description': 'About'};
+              },
+              isOnWifi: () async => true,
+              prepare: () async {
+                await yt.initialize();
+                return true;
+              },
+              onRun: (given) => budget = given,
+            ),
+      );
+
+      expect(report.status, AutoUpdateStatus.nothingDue);
+      expect(fetched, ['https://www.youtube.com/watch?v=abc']);
+      expect(ytdlp.initializeCalls, 1);
+      expect(budget, lessThanOrEqualTo(backgroundInfoBackfillBudget));
+      expect(budget, greaterThan(const Duration(minutes: 3)));
+
+      // A run that was asked to stop does not start it.
+      fetched.clear();
+      budget = null;
+      stopRequested = true;
+      await runBackgroundAutoUpdate(
+        openDatabase: () => db,
+        isStopRequested: () => stopRequested,
+        onRunner: (_) {},
+        ytdlp: ytdlp,
+        lock: DownloadLock(directoryProvider: () async => tempDir.path),
+        attempts: attempts,
+        log: log,
+        infoBackfill:
+            (db, yt, log) => _BudgetSpy(
+              db,
+              fetchInfo: (url) async => throw StateError('not expected'),
+              isOnWifi: () async => true,
+              onRun: (given) => budget = given,
+            ),
+      );
+      expect(budget, isNull);
+    });
   });
+}
+
+/// Records the budget a background run gives the YouTube info backfill.
+class _BudgetSpy extends InfoBackfillService {
+  _BudgetSpy(
+    super.db, {
+    required super.fetchInfo,
+    required super.isOnWifi,
+    super.store,
+    super.prepare,
+    required this.onRun,
+  });
+
+  final void Function(Duration? budget) onRun;
+
+  @override
+  Future<InfoBackfillRun> run({bool Function()? shouldStop, Duration? budget}) {
+    onRun(budget);
+    return super.run(shouldStop: shouldStop, budget: budget);
+  }
 }

@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:drift/drift.dart' show Value;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -12,6 +13,7 @@ import 'package:woolytube/providers/providers.dart';
 import 'package:woolytube/services/app_settings_service.dart';
 import 'package:woolytube/services/backup_check_service.dart';
 import 'package:woolytube/services/folder_write_errors.dart';
+import 'package:woolytube/services/info_backfill_service.dart';
 import 'package:woolytube/services/library_export_service.dart';
 import 'package:woolytube/services/library_file.dart';
 import 'package:woolytube/services/library_gate.dart';
@@ -69,7 +71,7 @@ void main() {
     LibraryFileService libraryFile,
     MetadataService metadata,
   })
-  servicesFor({bool waitsForRestore = false}) {
+  servicesFor({bool waitsForRestore = false, InfoBackfillStore? infoStore}) {
     final metadata = MetadataService(db);
     final exporter = LibraryExportService(
       db,
@@ -99,6 +101,7 @@ void main() {
         LibraryGate.unlocked(),
         log: log,
         libraryWaitsForRestore: () => waitsForRestore,
+        infoBackfill: infoStore,
       ),
       exporter: exporter,
       libraryFile: libraryFile,
@@ -438,6 +441,50 @@ void main() {
     },
   );
 
+  test('counts the saved YouTube info and what cannot be fetched', () async {
+    final mix = await addPlaylist('Mix', tracks: 5);
+    final folder = mix.outputPath;
+    final tracks = await db.getTracksForPlaylist(mix.id);
+    // 2: no info yet; 3: gone from YouTube; 4: the owner's own file, which
+    // is not counted; 5: given up by the background fetch.
+    for (final i in [2, 3, 4, 5]) {
+      await File(LibraryLayout.infoJsonPath(folder, 'Mix-$i')).delete();
+    }
+    Future<void> change(int index, TracksCompanion fields) =>
+        (db.update(db.tracks)..where(
+          (t) => t.id.equals(tracks.firstWhere((t) => t.index == index).id),
+        )).write(fields);
+    await change(
+      3,
+      const TracksCompanion(unavailableReason: Value('Removed from YouTube')),
+    );
+    await change(4, const TracksCompanion(isLocalReplacement: Value(true)));
+    final store = InfoBackfillStore(
+      directoryProvider: () async => p.join(tempDir.path, 'app'),
+    );
+    final pausedUntil = DateTime.now().add(const Duration(hours: 1));
+    await store.save(
+      InfoBackfillState(
+        pausedUntil: pausedUntil,
+        misses: {
+          'Mix-5': InfoBackfillMiss(at: DateTime.now(), tries: 1, gone: true),
+          'Mix-2': InfoBackfillMiss(at: DateTime.now(), tries: 1),
+        },
+      ),
+    );
+    final before = snapshot();
+
+    final report = await servicesFor(infoStore: store).service.check();
+
+    expect(report.infoSaved, 1);
+    expect(report.infoTotal, 4);
+    expect(report.infoUnavailable, 2);
+    expect(report.infoPausedUntil, pausedUntil);
+    // The background fetch fills these; Fix does not.
+    expect(report.problems.where((line) => line.contains('info')), isEmpty);
+    expect(snapshot(), before);
+  });
+
   testWidgets('Check backup replaces Back up library', (tester) async {
     late Playlist mix;
     await tester.runAsync(() async {
@@ -466,6 +513,7 @@ void main() {
     await waitFor(() => find.text('Backup needs fixing').evaluate().isNotEmpty);
 
     expect(find.text('• "Mix": playlist files out of date'), findsOneWidget);
+    expect(find.text('YouTube info: 2 of 2 saved.'), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('fix-backup')));
     await waitFor(() => find.text('Backup fixed').evaluate().isNotEmpty);
 
