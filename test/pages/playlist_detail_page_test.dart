@@ -997,7 +997,7 @@ void main() {
     expect(find.byType(SnackBar), findsNothing);
   });
 
-  testWidgets('a video removed from YouTube can be tried again', (
+  testWidgets('a video removed from YouTube can be tried again now', (
     tester,
   ) async {
     useTallScreen(tester);
@@ -1015,16 +1015,15 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Try again now'), findsOneWidget);
     expect(find.text('Download now'), findsNothing);
-    await tester.tap(find.text('Try again on the next update'));
+    // Every update tries it again by itself.
+    expect(find.text('Try again on the next update'), findsNothing);
+    await tester.tapAt(const Offset(10, 10));
     await tester.pumpAndSettle();
-    expect(playlists.retriedTracks, [removed.id]);
-    expect(find.text('The next update tries it again'), findsOneWidget);
 
     await tester.tap(find.byKey(const ValueKey('playlist-detail-menu')));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Try removed videos again (1)'));
-    await tester.pumpAndSettle();
-    expect(playlists.retriedPlaylists, [playlist.id]);
+    expect(find.textContaining('Try removed videos again'), findsNothing);
+    expect(find.text('Jump to next removed (1)'), findsOneWidget);
   });
 
   testWidgets('Play next puts a track at the front of Up next', (tester) async {
@@ -1169,6 +1168,88 @@ void main() {
     await jump();
     expect(find.byKey(ValueKey('track-row-${tracks[29].id}')), findsOneWidget);
     expect(find.textContaining('Back to the first'), findsOneWidget);
+  });
+
+  testWidgets('the menu jumps from one removed track to the next', (
+    tester,
+  ) async {
+    final tracks = [
+      for (var i = 1; i <= 60; i++)
+        await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: i,
+          videoId: 'v$i',
+          title: 'Track $i',
+          // #20 failed for another reason: not a removed track.
+          status: i == 20 ? 'error' : (i == 30 ? 'unavailable' : 'complete'),
+          filePath: i == 20 || i == 30 ? null : '/tmp/$i.m4a',
+          // #30 has no file, #50 kept its file.
+          unavailableReason:
+              i == 30 ? removedFromYouTubeReason : (i == 50 ? 'removed' : null),
+        ),
+    ];
+    await pumpPage(tester, tracks: tracks);
+
+    Future<void> jump() async {
+      await tester.tap(find.byKey(const ValueKey('playlist-detail-menu')));
+      await tester.pumpAndSettle();
+      expect(find.text('Jump to next removed (2)'), findsOneWidget);
+      await tester.tap(find.text('Jump to next removed (2)'));
+      // The landed-on row is tinted for a moment.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+    }
+
+    double tint(Track track) =>
+        tester
+            .widget<AnimatedOpacity>(
+              find.byKey(ValueKey('jump-highlight-${track.id}')),
+            )
+            .opacity;
+
+    await jump();
+    expect(find.byKey(ValueKey('track-row-${tracks[29].id}')), findsOneWidget);
+    expect(
+      find.textContaining('1 of 2: #30 removed from youtube'),
+      findsOneWidget,
+    );
+    expect(tint(tracks[29]), 1);
+    // ...and only for a moment.
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pumpAndSettle();
+    expect(tint(tracks[29]), 0);
+
+    await jump();
+    expect(find.byKey(ValueKey('track-row-${tracks[49].id}')), findsOneWidget);
+    expect(
+      find.textContaining('2 of 2: #50 removed from playlist'),
+      findsOneWidget,
+    );
+    expect(tint(tracks[49]), 1);
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pumpAndSettle();
+
+    await jump();
+    expect(find.byKey(ValueKey('track-row-${tracks[29].id}')), findsOneWidget);
+    expect(find.textContaining('Back to the first'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('no removed jump without removed tracks', (tester) async {
+    final track = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      status: 'error',
+      lastError: 'HTTP Error 403',
+    );
+    await pumpPage(tester, tracks: [track]);
+
+    await tester.tap(find.byKey(const ValueKey('playlist-detail-menu')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Jump to next failed'), findsOneWidget);
+    expect(find.textContaining('Jump to next removed'), findsNothing);
   });
 
   testWidgets('the menu jumps from one track without lyrics to the next', (
@@ -1834,8 +1915,6 @@ class _Playlists implements PlaylistService {
     required int? newMax,
     Iterable<Track>? only,
   }) async => const [];
-  final retriedTracks = <int>[];
-  final retriedPlaylists = <int>[];
   Object? syncError;
 
   @override
@@ -1852,16 +1931,6 @@ class _Playlists implements PlaylistService {
     final error = syncError;
     if (error != null) throw error;
     throw UnimplementedError();
-  }
-
-  @override
-  Future<void> retryRemovedTrack(int trackId) async =>
-      retriedTracks.add(trackId);
-
-  @override
-  Future<int> retryRemovedTracks(int playlistId) async {
-    retriedPlaylists.add(playlistId);
-    return 1;
   }
 
   @override

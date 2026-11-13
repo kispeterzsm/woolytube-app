@@ -86,7 +86,7 @@ const _removedFromYouTubePhrases = [
 
 /// True when a download failed because YouTube removed the video for good
 /// (a copyright claim, a guideline violation, a terminated account). Such a
-/// track is marked "Removed from YouTube" and is not retried by updates.
+/// track is marked "Removed from YouTube"; updates try it again quietly.
 bool isRemovedFromYouTubeError(String raw) {
   final lower = raw.toLowerCase().replaceAll('’', "'");
   if (isBotCheckDownloadError(raw)) return false;

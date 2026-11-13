@@ -1038,29 +1038,6 @@ class PlaylistService {
     }
   }
 
-  /// Puts every track of [playlistId] that a download found removed from
-  /// YouTube back in the queue, so the next update tries them again.
-  /// Returns how many there were.
-  Future<int> retryRemovedTracks(int playlistId) async {
-    var count = 0;
-    for (final track in await _db.getTracksForPlaylist(playlistId)) {
-      if (track.unavailableReason != removedFromYouTubeReason) continue;
-      await _db.clearRemovedFromYouTube(track.id);
-      count++;
-    }
-    if (count > 0) await _writeMetadata(playlistId);
-    return count;
-  }
-
-  /// Puts one track that a download found removed from YouTube back in the
-  /// queue (see [retryRemovedTracks]).
-  Future<void> retryRemovedTrack(int trackId) async {
-    final track = await _db.getTrack(trackId);
-    if (track == null) return;
-    await _db.clearRemovedFromYouTube(trackId);
-    await _writeMetadata(track.playlistId);
-  }
-
   Future<SyncResult> _applySync(
     Playlist playlist,
     Map<String, dynamic> info,
@@ -1128,7 +1105,8 @@ class PlaylistService {
       } else if (track.unavailableReason == removedFromYouTubeReason) {
         // A download found the video taken down for good. The playlist
         // listing often still shows such a video as normal, so it does not
-        // count as "available again"; only a manual retry brings it back.
+        // count as "available again"; only a download that works (each
+        // update tries one quietly) brings it back.
         continue;
       } else if (track.unavailableReason != null) {
         // Video is available again (was previously flagged)

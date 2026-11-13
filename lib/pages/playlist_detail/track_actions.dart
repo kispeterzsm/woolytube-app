@@ -153,7 +153,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
     }
 
     return [
-      if (removedFromYouTube && !isDownloading) ...[
+      if (removedFromYouTube && !isDownloading)
         tile(
           key: const ValueKey('track-actions-retry-removed-now'),
           icon: Icons.refresh,
@@ -169,17 +169,6 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
             unawaited(_startTrackDownload(track));
           },
         ),
-        tile(
-          key: const ValueKey('track-actions-retry-removed'),
-          icon: Icons.schedule,
-          title: 'Try again on the next update',
-          subtitle: 'Updates skip it until then',
-          onTap: () {
-            close();
-            unawaited(_retryRemovedOnNextUpdate(track));
-          },
-        ),
-      ],
       // Get the track first when it has no file yet.
       if (!isDownloaded &&
           canRedownload &&
@@ -488,20 +477,6 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
         ),
       ),
     );
-  }
-
-  Future<void> _retryRemovedOnNextUpdate(Track track) async {
-    final messenger = ScaffoldMessenger.of(context);
-    try {
-      await ref.read(playlistServiceProvider).retryRemovedTrack(track.id);
-      messenger.showSnackBar(
-        const SnackBar(content: Text('The next update tries it again')),
-      );
-    } catch (e) {
-      messenger.showSnackBar(
-        SnackBar(content: Text('Could not save: ${_errorText(e)}')),
-      );
-    }
   }
 
   Future<void> _shareTrack(Track track) async {

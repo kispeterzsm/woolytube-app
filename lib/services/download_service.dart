@@ -69,7 +69,8 @@ class DownloadProgress {
   final int failedCount;
 
   /// Tracks of this run that YouTube removed for good. They are marked
-  /// "Removed from YouTube" and are not tried again by updates.
+  /// "Removed from YouTube"; updates try them again quietly, and a track
+  /// that is still removed then is not counted again.
   final int removedCount;
 
   const DownloadProgress({
@@ -496,6 +497,10 @@ class DownloadService {
   /// YouTube first: the run then does not count as an update, so the next
   /// scheduled check still happens on time.
   ///
+  /// An update ([sourceChecked]) also tries again the tracks marked
+  /// "Removed from YouTube", after all other work. Such a retry is quiet:
+  /// one that fails again is neither counted as failed nor notified.
+  ///
   /// When another download is running, the playlist is queued and starts
   /// right after it ([DownloadStart.queued]); the returned future then
   /// completes at once.
@@ -572,17 +577,31 @@ class DownloadService {
 
       final pendingTracks = await _db.getPendingTracks(playlist.id);
       final replaceTracks = await _db.getReplacementRequests(playlist.id);
+      // YouTube sometimes brings a removed video back (a claim withdrawn, an
+      // account restored), so every update asks for those again. They go
+      // last: they never hold up new videos or eat a time budget first.
+      final retryTracks =
+          sourceChecked
+              ? await _db.getRemovedFromYouTubeTracks(playlist.id)
+              : const <Track>[];
       final work = [
-        for (final track in pendingTracks) (track: track, replace: false),
-        for (final track in replaceTracks) (track: track, replace: true),
+        for (final track in pendingTracks)
+          (track: track, replace: false, retry: false),
+        for (final track in replaceTracks)
+          (track: track, replace: true, retry: false),
       ]..sort((a, b) => a.track.index.compareTo(b.track.index));
+      work.addAll([
+        for (final track in retryTracks)
+          (track: track, replace: false, retry: true),
+      ]);
       final playlistTrackCount = await _db.getTotalTrackCount(playlist.id);
       _workTotal = work.length;
 
       _log.info(
         'Updating "${playlist.name}": ${pendingTracks.length} of '
         '$playlistTrackCount tracks to download'
-        '${replaceTracks.isEmpty ? '' : ', ${replaceTracks.length} to replace'}',
+        '${replaceTracks.isEmpty ? '' : ', ${replaceTracks.length} to replace'}'
+        '${retryTracks.isEmpty ? '' : ', ${retryTracks.length} removed to try again'}',
       );
 
       if (_cancelRequested) {
@@ -619,6 +638,8 @@ class DownloadService {
 
       var playlistDeleted = false;
       var outOfTime = false;
+      var retriedBack = 0;
+      var retriedStillRemoved = 0;
       for (var i = 0; i < work.length; i++) {
         if (_cancelRequested) break;
         if (shouldStop?.call() ?? false) {
@@ -650,6 +671,27 @@ class DownloadService {
           // A quality chosen while the run goes applies to the next track.
           maxHeight: effectiveMaxHeight(latest, track),
         );
+        if (item.retry) {
+          // Quiet: a video still gone is not news, and its failure must not
+          // count towards a failure notification.
+          if (result == _TrackDownloadResult.downloaded ||
+              result == _TrackDownloadResult.reused) {
+            downloadedCount++;
+            _downloadedSoFar++;
+            retriedBack++;
+          } else if (result == _TrackDownloadResult.removed) {
+            retriedStillRemoved++;
+          } else if (result == _TrackDownloadResult.failed &&
+              !isPermanentDownloadError(_lastFailure ?? '')) {
+            // A bot check or the network: the other removed videos would
+            // fail the same way. They wait for the next update.
+            _log.info(
+              'Stopped trying removed videos again for now: $_lastFailure',
+            );
+            break;
+          }
+          continue;
+        }
         switch (result) {
           case _TrackDownloadResult.downloaded:
             downloadedCount++;
@@ -689,7 +731,14 @@ class DownloadService {
       if (removedCount > 0) {
         _log.warn(
           '$removedCount ${removedCount == 1 ? 'video was' : 'videos were'} '
-          'removed from YouTube; they are marked and no longer retried',
+          'removed from YouTube; they are marked and only tried again '
+          'quietly by updates',
+        );
+      }
+      if (retriedBack + retriedStillRemoved > 0) {
+        _log.info(
+          'Tried removed videos again: $retriedBack back, '
+          '$retriedStillRemoved still removed',
         );
       }
 

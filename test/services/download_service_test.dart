@@ -1247,7 +1247,7 @@ void main() {
         'following a copyright removal request';
 
     test(
-      'are marked, not retried, and do not block the update stamp',
+      'are marked, retried quietly, and do not block the update stamp',
       () async {
         final playlist = await insertTestPlaylist(db, outputPath: folder);
         final first = await insertTestTrack(
@@ -1284,11 +1284,102 @@ void main() {
         expect(events.last.removedCount, 2);
         expect(friendlyDownloadError(guidelines), 'Removed from YouTube');
 
-        // The next update does not ask YouTube for them again.
+        // The next update asks YouTube again, quietly: still removed is not
+        // news and no failure.
+        events.clear();
+        final again = service.progressStream.listen(events.add);
         await service.downloadPlaylist(playlist);
-        expect(ytdlp.calls, hasLength(2));
+        await Future<void>.delayed(Duration.zero);
+        await again.cancel();
+        expect(ytdlp.calls, hasLength(4));
+        for (final id in [first.id, second.id]) {
+          final track = (await db.getTrack(id))!;
+          expect(track.status, 'unavailable');
+          expect(track.unavailableReason, removedFromYouTubeReason);
+        }
+        expect(events.last.status, 'complete');
+        expect(events.last.removedCount, 0);
+        expect(events.last.failedCount, 0);
+        expect(notifications.failures, isEmpty);
+        expect(notifications.playlistNames, isEmpty);
+
+        // A download that is not an update (no fresh look at the playlist)
+        // leaves them alone.
+        await service.downloadPlaylist(playlist, sourceChecked: false);
+        expect(ytdlp.calls, hasLength(4));
       },
     );
+
+    test('an update brings back a removed video that is back', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final fresh = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 2,
+        videoId: 'new-1',
+      );
+      final removed = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 1,
+        videoId: 'gone-1',
+        status: 'unavailable',
+        unavailableReason: removedFromYouTubeReason,
+        lastError: guidelines,
+      );
+
+      await service.downloadPlaylist(playlist);
+
+      // New videos first, the removed one after them.
+      expect([for (final c in ytdlp.calls) c.videoId], ['new-1', 'gone-1']);
+      final back = (await db.getTrack(removed.id))!;
+      expect(back.status, 'complete');
+      expect(back.unavailableReason, isNull);
+      expect(back.lastError, isNull);
+      expect((await db.getTrack(fresh.id))!.status, 'complete');
+      expect(notifications.downloadedCounts, [2]);
+    });
+
+    test('a bot check stops the retries of removed videos quietly', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      // A scheduled run is the one that notifies failures.
+      final background = newService(owner: DownloadLock.backgroundOwner);
+      addTearDown(background.dispose);
+      for (var i = 1; i <= 3; i++) {
+        await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: i,
+          videoId: 'gone-$i',
+          status: 'unavailable',
+          unavailableReason: removedFromYouTubeReason,
+          lastError: guidelines,
+        );
+      }
+      ytdlp.downloadError = PlatformException(
+        code: 'DOWNLOAD_ERROR',
+        message: "ERROR: [youtube] gone-1: Sign in to confirm you're not a bot",
+      );
+      final events = <DownloadProgress>[];
+      final sub = background.progressStream.listen(events.add);
+
+      await background.downloadPlaylist(playlist);
+      await Future<void>.delayed(Duration.zero);
+      await sub.cancel();
+
+      // The others would fail the same way: one call, not three.
+      expect(ytdlp.calls, hasLength(1));
+      for (final track in await db.getTracksForPlaylist(playlist.id)) {
+        expect(track.status, 'unavailable');
+        expect(track.unavailableReason, removedFromYouTubeReason);
+        expect(track.lastError, guidelines);
+      }
+      expect(events.last.status, 'complete');
+      expect(events.last.failedCount, 0);
+      expect(notifications.failures, isEmpty);
+      // Nothing failed that the update was asked for: it counts.
+      expect((await db.getPlaylist(playlist.id)).lastUpdated, isNotNull);
+    });
 
     test('a manual retry that works makes the track normal again', () async {
       final playlist = await insertTestPlaylist(db, outputPath: folder);

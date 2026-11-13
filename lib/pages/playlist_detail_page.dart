@@ -75,6 +75,12 @@ class PlaylistDetailPage extends ConsumerStatefulWidget {
 bool _isProblemTrack(Track track) =>
     track.status == 'error' || track.status == 'unavailable';
 
+/// A track shown as removed: taken down by YouTube (found by a download) or
+/// gone from the YouTube playlist. It may still have its file.
+bool _isRemovedTrack(Track track) =>
+    track.unavailableReason == removedFromYouTubeReason ||
+    track.unavailableReason == 'removed';
+
 class _TrackListView {
   _TrackListView(this.tracks, this.query, [this.lyricMatches = const {}]) {
     final matches = <int, MediaChapter>{};
@@ -99,17 +105,19 @@ class _TrackListView {
       for (var i = 0; i < visible.length; i++)
         if (_isProblemTrack(visible[i])) i,
     ];
+    removedRows = [
+      for (var i = 0; i < visible.length; i++)
+        if (_isRemovedTrack(visible[i])) i,
+    ];
 
     var downloaded = 0;
     var unavailable = 0;
-    var removed = 0;
     var seconds = 0;
     var maxIndex = 0;
     var playable = false;
     for (final track in tracks) {
       if (track.status == 'complete') downloaded++;
       if (track.status == 'unavailable') unavailable++;
-      if (track.unavailableReason == removedFromYouTubeReason) removed++;
       seconds += track.durationSeconds ?? 0;
       if (track.index > maxIndex) maxIndex = track.index;
       if (!playable && track.status == 'complete' && !track.alwaysSkip) {
@@ -117,7 +125,6 @@ class _TrackListView {
       }
     }
     this.maxIndex = maxIndex;
-    removedFromYouTube = removed;
     hasPlayable = playable;
     visibleHasPlayable =
         identical(visible, tracks)
@@ -136,11 +143,12 @@ class _TrackListView {
 
   /// Rows (in [visible]) whose download failed or that are unavailable.
   late final List<int> problemRows;
+
+  /// Rows (in [visible]) of tracks removed from YouTube or from the
+  /// playlist (see [_isRemovedTrack]).
+  late final List<int> removedRows;
   late final Map<int, MediaChapter> chapterMatches;
   late final int maxIndex;
-
-  /// Tracks a download found removed from YouTube (with or without a file).
-  late final int removedFromYouTube;
   late final bool hasPlayable;
   late final bool visibleHasPlayable;
   late final String summary;
@@ -217,6 +225,11 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
   DateTime? _forceFollowUntil;
   DateTime? _lastUserScroll;
   int? _lastJumpRow;
+
+  /// The track a menu jump just landed on, tinted for a moment.
+  final ValueNotifier<int?> _highlightedTrackId = ValueNotifier(null);
+  Timer? _highlightTimer;
+  static const _highlightDuration = Duration(milliseconds: 1500);
 
   /// Tracks of this playlist whose lyrics need nothing more (see
   /// [lyricsSettledTracksProvider]); null until first loaded.
@@ -315,6 +328,8 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
     _searchController.dispose();
     _listController?.dispose();
     _showJumpToPlaying.dispose();
+    _highlightTimer?.cancel();
+    _highlightedTrackId.dispose();
     super.dispose();
   }
 
@@ -740,6 +755,17 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
     _jumpToNextRow(view, _missingLyricsRows(view), (_) => 'no lyrics');
   }
 
+  /// Scrolls to the next track removed from YouTube or from the playlist.
+  void _jumpToNextRemoved() {
+    final view = _view;
+    if (view == null) return;
+    _jumpToNextRow(
+      view,
+      view.removedRows,
+      (track) => _unavailableLabel(track.unavailableReason).toLowerCase(),
+    );
+  }
+
   /// Scrolls to the first of [rows] below the row in the middle of the
   /// list, wrapping around to the top after the last one, and says which
   /// track it is with [describe].
@@ -775,10 +801,20 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
     _lastUserScroll = DateTime.now();
     _scrollToRow(row, animate: true);
     final track = view.visible[row];
+    _highlight(track.id);
     _showModeFeedback(
       '${wrapped && rows.length > 1 ? 'Back to the first · ' : ''}'
       '${index + 1} of ${rows.length}: #${track.index} ${describe(track)}',
     );
+  }
+
+  /// Tints the row of [trackId] for a moment, so the eye finds it.
+  void _highlight(int trackId) {
+    _highlightTimer?.cancel();
+    _highlightedTrackId.value = trackId;
+    _highlightTimer = Timer(_highlightDuration, () {
+      if (mounted) _highlightedTrackId.value = null;
+    });
   }
 
   void _showModeFeedback(String message) {
@@ -939,8 +975,8 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
                 _jumpToNextProblem();
               case 'next-missing-lyrics':
                 _jumpToNextMissingLyrics();
-              case 'retry-removed':
-                unawaited(_retryRemovedTracks());
+              case 'next-removed':
+                _jumpToNextRemoved();
               case 'clear':
                 unawaited(_confirmClearTemporary());
               case 'youtube':
@@ -987,14 +1023,14 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
                       contentPadding: EdgeInsets.zero,
                     ),
                   ),
-                if (view != null && view.removedFromYouTube > 0)
+                if (view != null && view.removedRows.isNotEmpty)
                   PopupMenuItem(
-                    key: const ValueKey('playlist-detail-retry-removed'),
-                    value: 'retry-removed',
+                    key: const ValueKey('playlist-detail-next-removed'),
+                    value: 'next-removed',
                     child: ListTile(
-                      leading: const Icon(Icons.refresh),
+                      leading: const Icon(Icons.remove_circle_outline),
                       title: Text(
-                        'Try removed videos again (${view.removedFromYouTube})',
+                        'Jump to next removed (${view.removedRows.length})',
                       ),
                       contentPadding: EdgeInsets.zero,
                     ),
@@ -1174,14 +1210,18 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
                         itemCount: view.visible.length,
                         itemBuilder: (context, index) {
                           final track = view.visible[index];
-                          return _TrackRow(
-                            key: ValueKey('track-row-${track.id}'),
-                            track: track,
-                            metrics: metrics,
-                            chapterMatch: view.chapterMatches[track.id],
-                            lyricMatch: view.lyricMatches[track.id],
-                            onTap: _onTrackTap,
-                            onActions: _showTrackActions,
+                          return _JumpHighlight(
+                            trackId: track.id,
+                            highlighted: _highlightedTrackId,
+                            child: _TrackRow(
+                              key: ValueKey('track-row-${track.id}'),
+                              track: track,
+                              metrics: metrics,
+                              chapterMatch: view.chapterMatches[track.id],
+                              lyricMatch: view.lyricMatches[track.id],
+                              onTap: _onTrackTap,
+                              onActions: _showTrackActions,
+                            ),
                           );
                         },
                       ),
@@ -1349,30 +1389,6 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
     if (mounted) navigator.popUntil((route) => route.isFirst);
   }
 
-  Future<void> _retryRemovedTracks() async {
-    final messenger = ScaffoldMessenger.of(context);
-    try {
-      final count = await ref
-          .read(playlistServiceProvider)
-          .retryRemovedTracks(widget.playlistId);
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text(
-            count == 0
-                ? 'No removed videos to try again'
-                : count == 1
-                ? 'The next update tries 1 removed video again'
-                : 'The next update tries $count removed videos again',
-          ),
-        ),
-      );
-    } catch (e) {
-      messenger.showSnackBar(
-        SnackBar(content: Text('Could not save: ${_errorText(e)}')),
-      );
-    }
-  }
-
   Future<void> _startUpdate() async {
     final playlist = _playlist;
     if (playlist == null || _isUpdating) return;
@@ -1434,6 +1450,44 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
 /// entrance animation has finished. The route is looked up here, in a
 /// widget whose rebuild costs nothing, so route changes do not rebuild the
 /// page.
+/// Tints a track row for a moment while [highlighted] names it: where a
+/// jump from the menu landed. Only the tint rebuilds, never the row.
+class _JumpHighlight extends StatelessWidget {
+  const _JumpHighlight({
+    required this.trackId,
+    required this.highlighted,
+    required this.child,
+  });
+
+  final int trackId;
+  final ValueNotifier<int?> highlighted;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<int?>(
+      valueListenable: highlighted,
+      child: child,
+      builder:
+          (context, id, row) => Stack(
+            children: [
+              row!,
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: AnimatedOpacity(
+                    key: ValueKey('jump-highlight-$trackId'),
+                    opacity: id == trackId ? 1 : 0,
+                    duration: const Duration(milliseconds: 300),
+                    child: ColoredBox(color: _accent.withValues(alpha: 0.22)),
+                  ),
+                ),
+              ),
+            ],
+          ),
+    );
+  }
+}
+
 class _AfterRouteSettles extends StatefulWidget {
   const _AfterRouteSettles({required this.onSettled, required this.child});
 

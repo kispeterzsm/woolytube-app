@@ -65,11 +65,11 @@ void main() {
     expect(synced.status, 'unavailable');
     expect(synced.unavailableReason, removedFromYouTubeReason);
     expect((await db.getPlaylist(playlist.id)).lastUpdateAttempt, isNotNull);
-
-    expect(await service.retryRemovedTracks(playlist.id), 1);
-    final retried = (await db.getTrack(track.id))!;
-    expect(retried.status, 'pending');
-    expect(retried.unavailableReason, isNull);
+    // The download of the update tries it again (see DownloadService).
+    expect(
+      (await db.getRemovedFromYouTubeTracks(playlist.id)).single.id,
+      track.id,
+    );
   });
 
   test('one update per playlist at a time, and it can be stopped', () async {

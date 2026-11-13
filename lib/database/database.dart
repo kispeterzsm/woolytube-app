@@ -977,6 +977,20 @@ class AppDatabase extends _$AppDatabase {
             ..orderBy([(t) => OrderingTerm.asc(t.index)]))
           .get();
 
+  /// Tracks a download found removed from YouTube that have no file. Every
+  /// update tries them again: YouTube sometimes brings a video back.
+  Future<List<Track>> getRemovedFromYouTubeTracks(int playlistId) =>
+      (select(tracks)
+            ..where(
+              (t) =>
+                  t.playlistId.equals(playlistId) &
+                  t.status.equals('unavailable') &
+                  t.unavailableReason.equals(removedFromYouTubeReason) &
+                  t.isLocalReplacement.equals(false),
+            )
+            ..orderBy([(t) => OrderingTerm.asc(t.index)]))
+          .get();
+
   /// The track's own video quality: null follows the playlist, 0 = the
   /// best, N = up to N p.
   Future<void> setTrackVideoQuality(int trackId, int? quality) =>
@@ -1080,8 +1094,10 @@ class AppDatabase extends _$AppDatabase {
   }
 
   /// Marks a track YouTube has permanently taken down, found out by a
-  /// failed download. A track without a file becomes 'unavailable', so
-  /// updates stop retrying it; a downloaded file stays and keeps playing.
+  /// failed download. A track without a file becomes 'unavailable', so it
+  /// leaves the normal download queue (updates only try it again quietly,
+  /// see [getRemovedFromYouTubeTracks]); a downloaded file stays and keeps
+  /// playing.
   Future<void> markTrackRemovedFromYouTube(int trackId, String error) async {
     final track = await getTrack(trackId);
     if (track == null) return;
@@ -1241,9 +1257,9 @@ class AppDatabase extends _$AppDatabase {
   /// alone. The local-file flag is kept: an interrupted download replaced
   /// nothing.
   ///
-  /// A track marked removed from YouTube whose manual retry was interrupted
+  /// A track marked removed from YouTube whose retry was interrupted
   /// goes back to 'unavailable' with its removal message, not to the queue:
-  /// the mark always means "no file and not retried by updates".
+  /// the mark always means "no file and only tried again quietly".
   Future<void> resetInterruptedTrack(
     int trackId, {
     bool onlyIfDownloading = false,
@@ -1264,9 +1280,10 @@ class AppDatabase extends _$AppDatabase {
     });
   }
 
-  /// Ends a failed manual retry of a track marked removed from YouTube: it
-  /// stays 'unavailable' with its removal message, whatever the retry
-  /// failed with (a bot check must not put it back into every update).
+  /// Ends a failed retry of a track marked removed from YouTube: it stays
+  /// 'unavailable' with its removal message, whatever the retry failed with
+  /// (a bot check must not turn it into a failed download that is counted
+  /// and notified on every update).
   Future<void> restoreRemovedFromYouTube(int trackId) async {
     await (update(tracks)..where(
       (t) =>
