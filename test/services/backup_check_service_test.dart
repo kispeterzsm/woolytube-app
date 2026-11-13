@@ -19,6 +19,7 @@ import 'package:woolytube/services/library_file.dart';
 import 'package:woolytube/services/library_gate.dart';
 import 'package:woolytube/services/library_layout.dart';
 import 'package:woolytube/services/log_service.dart';
+import 'package:woolytube/services/loudness_file.dart';
 import 'package:woolytube/services/lyrics/lyrics_files.dart';
 import 'package:woolytube/services/lyrics/lyrics_models.dart';
 import 'package:woolytube/services/lyrics/lyrics_service.dart'
@@ -26,6 +27,7 @@ import 'package:woolytube/services/lyrics/lyrics_service.dart'
 import 'package:woolytube/services/media_thumbnail_service.dart';
 import 'package:woolytube/services/metadata_service.dart';
 import 'package:woolytube/services/playback_settings_store.dart';
+import 'package:woolytube/services/settings_mirror.dart';
 import 'package:woolytube/services/sidecar_mirror.dart';
 import 'package:woolytube/services/thumbnail_backfill_service.dart';
 
@@ -284,7 +286,8 @@ void main() {
     final s = servicesFor();
     await s.metadata.writeMetadataFor(mix.id);
     await s.metadata.writeMetadataFor(other.id);
-    // A newer app wrote this one: never "fixed".
+    // A newer app wrote this one after this run did: never "fixed", although
+    // Fix compares with the disk rather than what this run wrote.
     final otherMeta = File(
       p.join(other.outputPath, MetadataService.metaFileName),
     );
@@ -483,6 +486,187 @@ void main() {
     // The background fetch fills these; Fix does not.
     expect(report.problems.where((line) => line.contains('info')), isEmpty);
     expect(snapshot(), before);
+  });
+
+  test('Fix writes again files changed on disk after this run wrote '
+      'them', () async {
+    final mix = await addPlaylist('Mix');
+    final s = servicesFor();
+    final metaFile = File(p.join(mix.outputPath, MetadataService.metaFileName));
+    final settingsFile = File(
+      p.join(
+        LibraryExportService.backupDir,
+        LibraryExportService.settingsFileName,
+      ),
+    );
+    final libraryFile = File(LibraryFileService.pathIn(audioBase));
+    Future<void> mirrorsWrite() async {
+      for (final playlist in await db.getAllPlaylists()) {
+        await s.metadata.writeMetadataFor(playlist.id);
+      }
+      await s.exporter.writeSettingsFile();
+      await s.libraryFile.write();
+    }
+
+    await mirrorsWrite();
+    final oldMeta = metaFile.readAsStringSync();
+    final oldSettings = settingsFile.readAsStringSync();
+    final oldLibrary = libraryFile.readAsStringSync();
+    // The library changes and the mirrors write it ...
+    await db.updateTrackAlwaysSkip((await trackOf(mix, 1)).id, true);
+    await AppSettingsService().setEvenOutVolume(false);
+    await addPlaylist('Other');
+    await mirrorsWrite();
+    // ... then an older copy of the folders is put back from the PC.
+    metaFile.writeAsStringSync(oldMeta);
+    settingsFile.writeAsStringSync(oldSettings);
+    libraryFile.writeAsStringSync(oldLibrary);
+
+    final report = await s.service.check();
+
+    expect(report.problems, [
+      '"Mix": playlist files out of date',
+      'Settings file out of date',
+      'Library file out of date in Music/WoolyTube',
+    ]);
+
+    final fixed = await s.service.fix();
+    final after = await s.service.check();
+
+    expect(fixed.problems, isEmpty);
+    expect(after.problems, isEmpty);
+    expect(after.needsFix, isFalse);
+    expect(metaFile.readAsStringSync(), isNot(oldMeta));
+    // The settings file put back holds other settings: kept aside for
+    // Restore settings, not lost.
+    expect(
+      File(
+        p.join(
+          LibraryExportService.backupDir,
+          LibraryExportService.previousSettingsFileName,
+        ),
+      ).readAsStringSync(),
+      oldSettings,
+    );
+  });
+
+  test('Fix marks the metadata and settings files saved again', () async {
+    final mix = await addPlaylist('Mix');
+    final mirror = SidecarMirror(
+      db,
+      MetadataService(db),
+      LibraryGate.unlocked(),
+      log: log,
+    );
+    final blocker = Directory(
+      p.join(mix.outputPath, MetadataService.metaFileName),
+    )..createSync();
+    await mirror.flush();
+    FolderWriteErrors.failed(SettingsMirror.errorKey, 'Settings file', 'full');
+    final s = servicesFor();
+
+    // Still in the way: Fix reports it again.
+    final failed = await s.service.fix();
+
+    expect(failed.problems, hasLength(1));
+    expect(FolderWriteErrors.unresolved.map((e) => e.what), [
+      'Metadata file of "Mix"',
+    ]);
+    expect(FolderWriteErrors.unresolved.single.count, 2);
+
+    blocker.deleteSync();
+    final fixed = await s.service.fix();
+
+    expect(fixed.problems, isEmpty);
+    expect(FolderWriteErrors.unresolved, isEmpty);
+    expect(FolderWriteErrors.all.every((e) => e.resolved), isTrue);
+    await mirror.dispose();
+  });
+
+  test('two playlists in one folder: their files are left alone', () async {
+    final mix = await addPlaylist('Mix');
+    final folder = mix.outputPath;
+    final other = await insertTestPlaylist(
+      db,
+      url: 'https://www.youtube.com/playlist?list=Other',
+      name: 'Other',
+      audioOnly: true,
+      outputPath: folder,
+    );
+    Future<Track> otherTrack(int index, String videoId) async {
+      final file = p.join(folder, 'other_$index.m4a');
+      await File(file).writeAsBytes(List.filled(10 + index, index));
+      return insertTestTrack(
+        db,
+        playlistId: other.id,
+        index: index,
+        videoId: videoId,
+        title: 'Other $index',
+        filePath: file,
+        status: 'complete',
+      );
+    }
+
+    final ownSong = await otherTrack(1, 'Other-1');
+    // The same video in both playlists, each with its own lyrics.
+    final sameVideo = await otherTrack(2, 'Mix-1');
+    Future<void> measure(Track track) async {
+      final stat = await File(track.filePath!).stat();
+      await db.saveLoudnessMeasurement(
+        LoudnessMeasurementsCompanion.insert(
+          trackId: Value(track.id),
+          filePath: track.filePath!,
+          fileSize: stat.size,
+          fileModifiedMs: stat.modified.millisecondsSinceEpoch,
+          integratedLufs: const Value(-14.0),
+          measuredAt: DateTime.utc(2026, 11, 10),
+        ),
+      );
+    }
+
+    for (final track in [
+      await trackOf(mix, 1),
+      await trackOf(mix, 2),
+      ownSong,
+    ]) {
+      await measure(track);
+    }
+    await writeLoudnessFile(db, mix);
+    final loudness = File(LibraryLayout.loudnessJsonPath(folder));
+    final loudnessContent = loudness.readAsStringSync();
+    final song = await trackOf(mix, 1);
+    await db.replaceLyricsDoc(draft(song.id, ['mix words']));
+    await persistLyricsFile(db, song.id);
+    await db.replaceLyricsDoc(draft(sameVideo.id, ['other words']));
+    final lyrics = File(LibraryLayout.lyricsJsonPath(folder, 'Mix-1'));
+    final lyricsContent = lyrics.readAsStringSync();
+    final s = servicesFor();
+
+    final report = await s.service.check();
+
+    expect(report.playlists.map((pl) => pl.sharedFolder), [true, true]);
+    expect(report.playlists.map((pl) => pl.outdatedLyricsFiles), [0, 0]);
+    expect(report.playlists.map((pl) => pl.metadataOutOfDate), [false, false]);
+    expect(
+      report.problems.where((line) => line.contains('shares its folder')),
+      [
+        '"Mix": shares its folder with another playlist',
+        '"Other": shares its folder with another playlist',
+      ],
+    );
+
+    final fixed = await s.service.fix();
+
+    expect(fixed.problems, [
+      LibraryExportService.sharedFolderProblem('Mix'),
+      LibraryExportService.sharedFolderProblem('Other'),
+    ]);
+    expect(loudness.readAsStringSync(), loudnessContent);
+    expect(lyrics.readAsStringSync(), lyricsContent);
+    expect(
+      File(p.join(folder, MetadataService.metaFileName)).existsSync(),
+      isFalse,
+    );
   });
 
   testWidgets('Check backup replaces Back up library', (tester) async {

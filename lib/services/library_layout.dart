@@ -56,6 +56,25 @@ class LibraryLayout {
   static String basePathFor({required bool audioOnly}) =>
       audioOnly ? audioBasePath : videoBasePath;
 
+  /// [folder] in a form that compares equal for the same folder written
+  /// differently.
+  static String folderKey(String folder) =>
+      p.normalize(p.absolute(folder)).toLowerCase();
+
+  /// The keys ([folderKey]) of the folders that more than one of [folders]
+  /// point at. Two playlists in one folder would overwrite each other's
+  /// metadata, lyrics and loudness files; the startup check gives each its
+  /// own folder, and until then those files are left alone.
+  static Set<String> sharedFolders(Iterable<String> folders) {
+    final seen = <String>{};
+    final shared = <String>{};
+    for (final folder in folders) {
+      final key = folderKey(folder);
+      if (!seen.add(key)) shared.add(key);
+    }
+    return shared;
+  }
+
   static String thumbnailsDir(String playlistPath) =>
       p.join(playlistPath, thumbnailsDirName);
 

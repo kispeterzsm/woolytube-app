@@ -25,6 +25,7 @@ class PlaylistBackupStatus {
     required this.folder,
     this.folderMissing = false,
     this.outsideLibrary = false,
+    this.sharedFolder = false,
     this.metadataOutOfDate = false,
     this.newerMetadataVersion,
     this.tracks = 0,
@@ -46,6 +47,11 @@ class PlaylistBackupStatus {
   /// The folder is not in Music/WoolyTube or Movies/WoolyTube, so copying
   /// those two does not take it along.
   final bool outsideLibrary;
+
+  /// Another playlist points at the same folder. Their metadata, lyrics
+  /// and loudness files would overwrite each other, so they are neither
+  /// compared nor written until the app gives each its own folder.
+  final bool sharedFolder;
 
   /// `woolytube_meta.json` or the `.m3u8` is missing or differs from the
   /// database.
@@ -164,6 +170,8 @@ class BackupReport {
       for (final pl in playlists) ...[
         if (pl.folderMissing) '"${pl.name}": folder not found',
         if (!pl.folderMissing) ...[
+          if (pl.sharedFolder)
+            '"${pl.name}": shares its folder with another playlist',
           if (pl.metadataOutOfDate) '"${pl.name}": playlist files out of date',
           if (pl.missingCovers > 0)
             '"${pl.name}": ${count(pl.missingCovers, 'track')} without a cover',
@@ -235,6 +243,9 @@ class BackupCheckService {
         infoStore == null
             ? const InfoBackfillStatus()
             : await InfoBackfillStatus.read(infoStore);
+    final shared = LibraryLayout.sharedFolders(
+      playlists.map((pl) => pl.outputPath),
+    );
     final statuses = <PlaylistBackupStatus>[];
     for (var i = 0; i < playlists.length; i++) {
       final playlist = playlists[i];
@@ -245,7 +256,15 @@ class BackupCheckService {
           current: playlist.name,
         ),
       );
-      statuses.add(await _checkPlaylist(playlist, info));
+      statuses.add(
+        await _checkPlaylist(
+          playlist,
+          info,
+          sharedFolder: shared.contains(
+            LibraryLayout.folderKey(playlist.outputPath),
+          ),
+        ),
+      );
     }
     onProgress?.call(
       LibraryExportProgress(
@@ -274,8 +293,9 @@ class BackupCheckService {
 
   Future<PlaylistBackupStatus> _checkPlaylist(
     Playlist playlist,
-    InfoBackfillStatus info,
-  ) async {
+    InfoBackfillStatus info, {
+    required bool sharedFolder,
+  }) async {
     final folder = playlist.outputPath;
     final outside =
         !p.isWithin(LibraryLayout.audioBasePath, folder) &&
@@ -311,12 +331,19 @@ class BackupCheckService {
         }
       }
     }
-    final sidecar = await _metadata.checkMetadataOf(playlist);
-    final lyrics = await checkLyricsFiles(_db, playlist, tracks: tracks);
+    // A shared folder holds one playlist's files at best: comparing would
+    // report the other as out of date on every check.
+    final sidecar =
+        sharedFolder ? null : await _metadata.checkMetadataOf(playlist);
+    final lyrics =
+        sharedFolder
+            ? null
+            : await checkLyricsFiles(_db, playlist, tracks: tracks);
     return PlaylistBackupStatus(
       name: playlist.name,
       folder: folder,
       outsideLibrary: outside,
+      sharedFolder: sharedFolder,
       metadataOutOfDate:
           sidecar != null &&
           sidecar.newerVersionKept == null &&
@@ -326,8 +353,8 @@ class BackupCheckService {
       missingCovers: missingCovers,
       missingPlaylistCover:
           downloaded > 0 && !await thumbnailFileExists(playlist.thumbnailPath),
-      missingLyricsFiles: lyrics.missing,
-      outdatedLyricsFiles: lyrics.outdated,
+      missingLyricsFiles: lyrics?.missing ?? 0,
+      outdatedLyricsFiles: lyrics?.outdated ?? 0,
       infoFiles: infoFiles,
       missingInfoFiles: missingInfo,
       unavailableInfoFiles: unavailableInfo,
@@ -339,6 +366,11 @@ class BackupCheckService {
   /// files, lyrics files and loudness files. No database copy is made.
   /// Files a newer app wrote, and a settings file waiting to be restored,
   /// are left alone; nothing is deleted.
+  ///
+  /// Files are compared with the disk, not with what this run last wrote,
+  /// so one changed on disk since is written again. The metadata, lyrics
+  /// and loudness files of playlists sharing one folder are left alone
+  /// (they would overwrite each other) and listed as a problem.
   Future<LibraryExportResult> fix({
     bool allowNetwork = false,
     void Function(LibraryExportProgress progress)? onProgress,
@@ -351,14 +383,23 @@ class BackupCheckService {
     );
     final problems = [...export.problems];
     try {
-      await _libraryFile.write();
+      await _libraryFile.write(verify: true);
       FolderWriteErrors.succeeded(LibraryMirror.errorKey);
     } catch (e) {
       problems.add('Library file: $e');
       FolderWriteErrors.failed(LibraryMirror.errorKey, 'Library file', e);
     }
     var lyricsWritten = 0;
-    for (final playlist in await _db.getAllPlaylists()) {
+    final playlists = await _db.getAllPlaylists();
+    final shared = LibraryLayout.sharedFolders(
+      playlists.map((pl) => pl.outputPath),
+    );
+    for (final playlist in playlists) {
+      if (shared.contains(LibraryLayout.folderKey(playlist.outputPath))) {
+        final problem = LibraryExportService.sharedFolderProblem(playlist.name);
+        if (!problems.contains(problem)) problems.add(problem);
+        continue;
+      }
       if (_folderBusy) {
         problems.add(
           '${playlist.name}: lyrics and loudness files wait until the '
@@ -408,14 +449,14 @@ class BackupCheckService {
   Future<int> repairMissingLyricsFiles() async {
     var written = 0;
     final playlists = await _db.getAllPlaylists();
-    final perFolder = <String, int>{};
-    for (final playlist in playlists) {
-      final key = _folderKey(playlist.outputPath);
-      perFolder[key] = (perFolder[key] ?? 0) + 1;
-    }
+    final shared = LibraryLayout.sharedFolders(
+      playlists.map((pl) => pl.outputPath),
+    );
     for (final playlist in playlists) {
       // Two playlists in one folder: the startup check separates them.
-      if ((perFolder[_folderKey(playlist.outputPath)] ?? 0) > 1) continue;
+      if (shared.contains(LibraryLayout.folderKey(playlist.outputPath))) {
+        continue;
+      }
       if (_folderBusy) break;
       try {
         final result = await checkLyricsFiles(
@@ -481,7 +522,4 @@ class BackupCheckService {
     if ((await _db.getAllPlaylists()).isNotEmpty) return false;
     return _exporter.settingsFileExists();
   }
-
-  static String _folderKey(String path) =>
-      p.normalize(p.absolute(path)).toLowerCase();
 }

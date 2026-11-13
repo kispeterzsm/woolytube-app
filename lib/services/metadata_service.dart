@@ -444,6 +444,10 @@ class MetadataService {
   final _writtenRevisions = <int, int>{};
   var _metadataWriteCounter = 0;
 
+  /// Playlists whose next write compares with the disk (see
+  /// [writeMetadataFor]).
+  final _verifyNext = <int>{};
+
   /// Sidecars left alone because a newer app wrote them, already logged.
   final _newerSidecarsReported = <String>{};
 
@@ -473,7 +477,14 @@ class MetadataService {
   /// would otherwise race on the temp file or rename a half-written sidecar
   /// into place. Requests that arrive while a write is waiting to start
   /// share it, since it reads the database only when it starts.
-  Future<void> writeMetadataFor(int playlistId) {
+  ///
+  /// Files this run already wrote with the same content are normally not
+  /// read again. With [verify] they are compared with the disk, so a file
+  /// changed on disk since (for example an older copy put back) is written
+  /// again; "Check backup" compares with the disk too.
+  Future<void> writeMetadataFor(int playlistId, {bool verify = false}) {
+    // Read when the write starts, so a write already queued verifies too.
+    if (verify) _verifyNext.add(playlistId);
     final queued = _queuedWrites[playlistId];
     if (queued != null) return queued;
     final previous = _metadataWrites[playlistId] ?? Future<void>.value();
@@ -495,6 +506,7 @@ class MetadataService {
   }
 
   Future<void> _writeMetadataNow(int playlistId) async {
+    final verify = _verifyNext.remove(playlistId);
     // Read the revision first: a change made while the files are built
     // leaves the recorded revision behind, so the mirror writes again.
     final revision = await _db.playlistRevision(playlistId);
@@ -503,7 +515,7 @@ class MetadataService {
     final dir = Directory(playlist.outputPath);
     if (!await dir.exists()) return;
 
-    final job = await _sidecarJob(playlist);
+    final job = await _sidecarJob(playlist, compareWithDisk: verify);
     final result =
         job.tracks.length >= isolateTrackThreshold
             ? await Isolate.run(() => writeSidecarFiles(job))
@@ -528,7 +540,11 @@ class MetadataService {
   /// database holds. Null when the playlist folder is gone.
   Future<SidecarCheck?> checkMetadataOf(Playlist playlist) async {
     if (!await Directory(playlist.outputPath).exists()) return null;
-    final job = await _sidecarJob(playlist, dryRun: true);
+    final job = await _sidecarJob(
+      playlist,
+      dryRun: true,
+      compareWithDisk: true,
+    );
     final result =
         job.tracks.length >= isolateTrackThreshold
             ? await Isolate.run(() => writeSidecarFiles(job))
@@ -543,6 +559,7 @@ class MetadataService {
   Future<SidecarJob> _sidecarJob(
     Playlist playlist, {
     bool dryRun = false,
+    bool compareWithDisk = false,
   }) async {
     final tracks = await _db.getTracksForPlaylist(playlist.id);
     final segmentsByTrack = await _segmentsByTrack(tracks);
@@ -561,10 +578,10 @@ class MetadataService {
       labels: await _db.getLabels(),
       metaPath: metaPath,
       playlistFilePath: m3uPath,
-      // A check compares with the files on disk, not with what this run
-      // last wrote: they may have changed since.
+      // A check (and a verifying write) compares with the files on disk,
+      // not with what this run last wrote: they may have changed since.
       knownHashes:
-          dryRun
+          compareWithDisk
               ? const {}
               : {
                 metaPath: _writtenHashes[metaPath],

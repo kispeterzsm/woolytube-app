@@ -810,8 +810,8 @@ class _CountingLibraryFile extends LibraryFileService {
   var writes = 0;
 
   @override
-  Future<int> write() {
+  Future<int> write({bool verify = false}) {
     writes++;
-    return super.write();
+    return super.write(verify: verify);
   }
 }

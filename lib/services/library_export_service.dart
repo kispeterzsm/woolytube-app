@@ -5,9 +5,12 @@ import 'package:path/path.dart' as p;
 
 import '../database/database.dart';
 import 'app_settings_service.dart';
+import 'folder_write_errors.dart';
 import 'library_layout.dart';
 import 'log_service.dart';
 import 'metadata_service.dart';
+import 'settings_mirror.dart';
+import 'sidecar_mirror.dart';
 import 'thumbnail_backfill_service.dart';
 
 class LibraryExportProgress {
@@ -98,6 +101,11 @@ class LibraryExportService {
   /// The database copies older versions made, named by their time.
   static final databaseCopyPattern = RegExp(r'^woolytube-\d{8}-\d{4}\.sqlite$');
 
+  /// The problem listed for a playlist sharing its folder with another.
+  static String sharedFolderProblem(String playlistName) =>
+      '$playlistName: shares its folder with another playlist; its files '
+      'are saved once the app gives it its own folder at the next start';
+
   static String get backupDir =>
       p.join(LibraryLayout.audioBasePath, backupDirName);
 
@@ -107,6 +115,13 @@ class LibraryExportService {
   /// The settings file is left alone without [writeSettings] (a copied
   /// library waiting to be restored brought its own). A failing playlist is
   /// listed in the result and the rest still export.
+  ///
+  /// The metadata, playlist and settings files are compared with the disk,
+  /// not with what this run last wrote, so a file changed on disk since is
+  /// written again. Each write is reported to [FolderWriteErrors], so an
+  /// earlier failure of the mirrors shows as saved again. Two playlists
+  /// sharing one folder are left alone (their metadata files would
+  /// overwrite each other) and listed as a problem.
   Future<LibraryExportResult> exportLibrary({
     bool allowNetwork = false,
     bool writeSettings = true,
@@ -125,6 +140,9 @@ class LibraryExportService {
     void Function(LibraryExportProgress progress)? onProgress,
   ) async {
     final playlists = await _db.getAllPlaylists();
+    final shared = LibraryLayout.sharedFolders(
+      playlists.map((pl) => pl.outputPath),
+    );
     final problems = <String>[];
     var exported = 0;
     var tracks = 0;
@@ -148,6 +166,11 @@ class LibraryExportService {
           );
           continue;
         }
+        if (shared.contains(LibraryLayout.folderKey(playlist.outputPath))) {
+          // Covers wait too: finding one rewrites the metadata file.
+          problems.add(sharedFolderProblem(playlist.name));
+          continue;
+        }
         newCovers += await _thumbnails.ensureTrackThumbnails(
           playlist,
           allowNetwork: allowNetwork,
@@ -157,7 +180,18 @@ class LibraryExportService {
           allowNetwork: allowNetwork,
         );
         if (cover != null) newCovers++;
-        await _metadata.writeMetadataFor(playlist.id);
+        final errorKey = SidecarMirror.metadataErrorKey(playlist.id);
+        try {
+          await _metadata.writeMetadataFor(playlist.id, verify: true);
+          FolderWriteErrors.succeeded(errorKey);
+        } catch (e) {
+          FolderWriteErrors.failed(
+            errorKey,
+            'Metadata file of "${playlist.name}"',
+            e,
+          );
+          rethrow;
+        }
 
         final current = await _db.getPlaylist(playlist.id);
         if (await _exists(current.thumbnailPath)) playlistCovers++;
@@ -183,10 +217,12 @@ class LibraryExportService {
     String? settingsFile;
     if (writeSettings) {
       try {
-        settingsFile = await writeSettingsFile();
+        settingsFile = await writeSettingsFile(verify: true);
+        FolderWriteErrors.succeeded(SettingsMirror.errorKey);
       } catch (e) {
         problems.add('Settings: $e');
         _log.warn('settings export failed: $e');
+        FolderWriteErrors.failed(SettingsMirror.errorKey, 'Settings file', e);
       }
     }
     _log.info(
@@ -330,14 +366,18 @@ class LibraryExportService {
   /// written over: it came from elsewhere, for example copied from another
   /// phone. It is put aside as [previousSettingsFileName] first, and
   /// Restore settings offers it.
-  Future<String> writeSettingsFile() {
+  ///
+  /// With [verify] the file is compared with the disk even when this run
+  /// already wrote the same content, so a file changed on disk since is
+  /// written again (by the same rules).
+  Future<String> writeSettingsFile({bool verify = false}) {
     final previous = _settingsWrite;
     final next =
         previous == null
-            ? _writeSettingsFileNow()
+            ? _writeSettingsFileNow(verify)
             : previous.then(
-              (_) => _writeSettingsFileNow(),
-              onError: (Object _) => _writeSettingsFileNow(),
+              (_) => _writeSettingsFileNow(verify),
+              onError: (Object _) => _writeSettingsFileNow(verify),
             );
     _settingsWrite = next;
     next.then<void>((_) {}, onError: (Object _) {}).whenComplete(() {
@@ -373,12 +413,14 @@ class LibraryExportService {
     }
   }
 
-  Future<String> _writeSettingsFileNow() async {
+  Future<String> _writeSettingsFileNow(bool verify) async {
     final content = await _settingsFileContent();
     final hash = contentHash(content);
     final target = p.join(backupDir, settingsFileName);
     final file = File(target);
-    if (_settingsFileHash == hash && await file.exists()) return target;
+    if (!verify && _settingsFileHash == hash && await file.exists()) {
+      return target;
+    }
     final exists = await file.exists();
     String? onDisk;
     if (exists) {

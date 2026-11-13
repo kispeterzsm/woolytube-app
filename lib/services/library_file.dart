@@ -386,7 +386,11 @@ class LibraryFileService {
   /// files changed. `Music/WoolyTube` is created when missing;
   /// `Movies/WoolyTube` only gets the file when it exists. Writes run one
   /// after another.
-  Future<int> write() {
+  ///
+  /// With [verify] each file is compared with the disk even when this run
+  /// already wrote the same content, so a file changed on disk since is
+  /// written again.
+  Future<int> write({bool verify = false}) {
     if (_holds > 0) {
       _heldBack = true;
       return Future.value(0);
@@ -394,10 +398,10 @@ class LibraryFileService {
     final previous = _writing;
     final next =
         previous == null
-            ? _writeNow()
+            ? _writeNow(verify)
             : previous.then(
-              (_) => _writeNow(),
-              onError: (Object _) => _writeNow(),
+              (_) => _writeNow(verify),
+              onError: (Object _) => _writeNow(verify),
             );
     _writing = next;
     next.then<void>((_) {}, onError: (Object _) {}).whenComplete(() {
@@ -406,7 +410,7 @@ class LibraryFileService {
     return next;
   }
 
-  Future<int> _writeNow() async {
+  Future<int> _writeNow(bool verify) async {
     if (_holds > 0) {
       // A restore started while this write waited its turn.
       _heldBack = true;
@@ -424,7 +428,9 @@ class LibraryFileService {
       if (!isAudioRoot && !await dir.exists()) continue;
       final path = pathIn(root);
       final file = File(path);
-      if (_writtenBodies[path] == bodyText && await file.exists()) continue;
+      if (!verify && _writtenBodies[path] == bodyText && await file.exists()) {
+        continue;
+      }
       final onDisk = await _readJson(path);
       if (onDisk != null) {
         final version = _versionOf(onDisk);
