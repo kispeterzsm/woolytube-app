@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:woolytube/player/player_layout.dart';
+import 'package:woolytube/player/player_shell.dart';
 import 'package:woolytube/player/video_view.dart';
+import 'package:woolytube/providers/lifecycle_provider.dart';
 import 'package:woolytube/providers/playback_providers.dart';
 import 'package:woolytube/services/chapter_playback.dart';
 import 'package:woolytube/services/chapters.dart';
@@ -209,6 +212,49 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Second page'), findsNothing);
     expect(find.text('Row 0'), findsOneWidget);
+  });
+
+  testWidgets('Android sends back to the app on every page and after '
+      'resuming', (tester) async {
+    final harness = await pumpPlayerShell(tester);
+    // Without this the embedding closes the app on back, even on a page.
+    expect(harness.frameworkHandlesBackCalls, isNotEmpty);
+    expect(harness.frameworkHandlesBackCalls, everyElement(isTrue));
+
+    harness.systemCalls.clear();
+    harness.pagesKey.currentState!.push(
+      MaterialPageRoute<void>(
+        builder: (_) => const Scaffold(body: Text('Second page')),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(harness.frameworkHandlesBackCalls, isNotEmpty);
+    expect(harness.frameworkHandlesBackCalls, everyElement(isTrue));
+
+    // A new activity on the cached engine starts with back handling off.
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlayerShell)),
+    );
+    container.read(appLifecycleProvider.notifier).state =
+        AppLifecycleState.paused;
+    await tester.pump();
+    harness.systemCalls.clear();
+    container.read(appLifecycleProvider.notifier).state =
+        AppLifecycleState.resumed;
+    await tester.pump();
+    expect(harness.frameworkHandlesBackCalls, [true]);
+
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text('Second page'), findsNothing);
+    expect(find.text('Row 0'), findsOneWidget);
+    expect(harness.systemPopped, isFalse);
+    expect(harness.frameworkHandlesBackCalls, everyElement(isTrue));
+
+    // Only back on the first page leaves the app.
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(harness.systemPopped, isTrue);
   });
 
   testWidgets('pushing a page from above the panel collapses it', (

@@ -90,6 +90,18 @@ class PlayerShellHarness {
   late Track videoTrack;
   late Playlist testPlaylist;
 
+  /// What the app told Android about handling back, oldest first. While
+  /// the last value is not true, Android closes the app on back.
+  List<Object?> get frameworkHandlesBackCalls => [
+    for (final call in systemCalls)
+      if (call.method == 'SystemNavigator.setFrameworkHandlesBack')
+        call.arguments,
+  ];
+
+  /// Whether the app asked Android to leave it.
+  bool get systemPopped =>
+      systemCalls.any((call) => call.method == 'SystemNavigator.pop');
+
   PlayerShellState shellState(WidgetTester tester) =>
       tester.state<PlayerShellState>(find.byType(PlayerShell));
 

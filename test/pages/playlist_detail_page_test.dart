@@ -1680,6 +1680,38 @@ void main() {
     expect(metadata.reconcileCalls, 2);
   });
 
+  testWidgets('inside the player shell: system back on a playlist returns '
+      'home instead of leaving the app', (tester) async {
+    final livePlaylists = BehaviorSubject<List<Playlist>>.seeded([playlist]);
+    addTearDown(livePlaylists.close);
+    final harness = await pumpPlayerShell(
+      tester,
+      overrides: [
+        ...serviceOverrides(),
+        playlistsProvider.overrideWith((ref) => livePlaylists.stream),
+      ],
+    );
+    unawaited(
+      harness.pagesKey.currentState!.push(
+        MaterialPageRoute<void>(
+          builder: (_) => PlaylistDetailPage(playlistId: playlist.id),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(PlaylistDetailPage), findsOneWidget);
+    // Android hands back presses to the app instead of closing it.
+    expect(harness.frameworkHandlesBackCalls, isNotEmpty);
+    expect(harness.frameworkHandlesBackCalls.last, isTrue);
+
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.byType(PlaylistDetailPage), findsNothing);
+    expect(find.byKey(const ValueKey('test-page')), findsOneWidget);
+    expect(harness.systemPopped, isFalse);
+    expect(harness.frameworkHandlesBackCalls.last, isTrue);
+  });
+
   testWidgets('inside the player shell: back closes search, pages stay '
       'under the player', (tester) async {
     final livePlaylists = BehaviorSubject<List<Playlist>>.seeded([playlist]);

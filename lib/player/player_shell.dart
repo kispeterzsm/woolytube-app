@@ -92,7 +92,11 @@ class PlayerShellState extends ConsumerState<PlayerShell>
       NotificationListener<NavigationNotification>(
         // The shell route decides what back does; the inner navigator's own
         // notifications must not tell the engine that the app cannot pop.
-        onNotification: (_) => true,
+        // Page changes re-assert that the shell handles back instead.
+        onNotification: (_) {
+          _claimSystemBack();
+          return true;
+        },
         child: HeroControllerScope(
           controller: _heroController,
           child: _PagesNavigator(
@@ -133,6 +137,7 @@ class PlayerShellState extends ConsumerState<PlayerShell>
     expansion.addStatusListener(_onExpansionStatus);
     videoness.addListener(_onExpansionChanged);
     presence.addStatusListener(_onPresenceStatus);
+    _claimSystemBack();
   }
 
   @override
@@ -436,6 +441,20 @@ class PlayerShellState extends ConsumerState<PlayerShell>
     });
   }
 
+  /// Tells Android that back presses go to Flutter, which routes them to
+  /// [_handleBack]; that leaves the app itself once nothing is left to close.
+  ///
+  /// The Android embedding starts every activity with its back callback off
+  /// and turns it on only when told the framework handles back. Without it,
+  /// back closes the app even on a pushed page. [WidgetsApp] only reports
+  /// this when the root navigator changes, and drops reports sent before the
+  /// first lifecycle state arrives, so the shell claims back itself: at
+  /// start, whenever its pages change, and when the app resumes (a new
+  /// activity on the cached engine starts with the callback off again).
+  void _claimSystemBack() {
+    unawaited(SystemNavigator.setFrameworkHandlesBack(true));
+  }
+
   void _handleBack() {
     if (_video && expansion.value > 0 && videoLocked.value) return;
     if (expansion.value > 0) {
@@ -458,6 +477,7 @@ class PlayerShellState extends ConsumerState<PlayerShell>
     ref.listen<AppLifecycleState>(appLifecycleProvider, (previous, next) {
       if (next == AppLifecycleState.resumed &&
           previous != AppLifecycleState.resumed) {
+        _claimSystemBack();
         _suppressVideoAutoOpenUntil = DateTime.now().add(
           const Duration(seconds: 3),
         );

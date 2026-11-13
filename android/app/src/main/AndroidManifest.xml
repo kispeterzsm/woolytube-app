@@ -21,7 +21,12 @@
         android:extractNativeLibs="true"
         android:requestLegacyExternalStorage="true"
         android:fullBackupContent="@xml/backup_rules"
-        android:dataExtractionRules="@xml/data_extraction_rules">
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:enableOnBackInvokedCallback="false">
+        <!-- Back goes through the activity's OnBackPressedDispatcher to
+             Flutter, whose player shell keeps that callback enabled
+             (SystemNavigator.setFrameworkHandlesBack) and leaves the app
+             itself from the first page. No predictive back animations. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
