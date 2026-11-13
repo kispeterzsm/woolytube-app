@@ -60,8 +60,11 @@ void main() {
         );
         final tracks = [album, other];
         final playback = _Playback();
+        // The title, not the search field (matched words make it rich text).
         final albumTitle = find.byWidgetPredicate(
-          (widget) => widget is Text && widget.data == 'Full album',
+          (widget) =>
+              widget is Text &&
+              (widget.data ?? widget.textSpan?.toPlainText()) == 'Full album',
         );
         await tester.pumpWidget(
           ProviderScope(

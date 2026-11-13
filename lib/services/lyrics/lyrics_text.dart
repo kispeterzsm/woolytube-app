@@ -97,6 +97,59 @@ String foldForSearch(String text) {
   return buffer.toString();
 }
 
+/// [foldForSearch] of a raw text, with where each folded character came
+/// from, so a match in the folded text can be highlighted in the raw one.
+class FoldedText {
+  FoldedText._(this.text, this._starts, this._ends);
+
+  /// Equal to `foldForSearch(raw)`.
+  final String text;
+
+  // Per UTF-16 unit of [text]: the raw range [start, end) it came from.
+  final List<int> _starts;
+  final List<int> _ends;
+
+  /// The raw range [start, end) that folded range [start, end) came from.
+  (int, int) rawRange(int start, int end) => (_starts[start], _ends[end - 1]);
+}
+
+/// [foldForSearch] with offsets back into [text] (see [FoldedText]).
+FoldedText foldWithOffsets(String text) {
+  final buffer = StringBuffer();
+  final starts = <int>[];
+  final ends = <int>[];
+  var pendingSpace = false;
+  var spaceAt = 0;
+  var offset = 0;
+  for (final rune in text.runes) {
+    final char = String.fromCharCode(rune);
+    final folded = _foldChar(char);
+    if (folded == null) {
+      // A dropped apostrophe or accent mark belongs to the word it is in.
+      if (ends.isNotEmpty && !pendingSpace) ends.last = offset + char.length;
+    } else if (folded == ' ') {
+      if (buffer.isNotEmpty && !pendingSpace) {
+        pendingSpace = true;
+        spaceAt = offset;
+      }
+    } else {
+      if (pendingSpace) {
+        buffer.write(' ');
+        starts.add(spaceAt);
+        ends.add(offset);
+        pendingSpace = false;
+      }
+      buffer.write(folded);
+      for (var i = 0; i < folded.length; i++) {
+        starts.add(offset);
+        ends.add(offset + char.length);
+      }
+    }
+    offset += char.length;
+  }
+  return FoldedText._(buffer.toString(), starts, ends);
+}
+
 /// The words of a string already folded with [foldForSearch].
 List<String> tokenizeFolded(String folded) =>
     folded.split(' ').where((word) => word.isNotEmpty).toList();

@@ -17,6 +17,7 @@ import '../database/database.dart';
 import '../providers/chapter_fetch_jobs.dart';
 import '../providers/playback_providers.dart';
 import '../providers/providers.dart';
+import '../services/chapter_playback.dart';
 import '../services/chapters.dart';
 import '../services/download_errors.dart';
 import '../services/download_service.dart';
@@ -30,6 +31,7 @@ import '../services/video_quality.dart';
 import '../services/youtube_links.dart';
 import '../widgets/lyrics_line_text.dart';
 import '../widgets/mobile_data_download_guard.dart';
+import '../widgets/search_tools.dart';
 import '../widgets/tap_to_place_cursor_text_field.dart';
 import '../widgets/video_quality_picker.dart';
 import 'chapters_page.dart';
@@ -82,24 +84,36 @@ bool _isRemovedTrack(Track track) =>
     track.unavailableReason == 'removed';
 
 class _TrackListView {
-  _TrackListView(this.tracks, this.query, [this.lyricMatches = const {}]) {
-    final matches = <int, MediaChapter>{};
+  _TrackListView(
+    this.tracks,
+    this.query, [
+    this.filters = const SearchFilters(),
+    this.lyricHits = const [],
+  ]) {
     if (query.isEmpty) {
+      hits = const [];
       visible = tracks;
+      chapterMatches = const {};
+      lyricMatches = const {};
     } else {
-      visible = [
-        for (final track in tracks)
-          if (matchesNormalizedTrackSearch(track, query) ||
-              lyricMatches.containsKey(track.id))
-            track,
-      ];
-      for (final track in visible) {
-        if (track.chaptersJson == null) continue;
-        final chapter = matchingChapterForSearch(track, query);
-        if (chapter != null) matches[track.id] = chapter;
-      }
+      // Kept in playlist order: the search filters the list.
+      hits = searchLibrary(
+        tracks,
+        query,
+        filters: filters,
+        lyricHits: lyricHits,
+        ranked: false,
+      );
+      visible = [for (final hit in hits) hit.track];
+      chapterMatches = {
+        for (final hit in hits)
+          if (hit.chapter case final chapter?) hit.track.id: chapter,
+      };
+      lyricMatches = {
+        for (final hit in hits)
+          if (hit.lyric case final lyric?) hit.track.id: lyric,
+      };
     }
-    chapterMatches = matches;
     rowOf = {for (var i = 0; i < visible.length; i++) visible[i].id: i};
     problemRows = [
       for (var i = 0; i < visible.length; i++)
@@ -126,18 +140,24 @@ class _TrackListView {
     }
     this.maxIndex = maxIndex;
     hasPlayable = playable;
-    visibleHasPlayable =
-        identical(visible, tracks)
-            ? playable
-            : visible.any((t) => t.status == 'complete' && !t.alwaysSkip);
     summary = _summaryText(tracks.length, downloaded, unavailable, seconds);
   }
 
   final List<Track> tracks;
-  final String query;
+  final SearchQuery query;
+  final SearchFilters filters;
+
+  /// Lyric lines matching [query], searched while the Lyrics filter is on.
+  final List<LyricsHit> lyricHits;
+
+  /// The search results, in playlist order; empty when not searching.
+  late final List<SearchHit> hits;
+
+  /// What Play all queues for [hits].
+  late final List<QueueEntry> resultEntries = searchQueueEntries(hits);
 
   /// The best lyric line of each track whose lyrics match [query].
-  final Map<int, LyricsHit> lyricMatches;
+  late final Map<int, LyricsHit> lyricMatches;
   late final List<Track> visible;
   late final Map<int, int> rowOf;
 
@@ -150,7 +170,6 @@ class _TrackListView {
   late final Map<int, MediaChapter> chapterMatches;
   late final int maxIndex;
   late final bool hasPlayable;
-  late final bool visibleHasPlayable;
   late final String summary;
 
   static String _summaryText(
@@ -193,15 +212,19 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
 
   final TextEditingController _searchController = TextEditingController();
 
-  /// The normalized (trimmed, lower-case) query; empty when not filtering.
-  String _searchQuery = '';
+  /// The search; empty when not filtering.
+  SearchQuery _query = SearchQuery.empty;
 
-  // Lyric lines matching the query, searched after a short pause in typing.
+  /// The search filters; Lyrics is off each time search opens.
+  SearchFilters _searchFilters = const SearchFilters();
+
+  // Lyric lines matching the query, searched after a short pause in typing
+  // while the Lyrics filter is on.
   static const _lyricsDebounce = Duration(milliseconds: 200);
   Timer? _lyricsTimer;
   int _lyricsGeneration = 0;
-  Map<int, LyricsHit> _lyricMatches = const {};
-  String _lyricMatchesQuery = '';
+  List<LyricsHit> _lyricHits = const [];
+  String _lyricHitsQuery = '';
   bool _showSearch = false;
   double? _offsetBeforeSearch;
   bool _isUpdating = false;
@@ -341,16 +364,17 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   _TrackListView _viewFor(List<Track> tracks) {
     final cached = _view;
     final lyrics =
-        _lyricMatchesQuery == _searchQuery
-            ? _lyricMatches
-            : const <int, LyricsHit>{};
+        _searchFilters.lyrics && _lyricHitsQuery == _query.folded
+            ? _lyricHits
+            : const <LyricsHit>[];
     if (cached != null &&
         identical(cached.tracks, tracks) &&
-        cached.query == _searchQuery &&
-        identical(cached.lyricMatches, lyrics)) {
+        cached.query == _query &&
+        cached.filters == _searchFilters &&
+        identical(cached.lyricHits, lyrics)) {
       return cached;
     }
-    return _view = _TrackListView(tracks, _searchQuery, lyrics);
+    return _view = _TrackListView(tracks, _query, _searchFilters, lyrics);
   }
 
   // ---------------------------------------------------------------------
@@ -597,17 +621,21 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
 
   void _openSearch() {
     _offsetBeforeSearch = _position?.pixels;
-    setState(() => _showSearch = true);
+    setState(() {
+      _showSearch = true;
+      _searchFilters = const SearchFilters();
+    });
   }
 
   void _closeSearch() {
     _searchController.clear();
-    _scheduleLyricsSearch('');
     final restore = _offsetBeforeSearch;
     setState(() {
       _showSearch = false;
-      _searchQuery = '';
+      _query = SearchQuery.empty;
+      _searchFilters = const SearchFilters();
     });
+    _scheduleLyricsSearch();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final row = _rowOfCurrentTrack();
@@ -625,14 +653,14 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   }
 
   void _onSearchChanged(String raw) {
-    final query = normalizeTrackSearchQuery(raw);
-    if (query == _searchQuery) {
+    final query = SearchQuery(raw);
+    if (query == _query) {
       // Keeps the clear button in sync with the text.
       setState(() {});
       return;
     }
-    setState(() => _searchQuery = query);
-    _scheduleLyricsSearch(query);
+    setState(() => _query = query);
+    _scheduleLyricsSearch();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final position = _position;
       if (position != null && position.pixels != 0) {
@@ -642,17 +670,29 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     });
   }
 
-  /// Searches this playlist's lyrics for [query] once typing pauses, when
-  /// the playlist has lyrics on.
-  void _scheduleLyricsSearch(String query) {
+  /// Turns the search filters to [filters]; turning Lyrics on searches
+  /// them at once.
+  void _onFiltersChanged(SearchFilters filters) {
+    final lyricsChanged = filters.lyrics != _searchFilters.lyrics;
+    setState(() => _searchFilters = filters);
+    if (lyricsChanged) _scheduleLyricsSearch(now: true);
+  }
+
+  /// Searches this playlist's lyrics for the query once typing pauses, when
+  /// the Lyrics filter is on (only offered while the playlist has lyrics
+  /// on).
+  void _scheduleLyricsSearch({bool now = false}) {
     _lyricsTimer?.cancel();
     final generation = ++_lyricsGeneration;
-    if (query.length < 2 || _playlist?.lyricsMode == null) {
-      _lyricMatches = const {};
-      _lyricMatchesQuery = '';
+    final query = _query.folded;
+    if (query.length < 2 ||
+        !_searchFilters.lyrics ||
+        _playlist?.lyricsMode == null) {
+      _lyricHits = const [];
+      _lyricHitsQuery = '';
       return;
     }
-    _lyricsTimer = Timer(_lyricsDebounce, () async {
+    _lyricsTimer = Timer(now ? Duration.zero : _lyricsDebounce, () async {
       List<LyricsHit> hits;
       try {
         hits = await ref
@@ -662,16 +702,21 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
         hits = const [];
       }
       if (!mounted || generation != _lyricsGeneration) return;
-      final matches = <int, LyricsHit>{};
-      for (final hit in hits) {
-        matches.putIfAbsent(hit.trackId, () => hit);
-      }
       setState(() {
-        _lyricMatches = matches;
-        _lyricMatchesQuery = query;
+        _lyricHits = hits;
+        _lyricHitsQuery = query;
       });
     });
   }
+
+  /// "Lyrics" or "Transcript" while the playlist has lyrics on.
+  String? get _lyricsFilterLabel => switch (LyricsMode.fromDb(
+    _playlist?.lyricsMode,
+  )) {
+    LyricsMode.lyrics => 'Lyrics',
+    LyricsMode.transcript => 'Transcript',
+    null => null,
+  };
 
   // ---------------------------------------------------------------------
   // Playback actions
@@ -724,6 +769,15 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     unawaited(
       ref.read(playbackServiceProvider).playAll(tracks, playlist: _playlist),
     );
+  }
+
+  /// Plays the search results: files found by title or number whole, those
+  /// found only by chapter titles just those chapters.
+  void _playResults(List<QueueEntry> entries) {
+    FocusManager.instance.primaryFocus?.unfocus();
+    _forceFollowUntil = DateTime.now().add(_forceFollowWindow);
+    _lastUserScroll = null;
+    unawaited(ref.read(playbackServiceProvider).playEntries(entries));
   }
 
   /// Scrolls to the first failed or unavailable track below the one in the
@@ -912,7 +966,25 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
 
   PreferredSizeWidget _buildAppBar(Playlist? playlist, _TrackListView? view) {
     final name = playlist?.name ?? widget.initialName ?? '';
+    final lyricsLabel = _showSearch ? _lyricsFilterLabel : null;
     return AppBar(
+      bottom:
+          lyricsLabel == null
+              ? null
+              : PreferredSize(
+                preferredSize: const Size.fromHeight(44),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: SearchFilterChips(
+                      filters: _searchFilters,
+                      lyricsLabel: lyricsLabel,
+                      onChanged: _onFiltersChanged,
+                    ),
+                  ),
+                ),
+              ),
       titleSpacing: _showSearch ? 0 : null,
       title:
           _showSearch
@@ -1069,9 +1141,8 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   }
 
   Widget _buildHeader(_TrackListView view, Playlist? playlist) {
-    final filtering = _searchQuery.isNotEmpty;
-    final playTracks = filtering ? view.visible : view.tracks;
-    final canPlay = filtering ? view.visibleHasPlayable : view.hasPlayable;
+    final filtering = !_query.isEmpty;
+    final entries = view.resultEntries;
     final isVideoPlaylist = playlist?.audioOnly == false;
     final playback = ref.read(playbackServiceProvider);
 
@@ -1086,15 +1157,34 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                 // Shrinks with very large text instead of pushing the toggles off.
                 Flexible(
                   flex: 3,
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    child: FilledButton.icon(
-                      key: const ValueKey('playlist-detail-play'),
-                      onPressed: canPlay ? () => _playAll(playTracks) : null,
-                      icon: const Icon(Icons.play_arrow),
-                      label: Text(filtering ? 'Play results' : 'Play'),
-                    ),
-                  ),
+                  child:
+                      filtering
+                          ? FittedBox(
+                            fit: BoxFit.scaleDown,
+                            alignment: Alignment.centerLeft,
+                            child: SearchPlayAllButton(
+                              entries: entries,
+                              onPlayAll: () => _playResults(entries),
+                              onAddToUpNext:
+                                  () => addSearchResultsToUpNext(
+                                    context,
+                                    playback,
+                                    entries,
+                                  ),
+                            ),
+                          )
+                          : FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: FilledButton.icon(
+                              key: const ValueKey('playlist-detail-play'),
+                              onPressed:
+                                  view.hasPlayable
+                                      ? () => _playAll(view.tracks)
+                                      : null,
+                              icon: const Icon(Icons.play_arrow),
+                              label: const Text('Play'),
+                            ),
+                          ),
                 ),
                 const SizedBox(width: 4),
                 Flexible(
@@ -1224,6 +1314,8 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                               metrics: metrics,
                               chapterMatch: view.chapterMatches[track.id],
                               lyricMatch: view.lyricMatches[track.id],
+                              searchQuery:
+                                  view.query.isEmpty ? null : view.query,
                               onTap: _onTrackTap,
                               onActions: _showTrackActions,
                             ),
@@ -1245,12 +1337,23 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                     ),
                   )
                 else if (view.visible.isEmpty)
-                  const Center(
-                    child: Text(
-                      'No matching tracks',
-                      style: TextStyle(color: _muted),
+                  if (_lyricsFilterLabel case final label?
+                      when !_searchFilters.lyrics)
+                    SearchLyricsNudge(
+                      message: 'No matching tracks',
+                      lyricsLabel: label,
+                      onSearchLyrics:
+                          () => _onFiltersChanged(
+                            _searchFilters.copyWith(lyrics: true),
+                          ),
+                    )
+                  else
+                    const Center(
+                      child: Text(
+                        'No matching tracks',
+                        style: TextStyle(color: _muted),
+                      ),
                     ),
-                  ),
                 Positioned(
                   right: 16,
                   bottom: overlay + 16,

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/services/audio_focus_controller.dart';
+import 'package:woolytube/services/chapter_playback.dart';
 import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/playback_service.dart';
 
@@ -407,6 +408,86 @@ void main() {
 
       expect(player.opened.single.start, const Duration(seconds: 33));
       expect(playback.position, const Duration(seconds: 13));
+    });
+
+    group('search results', () {
+      Future<ChapterData> skipping(String id) async => ChapterData(
+        downloaded: threeChapters.downloaded,
+        skippedChapterIds: {id},
+      );
+
+      test('Play all plays whole files and only the chapters found, and '
+          'keeps Up next', () async {
+        final song = await addTrack('song');
+        final mix = await addTrack('mix', chapters: await skipping('three'));
+        final skipped = await addTrack('skipped');
+        await db.updateTrackAlwaysSkip(skipped.id, true);
+        final waiting = await addTrack('waiting');
+        expect(await playback.addToUpNextQueue(waiting), isTrue);
+
+        await playback.playEntries([
+          QueueEntry(song),
+          QueueEntry(mix, const {'three', 'one'}),
+          QueueEntry((await db.getTrack(skipped.id))!),
+        ]);
+        await settle();
+
+        expect(playback.currentTrack!.id, song.id);
+        // Up next still plays after the current file; then the mix in
+        // timeline order, without "three" (marked Always skip).
+        expect(playback.queue.map((t) => t.title), [
+          'song',
+          'waiting',
+          'First song',
+        ]);
+        expect(playback.upNextQueue.map((t) => t.id), [waiting.id]);
+      });
+
+      test('a file listed whole anywhere plays whole', () async {
+        final mix = await addTrack('mix', chapters: threeChapters);
+        await playback.playEntries([
+          QueueEntry(mix, const {'two'}),
+          QueueEntry(mix),
+        ]);
+        await settle();
+        expect(playback.queue.map((t) => t.title), [
+          'First song',
+          'Second song',
+          'Third song',
+        ]);
+      });
+
+      test('Add to Up next adds one entry per file, in order', () async {
+        final playing = await addTrack('playing');
+        final song = await addTrack('song');
+        final mix = await addTrack('mix', chapters: threeChapters);
+        final pending = await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: 90,
+          videoId: 'pending',
+        );
+        await playback.playTrack(playing, [playing]);
+        await settle();
+
+        final added = await playback.enqueueEntries([
+          QueueEntry(song),
+          QueueEntry(pending),
+          QueueEntry(mix, const {'two'}),
+        ]);
+        expect(added, 2);
+        expect(playback.upNextQueue.map((t) => t.title), [
+          'song',
+          'Second song',
+        ]);
+        expect(playback.currentTrack!.id, playing.id);
+
+        expect(
+          await playback.enqueueEntries([QueueEntry(playing)], first: true),
+          1,
+        );
+        expect(playback.upNextQueue.first.id, playing.id);
+      });
     });
 
     test('previous from a tapped chapter plays the chapter above', () async {

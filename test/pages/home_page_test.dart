@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:drift/drift.dart' show Value;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -10,6 +11,7 @@ import 'package:woolytube/pages/home_page.dart';
 import 'package:woolytube/providers/playback_providers.dart';
 import 'package:woolytube/providers/providers.dart';
 import 'package:woolytube/services/app_settings_service.dart';
+import 'package:woolytube/services/chapter_playback.dart';
 import 'package:woolytube/services/download_network_policy.dart';
 import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/download_service.dart';
@@ -424,6 +426,7 @@ void main() {
       ),
     );
     tracks = [(await db.getTrack(tracks.first.id))!, tracks.last];
+    playlists[1] = playlists[1].copyWith(lyricsMode: const Value('lyrics'));
     lyrics.hits = [
       LyricsHit(
         trackId: tracks.first.id,
@@ -445,18 +448,31 @@ void main() {
     await tester.tap(find.byTooltip('Search'));
     await tester.pumpAndSettle();
 
-    await tester.enterText(find.byType(TextField), 'an endles');
+    final chip = find.byKey(const ValueKey('search-filter-lyrics'));
+    expect(tester.widget<FilterChip>(chip).selected, isFalse);
     await tester.enterText(find.byType(TextField), 'an endless road');
     await tester.pump();
-    // Not searched until typing pauses.
-    expect(lyrics.queries, isEmpty);
-    expect(find.text('Lyrics'), findsNothing);
-    expect(find.text('Nothing matches'), findsOneWidget);
-
     await tester.pump(const Duration(milliseconds: 250));
     await tester.pump();
+    // Lyrics are not searched while the filter is off (the default); a
+    // button offers to.
+    expect(lyrics.queries, isEmpty);
+    expect(find.text('No titles match'), findsOneWidget);
+    expect(find.text('Search lyrics too'), findsOneWidget);
+
+    // Turning it on searches at once.
+    await tester.tap(chip);
+    await tester.pump();
+    await tester.pump(Duration.zero);
+    await tester.pump();
+    expect(tester.widget<FilterChip>(chip).selected, isTrue);
     expect(lyrics.queries, ['an endless road']);
-    expect(find.text('Lyrics'), findsOneWidget);
+    expect(find.text('Search lyrics too'), findsNothing);
+    final header = find.descendant(
+      of: find.byType(ListView),
+      matching: find.text('Lyrics'),
+    );
+    expect(header, findsOneWidget);
     final tile = find.byKey(const ValueKey('search-lyrics-7'));
     expect(tile, findsOneWidget);
     expect(
@@ -491,7 +507,17 @@ void main() {
     expect(playback.playedChapterId, 'ch2');
     expect(playback.playedStartAt, const Duration(milliseconds: 603000));
 
-    // A new query hides the old lines until its own search is done.
+    // Play all queues the chapter holding the line.
+    await tester.tap(find.text('Play all'));
+    await tester.pump();
+    expect(playback.playedEntries, [
+      [
+        QueueEntry(tracks.first, const {'ch2'}),
+      ],
+    ]);
+
+    // A new query hides the old lines until its own search is done, a
+    // moment after typing stops.
     await tester.enterText(find.byType(TextField), 'winter snow');
     await tester.pump();
     expect(find.byKey(const ValueKey('search-lyrics-7')), findsNothing);
@@ -504,8 +530,123 @@ void main() {
     await tester.enterText(find.byType(TextField), 'a');
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 250));
-    expect(find.text('Lyrics'), findsNothing);
+    expect(header, findsNothing);
     expect(lyrics.queries, hasLength(2));
+
+    // Turning the filter off hides the lines.
+    await tester.enterText(find.byType(TextField), 'winter snow');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('search-lyrics-7')), findsOneWidget);
+    await tester.tap(chip);
+    await tester.pump();
+    expect(find.byKey(const ValueKey('search-lyrics-7')), findsNothing);
+    expect(lyrics.queries, hasLength(3));
+
+    // Search opens with the filter off again.
+    await tester.tap(find.byTooltip('Close search'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Search'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<FilterChip>(chip).selected, isFalse);
+  });
+
+  testWidgets('search: best matches first, the chapter found, and Play all', (
+    tester,
+  ) async {
+    final mix = await insertTestTrack(
+      db,
+      playlistId: playlists[0].id,
+      videoId: 'mix',
+      title: 'Vibe mix',
+      status: 'complete',
+      filePath: '/tmp/mix.m4a',
+    );
+    await db.writeTrackChapters(
+      mix.id,
+      const ChapterData(
+        downloaded: [
+          MediaChapter(id: 'intro', title: 'Intro', startMs: 0, endMs: 60000),
+          MediaChapter(
+            id: 'ko',
+            title: 'Föl földobott kő',
+            startMs: 60000,
+            endMs: 120000,
+          ),
+          MediaChapter(
+            id: 'ko2',
+            title: 'Földobott kő (reprise)',
+            startMs: 120000,
+            endMs: 180000,
+          ),
+        ],
+      ),
+    );
+    final exact = await insertTestTrack(
+      db,
+      playlistId: playlists[5].id,
+      videoId: 'exact',
+      title: 'Song',
+      status: 'complete',
+      filePath: '/tmp/song.m4a',
+    );
+    tracks = [...tracks, (await db.getTrack(mix.id))!, exact];
+    await pumpHome(tester);
+    await tester.tap(find.byTooltip('Search'));
+    await tester.pumpAndSettle();
+    // No playlist has lyrics on: no Lyrics filter.
+    expect(find.byKey(const ValueKey('search-filter-lyrics')), findsNothing);
+
+    // Accents and word order don't matter; the chapter found shows.
+    await tester.enterText(find.byType(TextField), 'ko foldobott');
+    await tester.pump();
+    final mixTile = find.byKey(ValueKey('search-track-${mix.id}'));
+    expect(mixTile, findsOneWidget);
+    expect(
+      find.descendant(
+        of: mixTile,
+        matching: find.text(
+          'Chapter: Föl földobott kő · 1:00 · +1 more',
+          findRichText: true,
+        ),
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('1 track'), findsOneWidget);
+    await tester.tap(find.text('Play all'));
+    await tester.pump();
+    // Only the chapters found, not the whole mix.
+    expect(playback.playedEntries.single, [
+      QueueEntry(tracks[2], const {'ko', 'ko2'}),
+    ]);
+
+    // An exact title comes first, even from a later playlist; a track that
+    // is not downloaded is listed but not queued.
+    await tester.enterText(find.byType(TextField), 'song');
+    await tester.pump();
+    expect(find.text('3 tracks'), findsOneWidget);
+    double top(Track track) =>
+        tester.getTopLeft(find.byKey(ValueKey('search-track-${track.id}'))).dy;
+    expect(top(exact), lessThan(top(tracks[0])));
+    expect(top(tracks[0]), lessThan(top(tracks[1])));
+    await tester.tap(find.byKey(const ValueKey('search-results-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add 2 to Up next'));
+    await tester.pumpAndSettle();
+    expect(playback.enqueuedEntries.single, [
+      QueueEntry(exact),
+      QueueEntry(tracks[0]),
+    ]);
+    expect(find.text('Added 2 tracks to Up next'), findsOneWidget);
+
+    // The bar fits a narrow phone with large text.
+    tester.view.physicalSize = const Size(320 * 3, 800 * 3);
+    tester.platformDispatcher.textScaleFactorTestValue = 1.3;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.text('Play all'), findsOneWidget);
   });
 
   testWidgets('a whole-file transcript hit plays the chapter at its time', (
@@ -526,6 +667,7 @@ void main() {
       ),
     );
     tracks = [(await db.getTrack(tracks.first.id))!, tracks.last];
+    playlists[1] = playlists[1].copyWith(lyricsMode: const Value('transcript'));
     lyrics.hits = [
       LyricsHit(
         trackId: tracks.first.id,
@@ -541,6 +683,8 @@ void main() {
     await pumpHome(tester);
     await tester.tap(find.byTooltip('Search'));
     await tester.pumpAndSettle();
+    await tester.tap(find.text('Transcripts'));
+    await tester.pump();
     await tester.enterText(find.byType(TextField), 'mitochondria');
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 250));
@@ -722,6 +866,24 @@ class _Playback implements PlaybackService {
   int? played;
   String? playedChapterId;
   Duration? playedStartAt;
+  final playedEntries = <List<QueueEntry>>[];
+  final enqueuedEntries = <List<QueueEntry>>[];
+
+  @override
+  Future<void> playEntries(List<QueueEntry> entries) async =>
+      playedEntries.add(entries);
+
+  @override
+  Future<int> enqueueEntries(
+    List<QueueEntry> entries, {
+    bool first = false,
+  }) async {
+    enqueuedEntries.add(entries);
+    return entries.length;
+  }
+
+  @override
+  Future<bool> startUpNextQueueIfIdle() async => false;
 
   @override
   Future<void> playTrack(

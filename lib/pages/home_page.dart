@@ -14,6 +14,8 @@ import '../providers/providers.dart';
 import '../services/download_errors.dart';
 import '../services/download_service.dart';
 import '../services/lyrics/lyrics_models.dart';
+import '../services/chapter_playback.dart';
+import '../services/chapters.dart';
 import '../services/media_thumbnail_service.dart';
 import '../services/metadata_service.dart';
 import '../services/track_search.dart';
@@ -21,6 +23,7 @@ import '../services/update_service.dart';
 import '../widgets/lyrics_line_text.dart';
 import '../widgets/mobile_data_download_guard.dart';
 import '../widgets/playlist_card.dart';
+import '../widgets/search_tools.dart';
 import 'add_playlist_page.dart';
 import 'playlist_detail_page.dart';
 import 'playlist_settings_page.dart';
@@ -45,6 +48,9 @@ class _HomePageState extends ConsumerState<HomePage> {
   /// network access, before the shared sync state takes over.
   final Set<int> _startingPlaylistIds = <int>{};
   bool _showSearch = false;
+
+  /// The search filters; Lyrics is off each time search opens.
+  SearchFilters _searchFilters = const SearchFilters();
   bool _importing = false;
   AppUpdate? _availableUpdate;
   Future<void>? _updateCheck;
@@ -65,12 +71,18 @@ class _HomePageState extends ConsumerState<HomePage> {
     super.dispose();
   }
 
-  void _openSearch() => setState(() => _showSearch = true);
+  void _openSearch() => setState(() {
+    _showSearch = true;
+    _searchFilters = const SearchFilters();
+  });
 
   void _closeSearch() {
     FocusManager.instance.primaryFocus?.unfocus();
     _searchController.clear();
-    setState(() => _showSearch = false);
+    setState(() {
+      _showSearch = false;
+      _searchFilters = const SearchFilters();
+    });
   }
 
   @override
@@ -369,6 +381,9 @@ class _HomePageState extends ConsumerState<HomePage> {
             builder:
                 (context, value, _) => _SearchResults(
                   query: value.text,
+                  filters: _searchFilters,
+                  onFiltersChanged:
+                      (filters) => setState(() => _searchFilters = filters),
                   onOpenPlaylist: _navigateToDetail,
                 ),
           ),
@@ -876,13 +891,21 @@ class _HomeNotice extends StatelessWidget {
   }
 }
 
-/// The library search: playlists whose name matches, then every track whose
-/// title, number or chapter matches, then lyric and transcript lines (searched
-/// a moment after typing stops). An empty query lists every track.
+/// The library search: a filter row with Play all, then playlists whose
+/// name matches, every track whose title, number or chapter matches (best
+/// matches first) and, with the Lyrics filter on, lyric and transcript lines
+/// (searched a moment after typing stops). An empty query lists every track.
 class _SearchResults extends ConsumerStatefulWidget {
-  const _SearchResults({required this.query, required this.onOpenPlaylist});
+  const _SearchResults({
+    required this.query,
+    required this.filters,
+    required this.onFiltersChanged,
+    required this.onOpenPlaylist,
+  });
 
   final String query;
+  final SearchFilters filters;
+  final ValueChanged<SearchFilters> onFiltersChanged;
   final ValueChanged<Playlist> onOpenPlaylist;
 
   @override
@@ -890,17 +913,21 @@ class _SearchResults extends ConsumerStatefulWidget {
 }
 
 class _SearchResultsState extends ConsumerState<_SearchResults> {
-  // The last filter, reused while neither the tracks nor the query changed
-  // (an unrelated rebuild must not filter the whole library again).
-  List<Track>? _filteredFrom;
-  String? _filteredQuery;
-  List<Track> _filtered = const [];
+  // The last search, reused while neither its inputs changed (an unrelated
+  // rebuild must not search the whole library again).
+  List<Track>? _searchedTracks;
+  SearchQuery? _searchedQuery;
+  SearchFilters? _searchedFilters;
+  List<LyricsHit>? _searchedLyrics;
+  List<Playlist>? _searchedPlaylists;
+  List<SearchHit> _hits = const [];
 
   // The tracks grouped by playlist, as a queue for playback.
   List<Track>? _groupedFrom;
   Map<int, List<Track>> _byPlaylist = const {};
 
-  // Lyric lines matching the query, searched after a short pause in typing.
+  // Lyric lines matching the query, searched after a short pause in typing
+  // while the Lyrics filter is on.
   static const _lyricsDebounce = Duration(milliseconds: 200);
   Timer? _lyricsTimer;
   int _lyricsGeneration = 0;
@@ -908,6 +935,8 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
 
   /// The query [_lyricHits] belong to; older hits are not shown.
   String _lyricHitsQuery = '';
+
+  late SearchQuery _query = SearchQuery(widget.query);
 
   @override
   void initState() {
@@ -918,7 +947,14 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
   @override
   void didUpdateWidget(_SearchResults oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.query.trim() != widget.query.trim()) _scheduleLyricsSearch();
+    final query = SearchQuery(widget.query);
+    final queryChanged = query != _query;
+    _query = query;
+    final lyricsChanged = oldWidget.filters.lyrics != widget.filters.lyrics;
+    if (queryChanged || lyricsChanged) {
+      // Turning the filter on searches at once.
+      _scheduleLyricsSearch(now: lyricsChanged);
+    }
   }
 
   @override
@@ -927,15 +963,16 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
     super.dispose();
   }
 
-  void _scheduleLyricsSearch() {
+  void _scheduleLyricsSearch({bool now = false}) {
     _lyricsTimer?.cancel();
     final generation = ++_lyricsGeneration;
-    final query = widget.query.trim();
-    if (query.length < 2) {
+    final query = _query.folded;
+    if (!widget.filters.lyrics || query.length < 2) {
       _lyricHits = const [];
+      _lyricHitsQuery = '';
       return;
     }
-    _lyricsTimer = Timer(_lyricsDebounce, () async {
+    _lyricsTimer = Timer(now ? Duration.zero : _lyricsDebounce, () async {
       List<LyricsHit> hits;
       try {
         hits = await ref.read(lyricsSearchProvider).search(query, limit: 30);
@@ -950,19 +987,35 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
     });
   }
 
-  List<Track> _filter(List<Track> tracks, String normalized) {
-    if (!identical(tracks, _filteredFrom) || normalized != _filteredQuery) {
-      _filteredFrom = tracks;
-      _filteredQuery = normalized;
-      _filtered =
-          normalized.isEmpty
-              ? tracks
-              : [
-                for (final track in tracks)
-                  if (matchesNormalizedTrackSearch(track, normalized)) track,
-              ];
+  /// The current lyric hits, when they belong to the current query.
+  List<LyricsHit> get _currentLyricHits =>
+      widget.filters.lyrics && _lyricHitsQuery == _query.folded
+          ? _lyricHits
+          : const [];
+
+  List<SearchHit> _search(List<Track> tracks, List<Playlist> playlists) {
+    final lyricHits = _currentLyricHits;
+    if (!identical(tracks, _searchedTracks) ||
+        _query != _searchedQuery ||
+        widget.filters != _searchedFilters ||
+        !identical(lyricHits, _searchedLyrics) ||
+        !identical(playlists, _searchedPlaylists)) {
+      _searchedTracks = tracks;
+      _searchedQuery = _query;
+      _searchedFilters = widget.filters;
+      _searchedLyrics = lyricHits;
+      _searchedPlaylists = playlists;
+      _hits = searchLibrary(
+        tracks,
+        _query,
+        filters: widget.filters,
+        lyricHits: lyricHits,
+        playlistOrder: {
+          for (var i = 0; i < playlists.length; i++) playlists[i].id: i,
+        },
+      );
     }
-    return _filtered;
+    return _hits;
   }
 
   List<Track> _queueFor(List<Track> tracks, int playlistId) {
@@ -977,12 +1030,23 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
     return _byPlaylist[playlistId] ?? const [];
   }
 
+  /// "Lyrics" or "Transcripts" when some playlist has lyrics on, else null.
+  static String? _lyricsLabel(List<Playlist> playlists) {
+    final modes = {
+      for (final p in playlists)
+        if (LyricsMode.fromDb(p.lyricsMode) case final mode?) mode,
+    };
+    if (modes.isEmpty) return null;
+    return modes.length == 1 && modes.single == LyricsMode.transcript
+        ? 'Transcripts'
+        : 'Lyrics';
+  }
+
   @override
   Widget build(BuildContext context) {
     final playlistsAsync = ref.watch(playlistsProvider);
     final visibleAsync = ref.watch(visiblePlaylistsProvider);
     final tracksAsync = ref.watch(allTracksProvider);
-    final normalized = normalizeTrackSearchQuery(widget.query);
 
     if (playlistsAsync.hasError || tracksAsync.hasError) {
       return Center(
@@ -998,27 +1062,126 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
       return const _SearchMessage('No tracks yet. Add a playlist first.');
     }
 
+    final query = _query;
     final playlistsById = {for (final p in playlists) p.id: p};
     final matchingPlaylists =
-        normalized.isEmpty
+        query.isEmpty
             ? const <Playlist>[]
             : [
               for (final p in visibleAsync.valueOrNull ?? playlists)
-                if (p.name.toLowerCase().contains(normalized)) p,
+                if (matchesSearchText(p.name, query)) p,
             ];
-    final filtered = _filter(tracks, normalized);
+    final hits = _search(tracks, playlists);
+    // Tracks found only by a lyric line show as their lines, below.
+    final trackHits = [
+      for (final hit in hits)
+        if (hit.reason != SearchReason.lyrics) hit,
+    ];
     final lyricHits = _lyricRows(tracks);
-    if (filtered.isEmpty && matchingPlaylists.isEmpty && lyricHits.isEmpty) {
-      return const _SearchMessage('Nothing matches');
+    final lyricsLabel = _lyricsLabel(playlists);
+    final entries =
+        query.isEmpty ? const <QueueEntry>[] : searchQueueEntries(hits);
+
+    final Widget results;
+    if (trackHits.isEmpty && matchingPlaylists.isEmpty && lyricHits.isEmpty) {
+      results =
+          lyricsLabel != null && !widget.filters.lyrics && !query.isEmpty
+              ? SearchLyricsNudge(
+                message: 'No titles match',
+                lyricsLabel: lyricsLabel,
+                onSearchLyrics:
+                    () => widget.onFiltersChanged(
+                      widget.filters.copyWith(lyrics: true),
+                    ),
+              )
+              : const _SearchMessage('Nothing matches');
+    } else {
+      results = _buildList(
+        query: query,
+        playlistsById: playlistsById,
+        matchingPlaylists: matchingPlaylists,
+        trackHits: trackHits,
+        lyricHits: lyricHits,
+        tracks: tracks,
+      );
     }
 
+    final showActions = !query.isEmpty && hits.isNotEmpty;
+    final showBar = lyricsLabel != null || showActions;
+    return Column(
+      children: [
+        if (showBar)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 4, 4),
+            child: Row(
+              children: [
+                // The chips scroll and the count shrinks, so Play all always
+                // keeps its size.
+                Expanded(
+                  child: Row(
+                    children: [
+                      Flexible(
+                        child: SearchFilterChips(
+                          filters: widget.filters,
+                          lyricsLabel: lyricsLabel,
+                          onChanged: widget.onFiltersChanged,
+                        ),
+                      ),
+                      if (showActions)
+                        Flexible(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            child: Text(
+                              hits.length == 1
+                                  ? '1 track'
+                                  : '${hits.length} tracks',
+                              key: const ValueKey('search-result-count'),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: _searchMuted,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                if (showActions)
+                  SearchPlayAllButton(
+                    entries: entries,
+                    onPlayAll: () => _playAll(entries),
+                    onAddToUpNext:
+                        () => addSearchResultsToUpNext(
+                          context,
+                          ref.read(playbackServiceProvider),
+                          entries,
+                        ),
+                  ),
+              ],
+            ),
+          ),
+        Expanded(child: results),
+      ],
+    );
+  }
+
+  Widget _buildList({
+    required SearchQuery query,
+    required Map<int, Playlist> playlistsById,
+    required List<Playlist> matchingPlaylists,
+    required List<SearchHit> trackHits,
+    required List<(LyricsHit, Track)> lyricHits,
+    required List<Track> tracks,
+  }) {
     // Rows: [playlist header + playlists], [tracks header] + tracks,
     // [lyrics header + lyric lines].
     final showHeaders = matchingPlaylists.isNotEmpty || lyricHits.isNotEmpty;
     final playlistRows =
         matchingPlaylists.isEmpty ? 0 : matchingPlaylists.length + 1;
-    final trackHeader = showHeaders && filtered.isNotEmpty ? 1 : 0;
-    final trackRows = trackHeader + filtered.length;
+    final trackHeader = showHeaders && trackHits.isNotEmpty ? 1 : 0;
+    final trackRows = trackHeader + trackHits.length;
     final lyricRows = lyricHits.isEmpty ? 0 : lyricHits.length + 1;
     final itemCount = playlistRows + trackRows + lyricRows;
 
@@ -1035,6 +1198,7 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
                 final playlist = matchingPlaylists[index - 1];
                 return _PlaylistResultTile(
                   playlist: playlist,
+                  query: query,
                   onTap: () {
                     FocusManager.instance.primaryFocus?.unfocus();
                     widget.onOpenPlaylist(playlist);
@@ -1059,33 +1223,37 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
                 if (i == 0) return const _SearchHeader('Tracks');
                 i--;
               }
-              final track = filtered[i];
+              final hit = trackHits[i];
+              final track = hit.track;
               final playlist = playlistsById[track.playlistId];
               return _SearchTrackTile(
                 key: ValueKey('search-track-${track.id}'),
-                track: track,
+                hit: hit,
+                query: query,
                 playlist: playlist,
-                onTap: () => _onTrackTap(track, playlist, tracks),
+                onTap: () => _onTrackTap(hit, playlist, tracks),
               );
             },
           ),
     );
   }
 
+  void _playAll(List<QueueEntry> entries) {
+    FocusManager.instance.primaryFocus?.unfocus();
+    unawaited(ref.read(playbackServiceProvider).playEntries(entries));
+  }
+
   /// The lyric hits whose track is still in the library, with the track.
   List<(LyricsHit, Track)> _lyricRows(List<Track> tracks) {
-    if (_lyricHits.isEmpty ||
-        widget.query.trim().length < 2 ||
-        _lyricHitsQuery != widget.query.trim()) {
-      return const [];
-    }
-    final wanted = {for (final hit in _lyricHits) hit.trackId};
+    final lyricHits = _currentLyricHits;
+    if (lyricHits.isEmpty) return const [];
+    final wanted = {for (final hit in lyricHits) hit.trackId};
     final byId = {
       for (final track in tracks)
         if (wanted.contains(track.id)) track.id: track,
     };
     return [
-      for (final hit in _lyricHits)
+      for (final hit in lyricHits)
         if (byId[hit.trackId] case final track?) (hit, track),
     ];
   }
@@ -1110,7 +1278,8 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
         );
   }
 
-  void _onTrackTap(Track track, Playlist? playlist, List<Track> tracks) {
+  void _onTrackTap(SearchHit hit, Playlist? playlist, List<Track> tracks) {
+    final track = hit.track;
     FocusManager.instance.primaryFocus?.unfocus();
     if (playlist == null || !_canPlay(track, playlist)) return;
     ref
@@ -1119,7 +1288,7 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
           track,
           _queueFor(tracks, track.playlistId),
           playlist: playlist,
-          chapterId: matchingChapterForSearch(track, widget.query)?.id,
+          chapterId: hit.chapter?.id,
         );
   }
 
@@ -1146,6 +1315,8 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
     return true;
   }
 }
+
+const _searchMuted = Color(0xFF888888);
 
 /// One matched lyric or transcript line: the track (or chapter) title, then
 /// the line with its matched words highlighted and its time.
@@ -1284,19 +1455,23 @@ class _SearchHeader extends StatelessWidget {
 }
 
 class _PlaylistResultTile extends StatelessWidget {
-  const _PlaylistResultTile({required this.playlist, required this.onTap});
+  const _PlaylistResultTile({
+    required this.playlist,
+    required this.query,
+    required this.onTap,
+  });
 
   final Playlist playlist;
+  final SearchQuery query;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     return ListTile(
       leading: const Icon(Icons.queue_music, color: Color(0xFFAAAAAA)),
-      title: Text(
+      title: searchHighlightedText(
         playlist.name,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
+        query,
         style: const TextStyle(color: Colors.white, fontSize: 14),
       ),
       subtitle: Text(
@@ -1309,19 +1484,24 @@ class _PlaylistResultTile extends StatelessWidget {
   }
 }
 
-/// One track in the search results. Only this tile rebuilds when it starts
-/// or stops being the playing track.
+/// One track in the search results, with the words found highlighted and
+/// the chapter found, if any. Only this tile rebuilds when it starts or
+/// stops being the playing track.
 class _SearchTrackTile extends ConsumerWidget {
   const _SearchTrackTile({
     super.key,
-    required this.track,
+    required this.hit,
+    required this.query,
     required this.playlist,
     required this.onTap,
   });
 
-  final Track track;
+  final SearchHit hit;
+  final SearchQuery query;
   final Playlist? playlist;
   final VoidCallback onTap;
+
+  Track get track => hit.track;
 
   static const _accent = Color(0xFF2196F3);
 
@@ -1405,8 +1585,9 @@ class _SearchTrackTile extends ConsumerWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Text(
+                    searchHighlightedText(
                       track.title,
+                      query,
                       style: TextStyle(
                         color: isCurrentTrack ? _accent : Colors.white,
                         fontSize: 14,
@@ -1416,8 +1597,22 @@ class _SearchTrackTile extends ConsumerWidget {
                                 : FontWeight.normal,
                       ),
                       maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
                     ),
+                    if (hit.chapter case final chapter?) ...[
+                      const SizedBox(height: 2),
+                      searchHighlightedText(
+                        _chapterLine(chapter),
+                        query,
+                        style: const TextStyle(
+                          color: Color(0xFFAAAAAA),
+                          fontSize: 12,
+                        ),
+                        highlightStyle: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 4),
                     Text(
                       subtitle,
@@ -1455,6 +1650,13 @@ class _SearchTrackTile extends ConsumerWidget {
         ),
       ),
     );
+  }
+
+  /// `Chapter: Title · 1:20`, and how many more chapters matched.
+  String _chapterLine(MediaChapter chapter) {
+    final more = hit.chapters.length - 1;
+    return 'Chapter: ${chapter.title} · ${formatLyricsTime(chapter.startMs)}'
+        '${more > 0 ? ' · +$more more' : ''}';
   }
 
   Widget _buildThumbnail(BuildContext context, double width) {

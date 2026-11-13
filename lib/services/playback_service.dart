@@ -682,12 +682,68 @@ class PlaybackService
         await _startQueue(playableTracksForPlayback(tracks));
       });
 
+  /// Replaces the queue with [entries] (such as search results) and plays
+  /// it, in this order or shuffled; Up next is kept. Each file plays whole
+  /// or as just its listed chapters. Files that are not downloaded or are
+  /// marked Always skip are left out, and so are chapters marked Always
+  /// skip.
+  Future<void> playEntries(List<QueueEntry> entries) => _transition(() async {
+    final (tracks, chapterSubsets) = _entryTracks(entries);
+    await _startQueue(
+      playableTracksForPlayback(tracks),
+      chapterSubsets: chapterSubsets,
+    );
+  });
+
+  /// Adds [entries] to Up next as one entry per file, in order ([first]
+  /// puts them all before what is already waiting), skipping what
+  /// [playEntries] leaves out. Returns how many files were added.
+  Future<int> enqueueEntries(
+    List<QueueEntry> entries, {
+    bool first = false,
+  }) async {
+    final (tracks, chapterSubsets) = _entryTracks(entries);
+    final groups = await _buildAlbums(
+      playableTracksForPlayback(tracks),
+      chapterSubsets: chapterSubsets,
+    );
+    for (final album in first ? groups.reversed : groups) {
+      _albumQueue.enqueue(album, first: first);
+    }
+    if (groups.isNotEmpty) _publishQueue();
+    return groups.length;
+  }
+
+  /// The distinct files of [entries] in order, and the chapters to play of
+  /// those that play only some. A file listed whole anywhere plays whole.
+  static (List<Track>, Map<int, Set<String>>) _entryTracks(
+    List<QueueEntry> entries,
+  ) {
+    final tracks = <Track>[];
+    final seen = <int>{};
+    final whole = <int>{};
+    final subsets = <int, Set<String>>{};
+    for (final entry in entries) {
+      final id = entry.track.id;
+      if (seen.add(id)) tracks.add(entry.track);
+      final chapterIds = entry.chapterIds;
+      if (chapterIds == null) {
+        whole.add(id);
+        subsets.remove(id);
+      } else if (!whole.contains(id)) {
+        subsets.putIfAbsent(id, () => <String>{}).addAll(chapterIds);
+      }
+    }
+    return (tracks, subsets);
+  }
+
   Future<void> _startQueue(
     List<Track> tracks, {
     Track? selected,
     String? chapterId,
     bool whole = false,
     Duration? startAt,
+    Map<int, Set<String>> chapterSubsets = const {},
   }) async {
     final trackId = selected?.id;
     final groups = await _buildAlbums(
@@ -695,6 +751,7 @@ class PlaybackService
       trackId: trackId,
       chapterId: chapterId,
       whole: whole,
+      chapterSubsets: chapterSubsets,
     );
     if (groups.isEmpty) {
       reportMessage('Nothing to play');
@@ -801,12 +858,15 @@ class PlaybackService
   }
 
   /// Builds the playback groups for [tracks] from fresh database rows, reading
-  /// each distinct playlist once instead of one query per track.
+  /// each distinct playlist once instead of one query per track. A file in
+  /// [chapterSubsets] plays only those of its active chapters that are not
+  /// marked Always skip, and is left out when none is left.
   Future<List<PlaybackAlbum>> _buildAlbums(
     List<Track> tracks, {
     int? trackId,
     String? chapterId,
     bool whole = false,
+    Map<int, Set<String>> chapterSubsets = const {},
   }) async {
     final playlists = <int, Playlist>{};
     final freshTracks = <int, Track>{};
@@ -844,6 +904,15 @@ class PlaybackService
                 .map((c) => PlaybackItem(fresh, c))
                 .toList();
         if (!items.any((i) => i.chapter?.id == chapterId)) return const [];
+      }
+      final subset = chapterSubsets[track.id];
+      if (subset != null) {
+        final data = ChapterData.decode(fresh.chaptersJson);
+        items = [
+          for (final chapter in data.active)
+            if (subset.contains(chapter.id) && !data.isSkipped(chapter.id))
+              PlaybackItem(fresh, chapter),
+        ];
       }
       // Every chapter of it is marked Always skip.
       if (items.isEmpty) continue;

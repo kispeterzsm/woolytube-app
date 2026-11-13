@@ -10,6 +10,7 @@ import 'package:woolytube/pages/playlist_detail_page.dart';
 import 'package:woolytube/pages/playlist_settings_page.dart';
 import 'package:woolytube/providers/playback_providers.dart';
 import 'package:woolytube/providers/providers.dart';
+import 'package:woolytube/services/chapter_playback.dart';
 import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/download_service.dart';
 import 'package:woolytube/services/library_gate.dart';
@@ -296,7 +297,25 @@ void main() {
       find.textContaining('Chapter: Hidden Melody · 1:20'),
       findsOneWidget,
     );
-    expect(find.text('Play results'), findsOneWidget);
+    // Play all plays only the chapter found, not the whole album.
+    await tester.tap(find.text('Play all'));
+    await tester.pump();
+    expect(playback.playedEntries, [
+      [
+        QueueEntry(album, const {'b'}),
+      ],
+    ]);
+    expect(playback.playAllCalls, 0);
+    await tester.tap(find.byKey(const ValueKey('search-results-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add to Up next'));
+    await tester.pumpAndSettle();
+    expect(playback.enqueuedEntries, [
+      [
+        QueueEntry(album, const {'b'}),
+      ],
+    ]);
+    expect(find.text('Added 1 track to Up next'), findsOneWidget);
 
     await tester.tap(find.byKey(const ValueKey('playlist-search-clear')));
     await tester.pumpAndSettle();
@@ -373,13 +392,21 @@ void main() {
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), 'Endless road');
     await tester.pump();
-    // Title matches show at once; lyrics once typing pauses.
+    // Title matches show at once; lyrics only with the Lyrics filter,
+    // which is off by default.
     expect(find.text('Endless road trip'), findsOneWidget);
     expect(find.text('Avicii - Hey Brother'), findsNothing);
-    expect(lyrics.queries, isEmpty);
-
     await tester.pump(const Duration(milliseconds: 250));
     await tester.pumpAndSettle();
+    expect(lyrics.queries, isEmpty);
+    final chip = find.byKey(const ValueKey('search-filter-lyrics'));
+    expect(tester.widget<FilterChip>(chip).selected, isFalse);
+
+    // Turning it on searches at once.
+    await tester.tap(chip);
+    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(tester.widget<FilterChip>(chip).selected, isTrue);
     expect(lyrics.queries, [('endless road', playlist.id)]);
     expect(find.text('Avicii - Hey Brother'), findsOneWidget);
     expect(find.text('Something else'), findsNothing);
@@ -408,10 +435,75 @@ void main() {
     expect(playback.playTrackIds, [song.id]);
     expect(playback.startAts, [const Duration(milliseconds: 81000)]);
 
-    // Closing the search forgets the lyric matches.
+    // Play all queues the title match and the lyrics match (no chapters:
+    // the whole file).
+    await tester.tap(find.text('Play all'));
+    await tester.pump();
+    expect(playback.playedEntries, [
+      [QueueEntry(title), QueueEntry(song)],
+    ]);
+
+    // New words are searched once typing pauses.
+    await tester.enterText(find.byType(TextField), 'far away');
+    await tester.pump();
+    expect(lyrics.queries, hasLength(1));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pumpAndSettle();
+    expect(lyrics.queries.last, ('far away', playlist.id));
+
+    // Closing the search forgets the lyric matches and the filter.
     await tester.binding.handlePopRoute();
     await tester.pumpAndSettle();
     expect(find.byKey(ValueKey('track-lyric-${song.id}')), findsNothing);
+    await tester.tap(find.byTooltip('Search tracks'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<FilterChip>(
+            find.byKey(const ValueKey('search-filter-lyrics')),
+          )
+          .selected,
+      isFalse,
+    );
+  });
+
+  testWidgets('with no title match, a button searches lyrics too', (
+    tester,
+  ) async {
+    playlist = await insertTestPlaylist(
+      db,
+      url: 'nudge',
+      name: 'Songs',
+      lyricsMode: 'transcript',
+    );
+    final track = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      title: 'Only talk',
+      status: 'complete',
+      filePath: '/tmp/talk.m4a',
+    );
+    await pumpPage(tester, tracks: [track]);
+    await tester.tap(find.byTooltip('Search tracks'));
+    await tester.pumpAndSettle();
+    expect(find.text('Transcript'), findsOneWidget);
+    await tester.enterText(find.byType(TextField), 'mitochondria');
+    await tester.pumpAndSettle();
+    expect(find.text('No matching tracks'), findsOneWidget);
+    expect(lyrics.queries, isEmpty);
+
+    await tester.tap(find.text('Search transcript too'));
+    await tester.pumpAndSettle();
+    expect(lyrics.queries, [('mitochondria', playlist.id)]);
+    expect(
+      tester
+          .widget<FilterChip>(
+            find.byKey(const ValueKey('search-filter-lyrics')),
+          )
+          .selected,
+      isTrue,
+    );
+    expect(find.text('Search transcript too'), findsNothing);
   });
 
   testWidgets('a playlist with lyrics off never searches lyrics', (
@@ -433,6 +525,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(lyrics.queries, isEmpty);
     expect(find.text('No matching tracks'), findsOneWidget);
+    expect(find.byKey(const ValueKey('search-filter-lyrics')), findsNothing);
+    expect(find.textContaining('too'), findsNothing);
   });
 
   testWidgets('every row has the same height whatever its content', (
@@ -2012,6 +2106,22 @@ class _Playback implements PlaybackService {
   @override
   Future<void> playAll(List<Track> tracks, {Playlist? playlist}) async =>
       playAllCalls++;
+
+  final playedEntries = <List<QueueEntry>>[];
+  final enqueuedEntries = <List<QueueEntry>>[];
+
+  @override
+  Future<void> playEntries(List<QueueEntry> entries) async =>
+      playedEntries.add(entries);
+
+  @override
+  Future<int> enqueueEntries(
+    List<QueueEntry> entries, {
+    bool first = false,
+  }) async {
+    enqueuedEntries.add(entries);
+    return entries.length;
+  }
 
   @override
   Future<void> playTrack(

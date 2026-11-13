@@ -93,6 +93,7 @@ class _TrackRow extends ConsumerWidget {
     required this.metrics,
     required this.chapterMatch,
     this.lyricMatch,
+    this.searchQuery,
     required this.onTap,
     required this.onActions,
   });
@@ -105,6 +106,9 @@ class _TrackRow extends ConsumerWidget {
 
   /// The lyric line the search query matched, if any. A chapter match wins.
   final LyricsHit? lyricMatch;
+
+  /// The search, whose words are highlighted in the title.
+  final SearchQuery? searchQuery;
   final _TrackTapCallback onTap;
   final void Function(Track track) onActions;
 
@@ -199,10 +203,10 @@ class _TrackRow extends ConsumerWidget {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
+                      searchHighlightedText(
                         track.title,
+                        searchQuery,
                         maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
                         strutStyle: _titleStrut,
                         style: TextStyle(
                           color: isCurrent ? _accent : Colors.white,

@@ -87,6 +87,39 @@ List<PlaybackItem> chapterPlaybackItems(
   return kept.map((chapter) => PlaybackItem(track, chapter)).toList();
 }
 
+/// One file of a queue built from a list such as search results: the whole
+/// file, or only some of its chapters.
+class QueueEntry {
+  const QueueEntry(this.track, [this.chapterIds]);
+
+  final Track track;
+
+  /// The active chapters to play, in timeline order whatever the set's
+  /// order. Null plays the file as usual (its chapters, or the whole file).
+  final Set<String>? chapterIds;
+
+  @override
+  bool operator ==(Object other) =>
+      other is QueueEntry &&
+      other.track.id == track.id &&
+      _sameIds(other.chapterIds, chapterIds);
+
+  static bool _sameIds(Set<String>? a, Set<String>? b) =>
+      a == null || b == null
+          ? a == b
+          : a.length == b.length && a.containsAll(b);
+
+  @override
+  int get hashCode => Object.hash(
+    track.id,
+    chapterIds == null ? null : Object.hashAllUnordered(chapterIds!),
+  );
+
+  @override
+  String toString() =>
+      'QueueEntry(${track.id}${chapterIds == null ? '' : ', $chapterIds'})';
+}
+
 /// The chapters of one file that play one after another. Never build one
 /// without items: [trackId] reads the first.
 class PlaybackAlbum {
