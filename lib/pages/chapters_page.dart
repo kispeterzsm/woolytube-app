@@ -1106,6 +1106,13 @@ String fetchedChaptersMessage(ChapterData before, ChapterData after) {
   if (before.valid &&
       before.active.isNotEmpty &&
       !ChapterService.sameChapters(before.active, after.active)) {
+    final undo = after.undoChapters;
+    // A fetch keeps an Undo step that held a list of its own (such as the
+    // chapters "Use YouTube chapters again" set aside).
+    if (undo != null && !ChapterService.sameChapters(undo, before.active)) {
+      return '$foundText The list below was updated. Undo last chapter '
+          'change still brings back your earlier chapters.';
+    }
     return '$foundText The list below was updated. Undo last chapter change '
         'brings back the previous one.';
   }

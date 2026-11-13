@@ -172,6 +172,39 @@ void main() {
     ]);
   });
 
+  test('a fetch that changes YouTube\'s list never pushes the own chapters '
+      'that "Use YouTube chapters again" set aside out of Undo', () async {
+    await service.refresh(track);
+    track = (await db.getTrack(track.id))!;
+    final first = ChapterData.decode(track.chaptersJson).active.first;
+    await service.rename(track, first.id, 'Mine');
+    await service.restore(track);
+    var data = ChapterData.decode((await db.getTrack(track.id))!.chaptersJson);
+    expect(data.custom, isNull);
+    expect(data.undoChapters?.map((c) => c.title), ['Mine', 'Second']);
+    expect(data.undoFollowsDownloaded, isFalse);
+
+    // YouTube's chapters changed since the last fetch.
+    const older = [
+      MediaChapter(
+        id: 'youtube-0-0',
+        title: 'Old first',
+        startMs: 0,
+        endMs: 60000,
+        origin: ChapterOrigin.original,
+      ),
+    ];
+    await db.writeTrackChapters(track.id, data.copyWith(downloaded: older));
+    await service.refresh(track);
+    data = ChapterData.decode((await db.getTrack(track.id))!.chaptersJson);
+    expect(data.active.map((c) => c.title), ['First', 'Second']);
+    expect(data.undoChapters?.map((c) => c.title), ['Mine', 'Second']);
+
+    await service.undo(track);
+    data = ChapterData.decode((await db.getTrack(track.id))!.chaptersJson);
+    expect(data.custom?.map((c) => c.title), ['Mine', 'Second']);
+  });
+
   test('fetching missing chapters reports progress and can stop', () async {
     final others = <Track>[];
     for (var i = 2; i <= 4; i++) {

@@ -263,7 +263,9 @@ class ChapterService {
   /// The user's own list stays in use. A file that follows YouTube shows the
   /// new list, and when that differs from the list it showed, the old one
   /// becomes the Undo step (as a copy: Undo must bring back what was shown,
-  /// not follow YouTube to the new list again).
+  /// not follow YouTube to the new list again), unless the Undo step already
+  /// holds a list of its own: the user's chapters that "Use YouTube chapters
+  /// again" set aside must stay recoverable, so that step is kept.
   static ChapterData _withFetched(
     ChapterData old,
     List<MediaChapter> downloaded, {
@@ -280,7 +282,8 @@ class ChapterService {
     final shownBefore = old.active;
     if (old.custom != null ||
         shownBefore.isEmpty ||
-        sameChapters(shownBefore, next.active)) {
+        sameChapters(shownBefore, next.active) ||
+        (old.undoChapters != null && !old.undoFollowsDownloaded)) {
       return next;
     }
     return next.copyWith(

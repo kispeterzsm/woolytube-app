@@ -191,6 +191,9 @@ void main() {
       ),
     ];
     const mine = [MediaChapter(id: 'm', title: 'Mine', startMs: 0, endMs: 900)];
+    const mine2 = [
+      MediaChapter(id: 'm2', title: 'Crafted', startMs: 0, endMs: 800),
+    ];
     expect(
       fetchedChaptersMessage(
         const ChapterData(custom: mine),
@@ -221,6 +224,15 @@ void main() {
       ),
       'Found 1 chapter on YouTube. The list below was updated. Undo last '
       'chapter change brings back the previous one.',
+    );
+    // The Undo step kept the own chapters set aside before the fetch.
+    expect(
+      fetchedChaptersMessage(
+        const ChapterData(downloaded: mine, undoChapters: mine2),
+        const ChapterData(downloaded: yt, undoChapters: mine2),
+      ),
+      'Found 1 chapter on YouTube. The list below was updated. Undo last '
+      'chapter change still brings back your earlier chapters.',
     );
   });
 
