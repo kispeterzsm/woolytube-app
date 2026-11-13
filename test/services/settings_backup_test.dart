@@ -534,6 +534,54 @@ void main() {
       });
     });
 
+    test('the settings file an older version wrote on this phone, with its '
+        'bookkeeping, is replaced and not offered as copied', () async {
+      // Found by the real-data check: the phone's own file also listed
+      // the last yt-dlp update and the plane mode tip, which are not
+      // backed up any more, so it was put aside and "Restore settings"
+      // said settings from another phone were waiting.
+      SharedPreferences.setMockInitialValues({
+        AppSettingsService.evenOutVolumeKey: true,
+        AppSettingsService.lastYtDlpUpdateAttemptKey: 1794568716284,
+        AppSettingsService.planeModeStrengthKey: 'standard',
+        AppSettingsService.planeModeTipShownKey: true,
+        SharedPreferencesPlaybackSettingsStore.shuffleKey: true,
+      });
+      await Directory(p.dirname(settingsPath())).create(recursive: true);
+      File(settingsPath()).writeAsStringSync(
+        jsonEncode({
+          'app': 'WoolyTube',
+          'exportedAt': '2026-11-13T14:43:16.755473Z',
+          'settings': {
+            AppSettingsService.evenOutVolumeKey: true,
+            AppSettingsService.lastYtDlpUpdateAttemptKey: 1794568716284,
+            AppSettingsService.planeModeStrengthKey: 'standard',
+            AppSettingsService.planeModeTipShownKey: true,
+            SharedPreferencesPlaybackSettingsStore.shuffleKey: true,
+          },
+        }),
+      );
+      final upgraded = exporterFor(db, AppSettingsService(), log);
+
+      await upgraded.writeSettingsFile();
+
+      expect(File(previousPath()).existsSync(), isFalse);
+      expect(readFile()['version'], LibraryExportService.settingsFileVersion);
+      expect(await upgraded.copiedSettingsWaiting(), isFalse);
+
+      // A restorable setting that differs still puts the file aside.
+      File(settingsPath()).writeAsStringSync(
+        jsonEncode({
+          'settings': {
+            AppSettingsService.evenOutVolumeKey: false,
+            AppSettingsService.planeModeTipShownKey: true,
+          },
+        }),
+      );
+      await exporterFor(db, AppSettingsService(), log).writeSettingsFile();
+      expect(File(previousPath()).existsSync(), isTrue);
+    });
+
     test('a failing write is logged once until it works again', () async {
       // A file where the backup folder should be.
       await Directory(audioBase).create(recursive: true);

@@ -461,9 +461,13 @@ class LibraryExportService {
   }
 
   /// Whether the settings file content [onDisk] may be written over: this
-  /// install wrote it, or every setting in it is set the same on this phone
-  /// (nothing would be lost, for example a file of an older version of the
-  /// app on this same phone).
+  /// install wrote it, or every setting in it that a restore would bring
+  /// back is set the same on this phone (nothing would be lost, for example
+  /// a file of an older version of the app on this same phone).
+  ///
+  /// Keys a restore skips are not compared: older versions also wrote app
+  /// bookkeeping (the last yt-dlp update, whether the plane mode tips were
+  /// shown), which a restore never applies.
   Future<bool> _mayReplaceSettingsFile(String? onDisk) async {
     if (onDisk == null) return false;
     try {
@@ -473,10 +477,13 @@ class LibraryExportService {
       final values = settingsFromFile(jsonDecode(onDisk));
       if (values == null) return false;
       final current = await _settings.exportSettings();
-      return values.entries.every(
-        (entry) =>
-            current.containsKey(entry.key) && current[entry.key] == entry.value,
-      );
+      for (final setting in AppSettingsService.backedUpSettings) {
+        final value = setting.accept(values[setting.key]);
+        // Missing or not a value this setting takes: a restore skips it.
+        if (value == null) continue;
+        if (current[setting.key] != value) return false;
+      }
+      return true;
     } catch (_) {
       return false;
     }
