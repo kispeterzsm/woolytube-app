@@ -180,8 +180,10 @@ List<Widget> _moreTiles(
   final sleepStatus = sleepTimerStatus(sheetRef);
   final audioOnly = sheetRef.watch(audioOnlyModeProvider).valueOrNull ?? false;
   final service = sheetRef.read(playbackServiceProvider);
-  final shareChapter =
-      track == null ? null : _chapterToShare(item, track, service.position);
+  final fileChapters =
+      track == null
+          ? const <MediaChapter>[]
+          : ChapterData.decode(track.chaptersJson).active;
 
   void close() => Navigator.pop(sheetContext);
 
@@ -244,17 +246,47 @@ List<Widget> _moreTiles(
               },
     ),
     if (track != null && hasYouTubeTimeline(track))
-      tile(
-        key: const ValueKey('player-more-share'),
-        icon: Icons.share,
-        title: 'Share',
-        subtitle:
-            shareChapter == null
-                ? 'Share the YouTube link'
-                : 'Share a link to "${shareChapter.title}"',
-        onTap: () {
-          close();
-          unawaited(_share(hostContext, track, shareChapter));
+      Consumer(
+        builder: (context, ref, _) {
+          // Follows the playhead into the next chapter while the sheet is
+          // open; rebuilds only when the chapter changes.
+          ref.watch(
+            positionProvider.select(
+              (position) =>
+                  _chapterToShare(
+                    item,
+                    track,
+                    fileChapters,
+                    position.valueOrNull ?? service.position,
+                  )?.id,
+            ),
+          );
+          final shown = _chapterToShare(
+            item,
+            track,
+            fileChapters,
+            service.position,
+          );
+          return tile(
+            key: const ValueKey('player-more-share'),
+            icon: Icons.share,
+            title: 'Share',
+            subtitle:
+                shown == null
+                    ? 'Share the YouTube link'
+                    : 'Share a link to "${shown.title}"',
+            onTap: () {
+              // Worked out at the tap: the chapter playing right now.
+              final chapter = _chapterToShare(
+                item,
+                track,
+                fileChapters,
+                service.position,
+              );
+              close();
+              unawaited(_share(hostContext, track, chapter));
+            },
+          );
         },
       ),
     tile(
@@ -306,13 +338,14 @@ List<Widget> _moreTiles(
 MediaChapter? _chapterToShare(
   PlaybackItem? item,
   Track track,
+  List<MediaChapter> fileChapters,
   Duration position,
 ) {
   final chapter = item?.chapter;
   if (chapter != null) return chapter;
   if (item != null && item.track.id != track.id) return null;
   final ms = position.inMilliseconds;
-  for (final chapter in ChapterData.decode(track.chaptersJson).active) {
+  for (final chapter in fileChapters) {
     if (chapter.startMs <= ms && ms < chapter.endMs) return chapter;
   }
   return null;

@@ -273,6 +273,38 @@ void main() {
       expect(shared.last['title'], 'Audio track');
     });
 
+    testWidgets('shares the chapter playing at the tap, not at opening', (
+      tester,
+    ) async {
+      final harness = await _openPanel(tester);
+      final withChapters = harness.audioTrack.copyWith(
+        videoId: 'a-B_c9',
+        chaptersJson: Value(
+          const ChapterData(
+            downloaded: [
+              MediaChapter(id: 'a', title: 'Intro', startMs: 0, endMs: 61500),
+              _chapter,
+            ],
+            durationMs: 120000,
+          ).encode(),
+        ),
+      );
+      _play(harness, withChapters);
+      harness.position.add(const Duration(seconds: 59));
+      await tester.pumpAndSettle();
+      await _openMore(tester);
+      expect(find.text('Share a link to "Intro"'), findsOneWidget);
+
+      // The whole file plays on into the next chapter with the sheet open.
+      harness.position.add(const Duration(seconds: 62));
+      await tester.pumpAndSettle();
+      expect(find.text('Share a link to "Chapter two"'), findsOneWidget);
+      await tester.tap(_key('player-more-share'));
+      await tester.pumpAndSettle();
+      expect(shared.single['uri'], 'https://youtu.be/a-B_c9?t=61');
+      expect(shared.single['title'], 'Chapter two');
+    });
+
     testWidgets('is hidden for a file in place of the original', (
       tester,
     ) async {
