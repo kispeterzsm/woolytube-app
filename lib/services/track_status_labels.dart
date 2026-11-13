@@ -52,7 +52,7 @@ String shortTrackStatus(Track track) {
       return unavailableTrackLabel(track.unavailableReason);
     case 'complete' when track.unavailableReason != null:
       return withLength(_keptLabel(track.unavailableReason));
-    case 'complete' when _replacementFailed(track):
+    case 'complete' when trackReplacementFailed(track):
       return withLength(
         _youTubeCopyUnavailable(error!) ? 'No YouTube copy' : 'New copy failed',
       );
@@ -70,7 +70,7 @@ String trackStatusInFull(Track track) {
   return switch (track.status) {
     'complete' when track.unavailableReason != null =>
       '${unavailableTrackLabel(track.unavailableReason)} (local file)',
-    'complete' when _replacementFailed(track) =>
+    'complete' when trackReplacementFailed(track) =>
       '${replacementFailureReason(error!)} · '
           '${track.isLocalReplacement ? 'keeping your file' : 'keeping the old file'}',
     'complete' when track.isLocalReplacement => 'Your own file',
@@ -99,7 +99,10 @@ String _keptLabel(String? reason) {
   return '$gone, kept';
 }
 
-bool _replacementFailed(Track track) =>
+/// The requested new copy of a downloaded track (for example the YouTube
+/// original of a local file) could not be fetched; the file stays and
+/// updates try again.
+bool trackReplacementFailed(Track track) =>
     track.status == 'complete' &&
     track.replaceRequested &&
     track.unavailableReason == null &&

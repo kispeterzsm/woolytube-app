@@ -125,7 +125,7 @@ class _TrackRow extends ConsumerWidget {
           isPlayingProvider.select((playing) => playing.valueOrNull ?? false),
         );
     final state = _TrackState.of(track);
-    final subtitle = _rowSubtitle(track, chapterMatch);
+    final subtitles = _rowSubtitles(track, chapterMatch);
     final lyric = chapterMatch == null ? lyricMatch : null;
     final subtitleStyle = TextStyle(
       color: _subtitleColor(track, state),
@@ -220,12 +220,9 @@ class _TrackRow extends ConsumerWidget {
                       if (lyric != null)
                         _LyricSubtitle(hit: lyric, style: subtitleStyle)
                       else
-                        Text(
-                          subtitle,
+                        _RowSubtitle(
                           key: ValueKey('track-subtitle-${track.id}'),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          strutStyle: _subtitleStrut,
+                          options: subtitles,
                           style: subtitleStyle,
                         ),
                     ],
@@ -372,7 +369,7 @@ class _TrackState {
     hasError: track.status == 'error' && track.lastError != null,
     isUnavailable: track.status == 'unavailable',
     hasLocalFile: track.status == 'complete' && track.unavailableReason != null,
-    replacementFailed: _replacementFailed(track),
+    replacementFailed: trackReplacementFailed(track),
   );
 
   final bool hasError;
@@ -386,24 +383,70 @@ class _TrackState {
   final bool replacementFailed;
 }
 
-bool _replacementFailed(Track track) =>
-    track.status == 'complete' &&
-    track.replaceRequested &&
-    track.unavailableReason == null &&
-    track.lastError != null;
-
 /// The one grey line under a track: its short status, or for a chapter
 /// the search matched, where that chapter starts and its title.
-String _rowSubtitle(Track track, MediaChapter? chapter) {
-  final parts = <String>[
-    if (track.alwaysSkip) 'Always skip',
-    if (chapter != null)
-      '${_formatMs(chapter.startMs)} · ${chapter.title}'
-    else
-      shortTrackStatus(track),
-  ]..removeWhere((part) => part.isEmpty);
-  // Never empty, so every row lays out the same two text blocks.
-  return parts.isEmpty ? ' ' : parts.join(' · ');
+///
+/// Longest first: when "Always skip" in front of a long status would not
+/// fit, the row says "Skip", and if even that is too long, only "Always
+/// skip" (the icon and the ⋮ sheet still tell the state). The red colour
+/// marks the row either way.
+List<String> _rowSubtitles(Track track, MediaChapter? chapter) {
+  if (chapter != null) {
+    final match = '${_formatMs(chapter.startMs)} · ${chapter.title}';
+    return [track.alwaysSkip ? 'Always skip · $match' : match];
+  }
+  final status = shortTrackStatus(track);
+  if (!track.alwaysSkip) {
+    // Never empty, so every row lays out the same two text blocks.
+    return [status.isEmpty ? ' ' : status];
+  }
+  if (status.isEmpty) return const ['Always skip'];
+  return ['Always skip · $status', 'Skip · $status', 'Always skip'];
+}
+
+/// The first of [options] that fits the row on one line, so the line is
+/// not cut with "…" when a shorter wording exists.
+class _RowSubtitle extends StatelessWidget {
+  const _RowSubtitle({super.key, required this.options, required this.style});
+
+  final List<String> options;
+  final TextStyle style;
+
+  Text _text(String text) => Text(
+    text,
+    maxLines: 1,
+    overflow: TextOverflow.ellipsis,
+    strutStyle: _subtitleStrut,
+    style: style,
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    if (options.length == 1) return _text(options.single);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final painter = TextPainter(
+          textDirection: Directionality.of(context),
+          textScaler: MediaQuery.textScalerOf(context),
+          strutStyle: _subtitleStrut,
+          maxLines: 1,
+        );
+        final fullStyle = DefaultTextStyle.of(context).style.merge(style);
+        var chosen = options.last;
+        for (final option in options) {
+          painter
+            ..text = TextSpan(text: option, style: fullStyle)
+            ..layout(maxWidth: constraints.maxWidth);
+          if (!painter.didExceedMaxLines) {
+            chosen = option;
+            break;
+          }
+        }
+        painter.dispose();
+        return _text(chosen);
+      },
+    );
+  }
 }
 
 Color _subtitleColor(Track track, _TrackState state) {

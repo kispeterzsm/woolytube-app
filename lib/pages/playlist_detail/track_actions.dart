@@ -222,7 +222,7 @@ class _TrackActions {
             unawaited(_startTrackDownload(track));
           },
         ),
-      if (hasError || _replacementFailed(track))
+      if (hasError || trackReplacementFailed(track))
         tile(
           key: const ValueKey('track-actions-error-details'),
           icon: Icons.error_outline,

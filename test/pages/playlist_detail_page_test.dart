@@ -2123,6 +2123,63 @@ void main() {
       expectNotCut(tester, find.byKey(const ValueKey('track-actions-details')));
     });
 
+    testWidgets('an Always skip track keeps its grey line whole', (
+      tester,
+    ) async {
+      usePhoneScreen(tester);
+      var index = 0;
+      Future<Track> skipped({
+        required String status,
+        String? unavailableReason,
+        String? lastError,
+        int? durationSeconds = 3753,
+      }) {
+        index++;
+        return insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: index,
+          videoId: 'video-$index',
+          title: 'Song $index',
+          status: status,
+          filePath: status == 'complete' ? '/tmp/$index.m4a' : null,
+          durationSeconds: durationSeconds,
+          unavailableReason: unavailableReason,
+          lastError: lastError,
+          alwaysSkip: true,
+        );
+      }
+
+      final tracks = [
+        await skipped(status: 'complete', durationSeconds: 225),
+        await skipped(
+          status: 'error',
+          lastError:
+              "ERROR: [youtube] abc: Sign in to confirm you're not a bot.",
+        ),
+        await skipped(
+          status: 'unavailable',
+          unavailableReason: removedFromYouTubeReason,
+        ),
+        await skipped(
+          status: 'complete',
+          unavailableReason: removedFromYouTubeReason,
+        ),
+      ];
+      await pumpPage(tester, tracks: tracks);
+
+      for (final track in tracks) {
+        final subtitle = find.byKey(ValueKey('track-subtitle-${track.id}'));
+        await tester.scrollUntilVisible(subtitle, 200);
+        expectNotCut(tester, subtitle);
+      }
+      // Short: the whole prefix. Long: "Skip", and the status still shows.
+      expect(find.text('Always skip · 3:45'), findsOneWidget);
+      expect(find.text('Skip · Bot check, try later'), findsOneWidget);
+      expect(find.text('Skip · Removed from YouTube'), findsOneWidget);
+      expect(find.text('Skip · 1:02:33 · Removed, kept'), findsOneWidget);
+    });
+
     // 2.0 stands in for a phone font wider than Roboto.
     for (final scale in [1.0, 1.3, 2.0]) {
       testWidgets('Update on a video playlist is whole at text size $scale', (
