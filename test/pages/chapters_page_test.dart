@@ -19,6 +19,7 @@ import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/playback_service.dart';
 import 'package:woolytube/services/ytdlp_service.dart';
 
+import '../helpers/real_fonts.dart';
 import '../helpers/test_database.dart';
 import 'chapter_editor_fakes.dart';
 
@@ -494,7 +495,7 @@ void main() {
     expect(
       find.descendant(
         of: find.byKey(const ValueKey('chapter-b')),
-        matching: find.textContaining('Always skip'),
+        matching: find.textContaining('Always\u00A0skip'),
       ),
       findsOneWidget,
     );
@@ -839,7 +840,7 @@ void main() {
     // Past the times, at the right of the row's text.
     final times = find.descendant(
       of: find.byKey(const ValueKey('chapter-b')),
-      matching: find.textContaining('0:05 – 3:00'),
+      matching: find.textContaining('0:05 –\u2060\u00A03:00'),
     );
     expect(tester.getTopLeft(b).dx, greaterThan(tester.getTopRight(times).dx));
     await unmount(tester);
@@ -858,6 +859,71 @@ void main() {
     await tester.tapAt(const Offset(160, 20));
     await tester.pumpAndSettle();
     await unmount(tester);
+  });
+
+  // Last in the file: Roboto stays loaded for the rest of the run.
+  group('with the phone font on a 411 dp screen', () {
+    setUpAll(loadRoboto);
+
+    for (final scale in [1.0, 1.3]) {
+      testWidgets('no chapter line ends with a "·" or "–" at text size '
+          '$scale', (tester) async {
+        // An hour-long mix: times with hours and milliseconds, marks and
+        // origins, so the grey lines wrap.
+        const fileMs = 3900000;
+        final track = await addTrack(
+          durationSeconds: fileMs ~/ 1000,
+          chapters: const ChapterData(
+            downloaded: [
+              MediaChapter(
+                id: 'a',
+                title: 'Intro',
+                startMs: 0,
+                endMs: 3753456,
+                origin: ChapterOrigin.auto,
+                manuallyEdited: true,
+              ),
+              MediaChapter(
+                id: 'b',
+                title: 'A song with quite a long name, by somebody',
+                startMs: 3753456,
+                endMs: 3812345,
+                origin: ChapterOrigin.auto,
+              ),
+              MediaChapter(
+                id: 'c',
+                title: 'Outro',
+                startMs: 3812345,
+                endMs: fileMs,
+              ),
+            ],
+            durationMs: fileMs,
+          ).withChapterSkip('a', true).withChapterSkip('b', true),
+        );
+        await pumpPage(tester, track);
+        usePhoneScreen(tester);
+        tester.platformDispatcher.textScaleFactorTestValue = scale;
+        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        expectNoDanglingSeparator(
+          find.byKey(const ValueKey('chapters-summary')),
+        );
+
+        for (final id in ['a', 'b', 'c']) {
+          final times = find.byKey(ValueKey('chapter-times-$id'));
+          await tester.scrollUntilVisible(times, 200);
+          expectNoDanglingSeparator(times);
+          expectNotCut(tester, times);
+        }
+        // At 411 dp the skipped, edited chapter needs more than one line.
+        expect(
+          renderedLines(find.byKey(const ValueKey('chapter-times-a'))).single,
+          hasLength(greaterThan(1)),
+        );
+        await unmount(tester);
+      });
+    }
   });
 }
 

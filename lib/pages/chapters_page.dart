@@ -766,15 +766,18 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                     children: [
                       Expanded(
                         child: Text(
+                          key: const ValueKey('chapters-summary'),
                           [
                             if (durationMs != null)
                               chapterTimestamp(durationMs, fileMs: fileMs),
-                            data.active.isEmpty
-                                ? 'No chapters'
-                                : data.active.length == 1
-                                ? '1 chapter'
-                                : '${data.active.length} chapters',
-                          ].join(' · '),
+                            _glued(
+                              data.active.isEmpty
+                                  ? 'No chapters'
+                                  : data.active.length == 1
+                                  ? '1 chapter'
+                                  : '${data.active.length} chapters',
+                            ),
+                          ].join(_separator),
                           style: const TextStyle(color: Color(0xFF999999)),
                         ),
                       ),
@@ -1512,10 +1515,12 @@ class _ChapterRow extends StatelessWidget {
     // Recognised chapters say so, and the first open question about them
     // (a doubtful name or timing) shows on a line of its own.
     final origin = switch (chapter.origin) {
-      ChapterOrigin.auto when chapter.manuallyEdited => ' · Auto, edited',
-      ChapterOrigin.auto => ' · Auto',
+      ChapterOrigin.auto when chapter.manuallyEdited =>
+        '$_separator${_glued('Auto, edited')}',
+      ChapterOrigin.auto => '${_separator}Auto',
       _ => '',
     };
+    final times = _timeRange(_time(chapter.startMs), _time(chapter.endMs));
     final review = chapter.reviewReasons.firstOrNull;
     final weight = isCurrent ? FontWeight.w600 : FontWeight.normal;
     // A stand-in name stays red even while it plays, so it is never missed.
@@ -1553,17 +1558,16 @@ class _ChapterRow extends StatelessWidget {
             children: [
               Expanded(
                 child: Text.rich(
+                  key: ValueKey('chapter-times-${chapter.id}'),
                   TextSpan(
                     children: [
                       if (skipped)
-                        const TextSpan(
-                          text: 'Always skip · ',
-                          style: TextStyle(color: Color(0xFFE57373)),
+                        TextSpan(
+                          text: _glued('Always skip'),
+                          style: const TextStyle(color: Color(0xFFE57373)),
                         ),
                       TextSpan(
-                        text:
-                            '${_time(chapter.startMs)} – '
-                            '${_time(chapter.endMs)}$origin',
+                        text: '${skipped ? _separator : ''}$times$origin',
                       ),
                     ],
                   ),
@@ -1612,6 +1616,19 @@ class _ChapterRow extends StatelessWidget {
     );
   }
 }
+
+/// " · " between the parts of a grey line. The dot is kept with the part
+/// after it (a no-break space), so a line that wraps never ends with a
+/// dangling "·"; the next line starts with it instead.
+const _separator = ' \u00B7\u00A0';
+
+/// [text] with no-break spaces, so it stays on one line: "Always skip".
+String _glued(String text) => text.replaceAll(' ', '\u00A0');
+
+/// "1:02:33 – 1:05:00". When it wraps, the dash goes to the next line with
+/// the end time (the word joiner and no-break space keep them together),
+/// so no line ends with a dangling "–".
+String _timeRange(String start, String end) => '$start \u2013\u2060\u00A0$end';
 
 const _sheetTitleStyle = TextStyle(color: Colors.white);
 const _sheetSubtitleStyle = TextStyle(color: Color(0xFF888888));

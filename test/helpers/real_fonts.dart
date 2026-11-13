@@ -62,3 +62,60 @@ void expectNotCut(WidgetTester tester, Finder finder) {
     }
   }
 }
+
+/// The lines each text under [finder] is laid out on, as shown (with
+/// their trailing spaces).
+List<List<String>> renderedLines(Finder finder) {
+  final result = <List<String>>[];
+  for (final element in finder.evaluate()) {
+    final paragraphs = <RenderParagraph>[];
+    void collect(RenderObject object) {
+      if (object is RenderParagraph) paragraphs.add(object);
+      object.visitChildren(collect);
+    }
+
+    collect(element.renderObject!);
+    for (final paragraph in paragraphs) {
+      final text = paragraph.text.toPlainText(includeSemanticsLabels: false);
+      final lines = <String>[];
+      double? top;
+      final line = StringBuffer();
+      for (var i = 0; i < text.length; i++) {
+        final boxes = paragraph.getBoxesForSelection(
+          TextSelection(baseOffset: i, extentOffset: i + 1),
+        );
+        if (boxes.isNotEmpty) {
+          final boxTop = boxes.first.top;
+          if (top != null && (boxTop - top).abs() > 1) {
+            lines.add(line.toString());
+            line.clear();
+          }
+          top = boxTop;
+        }
+        line.write(text[i]);
+      }
+      lines.add(line.toString());
+      result.add(lines);
+    }
+  }
+  return result;
+}
+
+/// Fails when a line of the text under [finder] ends with a separator
+/// ("·", "–") whose next part wrapped to the following line.
+void expectNoDanglingSeparator(Finder finder) {
+  final texts = renderedLines(finder);
+  expect(texts, isNotEmpty, reason: 'no text in $finder');
+  for (final lines in texts) {
+    for (final line in lines.take(lines.length - 1)) {
+      final end = line.replaceAll(RegExp(r'[\s ⁠]+$'), '');
+      expect(
+        end.endsWith('·') || end.endsWith('–'),
+        isFalse,
+        reason:
+            'a line of ${lines.map((l) => '"$l"').join(' / ')} ends '
+            'with a separator',
+      );
+    }
+  }
+}
