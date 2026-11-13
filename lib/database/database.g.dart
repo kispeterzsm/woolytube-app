@@ -266,6 +266,33 @@ class $PlaylistsTable extends Playlists
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _downloadSubtitlesMeta = const VerificationMeta(
+    'downloadSubtitles',
+  );
+  @override
+  late final GeneratedColumn<bool> downloadSubtitles = GeneratedColumn<bool>(
+    'download_subtitles',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("download_subtitles" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  static const VerificationMeta _subtitleLanguagesMeta = const VerificationMeta(
+    'subtitleLanguages',
+  );
+  @override
+  late final GeneratedColumn<String> subtitleLanguages =
+      GeneratedColumn<String>(
+        'subtitle_languages',
+        aliasedName,
+        true,
+        type: DriftSqlType.string,
+        requiredDuringInsert: false,
+      );
   @override
   List<GeneratedColumn> get $columns => [
     playChapters,
@@ -289,6 +316,8 @@ class $PlaylistsTable extends Playlists
     videoQuality,
     isTemporary,
     lyricsMode,
+    downloadSubtitles,
+    subtitleLanguages,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -469,6 +498,24 @@ class $PlaylistsTable extends Playlists
         lyricsMode.isAcceptableOrUnknown(data['lyrics_mode']!, _lyricsModeMeta),
       );
     }
+    if (data.containsKey('download_subtitles')) {
+      context.handle(
+        _downloadSubtitlesMeta,
+        downloadSubtitles.isAcceptableOrUnknown(
+          data['download_subtitles']!,
+          _downloadSubtitlesMeta,
+        ),
+      );
+    }
+    if (data.containsKey('subtitle_languages')) {
+      context.handle(
+        _subtitleLanguagesMeta,
+        subtitleLanguages.isAcceptableOrUnknown(
+          data['subtitle_languages']!,
+          _subtitleLanguagesMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -576,6 +623,15 @@ class $PlaylistsTable extends Playlists
         DriftSqlType.string,
         data['${effectivePrefix}lyrics_mode'],
       ),
+      downloadSubtitles:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.bool,
+            data['${effectivePrefix}download_subtitles'],
+          )!,
+      subtitleLanguages: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}subtitle_languages'],
+      ),
     );
   }
 
@@ -624,6 +680,15 @@ class Playlist extends DataClass implements Insertable<Playlist> {
   /// What text is fetched for search: 'lyrics' (songs) or 'transcript'
   /// (spoken content); null = off. See `LyricsMode`.
   final String? lyricsMode;
+
+  /// New downloads get subtitles (the uploader's or YouTube's automatic
+  /// ones), embedded in the video file. Ignored for audio-only playlists.
+  final bool downloadSubtitles;
+
+  /// Subtitle languages for yt-dlp, comma-separated (`en,hu`; `en.*` also
+  /// matches en-US and en-GB); null = English. See
+  /// `normalizeSubtitleLanguages`.
+  final String? subtitleLanguages;
   const Playlist({
     this.playChapters,
     required this.id,
@@ -646,6 +711,8 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     this.videoQuality,
     required this.isTemporary,
     this.lyricsMode,
+    required this.downloadSubtitles,
+    this.subtitleLanguages,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -686,6 +753,10 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     map['is_temporary'] = Variable<bool>(isTemporary);
     if (!nullToAbsent || lyricsMode != null) {
       map['lyrics_mode'] = Variable<String>(lyricsMode);
+    }
+    map['download_subtitles'] = Variable<bool>(downloadSubtitles);
+    if (!nullToAbsent || subtitleLanguages != null) {
+      map['subtitle_languages'] = Variable<String>(subtitleLanguages);
     }
     return map;
   }
@@ -734,6 +805,11 @@ class Playlist extends DataClass implements Insertable<Playlist> {
           lyricsMode == null && nullToAbsent
               ? const Value.absent()
               : Value(lyricsMode),
+      downloadSubtitles: Value(downloadSubtitles),
+      subtitleLanguages:
+          subtitleLanguages == null && nullToAbsent
+              ? const Value.absent()
+              : Value(subtitleLanguages),
     );
   }
 
@@ -774,6 +850,10 @@ class Playlist extends DataClass implements Insertable<Playlist> {
       videoQuality: serializer.fromJson<int?>(json['videoQuality']),
       isTemporary: serializer.fromJson<bool>(json['isTemporary']),
       lyricsMode: serializer.fromJson<String?>(json['lyricsMode']),
+      downloadSubtitles: serializer.fromJson<bool>(json['downloadSubtitles']),
+      subtitleLanguages: serializer.fromJson<String?>(
+        json['subtitleLanguages'],
+      ),
     );
   }
   @override
@@ -805,6 +885,8 @@ class Playlist extends DataClass implements Insertable<Playlist> {
       'videoQuality': serializer.toJson<int?>(videoQuality),
       'isTemporary': serializer.toJson<bool>(isTemporary),
       'lyricsMode': serializer.toJson<String?>(lyricsMode),
+      'downloadSubtitles': serializer.toJson<bool>(downloadSubtitles),
+      'subtitleLanguages': serializer.toJson<String?>(subtitleLanguages),
     };
   }
 
@@ -830,6 +912,8 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     Value<int?> videoQuality = const Value.absent(),
     bool? isTemporary,
     Value<String?> lyricsMode = const Value.absent(),
+    bool? downloadSubtitles,
+    Value<String?> subtitleLanguages = const Value.absent(),
   }) => Playlist(
     playChapters: playChapters.present ? playChapters.value : this.playChapters,
     id: id ?? this.id,
@@ -858,6 +942,11 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     videoQuality: videoQuality.present ? videoQuality.value : this.videoQuality,
     isTemporary: isTemporary ?? this.isTemporary,
     lyricsMode: lyricsMode.present ? lyricsMode.value : this.lyricsMode,
+    downloadSubtitles: downloadSubtitles ?? this.downloadSubtitles,
+    subtitleLanguages:
+        subtitleLanguages.present
+            ? subtitleLanguages.value
+            : this.subtitleLanguages,
   );
   Playlist copyWithCompanion(PlaylistsCompanion data) {
     return Playlist(
@@ -917,6 +1006,14 @@ class Playlist extends DataClass implements Insertable<Playlist> {
           data.isTemporary.present ? data.isTemporary.value : this.isTemporary,
       lyricsMode:
           data.lyricsMode.present ? data.lyricsMode.value : this.lyricsMode,
+      downloadSubtitles:
+          data.downloadSubtitles.present
+              ? data.downloadSubtitles.value
+              : this.downloadSubtitles,
+      subtitleLanguages:
+          data.subtitleLanguages.present
+              ? data.subtitleLanguages.value
+              : this.subtitleLanguages,
     );
   }
 
@@ -943,7 +1040,9 @@ class Playlist extends DataClass implements Insertable<Playlist> {
           ..write('sortOrder: $sortOrder, ')
           ..write('videoQuality: $videoQuality, ')
           ..write('isTemporary: $isTemporary, ')
-          ..write('lyricsMode: $lyricsMode')
+          ..write('lyricsMode: $lyricsMode, ')
+          ..write('downloadSubtitles: $downloadSubtitles, ')
+          ..write('subtitleLanguages: $subtitleLanguages')
           ..write(')'))
         .toString();
   }
@@ -971,6 +1070,8 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     videoQuality,
     isTemporary,
     lyricsMode,
+    downloadSubtitles,
+    subtitleLanguages,
   ]);
   @override
   bool operator ==(Object other) =>
@@ -997,7 +1098,9 @@ class Playlist extends DataClass implements Insertable<Playlist> {
           other.sortOrder == this.sortOrder &&
           other.videoQuality == this.videoQuality &&
           other.isTemporary == this.isTemporary &&
-          other.lyricsMode == this.lyricsMode);
+          other.lyricsMode == this.lyricsMode &&
+          other.downloadSubtitles == this.downloadSubtitles &&
+          other.subtitleLanguages == this.subtitleLanguages);
 }
 
 class PlaylistsCompanion extends UpdateCompanion<Playlist> {
@@ -1022,6 +1125,8 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
   final Value<int?> videoQuality;
   final Value<bool> isTemporary;
   final Value<String?> lyricsMode;
+  final Value<bool> downloadSubtitles;
+  final Value<String?> subtitleLanguages;
   const PlaylistsCompanion({
     this.playChapters = const Value.absent(),
     this.id = const Value.absent(),
@@ -1044,6 +1149,8 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     this.videoQuality = const Value.absent(),
     this.isTemporary = const Value.absent(),
     this.lyricsMode = const Value.absent(),
+    this.downloadSubtitles = const Value.absent(),
+    this.subtitleLanguages = const Value.absent(),
   });
   PlaylistsCompanion.insert({
     this.playChapters = const Value.absent(),
@@ -1067,6 +1174,8 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     this.videoQuality = const Value.absent(),
     this.isTemporary = const Value.absent(),
     this.lyricsMode = const Value.absent(),
+    this.downloadSubtitles = const Value.absent(),
+    this.subtitleLanguages = const Value.absent(),
   }) : url = Value(url),
        name = Value(name),
        createdAt = Value(createdAt),
@@ -1093,6 +1202,8 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     Expression<int>? videoQuality,
     Expression<bool>? isTemporary,
     Expression<String>? lyricsMode,
+    Expression<bool>? downloadSubtitles,
+    Expression<String>? subtitleLanguages,
   }) {
     return RawValuesInsertable({
       if (playChapters != null) 'play_chapters': playChapters,
@@ -1120,6 +1231,8 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
       if (videoQuality != null) 'video_quality': videoQuality,
       if (isTemporary != null) 'is_temporary': isTemporary,
       if (lyricsMode != null) 'lyrics_mode': lyricsMode,
+      if (downloadSubtitles != null) 'download_subtitles': downloadSubtitles,
+      if (subtitleLanguages != null) 'subtitle_languages': subtitleLanguages,
     });
   }
 
@@ -1145,6 +1258,8 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     Value<int?>? videoQuality,
     Value<bool>? isTemporary,
     Value<String?>? lyricsMode,
+    Value<bool>? downloadSubtitles,
+    Value<String?>? subtitleLanguages,
   }) {
     return PlaylistsCompanion(
       playChapters: playChapters ?? this.playChapters,
@@ -1170,6 +1285,8 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
       videoQuality: videoQuality ?? this.videoQuality,
       isTemporary: isTemporary ?? this.isTemporary,
       lyricsMode: lyricsMode ?? this.lyricsMode,
+      downloadSubtitles: downloadSubtitles ?? this.downloadSubtitles,
+      subtitleLanguages: subtitleLanguages ?? this.subtitleLanguages,
     );
   }
 
@@ -1243,6 +1360,12 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     if (lyricsMode.present) {
       map['lyrics_mode'] = Variable<String>(lyricsMode.value);
     }
+    if (downloadSubtitles.present) {
+      map['download_subtitles'] = Variable<bool>(downloadSubtitles.value);
+    }
+    if (subtitleLanguages.present) {
+      map['subtitle_languages'] = Variable<String>(subtitleLanguages.value);
+    }
     return map;
   }
 
@@ -1269,7 +1392,9 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
           ..write('sortOrder: $sortOrder, ')
           ..write('videoQuality: $videoQuality, ')
           ..write('isTemporary: $isTemporary, ')
-          ..write('lyricsMode: $lyricsMode')
+          ..write('lyricsMode: $lyricsMode, ')
+          ..write('downloadSubtitles: $downloadSubtitles, ')
+          ..write('subtitleLanguages: $subtitleLanguages')
           ..write(')'))
         .toString();
   }
@@ -5353,6 +5478,8 @@ typedef $$PlaylistsTableCreateCompanionBuilder =
       Value<int?> videoQuality,
       Value<bool> isTemporary,
       Value<String?> lyricsMode,
+      Value<bool> downloadSubtitles,
+      Value<String?> subtitleLanguages,
     });
 typedef $$PlaylistsTableUpdateCompanionBuilder =
     PlaylistsCompanion Function({
@@ -5377,6 +5504,8 @@ typedef $$PlaylistsTableUpdateCompanionBuilder =
       Value<int?> videoQuality,
       Value<bool> isTemporary,
       Value<String?> lyricsMode,
+      Value<bool> downloadSubtitles,
+      Value<String?> subtitleLanguages,
     });
 
 final class $$PlaylistsTableReferences
@@ -5514,6 +5643,16 @@ class $$PlaylistsTableFilterComposer
 
   ColumnFilters<String> get lyricsMode => $composableBuilder(
     column: $table.lyricsMode,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get downloadSubtitles => $composableBuilder(
+    column: $table.downloadSubtitles,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get subtitleLanguages => $composableBuilder(
+    column: $table.subtitleLanguages,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -5656,6 +5795,16 @@ class $$PlaylistsTableOrderingComposer
     column: $table.lyricsMode,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<bool> get downloadSubtitles => $composableBuilder(
+    column: $table.downloadSubtitles,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get subtitleLanguages => $composableBuilder(
+    column: $table.subtitleLanguages,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$PlaylistsTableAnnotationComposer
@@ -5760,6 +5909,16 @@ class $$PlaylistsTableAnnotationComposer
     builder: (column) => column,
   );
 
+  GeneratedColumn<bool> get downloadSubtitles => $composableBuilder(
+    column: $table.downloadSubtitles,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get subtitleLanguages => $composableBuilder(
+    column: $table.subtitleLanguages,
+    builder: (column) => column,
+  );
+
   Expression<T> tracksRefs<T extends Object>(
     Expression<T> Function($$TracksTableAnnotationComposer a) f,
   ) {
@@ -5836,6 +5995,8 @@ class $$PlaylistsTableTableManager
                 Value<int?> videoQuality = const Value.absent(),
                 Value<bool> isTemporary = const Value.absent(),
                 Value<String?> lyricsMode = const Value.absent(),
+                Value<bool> downloadSubtitles = const Value.absent(),
+                Value<String?> subtitleLanguages = const Value.absent(),
               }) => PlaylistsCompanion(
                 playChapters: playChapters,
                 id: id,
@@ -5858,6 +6019,8 @@ class $$PlaylistsTableTableManager
                 videoQuality: videoQuality,
                 isTemporary: isTemporary,
                 lyricsMode: lyricsMode,
+                downloadSubtitles: downloadSubtitles,
+                subtitleLanguages: subtitleLanguages,
               ),
           createCompanionCallback:
               ({
@@ -5883,6 +6046,8 @@ class $$PlaylistsTableTableManager
                 Value<int?> videoQuality = const Value.absent(),
                 Value<bool> isTemporary = const Value.absent(),
                 Value<String?> lyricsMode = const Value.absent(),
+                Value<bool> downloadSubtitles = const Value.absent(),
+                Value<String?> subtitleLanguages = const Value.absent(),
               }) => PlaylistsCompanion.insert(
                 playChapters: playChapters,
                 id: id,
@@ -5905,6 +6070,8 @@ class $$PlaylistsTableTableManager
                 videoQuality: videoQuality,
                 isTemporary: isTemporary,
                 lyricsMode: lyricsMode,
+                downloadSubtitles: downloadSubtitles,
+                subtitleLanguages: subtitleLanguages,
               ),
           withReferenceMapper:
               (p0) =>

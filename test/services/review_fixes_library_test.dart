@@ -184,9 +184,10 @@ void main() {
     final dismissed = ['https://www.youtube.com/playlist?list=gone'];
     final backupValues = <String, Object>{
       AppSettingsService.autoDownloadWithMobileDataKey: true,
-      AppSettingsService.downloadSubtitlesKey: true,
+      // The app-wide subtitle switch of older versions: no longer restored.
+      AppSettingsService.legacyDownloadSubtitlesKey: true,
       AppSettingsService.pauseOnAudioInterruptionKey: false,
-      AppSettingsService.subtitleLanguagesKey: 'en,hu',
+      AppSettingsService.legacySubtitleLanguagesKey: 'en,hu',
       AppSettingsService.dismissedImportUrlsKey: dismissed,
       AppSettingsService.lastYtDlpUpdateAttemptKey: 1700000000000,
     };
@@ -195,15 +196,14 @@ void main() {
       AppSettingsService settings,
     ) async {
       expect(await settings.getAutoDownloadWithMobileData(), isTrue);
-      expect(await settings.getDownloadSubtitles(), isTrue);
       expect(await settings.getPauseOnAudioInterruption(), isFalse);
-      expect(await settings.getSubtitleLanguages(), 'en,hu');
+      expect(await settings.readLegacySubtitleSetting(), isNull);
       // App bookkeeping stays this device's own.
       expect(await settings.getDismissedImportUrls(), isEmpty);
       expect(await settings.getLastYtDlpUpdateAttempt(), isNull);
     }
 
-    test('importSettings applies only the four preferences', () async {
+    test('importSettings applies only the two preferences', () async {
       final settings = AppSettingsService();
 
       final applied = await settings.importSettings({
@@ -211,7 +211,7 @@ void main() {
         'some_future_setting': 'x',
       });
 
-      expect(applied, 4);
+      expect(applied, 2);
       await expectOnlyPreferencesRestored(settings);
       // The new mobile-data choice reaches the update scheduler.
       expect(backgroundCalls.map((c) => c.method), ['scheduleAutoUpdate']);
@@ -248,9 +248,8 @@ void main() {
 
       // A fresh install: nothing set yet.
       SharedPreferences.setMockInitialValues({});
-      expect(await settings.getDownloadSubtitles(), isFalse);
 
-      expect(await exporter.restoreSettings(), 4);
+      expect(await exporter.restoreSettings(), 2);
       await expectOnlyPreferencesRestored(settings);
 
       // A backup copied somewhere else restores the same way.
@@ -268,7 +267,7 @@ void main() {
       await File(written).delete();
       SharedPreferences.setMockInitialValues({});
       expect(await exporter.restoreSettings(), isNull);
-      expect(await exporter.restoreSettings(folder: copy), 4);
+      expect(await exporter.restoreSettings(folder: copy), 2);
       await expectOnlyPreferencesRestored(settings);
     });
   });

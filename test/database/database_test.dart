@@ -9,6 +9,95 @@ import 'package:woolytube/services/sponsorblock_categories.dart';
 import '../helpers/test_database.dart';
 
 void main() {
+  group('playlist subtitles', () {
+    test('an existing database gets the columns, off, on upgrade', () async {
+      final dir = await Directory.systemTemp.createTemp('woolytube-db18-');
+      addTearDown(() => dir.delete(recursive: true));
+      final file = File('${dir.path}/library.sqlite');
+      final fresh = AppDatabase.forTesting(NativeDatabase(file));
+      final video = await insertTestPlaylist(fresh, name: 'Talks');
+      final audio = await insertTestPlaylist(
+        fresh,
+        url: 'https://www.youtube.com/playlist?list=songs',
+        name: 'Songs',
+        audioOnly: true,
+      );
+      // Make it look like a version 18 database: no subtitle columns, and
+      // the playlist trigger made without them.
+      final trigger = (await fresh
+              .customSelect(
+                'SELECT sql FROM sqlite_master '
+                "WHERE name = 'trg_rev_playlists_update'",
+              )
+              .getSingle())
+          .read<String>('sql');
+      await fresh.customStatement('DROP TRIGGER trg_rev_playlists_update');
+      for (final column in ['download_subtitles', 'subtitle_languages']) {
+        await fresh.customStatement(
+          'ALTER TABLE playlists DROP COLUMN $column',
+        );
+      }
+      final oldTrigger = trigger
+          .replaceAll(', "download_subtitles"', '')
+          .replaceAll(', "subtitle_languages"', '');
+      expect(oldTrigger, isNot(contains('subtitle')));
+      await fresh.customStatement(oldTrigger);
+      await fresh.customStatement('PRAGMA user_version = 18');
+      await fresh.close();
+
+      final upgraded = AppDatabase.forTesting(NativeDatabase(file));
+      addTearDown(upgraded.close);
+      final talks = await upgraded.getPlaylist(video.id);
+      expect(talks.downloadSubtitles, isFalse);
+      expect(talks.subtitleLanguages, isNull);
+      expect(talks.name, 'Talks');
+      expect((await upgraded.getPlaylist(audio.id)).audioOnly, isTrue);
+
+      // The metadata files follow a change of either column.
+      var revision = await upgraded.playlistRevision(video.id);
+      await upgraded.updatePlaylistFields(
+        video.id,
+        const PlaylistsCompanion(downloadSubtitles: Value(true)),
+      );
+      expect(await upgraded.playlistRevision(video.id), revision + 1);
+      revision++;
+      await upgraded.updatePlaylistFields(
+        video.id,
+        const PlaylistsCompanion(subtitleLanguages: Value('en,hu')),
+      );
+      expect(await upgraded.playlistRevision(video.id), revision + 1);
+    });
+
+    test('turning subtitles on for every video playlist', () async {
+      final db = openTestDatabase();
+      addTearDown(db.close);
+      final off = await insertTestPlaylist(db, name: 'Off');
+      final own = await insertTestPlaylist(
+        db,
+        url: 'https://www.youtube.com/playlist?list=own',
+        name: 'Own',
+        downloadSubtitles: true,
+        subtitleLanguages: 'de',
+      );
+      final audio = await insertTestPlaylist(
+        db,
+        url: 'https://www.youtube.com/playlist?list=songs',
+        name: 'Songs',
+        audioOnly: true,
+      );
+
+      expect(await db.enableSubtitlesForVideoPlaylists('en,hu'), 1);
+
+      final turnedOn = await db.getPlaylist(off.id);
+      expect(turnedOn.downloadSubtitles, isTrue);
+      expect(turnedOn.subtitleLanguages, 'en,hu');
+      // A playlist that already had them keeps its languages.
+      expect((await db.getPlaylist(own.id)).subtitleLanguages, 'de');
+      expect((await db.getPlaylist(audio.id)).downloadSubtitles, isFalse);
+      expect(await db.enableSubtitlesForVideoPlaylists('en,hu'), 0);
+    });
+  });
+
   group('loudness measurements', () {
     test('an existing database gets the table on upgrade', () async {
       final dir = await Directory.systemTemp.createTemp('woolytube-db17-');
@@ -24,6 +113,13 @@ void main() {
       );
       // Make it look like a version 17 (release 1.5.2) database.
       await fresh.customStatement('DROP TABLE loudness_measurements');
+      // Version 19 added the subtitle columns (and remade the trigger).
+      await fresh.customStatement('DROP TRIGGER trg_rev_playlists_update');
+      for (final column in ['download_subtitles', 'subtitle_languages']) {
+        await fresh.customStatement(
+          'ALTER TABLE playlists DROP COLUMN $column',
+        );
+      }
       await fresh.customStatement('PRAGMA user_version = 17');
       await fresh.close();
 

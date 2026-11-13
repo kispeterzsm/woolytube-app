@@ -20,57 +20,45 @@ void main() {
         .setMockMethodCallHandler(backgroundChannel, null);
   });
 
-  test(
-    'subtitle settings default to off and English and persist changes',
-    () async {
-      final settings = AppSettingsService();
-      expect(await settings.getDownloadSubtitles(), isFalse);
-      expect(await settings.getSubtitleLanguages(), 'en');
-      await settings.setDownloadSubtitles(true);
-      await settings.setSubtitleLanguages('hu, en,hu, pt-BR');
-      final reloaded = AppSettingsService();
-      expect(await reloaded.getDownloadSubtitles(), isTrue);
-      expect(await reloaded.getSubtitleLanguages(), 'hu,en,pt-BR');
-    },
-  );
-
-  test('invalid subtitle languages do not replace saved languages', () async {
+  test('the old app-wide subtitle setting is read once and removed', () async {
     final settings = AppSettingsService();
-    await settings.setSubtitleLanguages('hu');
-    for (final invalid in ['', ' , ', 'all', 'en.+', 'live_chat', '--help']) {
-      await expectLater(
-        settings.setSubtitleLanguages(invalid),
-        throwsFormatException,
-      );
-    }
-    expect(await settings.getSubtitleLanguages(), 'hu');
+    expect(await settings.readLegacySubtitleSetting(), isNull);
+
+    SharedPreferences.setMockInitialValues({
+      AppSettingsService.legacyDownloadSubtitlesKey: true,
+      AppSettingsService.legacySubtitleLanguagesKey: 'en,hu',
+      AppSettingsService.evenOutVolumeKey: true,
+    });
+    expect(await settings.readLegacySubtitleSetting(), (
+      enabled: true,
+      languages: 'en,hu',
+    ));
+    await settings.clearLegacySubtitleSetting();
+    expect(await settings.readLegacySubtitleSetting(), isNull);
+    expect(await settings.getEvenOutVolume(), isTrue);
+
+    // Only the languages, without the switch: it was off.
+    SharedPreferences.setMockInitialValues({
+      AppSettingsService.legacySubtitleLanguagesKey: 'de',
+    });
+    expect(await settings.readLegacySubtitleSetting(), (
+      enabled: false,
+      languages: 'de',
+    ));
   });
 
-  test('subtitle languages forgive a trailing comma and accept en.*', () {
-    expect(AppSettingsService.normalizeSubtitleLanguages('en, hu,'), 'en,hu');
-    expect(
-      AppSettingsService.normalizeSubtitleLanguages('en.*, pt-BR'),
-      'en.*,pt-BR',
-    );
-  });
-
-  test('restoring settings skips invalid subtitle languages', () async {
+  test('restoring an old backup skips the app-wide subtitle setting', () async {
     final settings = AppSettingsService();
-    await settings.setSubtitleLanguages('hu');
 
     final applied = await settings.importSettings({
-      AppSettingsService.subtitleLanguagesKey: 'all',
-      AppSettingsService.downloadSubtitlesKey: true,
+      AppSettingsService.legacySubtitleLanguagesKey: 'en,hu',
+      AppSettingsService.legacyDownloadSubtitlesKey: true,
+      AppSettingsService.evenOutVolumeKey: true,
     });
 
     expect(applied, 1);
-    expect(await settings.getSubtitleLanguages(), 'hu');
-    expect(await settings.getDownloadSubtitles(), isTrue);
-
-    await settings.importSettings({
-      AppSettingsService.subtitleLanguagesKey: ' de, en ,',
-    });
-    expect(await settings.getSubtitleLanguages(), 'de,en');
+    expect(await settings.getEvenOutVolume(), isTrue);
+    expect(await settings.readLegacySubtitleSetting(), isNull);
   });
 
   test('sound settings default to off and standard and persist', () async {

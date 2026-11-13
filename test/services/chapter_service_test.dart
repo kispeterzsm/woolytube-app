@@ -416,6 +416,12 @@ void main() {
       await database.customStatement(
         'ALTER TABLE playlists DROP COLUMN lyrics_mode',
       );
+      // Added in schema 19.
+      for (final column in ['download_subtitles', 'subtitle_languages']) {
+        await database.customStatement(
+          'ALTER TABLE playlists DROP COLUMN $column',
+        );
+      }
       await database.customStatement('PRAGMA user_version = 9');
       await database.close();
       database = AppDatabase.forTesting(NativeDatabase(file));

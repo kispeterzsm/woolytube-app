@@ -313,7 +313,7 @@ void main() {
 }
 
 /// Turns a current database into what schema 15 left on a device: no
-/// lyrics tables and no `playlists.lyrics_mode`.
+/// lyrics tables, no `playlists.lyrics_mode` and no subtitle columns.
 Future<void> downgradeToSchema15(AppDatabase db) async {
   for (final name in [
     'trg_lyrics_fts_insert',
@@ -335,6 +335,12 @@ Future<void> downgradeToSchema15(AppDatabase db) async {
   ]) {
     await db.customStatement('DROP TABLE $table');
   }
-  await db.customStatement('ALTER TABLE playlists DROP COLUMN lyrics_mode');
+  for (final column in [
+    'lyrics_mode',
+    'download_subtitles',
+    'subtitle_languages',
+  ]) {
+    await db.customStatement('ALTER TABLE playlists DROP COLUMN $column');
+  }
   await db.customStatement('PRAGMA user_version = 15');
 }

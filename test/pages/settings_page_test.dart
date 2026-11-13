@@ -98,35 +98,12 @@ void main() {
     expect(top(find.byKey(const ValueKey('debug-log'))), greaterThan(tops[5]));
   });
 
-  testWidgets('enables subtitle downloads and saves validated languages', (
+  testWidgets('subtitles are a playlist setting, not an app setting', (
     tester,
   ) async {
     await pumpSettings(tester);
-    final languages = find.byKey(const ValueKey('subtitle-languages'));
-    expect(languages, findsNothing);
-    await tester.tap(find.text('Download subtitles'));
-    await tester.pumpAndSettle();
-    expect(await AppSettingsService().getDownloadSubtitles(), isTrue);
-    await tester.tap(languages);
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextFormField), '');
-    await tester.tap(find.text('Save'));
-    await tester.pumpAndSettle();
-    expect(find.byType(AlertDialog), findsOneWidget);
-
-    // One-tap languages and a trailing comma are fine.
-    await tester.enterText(find.byType(TextFormField), 'en,');
-    await tester.tap(find.widgetWithText(FilterChip, 'Hungarian'));
-    await tester.pump();
-    expect(
-      tester.widget<TextFormField>(find.byType(TextFormField)).controller!.text,
-      'en, hu',
-    );
-    await tester.tap(find.text('Save'));
-    await tester.pumpAndSettle();
-    expect(find.byType(AlertDialog), findsNothing);
-    expect(await AppSettingsService().getSubtitleLanguages(), 'en,hu');
-    expect(find.text('en,hu'), findsOneWidget);
+    expect(find.text('Download subtitles'), findsNothing);
+    expect(find.text('Subtitle languages'), findsNothing);
   });
 
   testWidgets('shows the app version and opens the debug log', (tester) async {
@@ -162,7 +139,17 @@ void main() {
 
     expect(find.text('Restored 2 settings.'), findsOneWidget);
     expect(pauseSwitch().value, isFalse);
-    expect(find.byKey(const ValueKey('subtitle-languages')), findsOneWidget);
+    expect(
+      tester
+          .widget<SwitchListTile>(
+            find.widgetWithText(
+              SwitchListTile,
+              'Update playlists on mobile data',
+            ),
+          )
+          .value,
+      isTrue,
+    );
     expect(player.pauseOnInterruption, [false]);
   });
 
@@ -238,7 +225,7 @@ class _Exporter implements LibraryExportService {
     await gate?.future;
     return AppSettingsService().importSettings({
       AppSettingsService.pauseOnAudioInterruptionKey: false,
-      AppSettingsService.downloadSubtitlesKey: true,
+      AppSettingsService.autoDownloadWithMobileDataKey: true,
     });
   }
 

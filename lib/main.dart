@@ -16,6 +16,7 @@ import 'services/background_worker.dart' as background_worker;
 import 'services/app_settings_service.dart';
 import 'services/download_errors.dart';
 import 'services/download_service.dart';
+import 'services/subtitles.dart';
 import 'pages/home_page.dart';
 import 'player/player_shell.dart';
 import 'services/auto_update_runner.dart';
@@ -39,6 +40,11 @@ void main() async {
   }
 
   final database = AppDatabase();
+  try {
+    await migrateLegacySubtitleSetting(database, appSettingsService);
+  } catch (e) {
+    debugPrint('Subtitle setting could not be moved to the playlists: $e');
+  }
   final playbackService = PlaybackService(database);
   final pictureInPictureService = PictureInPictureService(playbackService);
   await pictureInPictureService.initialize();

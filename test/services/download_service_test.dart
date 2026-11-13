@@ -5,7 +5,6 @@ import 'dart:io';
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:woolytube/services/app_settings_service.dart';
 import 'package:woolytube/services/auto_update_attempts.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
@@ -141,7 +140,6 @@ void main() {
         MetadataService(db),
         notifications,
         sponsorBlock,
-        null,
         lock,
         owner,
         null,
@@ -186,32 +184,51 @@ void main() {
   });
 
   for (final audioOnly in [false, true]) {
-    test(
-      'subtitle setting reaches downloads only for video (audioOnly=$audioOnly)',
-      () async {
-        final settings = AppSettingsService();
-        await settings.setDownloadSubtitles(true);
-        await settings.setSubtitleLanguages('en, hu');
-        final playlist = await insertTestPlaylist(
-          db,
-          outputPath: folder,
-          audioOnly: audioOnly,
-        );
-        final track = await insertTestTrack(db, playlistId: playlist.id);
+    test("the playlist's subtitles reach downloads only for video "
+        '(audioOnly=$audioOnly)', () async {
+      final playlist = await insertTestPlaylist(
+        db,
+        outputPath: folder,
+        audioOnly: audioOnly,
+        downloadSubtitles: true,
+        subtitleLanguages: 'en,hu',
+      );
+      final track = await insertTestTrack(db, playlistId: playlist.id);
 
-        await service.downloadPlaylist(playlist);
-        await service.downloadTrack(playlist, track);
+      await service.downloadPlaylist(playlist);
+      await service.downloadTrack(playlist, track);
 
-        expect(ytdlp.subtitleRequests, [
-          (!audioOnly, audioOnly ? 'en' : 'en,hu'),
-          (!audioOnly, audioOnly ? 'en' : 'en,hu'),
-        ]);
-      },
-    );
+      expect(ytdlp.subtitleRequests, [
+        (!audioOnly, audioOnly ? 'en' : 'en,hu'),
+        (!audioOnly, audioOnly ? 'en' : 'en,hu'),
+      ]);
+    });
   }
 
   test('video subtitle downloads are opt-in', () async {
     final playlist = await insertTestPlaylist(db, outputPath: folder);
+    await insertTestTrack(db, playlistId: playlist.id);
+    await service.downloadPlaylist(playlist);
+    expect(ytdlp.subtitleRequests, [(false, 'en')]);
+  });
+
+  test('subtitles without their own languages download English', () async {
+    final playlist = await insertTestPlaylist(
+      db,
+      outputPath: folder,
+      downloadSubtitles: true,
+    );
+    await insertTestTrack(db, playlistId: playlist.id);
+    await service.downloadPlaylist(playlist);
+    expect(ytdlp.subtitleRequests, [(true, 'en')]);
+  });
+
+  test('languages alone do not turn subtitles on', () async {
+    final playlist = await insertTestPlaylist(
+      db,
+      outputPath: folder,
+      subtitleLanguages: 'hu',
+    );
     await insertTestTrack(db, playlistId: playlist.id);
     await service.downloadPlaylist(playlist);
     expect(ytdlp.subtitleRequests, [(false, 'en')]);
@@ -347,7 +364,6 @@ void main() {
         MetadataService(db),
         notifications,
         sponsorBlock,
-        null,
         lock,
         DownloadLock.foregroundOwner,
         null,
@@ -1066,8 +1082,11 @@ void main() {
     });
 
     test('a subtitle failure retries the video without subtitles', () async {
-      await AppSettingsService().setDownloadSubtitles(true);
-      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final playlist = await insertTestPlaylist(
+        db,
+        outputPath: folder,
+        downloadSubtitles: true,
+      );
       final track = await insertTestTrack(db, playlistId: playlist.id);
       ytdlp.errorFor =
           (call) =>

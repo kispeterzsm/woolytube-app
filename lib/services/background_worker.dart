@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import '../database/database.dart';
+import 'app_settings_service.dart';
 import 'auto_update_runner.dart';
 import 'ytdlp_service.dart';
 import 'log_service.dart';
@@ -14,6 +15,7 @@ import 'lyrics/lyrics_service.dart';
 import 'media_thumbnail_service.dart';
 import 'playlist_service.dart';
 import 'sponsorblock_service.dart';
+import 'subtitles.dart';
 
 /// Kotlin (AutoUpdateWorker) ↔ headless engine. Dart sends "taskComplete"
 /// or "taskFailed" when done; Kotlin sends "stop" when the run must end
@@ -128,6 +130,7 @@ Future<AutoUpdateReport> runBackgroundAutoUpdate({
   DownloadNotificationService? notifications,
   MediaThumbnailService thumbnails = const MediaThumbnailService(),
   DateTime Function()? clock,
+  AppSettingsService? settings,
 }) async {
   final yt = ytdlp ?? YtDlpService();
   final downloadLock = lock ?? DownloadLock();
@@ -145,6 +148,13 @@ Future<AutoUpdateReport> runBackgroundAutoUpdate({
   }
 
   final db = openDatabase();
+  // A scheduled update may run before the app is opened after an update
+  // of the app: it downloads with the old subtitle choice too.
+  try {
+    await migrateLegacySubtitleSetting(db, settings ?? AppSettingsService());
+  } catch (e) {
+    logService.warn('Subtitle setting could not be moved: $e');
+  }
   // Decide first whether there is anything to do: most hourly runs have
   // nothing due, and starting yt-dlp and notifications costs time.
   final all = await db.getAllPlaylists();
@@ -184,7 +194,6 @@ Future<AutoUpdateReport> runBackgroundAutoUpdate({
     metadata,
     notificationService,
     sponsorBlock,
-    null,
     downloadLock,
     DownloadLock.backgroundOwner,
     gate,

@@ -980,7 +980,6 @@ void main() {
         MetadataService(db),
         null,
         null,
-        null,
         DownloadLock(directoryProvider: () async => tempDir.path),
         DownloadLock.foregroundOwner,
         null,
@@ -1112,6 +1111,50 @@ void main() {
     expect(updated.lastUpdated, playlist.lastUpdated);
     expect(updated.outputPath, playlist.outputPath);
     expect(updated.sponsorBlockCategories, playlist.sponsorBlockCategories);
+  });
+
+  test('subtitle settings are tidied, checked and saved', () async {
+    final playlist = await insertTestPlaylist(db, outputPath: folder);
+
+    await service.updatePlaylistSettings(
+      id: playlist.id,
+      downloadSubtitles: true,
+      subtitleLanguages: const Value(' hu, en,hu,'),
+    );
+    var updated = await db.getPlaylist(playlist.id);
+    expect(updated.downloadSubtitles, isTrue);
+    expect(updated.subtitleLanguages, 'hu,en');
+    final sidecar =
+        jsonDecode(
+              await File(p.join(folder, 'woolytube_meta.json')).readAsString(),
+            )
+            as Map<String, dynamic>;
+    expect((sidecar['playlist'] as Map)['subtitleLanguages'], 'hu,en');
+
+    for (final invalid in ['all', 'en.+', '--help']) {
+      await expectLater(
+        service.updatePlaylistSettings(
+          id: playlist.id,
+          subtitleLanguages: Value(invalid),
+        ),
+        throwsFormatException,
+      );
+    }
+    // Leaving the languages out keeps them.
+    await service.updatePlaylistSettings(
+      id: playlist.id,
+      downloadSubtitles: false,
+    );
+    updated = await db.getPlaylist(playlist.id);
+    expect(updated.downloadSubtitles, isFalse);
+    expect(updated.subtitleLanguages, 'hu,en');
+
+    // Empty goes back to English.
+    await service.updatePlaylistSettings(
+      id: playlist.id,
+      subtitleLanguages: const Value(' '),
+    );
+    expect((await db.getPlaylist(playlist.id)).subtitleLanguages, isNull);
   });
 
   test('a local replacement drops remote SponsorBlock segments', () async {

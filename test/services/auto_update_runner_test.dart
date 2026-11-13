@@ -39,6 +39,7 @@ Playlist _playlist(
   outputPath: '/tmp/none',
   sortOrder: id,
   isTemporary: false,
+  downloadSubtitles: false,
 );
 
 /// yt-dlp that starts without a platform channel and counts the start.
@@ -622,7 +623,6 @@ void main() {
         ytdlp,
         log,
         MetadataService(db),
-        null,
         null,
         null,
         lock,

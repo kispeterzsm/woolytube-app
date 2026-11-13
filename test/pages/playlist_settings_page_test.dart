@@ -669,6 +669,116 @@ void main() {
     });
   });
 
+  group('subtitles', () {
+    testWidgets('are offered for video playlists only', (tester) async {
+      final audio = await insertTestPlaylist(
+        db,
+        url: 'audio',
+        outputPath: tempDir.path,
+        audioOnly: true,
+        downloadSubtitles: true,
+      );
+      await pumpStack(tester, audio.id);
+      expect(
+        find.byKey(const ValueKey('playlist-download-subtitles')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('playlist-subtitle-languages')),
+        findsNothing,
+      );
+
+      final video = await insertTestPlaylist(
+        db,
+        url: 'video',
+        outputPath: tempDir.path,
+      );
+      await pumpStack(tester, video.id);
+      expect(
+        tester
+            .widget<SwitchListTile>(
+              find.byKey(const ValueKey('playlist-download-subtitles')),
+            )
+            .value,
+        isFalse,
+      );
+      // The languages show only while subtitles are on.
+      expect(
+        find.byKey(const ValueKey('playlist-subtitle-languages')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('turning them on saves at once and offers the languages', (
+      tester,
+    ) async {
+      final playlist = await insertTestPlaylist(db, outputPath: tempDir.path);
+      await pumpStack(tester, playlist.id);
+
+      await tapRow(tester, 'playlist-download-subtitles');
+      expect(playlists.calls.last, {'downloadSubtitles': true});
+      expect((await db.getPlaylist(playlist.id)).downloadSubtitles, isTrue);
+      expect(player.settingsChanged, [playlist.id]);
+      final languages = find.byKey(
+        const ValueKey('playlist-subtitle-languages'),
+      );
+      expect(
+        find.descendant(of: languages, matching: find.text('English')),
+        findsOneWidget,
+      );
+
+      await tapRow(tester, 'playlist-subtitle-languages');
+      // An invalid list keeps the dialog open.
+      await tester.enterText(find.byType(TextFormField), 'all');
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsOneWidget);
+
+      // One-tap languages and a trailing comma are fine.
+      await tester.enterText(find.byType(TextFormField), 'en,');
+      await tester.tap(find.widgetWithText(FilterChip, 'Hungarian'));
+      await tester.pump();
+      expect(
+        tester
+            .widget<TextFormField>(find.byType(TextFormField))
+            .controller!
+            .text,
+        'en, hu',
+      );
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(playlists.calls.last, {'subtitleLanguages': 'en,hu'});
+      expect((await db.getPlaylist(playlist.id)).subtitleLanguages, 'en,hu');
+      expect(
+        find.descendant(
+          of: languages,
+          matching: find.text('English, Hungarian'),
+        ),
+        findsOneWidget,
+      );
+
+      await tapRow(tester, 'playlist-download-subtitles');
+      expect(playlists.calls.last, {'downloadSubtitles': false});
+      expect(languages, findsNothing);
+      // The languages are kept for the next time.
+      expect((await db.getPlaylist(playlist.id)).subtitleLanguages, 'en,hu');
+    });
+
+    testWidgets('the temporary playlist has them too', (tester) async {
+      final temporary = await insertTestPlaylist(
+        db,
+        url: 'temporary',
+        outputPath: tempDir.path,
+        isTemporary: true,
+        downloadSubtitles: true,
+        subtitleLanguages: 'de,pt-BR',
+      );
+      await pumpStack(tester, temporary.id);
+      expect(find.text('German, pt-BR'), findsOneWidget);
+    });
+  });
+
   testWidgets('a name that cannot be saved after leaving is reported', (
     tester,
   ) async {
@@ -1065,6 +1175,8 @@ class _Playlists implements PlaylistService {
     List<String>? sponsorBlockCategories,
     Map<String, SponsorBlockCategoryAction>? sponsorBlockCategoryActions,
     Value<LyricsMode?> lyricsMode = const Value.absent(),
+    bool? downloadSubtitles,
+    Value<String?> subtitleLanguages = const Value.absent(),
   }) async {
     final failure = failWith;
     if (failure != null) throw failure;
@@ -1081,6 +1193,9 @@ class _Playlists implements PlaylistService {
       if (sponsorBlockCategoryActions != null)
         'sponsorBlockCategoryActions': sponsorBlockCategoryActions,
       if (lyricsMode.present) 'lyricsMode': lyricsMode.value,
+      if (downloadSubtitles != null) 'downloadSubtitles': downloadSubtitles,
+      if (subtitleLanguages.present)
+        'subtitleLanguages': subtitleLanguages.value,
     };
     await beforeWrite?.call(call);
     calls.add(call);
@@ -1094,6 +1209,7 @@ class _Playlists implements PlaylistService {
             updateFrequencyHours: updateFrequencyHours,
             includeThumbnails: includeThumbnails,
             sponsorBlockEnabled: sponsorBlockEnabled,
+            downloadSubtitles: downloadSubtitles,
             sponsorBlockCategoryActions:
                 sponsorBlockCategoryActions == null
                     ? null
@@ -1108,6 +1224,12 @@ class _Playlists implements PlaylistService {
           .toCompanion(true),
     );
     // toCompanion(true) leaves out nulls, so "off" is written here.
+    if (subtitleLanguages.present) {
+      await db.updatePlaylistFields(
+        id,
+        PlaylistsCompanion(subtitleLanguages: subtitleLanguages),
+      );
+    }
     if (lyricsMode.present) {
       await db.updatePlaylistFields(
         id,

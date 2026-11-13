@@ -84,6 +84,8 @@ void main() {
       playChapters: false,
       outputPath: folder,
       videoQuality: 480,
+      downloadSubtitles: true,
+      subtitleLanguages: 'en.*,hu',
     );
     final chapters =
         ChapterData(
@@ -452,6 +454,62 @@ void main() {
     (off['playlist'] as Map)['lyricsMode'] = 'karaoke';
     await file.writeAsString(jsonEncode(off));
     expect((await metadata.readFolder(folder))!.lyricsMode, isNull);
+  });
+
+  test('the subtitle choice round-trips and is left out when off', () async {
+    final source = await insertTestPlaylist(
+      db,
+      outputPath: folder,
+      downloadSubtitles: true,
+      subtitleLanguages: 'en,hu',
+    );
+    await metadata.writeMetadata(source, const []);
+    final file = File(p.join(folder, 'woolytube_meta.json'));
+    final sidecar =
+        jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+    expect((sidecar['playlist'] as Map)['downloadSubtitles'], isTrue);
+    expect((sidecar['playlist'] as Map)['subtitleLanguages'], 'en,hu');
+    await db.deletePlaylist(source.id);
+
+    final id = await metadata.importPlaylist(
+      (await metadata.readFolder(folder))!,
+    );
+    final imported = await db.getPlaylist(id);
+    expect(imported.downloadSubtitles, isTrue);
+    expect(imported.subtitleLanguages, 'en,hu');
+
+    await db.updatePlaylistFields(
+      id,
+      const PlaylistsCompanion(
+        downloadSubtitles: Value(false),
+        subtitleLanguages: Value(null),
+      ),
+    );
+    await metadata.writeMetadata(await db.getPlaylist(id), const []);
+    final off = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+    final offPlaylist = off['playlist'] as Map<String, dynamic>;
+    expect(offPlaylist.containsKey('downloadSubtitles'), isFalse);
+    expect(offPlaylist.containsKey('subtitleLanguages'), isFalse);
+    // A sidecar of an older version has neither key.
+    var read = (await metadata.readFolder(folder))!;
+    expect(read.downloadSubtitles, isFalse);
+    expect(read.subtitleLanguages, isNull);
+
+    // A hand-edited list is tidied, or dropped when yt-dlp must not get it.
+    for (final (value, expected) in [
+      (' de, en ,', 'de,en'),
+      ('all', null),
+      ('--exec rm', null),
+      (42, null),
+      ('', null),
+    ]) {
+      offPlaylist['downloadSubtitles'] = 'yes';
+      offPlaylist['subtitleLanguages'] = value;
+      await file.writeAsString(jsonEncode(off));
+      read = (await metadata.readFolder(folder))!;
+      expect(read.subtitleLanguages, expected, reason: '$value');
+      expect(read.downloadSubtitles, isFalse);
+    }
   });
 
   test('import gives a repeated index to the entry whose file carries that '

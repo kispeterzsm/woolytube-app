@@ -105,7 +105,6 @@ void main() {
     MetadataService(db),
     null,
     withSponsorBlock ? sponsorBlock : null,
-    null,
     DownloadLock(directoryProvider: () async => tempDir.path),
     DownloadLock.foregroundOwner,
     null,

@@ -123,8 +123,8 @@ void main() {
       video: videoBase,
     );
     SharedPreferences.setMockInitialValues({
-      AppSettingsService.downloadSubtitlesKey: true,
-      AppSettingsService.subtitleLanguagesKey: 'en,hu',
+      AppSettingsService.evenOutVolumeKey: true,
+      AppSettingsService.planeModeStrengthKey: 'strong',
       AppSettingsService.dismissedImportUrlsKey: [
         'https://www.youtube.com/playlist?list=gone',
       ],
@@ -194,8 +194,8 @@ void main() {
         (jsonDecode(File(settingsPath).readAsStringSync())
                 as Map<String, dynamic>)['settings']
             as Map<String, dynamic>;
-    expect(settings[AppSettingsService.downloadSubtitlesKey], true);
-    expect(settings[AppSettingsService.subtitleLanguagesKey], 'en,hu');
+    expect(settings[AppSettingsService.evenOutVolumeKey], true);
+    expect(settings[AppSettingsService.planeModeStrengthKey], 'strong');
     expect(settings[AppSettingsService.dismissedImportUrlsKey], [
       'https://www.youtube.com/playlist?list=gone',
     ]);

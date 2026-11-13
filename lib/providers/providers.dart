@@ -132,7 +132,6 @@ final downloadServiceProvider = Provider<DownloadService>((ref) {
     ref.watch(metadataServiceProvider),
     ref.watch(notificationServiceProvider),
     ref.watch(sponsorBlockServiceProvider),
-    ref.watch(appSettingsServiceProvider),
     null,
     DownloadLock.foregroundOwner,
     ref.watch(libraryGateProvider),

@@ -124,7 +124,6 @@ void main() {
       metadata,
       null,
       null,
-      null,
       DownloadLock(directoryProvider: () async => tempDir.path),
       DownloadLock.foregroundOwner,
       null,

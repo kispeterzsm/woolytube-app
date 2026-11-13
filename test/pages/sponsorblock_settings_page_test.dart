@@ -190,6 +190,8 @@ class _Playlists implements PlaylistService {
     List<String>? sponsorBlockCategories,
     Map<String, SponsorBlockCategoryAction>? sponsorBlockCategoryActions,
     Value<LyricsMode?> lyricsMode = const Value.absent(),
+    bool? downloadSubtitles,
+    Value<String?> subtitleLanguages = const Value.absent(),
   }) async {
     await beforeWrite?.call();
     final current = await db.getPlaylist(id);

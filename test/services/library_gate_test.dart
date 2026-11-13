@@ -78,7 +78,6 @@ void main() {
       null,
       null,
       null,
-      null,
       DownloadLock.foregroundOwner,
       gate,
       thumbnails,

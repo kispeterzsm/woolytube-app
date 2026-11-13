@@ -19,9 +19,11 @@ import '../services/lyrics/lyrics_models.dart';
 import '../services/playback_service.dart';
 import '../services/playlist_service.dart';
 import '../services/sponsorblock_categories.dart';
+import '../services/subtitles.dart';
 import '../services/video_quality.dart';
 import '../widgets/mobile_data_download_guard.dart';
 import '../widgets/settings_section_header.dart';
+import '../widgets/subtitle_languages_dialog.dart';
 import '../widgets/update_frequency_dropdown.dart';
 import '../widgets/video_quality_picker.dart';
 import 'sponsorblock_settings_page.dart';
@@ -298,6 +300,26 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
       (playlists) => playlists.updatePlaylistSettings(
         id: playlist.id,
         updateFrequencyHours: hours,
+      ),
+    );
+  }
+
+  Future<void> _chooseSubtitleLanguages() async {
+    final playlist = _playlist;
+    if (playlist == null || _busy) return;
+    final current = subtitleLanguagesFor(playlist);
+    final languages = await showSubtitleLanguagesDialog(
+      context,
+      initialValue: current,
+    );
+    if (languages == null || !mounted || languages == current) return;
+    // Read again: the page may have changed while the dialog was open.
+    final latest = _playlist ?? playlist;
+    await _update(
+      latest.copyWith(subtitleLanguages: Value(languages)),
+      (playlists) => playlists.updatePlaylistSettings(
+        id: playlist.id,
+        subtitleLanguages: Value(languages),
       ),
     );
   }
@@ -873,7 +895,7 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
                               ),
                             ),
                   ),
-                  if (!playlist.audioOnly)
+                  if (!playlist.audioOnly) ...[
                     ListTile(
                       key: const ValueKey('playlist-video-quality'),
                       leading: const Icon(Icons.high_quality_outlined),
@@ -883,6 +905,41 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
                       trailing: const Icon(Icons.chevron_right),
                       onTap: _chooseVideoQuality,
                     ),
+                    SwitchListTile(
+                      key: const ValueKey('playlist-download-subtitles'),
+                      secondary: const Icon(Icons.closed_caption_outlined),
+                      title: const Text('Download subtitles'),
+                      subtitle: const Text(
+                        'Inside the video file, including automatic '
+                        'captions. Applies to new downloads',
+                      ),
+                      value: playlist.downloadSubtitles,
+                      onChanged:
+                          busy
+                              ? null
+                              : (value) => _update(
+                                playlist.copyWith(downloadSubtitles: value),
+                                (playlists) => playlists.updatePlaylistSettings(
+                                  id: playlist.id,
+                                  downloadSubtitles: value,
+                                ),
+                              ),
+                    ),
+                    if (playlist.downloadSubtitles)
+                      ListTile(
+                        key: const ValueKey('playlist-subtitle-languages'),
+                        leading: const SizedBox(width: 24),
+                        title: const Text('Subtitle languages'),
+                        subtitle: Text(
+                          subtitleLanguagesLabel(
+                            subtitleLanguagesFor(playlist),
+                          ),
+                        ),
+                        enabled: !busy,
+                        trailing: const Icon(Icons.chevron_right),
+                        onTap: _chooseSubtitleLanguages,
+                      ),
+                  ],
                   if (!temporary) ...[
                     const SettingsSectionHeader('Updates'),
                     SwitchListTile(

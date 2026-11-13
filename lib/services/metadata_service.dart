@@ -8,6 +8,7 @@ import 'sponsorblock_categories.dart';
 import 'chapters.dart';
 import 'library_layout.dart';
 import 'media_thumbnail_service.dart';
+import 'subtitles.dart';
 import 'video_quality.dart';
 import 'lyrics/lyrics_files.dart';
 import 'lyrics/lyrics_service.dart' show syncLyricsChapterDocs;
@@ -164,6 +165,12 @@ class DiscoveredPlaylist {
   /// `Playlists.lyricsMode`: 'lyrics', 'transcript' or null (off).
   final String? lyricsMode;
 
+  /// `Playlists.downloadSubtitles`.
+  final bool downloadSubtitles;
+
+  /// `Playlists.subtitleLanguages`: tidied codes, or null (English).
+  final String? subtitleLanguages;
+
   DiscoveredPlaylist({
     required this.folderPath,
     required this.url,
@@ -184,6 +191,8 @@ class DiscoveredPlaylist {
     this.videoQuality,
     this.isTemporary = false,
     this.lyricsMode,
+    this.downloadSubtitles = false,
+    this.subtitleLanguages,
   });
 }
 
@@ -1845,6 +1854,8 @@ for video) to keep a complete backup.
           videoQuality: Value(discovered.videoQuality),
           isTemporary: Value(discovered.isTemporary),
           lyricsMode: Value(discovered.lyricsMode),
+          downloadSubtitles: Value(discovered.downloadSubtitles),
+          subtitleLanguages: Value(discovered.subtitleLanguages),
         ),
       );
 
@@ -2110,6 +2121,9 @@ for video) to keep a complete backup.
       lyricsMode: LyricsMode.toDb(
         LyricsMode.fromDb(pl['lyricsMode'] is String ? pl['lyricsMode'] : null),
       ),
+      downloadSubtitles: pl['downloadSubtitles'] == true,
+      // A hand-edited list must not reach yt-dlp unchecked.
+      subtitleLanguages: subtitleLanguagesOrNull(pl['subtitleLanguages']),
     );
   }
 
@@ -2313,6 +2327,9 @@ String buildSidecarJson(
       if (playlist.videoQuality != null) 'videoQuality': playlist.videoQuality,
       if (playlist.isTemporary) 'temporary': true,
       if (playlist.lyricsMode != null) 'lyricsMode': playlist.lyricsMode,
+      if (playlist.downloadSubtitles) 'downloadSubtitles': true,
+      if (playlist.subtitleLanguages != null)
+        'subtitleLanguages': playlist.subtitleLanguages,
     },
     'tracks': tracksJson,
   };

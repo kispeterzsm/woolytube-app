@@ -55,8 +55,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   bool _pauseOnAudioInterruption = true;
   bool _evenOutVolume = false;
   PlaneModeStrength _planeModeStrength = PlaneModeStrength.standard;
-  bool _downloadSubtitles = false;
-  String _subtitleLanguages = 'en';
   DateTime? _lastYtDlpUpdateCheck;
   String? _appVersion;
   bool _isLoadingSettings = true;
@@ -83,9 +81,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       final values = await Future.wait([
         settings.getAutoDownloadWithMobileData(),
         settings.getPauseOnAudioInterruption(),
-        settings.getDownloadSubtitles(),
       ]);
-      final languages = await settings.getSubtitleLanguages();
       final lastCheck = await settings.getLastYtDlpUpdateAttempt();
       final evenOutVolume = await settings.getEvenOutVolume();
       final strength = await settings.getPlaneModeStrength();
@@ -93,8 +89,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         setState(() {
           _evenOutVolume = evenOutVolume;
           _planeModeStrength = strength;
-          _downloadSubtitles = values[2];
-          _subtitleLanguages = languages;
           _autoDownloadWithMobileData = values[0];
           _pauseOnAudioInterruption = values[1];
           _lastYtDlpUpdateCheck = lastCheck;
@@ -234,34 +228,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             .setAutoDownloadWithMobileData(enabled),
   );
 
-  Future<void> _setDownloadSubtitles(bool enabled) => _save(
-    apply: () => _downloadSubtitles = enabled,
-    revert: () => _downloadSubtitles = !enabled,
-    write:
-        () =>
-            ref.read(appSettingsServiceProvider).setDownloadSubtitles(enabled),
-  );
-
-  Future<void> _editSubtitleLanguages() async {
-    final languages = await showDialog<String>(
-      context: context,
-      builder:
-          (_) => _SubtitleLanguagesDialog(initialValue: _subtitleLanguages),
-    );
-    if (!mounted || languages == null || languages == _subtitleLanguages) {
-      return;
-    }
-    final previous = _subtitleLanguages;
-    await _save(
-      apply: () => _subtitleLanguages = languages,
-      revert: () => _subtitleLanguages = previous,
-      write:
-          () => ref
-              .read(appSettingsServiceProvider)
-              .setSubtitleLanguages(languages),
-    );
-  }
-
   Future<void> _restoreSettings() async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -269,8 +235,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           (ctx) => AlertDialog(
             title: const Text('Restore settings?'),
             content: const Text(
-              'Replaces the playback, sound, subtitle and mobile data '
-              'settings with the ones saved by the last library backup. '
+              'Replaces the playback, sound and mobile data settings with '
+              'the ones saved by the last library backup. '
               'Playlists are not changed.',
             ),
             actions: [
@@ -394,26 +360,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         value: _autoDownloadWithMobileData,
         onChanged: saving ? null : _setAutoDownloadWithMobileData,
       ),
-      SwitchListTile(
-        secondary: const Icon(Icons.closed_caption_outlined),
-        title: const Text('Download subtitles'),
-        subtitle: const Text(
-          'For video playlists, including automatic captions. Applies to new '
-          'downloads.',
-        ),
-        value: _downloadSubtitles,
-        onChanged: saving ? null : _setDownloadSubtitles,
-      ),
-      if (_downloadSubtitles)
-        ListTile(
-          key: const ValueKey('subtitle-languages'),
-          leading: const SizedBox(width: 24),
-          title: const Text('Subtitle languages'),
-          subtitle: Text(_subtitleLanguages),
-          enabled: !saving,
-          trailing: const Icon(Icons.chevron_right),
-          onTap: _editSubtitleLanguages,
-        ),
       ListTile(
         leading: const Icon(Icons.download_for_offline_outlined),
         title: const Text('Downloader (yt-dlp)'),
@@ -1054,8 +1000,8 @@ class _RestorePlaylistsPageState extends ConsumerState<_RestorePlaylistsPage> {
                     leading: const Icon(Icons.settings_backup_restore),
                     title: const Text('Restore settings from this folder'),
                     subtitle: const Text(
-                      'Playback, sound, subtitle and mobile data settings from '
-                      'its backup',
+                      'Playback, sound and mobile data settings from its '
+                      'backup',
                     ),
                     enabled: idle,
                     onTap: _restoreSettings,
@@ -1123,129 +1069,6 @@ class _RestorePlaylistsPageState extends ConsumerState<_RestorePlaylistsPage> {
               ],
             ),
       ),
-    );
-  }
-}
-
-class _SubtitleLanguagesDialog extends StatefulWidget {
-  const _SubtitleLanguagesDialog({required this.initialValue});
-
-  final String initialValue;
-
-  @override
-  State<_SubtitleLanguagesDialog> createState() =>
-      _SubtitleLanguagesDialogState();
-}
-
-class _SubtitleLanguagesDialogState extends State<_SubtitleLanguagesDialog> {
-  /// Offered as one-tap choices; any other code can be typed.
-  static const _common = <(String, String)>[
-    ('en', 'English'),
-    ('hu', 'Hungarian'),
-    ('de', 'German'),
-    ('es', 'Spanish'),
-    ('fr', 'French'),
-    ('it', 'Italian'),
-    ('pt', 'Portuguese'),
-    ('ja', 'Japanese'),
-  ];
-
-  final _formKey = GlobalKey<FormState>();
-  late final _controller = TextEditingController(text: widget.initialValue);
-
-  @override
-  void initState() {
-    super.initState();
-    _controller.addListener(_onChanged);
-  }
-
-  void _onChanged() => setState(() {});
-
-  @override
-  void dispose() {
-    _controller.removeListener(_onChanged);
-    _controller.dispose();
-    super.dispose();
-  }
-
-  List<String> get _codes =>
-      _controller.text
-          .split(',')
-          .map((code) => code.trim())
-          .where((code) => code.isNotEmpty)
-          .toList();
-
-  void _toggle(String code, bool selected) {
-    final codes = _codes..remove(code);
-    if (selected) codes.add(code);
-    _controller.text = codes.join(', ');
-  }
-
-  void _save() {
-    if (_formKey.currentState!.validate()) {
-      Navigator.pop(
-        context,
-        AppSettingsService.normalizeSubtitleLanguages(_controller.text),
-      );
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final codes = _codes;
-    return AlertDialog(
-      title: const Text('Subtitle languages'),
-      content: SingleChildScrollView(
-        child: Form(
-          key: _formKey,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Wrap(
-                spacing: 6,
-                runSpacing: 2,
-                children: [
-                  for (final (code, name) in _common)
-                    FilterChip(
-                      label: Text(name),
-                      selected: codes.contains(code),
-                      onSelected: (selected) => _toggle(code, selected),
-                    ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _controller,
-                autocorrect: false,
-                decoration: const InputDecoration(
-                  labelText: 'Language codes',
-                  helperText:
-                      'Separate codes with commas: en, hu, de. '
-                      'en.* also gets en-US and en-GB.',
-                  helperMaxLines: 2,
-                ),
-                validator: (value) {
-                  try {
-                    AppSettingsService.normalizeSubtitleLanguages(value ?? '');
-                    return null;
-                  } on FormatException catch (error) {
-                    return error.message;
-                  }
-                },
-                onFieldSubmitted: (_) => _save(),
-              ),
-            ],
-          ),
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(onPressed: _save, child: const Text('Save')),
-      ],
     );
   }
 }

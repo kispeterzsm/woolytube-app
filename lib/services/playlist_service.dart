@@ -12,6 +12,7 @@ export 'metadata_service.dart' show PlaylistExistsException;
 import 'sponsorblock_service.dart';
 import 'media_thumbnail_service.dart' as media_thumbnail_service;
 import 'app_settings_service.dart';
+import 'subtitles.dart';
 import 'video_quality.dart';
 import 'lyrics/lyrics_models.dart';
 import 'lyrics/lyrics_service.dart'
@@ -630,7 +631,17 @@ class PlaylistService {
     Map<String, SponsorBlockCategoryAction>? sponsorBlockCategoryActions,
     // `Value(null)` turns lyrics off; absent leaves the mode alone.
     Value<LyricsMode?> lyricsMode = const Value.absent(),
+    bool? downloadSubtitles,
+    // Comma-separated codes, tidied (see [normalizeSubtitleLanguages]);
+    // `Value(null)` or empty goes back to English. Throws a
+    // [FormatException] for a list yt-dlp must not be given.
+    Value<String?> subtitleLanguages = const Value.absent(),
   }) async {
+    final languages = subtitleLanguages.value;
+    final normalizedLanguages =
+        languages == null || languages.trim().isEmpty
+            ? null
+            : normalizeSubtitleLanguages(languages);
     final playlist = await _db.getPlaylist(id);
     final legacyCategorySet =
         sponsorBlockCategories?.where(isSponsorBlockCategory).toSet();
@@ -680,6 +691,14 @@ class PlaylistService {
       lyricsMode:
           lyricsMode.present
               ? Value(LyricsMode.toDb(lyricsMode.value))
+              : const Value.absent(),
+      downloadSubtitles:
+          downloadSubtitles != null
+              ? Value(downloadSubtitles)
+              : const Value.absent(),
+      subtitleLanguages:
+          subtitleLanguages.present
+              ? Value(normalizedLanguages)
               : const Value.absent(),
     );
 

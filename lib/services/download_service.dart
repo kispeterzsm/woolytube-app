@@ -9,7 +9,6 @@ import '../database/database.dart';
 import 'auto_update_attempts.dart';
 import 'download_errors.dart';
 import 'ytdlp_service.dart';
-import 'app_settings_service.dart';
 import 'library_gate.dart';
 import 'log_service.dart';
 import 'lyrics/lyrics_models.dart';
@@ -18,6 +17,7 @@ import 'media_thumbnail_service.dart';
 import 'metadata_service.dart';
 import 'notification_service.dart';
 import 'sponsorblock_service.dart';
+import 'subtitles.dart';
 import 'video_quality.dart';
 
 /// What a running download is doing right now.
@@ -357,7 +357,6 @@ class DownloadService {
   final DownloadNotificationService? _notifications;
   final SponsorBlockService? _sponsorBlock;
   final LyricsService? _lyrics;
-  final AppSettingsService _settings;
   final LibraryGate _gate;
   final MediaThumbnailService _thumbnails;
 
@@ -441,7 +440,6 @@ class DownloadService {
     this._metadata, [
     this._notifications,
     this._sponsorBlock,
-    AppSettingsService? settings,
     DownloadLock? lock,
     String lockOwner = DownloadLock.foregroundOwner,
     LibraryGate? gate,
@@ -450,7 +448,6 @@ class DownloadService {
     AutoUpdateAttemptLog? attempts,
   ]) : _lyrics = lyrics,
        _attempts = attempts ?? AutoUpdateAttemptLog(),
-       _settings = settings ?? AppSettingsService(),
        _gate =
            gate ?? LibraryGate(lock: lock ?? DownloadLock(), owner: lockOwner),
        _thumbnails = thumbnails ?? const MediaThumbnailService();
@@ -1158,6 +1155,7 @@ class DownloadService {
               '${escapeOutputTemplateLiteral(staging.path)}/'
               'reupload_%(title).${titleByteLimit}B.%(ext)s',
           trackLabel: trackLabel,
+          playlist: playlist,
           maxHeight: effectiveMaxHeight(playlist, fresh),
         );
       } catch (e) {
@@ -1450,6 +1448,7 @@ class DownloadService {
           metadataAlbum: playlist.name,
           outputTemplate: outputTemplate,
           trackLabel: trackLabel,
+          playlist: playlist,
           maxHeight: maxHeight,
         );
       } catch (e) {
@@ -1775,12 +1774,14 @@ class DownloadService {
     required String metadataAlbum,
     required String outputTemplate,
     required String trackLabel,
+    required Playlist playlist,
     int? maxHeight,
   }) async {
-    var downloadSubtitles =
-        !audioOnly && await _settings.getDownloadSubtitles();
+    var downloadSubtitles = !audioOnly && playlist.downloadSubtitles;
     final subtitleLanguages =
-        downloadSubtitles ? await _settings.getSubtitleLanguages() : 'en';
+        downloadSubtitles
+            ? subtitleLanguagesFor(playlist)
+            : defaultSubtitleLanguages;
     const backoffs = [Duration(seconds: 5), Duration(seconds: 15)];
     var attempt = 0;
     var withExtras = true;

@@ -59,6 +59,16 @@ class Playlists extends Table {
   /// What text is fetched for search: 'lyrics' (songs) or 'transcript'
   /// (spoken content); null = off. See `LyricsMode`.
   TextColumn get lyricsMode => text().nullable()();
+
+  /// New downloads get subtitles (the uploader's or YouTube's automatic
+  /// ones), embedded in the video file. Ignored for audio-only playlists.
+  BoolColumn get downloadSubtitles =>
+      boolean().withDefault(const Constant(false))();
+
+  /// Subtitle languages for yt-dlp, comma-separated (`en,hu`; `en.*` also
+  /// matches en-US and en-GB); null = English. See
+  /// `normalizeSubtitleLanguages`.
+  TextColumn get subtitleLanguages => text().nullable()();
 }
 
 class Tracks extends Table {
@@ -271,7 +281,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 18;
+  int get schemaVersion => 19;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -402,6 +412,14 @@ class AppDatabase extends _$AppDatabase {
       }
       if (from < 18) {
         await migrator.createTable(loudnessMeasurements);
+      }
+      if (from < 19) {
+        await migrator.addColumn(playlists, playlists.downloadSubtitles);
+        await migrator.addColumn(playlists, playlists.subtitleLanguages);
+        await customStatement(
+          'DROP TRIGGER IF EXISTS trg_rev_playlists_update',
+        );
+        await _createRevisionTracking();
       }
     },
   );
@@ -720,6 +738,18 @@ class AppDatabase extends _$AppDatabase {
   /// Writes only the columns present in [fields], leaving the rest untouched.
   Future<void> updatePlaylistFields(int id, PlaylistsCompanion fields) =>
       (update(playlists)..where((p) => p.id.equals(id))).write(fields);
+
+  /// Turns subtitles on, with [languages], for every video playlist that
+  /// has them off. Returns how many playlists changed.
+  Future<int> enableSubtitlesForVideoPlaylists(String? languages) =>
+      (update(playlists)..where(
+        (p) => p.audioOnly.equals(false) & p.downloadSubtitles.equals(false),
+      )).write(
+        PlaylistsCompanion(
+          downloadSubtitles: const Value(true),
+          subtitleLanguages: Value(languages),
+        ),
+      );
 
   Future<void> markPlaylistUpdated(int id, DateTime at) =>
       updatePlaylistFields(id, PlaylistsCompanion(lastUpdated: Value(at)));

@@ -10,8 +10,13 @@ class AppSettingsService {
     : _preferencesLoader = preferencesLoader ?? SharedPreferences.getInstance;
 
   static const autoDownloadWithMobileDataKey = 'auto_download_with_mobile_data';
-  static const downloadSubtitlesKey = 'download_subtitles';
-  static const subtitleLanguagesKey = 'subtitle_languages';
+
+  /// The app-wide subtitle setting of earlier versions. Subtitles are now a
+  /// playlist setting; these are only read to move the old choice there,
+  /// and skipped when an old settings backup is restored.
+  static const legacyDownloadSubtitlesKey = 'download_subtitles';
+  static const legacySubtitleLanguagesKey = 'subtitle_languages';
+
   static const pauseOnAudioInterruptionKey = 'pause_on_audio_interruption';
   static const dismissedImportUrlsKey = 'dismissed_import_urls';
   static const lastYtDlpUpdateAttemptKey = 'last_ytdlp_update_attempt';
@@ -78,55 +83,31 @@ class AppSettingsService {
     await preferences.setBool(planeModeTipShownKey, true);
   }
 
-  Future<bool> getDownloadSubtitles() async {
+  /// The app-wide subtitle setting of versions before subtitles became a
+  /// playlist setting: whether it was on and its languages. Null when
+  /// neither is stored (never set, or already moved to the playlists by
+  /// `migrateLegacySubtitleSetting`).
+  Future<({bool enabled, String? languages})?>
+  readLegacySubtitleSetting() async {
     final preferences = await _preferencesLoader();
-    // Background downloads run in another engine; refresh its preference cache.
+    // The app and the scheduled update run in different engines.
     await preferences.reload();
-    return preferences.getBool(downloadSubtitlesKey) ?? false;
-  }
-
-  Future<void> setDownloadSubtitles(bool enabled) async {
-    final preferences = await _preferencesLoader();
-    await preferences.setBool(downloadSubtitlesKey, enabled);
-  }
-
-  Future<String> getSubtitleLanguages() async {
-    final preferences = await _preferencesLoader();
-    await preferences.reload();
-    return preferences.getString(subtitleLanguagesKey) ?? 'en';
-  }
-
-  Future<void> setSubtitleLanguages(String languages) async {
-    final normalized = normalizeSubtitleLanguages(languages);
-    final preferences = await _preferencesLoader();
-    await preferences.setString(subtitleLanguagesKey, normalized);
-  }
-
-  /// Checks and tidies a comma-separated list of subtitle language codes
-  /// for yt-dlp. Spaces and empty items (a trailing comma) are dropped. A
-  /// code may end in `.*` to also match its regional variants (`en.*` for
-  /// en-US and en-GB captions). 'all' is refused: it would download
-  /// hundreds of automatic translations.
-  static String normalizeSubtitleLanguages(String value) {
-    final languages =
-        value
-            .split(',')
-            .map((code) => code.trim())
-            .where((code) => code.isNotEmpty)
-            .toSet();
-    if (languages.isEmpty ||
-        languages.any(
-          (code) =>
-              code.toLowerCase() == 'all' ||
-              !RegExp(
-                r'^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]+)*(?:\.\*)?$',
-              ).hasMatch(code),
-        )) {
-      throw const FormatException(
-        'Enter language codes separated by commas, such as en, hu, de.',
-      );
+    if (!preferences.containsKey(legacyDownloadSubtitlesKey) &&
+        !preferences.containsKey(legacySubtitleLanguagesKey)) {
+      return null;
     }
-    return languages.join(',');
+    final enabled = preferences.get(legacyDownloadSubtitlesKey);
+    final languages = preferences.get(legacySubtitleLanguagesKey);
+    return (
+      enabled: enabled == true,
+      languages: languages is String ? languages : null,
+    );
+  }
+
+  Future<void> clearLegacySubtitleSetting() async {
+    final preferences = await _preferencesLoader();
+    await preferences.remove(legacyDownloadSubtitlesKey);
+    await preferences.remove(legacySubtitleLanguagesKey);
   }
 
   /// Playlist URLs whose on-disk folders should not be offered for import
@@ -183,13 +164,13 @@ class AppSettingsService {
 
   /// Applies settings from a library backup (see [exportSettings]). Only
   /// the owner's preferences are restored, never app bookkeeping such as
-  /// dismissed imports. Returns how many settings were applied.
+  /// dismissed imports, nor the old app-wide subtitle setting (subtitles
+  /// are chosen per playlist now). Returns how many settings were applied.
   Future<int> importSettings(Map<String, Object?> values) async {
     final preferences = await _preferencesLoader();
     var applied = 0;
     for (final key in const [
       autoDownloadWithMobileDataKey,
-      downloadSubtitlesKey,
       pauseOnAudioInterruptionKey,
       evenOutVolumeKey,
     ]) {
@@ -204,20 +185,6 @@ class AppSettingsService {
         PlaneModeStrength.values.any((s) => s.name == strength)) {
       await preferences.setString(planeModeStrengthKey, strength);
       applied++;
-    }
-    final languages = values[subtitleLanguagesKey];
-    if (languages is String) {
-      // A hand-edited backup must not hand yt-dlp something the settings
-      // page would refuse.
-      try {
-        await preferences.setString(
-          subtitleLanguagesKey,
-          normalizeSubtitleLanguages(languages),
-        );
-        applied++;
-      } on FormatException {
-        // Keep the current languages.
-      }
     }
     if (applied > 0) await scheduleAutoUpdate();
     return applied;
