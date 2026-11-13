@@ -84,7 +84,6 @@ void main() {
     Future<bool> Function(List<MediaChapter>, int)? onSave,
     bool closeOnSave = false,
     int? playingAtMs,
-    Stream<int?>? playerPositionMs,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
@@ -113,7 +112,6 @@ void main() {
                               notesById: notes,
                               closeOnSave: closeOnSave,
                               playingAtMs: playingAtMs,
-                              playerPositionMs: playerPositionMs,
                               onSave:
                                   onSave ??
                                   (list, duration) async {
@@ -145,6 +143,12 @@ void main() {
                 .first,
           )
           .data!;
+
+  /// The editor playhead in the top bar.
+  String topPlayhead(WidgetTester tester) => tester
+      .widget<Text>(find.byKey(const ValueKey('editor-top-playhead')))
+      .textSpan!
+      .toPlainText(includePlaceholders: false);
 
   Future<void> tapKey(WidgetTester tester, String key) async {
     await tester.ensureVisible(find.byKey(ValueKey(key)));
@@ -1094,11 +1098,7 @@ void main() {
   });
 
   group('opened while the app plays this file', () {
-    String topBar(WidgetTester tester) =>
-        tester
-            .widget<Text>(find.byKey(const ValueKey('editor-player-position')))
-            .textSpan!
-            .toPlainText();
+    String topBar(WidgetTester tester) => topPlayhead(tester);
 
     testWidgets('selects the start of the playing chapter and puts the '
         'playhead where the player is', (tester) async {
@@ -1110,7 +1110,7 @@ void main() {
         tester.widget<Text>(find.byKey(const ValueKey('editor-position'))).data,
         '2:15.420',
       );
-      expect(topBar(tester), endsWith('2:15.420 · Long mix'));
+      expect(topBar(tester), '2:15.420');
       // The playhead is a spot the user listened to: Set here moves the
       // boundary there.
       await tapKey(tester, 'editor-set-here');
@@ -1166,32 +1166,75 @@ void main() {
       expect(find.text('Boundary 2 of 4'), findsOneWidget);
     });
 
-    testWidgets('the top bar follows the player to the millisecond', (
-      tester,
-    ) async {
-      final positions = StreamController<int?>();
-      addTearDown(positions.close);
-      await pumpEditor(
-        tester,
-        playingAtMs: 1000,
-        playerPositionMs: positions.stream,
+    testWidgets('the top bar follows the editor playhead, not the app '
+        'player', (tester) async {
+      final opening = previews.openGate = Completer<void>();
+      await pumpEditor(tester, playingAtMs: 1000);
+      // Where the app's player was, while the file is still opening.
+      expect(topBar(tester), '0:01.000');
+      opening.complete();
+      await tester.pumpAndSettle();
+      expect(topBar(tester), '0:01.000');
+
+      // The editor's own preview plays: the top bar moves with it.
+      await tapKey(tester, 'editor-play-pause');
+      final preview = previews.last;
+      preview.position = 61234;
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(topBar(tester), '1:01.234');
+      expect(
+        tester.widget<Text>(find.byKey(const ValueKey('editor-position'))).data,
+        '1:01.234',
       );
-      expect(topBar(tester), endsWith('0:01.000 · Long mix'));
-      positions.add(61234);
+      await tapKey(tester, 'editor-play-pause');
       await tester.pumpAndSettle();
-      expect(topBar(tester), endsWith('1:01.234 · Long mix'));
-      // The player moved on to another file.
-      positions.add(null);
+
+      // Seeking moves it too.
+      await tapKey(tester, 'editor-forward-5');
       await tester.pumpAndSettle();
-      expect(topBar(tester), 'Long mix');
+      expect(topBar(tester), '1:06.234');
+      await tapKey(tester, 'editor-back-5');
+      await tapKey(tester, 'editor-back-5');
+      await tester.pumpAndSettle();
+      expect(topBar(tester), '0:56.234');
     });
 
     testWidgets('without the player on this file the top bar shows the '
-        'title alone', (tester) async {
+        'playhead from the start; the title is in a tooltip', (tester) async {
       await pumpEditor(tester);
-      expect(topBar(tester), 'Long mix');
+      expect(topBar(tester), '0:00.000');
       expect(previews.last.seeks, isEmpty);
+      expect(find.byTooltip('Long mix'), findsOneWidget);
     });
+  });
+
+  testWidgets('every time of a file of an hour or more reads h:mm:ss', (
+    tester,
+  ) async {
+    previews = FakePreviewFactory(durationMs: 9444000);
+    await pumpEditor(
+      tester,
+      durationMs: 9444000,
+      playingAtMs: 8473958,
+      initial: const [
+        MediaChapter(id: 'a', title: 'Intro', startMs: 0, endMs: 60000),
+        MediaChapter(
+          id: 'b',
+          title: 'Long song',
+          startMs: 60000,
+          endMs: 9444000,
+        ),
+      ],
+    );
+    expect(topPlayhead(tester), '2:21:13.958');
+    expect(
+      tester.widget<Text>(find.byKey(const ValueKey('editor-position'))).data,
+      '2:21:13.958',
+    );
+    expect(find.text('of 2:37:24'), findsOneWidget);
+    expect(find.text('0:00:00 – 0:01:00 · 0:01:00'), findsOneWidget);
+    expect(find.text('0:01:00 – 2:37:24 · 2:36:24'), findsOneWidget);
+    expect(timeShown(tester), '0:01:00.000');
   });
 
   testWidgets('a length the file never reported is not saved', (tester) async {

@@ -43,22 +43,10 @@ String originName(ChapterOrigin origin) => switch (origin) {
   ChapterOrigin.user => 'Yours',
 };
 
-/// `m:ss.mmm`, or `h:mm:ss.mmm` from an hour on.
-String preciseTime(int ms) {
-  final negative = ms < 0;
-  final abs = ms.abs();
-  final hours = abs ~/ 3600000;
-  final minutes = abs ~/ 60000 % 60;
-  final seconds = abs ~/ 1000 % 60;
-  final millis = abs % 1000;
-  final ss = seconds.toString().padLeft(2, '0');
-  final mmm = millis.toString().padLeft(3, '0');
-  final body =
-      hours > 0
-          ? '$hours:${minutes.toString().padLeft(2, '0')}:$ss.$mmm'
-          : '$minutes:$ss.$mmm';
-  return negative ? '−$body' : body;
-}
+/// `m:ss.mmm`, or `h:mm:ss.mmm` when the file ([fileMs]) or [ms] reaches
+/// an hour: [chapterClock] to the millisecond.
+String preciseTime(int ms, {int? fileMs}) =>
+    chapterClock(ms, fileMs: fileMs, decimals: 3);
 
 /// "+0.420 s" or "−1.250 s" ([decimals] after the point).
 String signedSeconds(int ms, {int decimals = 3}) {

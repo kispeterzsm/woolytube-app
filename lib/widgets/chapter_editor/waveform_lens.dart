@@ -5,6 +5,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import '../../services/chapter_draft.dart';
+import '../../services/chapters.dart';
 import '../../services/waveform_service.dart';
 import 'editor_style.dart';
 
@@ -550,12 +551,8 @@ class _LensPainter extends CustomPainter {
     }
   }
 
-  static String _label(int ms, {required bool fine}) {
-    final minutes = ms ~/ 60000;
-    final seconds = (ms ~/ 1000 % 60).toString().padLeft(2, '0');
-    if (!fine) return '$minutes:$seconds';
-    return '$minutes:$seconds.${ms % 1000 ~/ 100}';
-  }
+  String _label(int ms, {required bool fine}) =>
+      chapterClock(ms, fileMs: durationMs, decimals: fine ? 1 : 0);
 
   @override
   bool shouldRepaint(_LensPainter old) =>

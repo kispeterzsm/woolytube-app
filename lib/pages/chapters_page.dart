@@ -2,12 +2,10 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:rxdart/rxdart.dart';
 
 import '../database/database.dart';
 import '../providers/playback_providers.dart';
 import '../providers/providers.dart';
-import '../services/chapter_playback.dart';
 import '../services/chapter_service.dart';
 import '../services/chapters.dart';
 import '../services/playback_service.dart';
@@ -196,7 +194,6 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
               durationMs: _durationOf(track),
               focusChapterId: focusChapterId,
               playingAtMs: playingAtMs,
-              playerPositionMs: _filePositionMs(player, track.id),
               title: data.active.isEmpty ? 'Create chapters' : 'Edit chapters',
               saveLabel: 'Save',
               notesById: {
@@ -225,18 +222,6 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
       _showMessage('Chapters saved. Undo last chapter change takes it back.');
     }
   }
-
-  /// Where [player] is in the file of [trackId] as it plays, or null while
-  /// it is on another file. The position is on the item's own timeline.
-  static Stream<int?> _filePositionMs(PlaybackService player, int trackId) =>
-      Rx.combineLatest2<PlaybackItem?, Duration, int?>(
-        player.currentItemStream,
-        player.positionStream,
-        (item, position) =>
-            item == null || item.track.id != trackId
-                ? null
-                : item.startMs + position.inMilliseconds,
-      ).distinct();
 
   Future<void> _rename(Track track, MediaChapter chapter) async {
     final title = await showDialog<String>(
@@ -421,6 +406,9 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                 ),
                 child: _ChapterActionsSheet(
                   chapter: chapter,
+                  fileMs:
+                      ChapterService.knownDurationMs(track) ??
+                      data.active.lastOrNull?.endMs,
                   skipped: skipped,
                   playable: playable,
                   onPlay: () {
@@ -737,6 +725,9 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
       false => _ShuffleChapters.noShuffle,
     };
     final durationMs = ChapterService.knownDurationMs(track);
+    // Sets the clock format of the times listed (h:mm:ss for an hour or
+    // more), so they all read alike.
+    final fileMs = durationMs ?? data.active.lastOrNull?.endMs;
 
     return Scaffold(
       appBar: AppBar(
@@ -777,7 +768,7 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                         child: Text(
                           [
                             if (durationMs != null)
-                              chapterTimestamp(durationMs),
+                              chapterTimestamp(durationMs, fileMs: fileMs),
                             data.active.isEmpty
                                 ? 'No chapters'
                                 : data.active.length == 1
@@ -1051,6 +1042,7 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                               key: ValueKey('chapter-${chapter.id}'),
                               number: i + 1,
                               chapter: chapter,
+                              fileMs: fileMs,
                               skipped: data.isSkipped(chapter.id),
                               playable: playable,
                               enabled: !_busy,
@@ -1485,6 +1477,7 @@ class _ChapterRow extends StatelessWidget {
     super.key,
     required this.number,
     required this.chapter,
+    required this.fileMs,
     required this.skipped,
     required this.playable,
     required this.enabled,
@@ -1497,6 +1490,9 @@ class _ChapterRow extends StatelessWidget {
   final int number;
   final MediaChapter chapter;
 
+  /// The file's length, for the clock format ([chapterClock]).
+  final int? fileMs;
+
   /// Marked Always skip: autoplay passes over it.
   final bool skipped;
   final bool playable;
@@ -1508,6 +1504,8 @@ class _ChapterRow extends StatelessWidget {
   final bool isPlaying;
   final VoidCallback onTap;
   final VoidCallback onMore;
+
+  String _time(int ms) => chapterTimestamp(ms, fileMs: fileMs);
 
   @override
   Widget build(BuildContext context) {
@@ -1564,8 +1562,8 @@ class _ChapterRow extends StatelessWidget {
                         ),
                       TextSpan(
                         text:
-                            '${chapterTimestamp(chapter.startMs)} – '
-                            '${chapterTimestamp(chapter.endMs)}$origin',
+                            '${_time(chapter.startMs)} – '
+                            '${_time(chapter.endMs)}$origin',
                       ),
                     ],
                   ),
@@ -1574,7 +1572,7 @@ class _ChapterRow extends StatelessWidget {
               const SizedBox(width: 8),
               // Right-aligned, so the lengths line up in a column.
               Text(
-                chapterTimestamp(chapter.duration.inMilliseconds),
+                _time(chapter.duration.inMilliseconds),
                 key: ValueKey('chapter-length-${chapter.id}'),
                 textAlign: TextAlign.right,
                 style: const TextStyle(
@@ -1622,6 +1620,7 @@ const _sheetSubtitleStyle = TextStyle(color: Color(0xFF888888));
 class _ChapterActionsSheet extends StatelessWidget {
   const _ChapterActionsSheet({
     required this.chapter,
+    required this.fileMs,
     required this.skipped,
     required this.playable,
     required this.onPlay,
@@ -1640,6 +1639,9 @@ class _ChapterActionsSheet extends StatelessWidget {
   });
 
   final MediaChapter chapter;
+
+  /// The file's length, for the clock format ([chapterClock]).
+  final int? fileMs;
   final bool skipped;
   final bool playable;
   final VoidCallback onPlay;
@@ -1659,6 +1661,8 @@ class _ChapterActionsSheet extends StatelessWidget {
   final String lyricsTitle;
   final String lyricsSubtitle;
   final VoidCallback onLyrics;
+
+  String _time(int ms) => chapterTimestamp(ms, fileMs: fileMs);
 
   @override
   Widget build(BuildContext context) {
@@ -1711,9 +1715,9 @@ class _ChapterActionsSheet extends StatelessWidget {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      '${chapterTimestamp(chapter.startMs)} – '
-                      '${chapterTimestamp(chapter.endMs)} · '
-                      '${chapterTimestamp(chapter.duration.inMilliseconds)}',
+                      '${_time(chapter.startMs)} – '
+                      '${_time(chapter.endMs)} · '
+                      '${_time(chapter.duration.inMilliseconds)}',
                       style: _sheetSubtitleStyle,
                     ),
                   ],
@@ -1903,11 +1907,15 @@ class ChapterEditDialog extends StatefulWidget {
 class _ChapterEditDialogState extends State<ChapterEditDialog> {
   late final _title = TextEditingController(text: widget.chapter?.title ?? '');
   late final _start = TextEditingController(
-    text: chapterTimestamp(widget.chapter?.startMs ?? widget.startMs ?? 0),
+    text: chapterTimestamp(
+      widget.chapter?.startMs ?? widget.startMs ?? 0,
+      fileMs: widget.durationMs,
+    ),
   );
   late final _end = TextEditingController(
     text: chapterTimestamp(
       widget.chapter?.endMs ?? widget.endMs ?? widget.durationMs ?? 0,
+      fileMs: widget.durationMs,
     ),
   );
   String? _error;

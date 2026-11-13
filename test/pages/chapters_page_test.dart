@@ -507,16 +507,17 @@ void main() {
   });
 
   testWidgets('Edit chapters on the file that is playing opens on the '
-      'chapter it plays and shows where the player is', (tester) async {
+      'chapter it plays, with its playhead where the player is', (
+    tester,
+  ) async {
     final track = await addTrack(chapters: youTubeChapters);
     player.item = PlaybackItem(track);
     player.position = const Duration(milliseconds: 30250);
     await pumpPage(tester, track);
-    String topBar() =>
-        tester
-            .widget<Text>(find.byKey(const ValueKey('editor-player-position')))
-            .textSpan!
-            .toPlainText();
+    String topBar() => tester
+        .widget<Text>(find.byKey(const ValueKey('editor-top-playhead')))
+        .textSpan!
+        .toPlainText(includePlaceholders: false);
 
     await tester.tap(find.byKey(const ValueKey('chapters-edit')));
     await tester.pumpAndSettle();
@@ -524,12 +525,13 @@ void main() {
     // boundary, and the preview playhead is where the player is.
     expect(find.text('Boundary 1 of 3'), findsOneWidget);
     expect(previews.last.seeks, [30250]);
-    expect(topBar(), contains('0:30.250'));
+    expect(topBar(), '0:30.250');
 
-    // The top bar follows the player.
+    // The top bar shows the editor's playhead, not the app's player
+    // (which the editor's preview pauses).
     player.position = const Duration(milliseconds: 31500);
     await tester.pumpAndSettle();
-    expect(topBar(), contains('0:31.500'));
+    expect(topBar(), '0:30.250');
     await tester.pageBack();
     await tester.pumpAndSettle();
     expect(find.byType(ChapterEditorPage), findsNothing);

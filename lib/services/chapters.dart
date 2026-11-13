@@ -435,13 +435,34 @@ bool isPlaceholderChapterTitle(String title) {
       _numberedChapterTitle.hasMatch(trimmed);
 }
 
-String chapterTimestamp(int ms) {
-  final d = Duration(milliseconds: ms);
-  final seconds = (d.inSeconds % 60).toString().padLeft(2, '0');
-  final fraction =
-      (ms % 1000) == 0 ? '' : '.${(ms % 1000).toString().padLeft(3, '0')}';
-  return '${d.inMinutes}:$seconds$fraction';
+/// The one clock format for times in a file's chapters: `m:ss`, or
+/// `h:mm:ss` when the file ([fileMs], its length) or [ms] itself reaches an
+/// hour, so every time of a long file reads alike and minutes never pass 59.
+/// [decimals] (0, 1 or 3) digits of the second follow, cut rather than
+/// rounded so a time never shows later than it is. Negative times get "−".
+String chapterClock(int ms, {int? fileMs, int decimals = 0}) {
+  assert(decimals == 0 || decimals == 1 || decimals == 3);
+  final abs = ms.abs();
+  final hours = abs ~/ 3600000;
+  final minutes = abs ~/ 60000 % 60;
+  final seconds = (abs ~/ 1000 % 60).toString().padLeft(2, '0');
+  final withHours = hours > 0 || (fileMs ?? 0) >= 3600000;
+  var text =
+      withHours
+          ? '$hours:${minutes.toString().padLeft(2, '0')}:$seconds'
+          : '$minutes:$seconds';
+  if (decimals == 3) {
+    text += '.${(abs % 1000).toString().padLeft(3, '0')}';
+  } else if (decimals == 1) {
+    text += '.${abs % 1000 ~/ 100}';
+  }
+  return ms < 0 ? '−$text' : text;
 }
+
+/// [chapterClock] with milliseconds only when [ms] is not a whole second.
+/// Edit fields use it too: [parseChapterTimestamp] reads it back exactly.
+String chapterTimestamp(int ms, {int? fileMs}) =>
+    chapterClock(ms, fileMs: fileMs, decimals: ms % 1000 == 0 ? 0 : 3);
 
 int? parseChapterTimestamp(String text) {
   final parts = text.trim().split(':');

@@ -42,7 +42,6 @@ class ChapterEditorPage extends ConsumerStatefulWidget {
     this.notesById = const {},
     this.closeOnSave = false,
     this.playingAtMs,
-    this.playerPositionMs,
   });
 
   final Track track;
@@ -73,10 +72,6 @@ class ChapterEditorPage extends ConsumerStatefulWidget {
   /// then opens on the start of the chapter there, with the preview
   /// playhead on that exact spot.
   final int? playingAtMs;
-
-  /// Where the app's player is in this file as it moves, or null once it
-  /// is on another file. Shown in the top bar.
-  final Stream<int?>? playerPositionMs;
 
   /// Forgets the choices kept for the session (zoom, lead time, replay).
   @visibleForTesting
@@ -180,9 +175,6 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
 
   /// Something was saved since the editor opened: leaving pops with true.
   bool _savedAny = false;
-
-  /// Where the app's player is in this file, for the top bar.
-  late final ValueNotifier<int?> _playerAt;
   final _scroll = ScrollController();
 
   @override
@@ -198,15 +190,6 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
     _initialById = {for (final c in widget.initial) c.id: c};
     _selectInitial();
     _ticker = createTicker((_) => _setPlayhead(_preview?.positionMs ?? 0));
-    _playerAt = ValueNotifier(widget.playingAtMs);
-    final positions = widget.playerPositionMs;
-    if (positions != null) {
-      _subscriptions.add(
-        positions.listen((ms) {
-          if (mounted) _playerAt.value = ms;
-        }),
-      );
-    }
     _waveforms = ref.read(waveformServiceProvider);
     final path = _path = resolveTrackMediaPath(widget.track);
     if (path == null) {
@@ -242,7 +225,6 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
     _preview = null;
     if (preview != null) unawaited(preview.dispose());
     _playhead.dispose();
-    _playerAt.dispose();
     _scroll.dispose();
     super.dispose();
   }
@@ -354,6 +336,14 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
   }
 
   void _setPlayhead(int ms) => _playhead.value = ms;
+
+  /// The file's length, which sets the clock format of every time shown
+  /// (h:mm:ss for an hour or more), so they all read alike.
+  int get _fileMs => _draft.durationMs;
+
+  String _time(int ms) => chapterTimestamp(ms, fileMs: _fileMs);
+
+  String _preciseTime(int ms) => preciseTime(ms, fileMs: _fileMs);
 
   int get _playheadMs =>
       _seekPendingMs ?? _preview?.positionMs ?? _playhead.value;
@@ -782,8 +772,8 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
     _offerUndo(
       next,
       added == null
-          ? 'Added a boundary at ${preciseTime(at)}.'
-          : 'Added "${added.title}" at ${preciseTime(at)}.',
+          ? 'Added a boundary at ${_preciseTime(at)}.'
+          : 'Added "${added.title}" at ${_preciseTime(at)}.',
     );
   }
 
@@ -809,7 +799,7 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
     if (edge == null) return;
     final ms = await showDialog<int>(
       context: context,
-      builder: (_) => _TimeDialog(initialMs: edge.ms),
+      builder: (_) => _TimeDialog(initialMs: edge.ms, fileMs: _fileMs),
     );
     if (ms == null || !mounted) return;
     final now = _edge;
@@ -818,7 +808,7 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
     _moveTo(target);
     if (target != ms) {
       _message(
-        'Moved to ${preciseTime(target)}, as close as it can go: chapters '
+        'Moved to ${_preciseTime(target)}, as close as it can go: chapters '
         'are at least 1 second long and cannot overlap.',
       );
     }
@@ -1071,20 +1061,29 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
       child: Scaffold(
         appBar: AppBar(
           titleSpacing: 0,
-          title: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(widget.title, maxLines: 1, overflow: TextOverflow.ellipsis),
-              // Where the app's player is in this file, to the millisecond,
-              // while it is on this file.
-              ValueListenableBuilder<int?>(
-                valueListenable: _playerAt,
-                builder:
-                    (context, ms, _) => Text.rich(
-                      TextSpan(
-                        children: [
-                          if (ms != null) ...[
+          // The file's name stays whole in a long-press tooltip: in the
+          // bar next to the playhead it would nearly always be cut, and the
+          // chapters screen one step back shows it in full.
+          title: Tooltip(
+            message: widget.track.title,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  widget.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                // Where the editor's playhead is, to the millisecond, as
+                // it plays, scrubs, seeks or nudges. It starts where the
+                // app's player was when the editor opened on this file.
+                ValueListenableBuilder<int>(
+                  valueListenable: _playhead,
+                  builder:
+                      (context, ms, _) => Text.rich(
+                        TextSpan(
+                          children: [
                             const WidgetSpan(
                               alignment: PlaceholderAlignment.middle,
                               child: Padding(
@@ -1096,28 +1095,20 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
                                 ),
                               ),
                             ),
-                            TextSpan(
-                              text: preciseTime(ms),
-                              style: const TextStyle(
-                                color: EditorColors.playhead,
-                                fontFeatures: tabularFigures,
-                              ),
-                            ),
-                            const TextSpan(text: ' · '),
+                            TextSpan(text: _preciseTime(ms)),
                           ],
-                          TextSpan(text: widget.track.title),
-                        ],
+                        ),
+                        key: const ValueKey('editor-top-playhead'),
+                        maxLines: 1,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: EditorColors.playhead,
+                          fontFeatures: tabularFigures,
+                        ),
                       ),
-                      key: const ValueKey('editor-player-position'),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: EditorColors.muted,
-                      ),
-                    ),
-              ),
-            ],
+                ),
+              ],
+            ),
           ),
           actions: [
             IconButton(
@@ -1328,7 +1319,7 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 Text(
-                                  preciseTime(liveMs),
+                                  _preciseTime(liveMs),
                                   style: const TextStyle(
                                     fontSize: 24,
                                     fontWeight: FontWeight.w600,
@@ -1639,7 +1630,7 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
           const SizedBox(width: 12),
           Expanded(
             child: Text(
-              'No chapter for ${chapterTimestamp(endMs - startMs)}',
+              'No chapter for ${_time(endMs - startMs)}',
               style: const TextStyle(color: EditorColors.muted, fontSize: 12),
             ),
           ),
@@ -1721,9 +1712,9 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      '${chapterTimestamp(c.startMs)} – '
-                      '${chapterTimestamp(c.endMs)} · '
-                      '${chapterTimestamp(c.lengthMs)}',
+                      '${_time(c.startMs)} – '
+                      '${_time(c.endMs)} · '
+                      '${_time(c.lengthMs)}',
                       style: const TextStyle(
                         color: EditorColors.muted,
                         fontSize: 13,
@@ -1849,7 +1840,7 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
                           FittedBox(
                             fit: BoxFit.scaleDown,
                             child: Text(
-                              preciseTime(ms),
+                              _preciseTime(ms),
                               key: const ValueKey('editor-position'),
                               style: const TextStyle(
                                 fontSize: 15,
@@ -1861,7 +1852,7 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
                             fit: BoxFit.scaleDown,
                             child: Text(
                               _draft.durationMs > 0
-                                  ? 'of ${chapterTimestamp(_draft.durationMs)}'
+                                  ? 'of ${_time(_fileMs)}'
                                   : 'Loading…',
                               style: const TextStyle(
                                 fontSize: 11,
@@ -2318,9 +2309,12 @@ class _NudgeButtonState extends State<_NudgeButton> {
 }
 
 class _TimeDialog extends StatefulWidget {
-  const _TimeDialog({required this.initialMs});
+  const _TimeDialog({required this.initialMs, required this.fileMs});
 
   final int initialMs;
+
+  /// The file's length, for the format of the time.
+  final int fileMs;
 
   @override
   State<_TimeDialog> createState() => _TimeDialogState();
@@ -2328,7 +2322,7 @@ class _TimeDialog extends StatefulWidget {
 
 class _TimeDialogState extends State<_TimeDialog> {
   late final _controller = TextEditingController(
-    text: preciseTime(widget.initialMs),
+    text: preciseTime(widget.initialMs, fileMs: widget.fileMs),
   );
   String? _error;
 
