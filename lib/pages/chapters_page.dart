@@ -1826,10 +1826,11 @@ class _ChapterActionsSheet extends StatelessWidget {
                   key: const ValueKey('chapter-actions-share'),
                   icon: Icons.share,
                   title: 'Share link',
-                  // The link is in whole seconds.
+                  // The link is in whole seconds; the time reads like the
+                  // header's (hours shown for a file of an hour or more).
                   subtitle:
                       'Opens YouTube at '
-                      '${chapterTimestamp(chapter.startMs ~/ 1000 * 1000)}',
+                      '${_time(chapter.startMs ~/ 1000 * 1000)}',
                   onTap: onShare,
                 ),
               const Divider(height: 1, color: Color(0xFF3A3A3A)),

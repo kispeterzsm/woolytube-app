@@ -917,6 +917,46 @@ void main() {
   group('with the phone font on a 411 dp screen', () {
     setUpAll(loadRoboto);
 
+    testWidgets('Share link reads its time like the header above it', (
+      tester,
+    ) async {
+      // An hour-long file: the header shows hours, so the link's time does
+      // too.
+      const fileMs = 3900000;
+      final track = await addTrack(
+        durationSeconds: fileMs ~/ 1000,
+        chapters: const ChapterData(
+          downloaded: [
+            MediaChapter(id: 'a', title: 'Intro', startMs: 0, endMs: 300000),
+            MediaChapter(
+              id: 'b',
+              title: 'Song',
+              startMs: 300000,
+              endMs: fileMs,
+            ),
+          ],
+          durationMs: fileMs,
+        ),
+        videoId: 'a-B_c9',
+      );
+      await pumpPage(tester, track);
+      usePhoneScreen(tester);
+      await tester.pumpAndSettle();
+
+      await openChapterOptions(tester, 'b');
+      expect(find.text('0:05:00 – 1:05:00 · 1:00:00'), findsOneWidget);
+      final share = find.byKey(const ValueKey('chapter-actions-share'));
+      expect(
+        find.descendant(
+          of: share,
+          matching: find.text('Opens YouTube at 0:05:00'),
+        ),
+        findsOneWidget,
+      );
+      expectNotCut(tester, share);
+      await unmount(tester);
+    });
+
     for (final scale in [1.0, 1.3]) {
       testWidgets('no chapter line ends with a "·" or "–" at text size '
           '$scale', (tester) async {

@@ -23,6 +23,7 @@ import 'package:woolytube/services/playback_service.dart';
 import 'package:woolytube/services/playlist_service.dart';
 import 'package:woolytube/services/sponsorblock_categories.dart';
 
+import '../helpers/real_fonts.dart';
 import '../helpers/test_database.dart';
 import 'lyrics_fakes.dart';
 
@@ -202,6 +203,46 @@ void main() {
     expect(playlists.calls.single, {'shuffleChapters': true});
     expect(player.settingsChanged, [playlist.id]);
     expect(tester.widget<SwitchListTile>(row).value, isTrue);
+  });
+
+  group('with the phone font', () {
+    setUpAll(loadRoboto);
+
+    testWidgets('subtitles of more than one sentence end with a full stop', (
+      tester,
+    ) async {
+      final playlist = await insertTestPlaylist(
+        db,
+        outputPath: tempDir.path,
+        audioOnly: false,
+      );
+      await pumpStack(tester, playlist.id);
+      // The phone's width, tall enough that every row is built.
+      tester.view.physicalSize = const Size(411, 3000);
+      await tester.pumpAndSettle();
+
+      final subtitles = [
+        for (final tile in tester.widgetList<ListTile>(find.byType(ListTile)))
+          if (tile.subtitle case Text(:final data?)) data,
+      ];
+      expect(subtitles, isNotEmpty);
+      final sentences = subtitles.where((text) => text.contains('. '));
+      expect(sentences, hasLength(greaterThanOrEqualTo(3)));
+      for (final text in sentences) {
+        expect(text, endsWith('.'), reason: text);
+      }
+      for (final text in subtitles.where((text) => !text.contains('. '))) {
+        expect(text, isNot(endsWith('.')), reason: text);
+      }
+
+      final shuffle = find.byKey(const ValueKey('playlist-shuffle-chapters'));
+      final subtitle = find.descendant(
+        of: shuffle,
+        matching: find.textContaining('When shuffle is on'),
+      );
+      expect(tester.widget<Text>(subtitle).data, endsWith('Chapters page.'));
+      expectNotCut(tester, subtitle);
+    });
   });
 
   testWidgets('a failed save puts the switch back and says why', (

@@ -907,7 +907,7 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
                       title: const Text('Download subtitles'),
                       subtitle: const Text(
                         'Inside the video file, including automatic '
-                        'captions. Applies to new downloads',
+                        'captions. Applies to new downloads.',
                       ),
                       value: playlist.downloadSubtitles,
                       onChanged:
@@ -1002,7 +1002,7 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
                     subtitle: const Text(
                       'When shuffle is on, the chapters of a video also play '
                       'in random order. A video can choose for itself on its '
-                      'Chapters page',
+                      'Chapters page.',
                     ),
                     value: playlist.shuffleChapters,
                     onChanged:
@@ -1212,7 +1212,7 @@ class _FetchLyricsTile extends ConsumerWidget {
         title: Text('Fetch $what now'),
         subtitle: Text(
           'Look up $what for downloaded tracks that have none yet. Updates '
-          'do this too',
+          'do this too.',
         ),
         enabled: enabled,
         onTap: onStart,
