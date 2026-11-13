@@ -1153,6 +1153,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.textContaining('Try removed videos again'), findsNothing);
     expect(find.text('Jump to next removed (1)'), findsOneWidget);
+    // Removed, not failed: it is not counted twice.
+    expect(find.textContaining('Jump to next failed'), findsNothing);
   });
 
   testWidgets('Play next puts a track at the front of Up next', (tester) async {
@@ -1271,9 +1273,14 @@ void main() {
           index: i,
           videoId: 'v$i',
           title: 'Track $i',
-          status: i == 30 ? 'error' : (i == 50 ? 'unavailable' : 'complete'),
-          filePath: i == 30 || i == 50 ? null : '/tmp/$i.m4a',
+          // #40 is removed from YouTube: only the removed jump counts it.
+          status:
+              i == 30
+                  ? 'error'
+                  : (i == 40 || i == 50 ? 'unavailable' : 'complete'),
+          filePath: i == 30 || i == 40 || i == 50 ? null : '/tmp/$i.m4a',
           lastError: i == 30 ? 'HTTP Error 403' : null,
+          unavailableReason: i == 40 ? removedFromYouTubeReason : null,
         ),
     ];
     await pumpPage(tester, tracks: tracks);
@@ -1281,6 +1288,7 @@ void main() {
     Future<void> jump() async {
       await tester.tap(find.byKey(const ValueKey('playlist-detail-menu')));
       await tester.pumpAndSettle();
+      expect(find.text('Jump to next removed (1)'), findsOneWidget);
       expect(find.text('Jump to next failed (2)'), findsOneWidget);
       await tester.tap(find.text('Jump to next failed (2)'));
       await tester.pumpAndSettle();
@@ -1323,6 +1331,8 @@ void main() {
     Future<void> jump() async {
       await tester.tap(find.byKey(const ValueKey('playlist-detail-menu')));
       await tester.pumpAndSettle();
+      // #30 has no file but is removed, not failed: only #20 failed.
+      expect(find.text('Jump to next failed (1)'), findsOneWidget);
       expect(find.text('Jump to next removed (2)'), findsOneWidget);
       await tester.tap(find.text('Jump to next removed (2)'));
       // The landed-on row is tinted for a moment.
@@ -1340,7 +1350,7 @@ void main() {
     await jump();
     expect(find.byKey(ValueKey('track-row-${tracks[29].id}')), findsOneWidget);
     expect(
-      find.textContaining('1 of 2: #30 removed from youtube'),
+      find.textContaining('1 of 2: #30 removed from YouTube'),
       findsOneWidget,
     );
     expect(tint(tracks[29]), 1);
@@ -2112,6 +2122,48 @@ void main() {
       );
       expectNotCut(tester, find.byKey(const ValueKey('track-actions-details')));
     });
+
+    // 2.0 stands in for a phone font wider than Roboto.
+    for (final scale in [1.0, 1.3, 2.0]) {
+      testWidgets('Update on a video playlist is whole at text size $scale', (
+        tester,
+      ) async {
+        usePhoneScreen(tester);
+        tester.platformDispatcher.textScaleFactorTestValue = scale;
+        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+        // Up next has entries, so its button is in the bar too.
+        final track = await insertTestTrack(db, playlistId: playlist.id);
+        upNext.add([track]);
+        await pumpPage(tester, tracks: [track]);
+
+        final update = find.byKey(const ValueKey('playlist-detail-update'));
+        expectNotCut(tester, update);
+        expect(
+          find.descendant(of: update, matching: find.text('Update')),
+          findsOneWidget,
+        );
+        expect(
+          find.byTooltip('Update the playlist from YouTube'),
+          findsOneWidget,
+        );
+
+        queued.add([playlist.id]);
+        await tester.pump();
+        await tester.pump();
+        expectNotCut(
+          tester,
+          find.byKey(const ValueKey('playlist-detail-leave-queue')),
+        );
+        queued.add(const []);
+        syncing.add({playlist.id});
+        await tester.pump();
+        await tester.pump();
+        expectNotCut(
+          tester,
+          find.byKey(const ValueKey('playlist-detail-stop-check')),
+        );
+      });
+    }
 
     testWidgets('Stop and Leave queue fit beside Play', (tester) async {
       usePhoneScreen(tester);

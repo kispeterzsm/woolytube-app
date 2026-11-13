@@ -74,9 +74,12 @@ class PlaylistDetailPage extends ConsumerStatefulWidget {
 
 /// Everything the page derives from one tracks list and one search query.
 /// Rebuilt only when either changes, never on playback or download ticks.
-/// A track whose download failed or that cannot be downloaded.
+/// A track whose download failed or that cannot be downloaded. Tracks
+/// removed from YouTube or from the playlist are not: they have their own
+/// jump ([_isRemovedTrack]), so no track is counted under both.
 bool _isProblemTrack(Track track) =>
-    track.status == 'error' || track.status == 'unavailable';
+    (track.status == 'error' || track.status == 'unavailable') &&
+    !_isRemovedTrack(track);
 
 /// A track shown as removed: taken down by YouTube (found by a download) or
 /// gone from the YouTube playlist. It may still have its file.
@@ -162,7 +165,8 @@ class _TrackListView {
   late final List<Track> visible;
   late final Map<int, int> rowOf;
 
-  /// Rows (in [visible]) whose download failed or that are unavailable.
+  /// Rows (in [visible]) whose download failed or that are unavailable,
+  /// removed ones left out (see [_isProblemTrack]).
   late final List<int> problemRows;
 
   /// Rows (in [visible]) of tracks removed from YouTube or from the
@@ -825,7 +829,8 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     _jumpToNextRow(
       view,
       view.removedRows,
-      (track) => _unavailableLabel(track.unavailableReason).toLowerCase(),
+      // "removed from YouTube": the name keeps its capitals.
+      (track) => lowerFirst(_unavailableLabel(track.unavailableReason)),
     );
   }
 
@@ -1718,7 +1723,9 @@ class _UpdateControl extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final run = _watchRun(ref, playlistId);
     // Short labels, so they fit beside Play and the toggles even on a video
-    // playlist; the tooltip says it in full.
+    // playlist; the tooltip says it in full. Where a wide phone font or
+    // large text still leaves too little room, the button shrinks a little
+    // like Play does, instead of cutting its label to "Upda…".
     Widget button({
       required Key key,
       required Widget icon,
@@ -1729,15 +1736,19 @@ class _UpdateControl extends ConsumerWidget {
     }) {
       return Tooltip(
         message: tooltip,
-        child: TextButton.icon(
-          key: key,
-          onPressed: onPressed,
-          icon: icon,
-          label: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
-          style: TextButton.styleFrom(
-            foregroundColor: color,
-            disabledForegroundColor: _muted,
-            minimumSize: const Size(48, 48),
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerLeft,
+          child: TextButton.icon(
+            key: key,
+            onPressed: onPressed,
+            icon: icon,
+            label: Text(label, maxLines: 1, softWrap: false),
+            style: TextButton.styleFrom(
+              foregroundColor: color,
+              disabledForegroundColor: _muted,
+              minimumSize: const Size(48, 48),
+            ),
           ),
         ),
       );
