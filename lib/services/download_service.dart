@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:drift/drift.dart' show Value;
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import '../database/database.dart';
+import 'auto_update_attempts.dart';
 import 'download_errors.dart';
 import 'ytdlp_service.dart';
 import 'app_settings_service.dart';
@@ -73,6 +75,17 @@ class DownloadProgress {
   /// that is still removed then is not counted again.
   final int removedCount;
 
+  /// The run was started by the scheduled update, not by the user. Its
+  /// failures are never shown in the app; they are told by at most one
+  /// quiet system notification.
+  final bool scheduled;
+
+  /// Name of the playlist, on the report that ends a run.
+  final String? playlistName;
+
+  /// The tracks the run could not download, on the report that ends it.
+  final List<DownloadFailure> failures;
+
   const DownloadProgress({
     required this.playlistId,
     required this.currentTrackIndex,
@@ -86,6 +99,9 @@ class DownloadProgress {
     this.downloadedCount = 0,
     this.failedCount = 0,
     this.removedCount = 0,
+    this.scheduled = false,
+    this.playlistName,
+    this.failures = const [],
   });
 
   static const idle = DownloadProgress(
@@ -123,7 +139,10 @@ class DownloadProgress {
       other.activeTrackId == activeTrackId &&
       other.downloadedCount == downloadedCount &&
       other.failedCount == failedCount &&
-      other.removedCount == removedCount;
+      other.removedCount == removedCount &&
+      other.scheduled == scheduled &&
+      other.playlistName == playlistName &&
+      listEquals(other.failures, failures);
 
   @override
   int get hashCode => Object.hash(
@@ -139,6 +158,9 @@ class DownloadProgress {
     downloadedCount,
     failedCount,
     removedCount,
+    scheduled,
+    playlistName,
+    Object.hashAll(failures),
   );
 
   @override
@@ -339,11 +361,15 @@ class DownloadService {
   final LibraryGate _gate;
   final MediaThumbnailService _thumbnails;
 
+  /// Remembers which failures the last scheduled run of each playlist had,
+  /// so the same failure is notified only once.
+  final AutoUpdateAttemptLog _attempts;
+
   final _progressController = StreamController<DownloadProgress>.broadcast();
   Stream<DownloadProgress> get progressStream => _progressController.stream;
 
   final _queueController = StreamController<List<int>>.broadcast();
-  final _queue = <({int playlistId, bool sourceChecked})>[];
+  final _queue = <({int playlistId, bool sourceChecked, bool scheduled})>[];
 
   /// Playlists asked to download while they were already downloading. The
   /// running pass chose its work when it started, so each gets one more
@@ -365,6 +391,9 @@ class DownloadService {
   bool _activeTrackIsReplacement = false;
   Playlist? _activePlaylist;
   String? _lastFailure;
+
+  /// The running playlist download was started by the scheduled update.
+  bool _scheduledRun = false;
 
   // What the progress reports describe.
   int _position = 0;
@@ -418,7 +447,9 @@ class DownloadService {
     LibraryGate? gate,
     MediaThumbnailService? thumbnails,
     LyricsService? lyrics,
+    AutoUpdateAttemptLog? attempts,
   ]) : _lyrics = lyrics,
+       _attempts = attempts ?? AutoUpdateAttemptLog(),
        _settings = settings ?? AppSettingsService(),
        _gate =
            gate ?? LibraryGate(lock: lock ?? DownloadLock(), owner: lockOwner),
@@ -458,6 +489,7 @@ class DownloadService {
         downloadedCount: _downloadedSoFar,
         failedCount: _failedSoFar,
         removedCount: _removedSoFar,
+        scheduled: _scheduledRun,
       ),
     );
   }
@@ -478,8 +510,9 @@ class DownloadService {
     _lastNotifiedPosition = null;
   }
 
-  void _beginRun(Playlist playlist) {
+  void _beginRun(Playlist playlist, {bool scheduled = false}) {
     _isDownloading = true;
+    _scheduledRun = scheduled;
     _cancelRequested = false;
     _cancelSignal = Completer<void>();
     _runCompleter = Completer<void>();
@@ -497,9 +530,20 @@ class DownloadService {
   /// YouTube first: the run then does not count as an update, so the next
   /// scheduled check still happens on time.
   ///
-  /// An update ([sourceChecked]) also tries again the tracks marked
-  /// "Removed from YouTube", after all other work. Such a retry is quiet:
-  /// one that fails again is neither counted as failed nor notified.
+  /// An update ([sourceChecked]) counts (stamps `lastUpdated`) even when
+  /// downloads failed: failed tracks and replacements are tried again at
+  /// the next update, on the playlist's own schedule. Only a run in which
+  /// every download failed because YouTube could not be reached at all
+  /// does not count.
+  ///
+  /// An update also tries again the tracks marked "Removed from YouTube",
+  /// after all other work. Such a retry is quiet: one that fails again is
+  /// neither counted as failed nor notified.
+  ///
+  /// [scheduled] says the scheduled update started the run, not the user.
+  /// Its report is marked so the app shows nothing, and its failures are
+  /// told by one quiet notification that names only failures the previous
+  /// scheduled run of the playlist did not already have.
   ///
   /// When another download is running, the playlist is queued and starts
   /// right after it ([DownloadStart.queued]); the returned future then
@@ -512,28 +556,38 @@ class DownloadService {
     Playlist playlist, {
     bool sourceChecked = true,
     bool Function()? shouldStop,
+    bool scheduled = false,
   }) async {
     if (_isDownloading || _queueHolds > 0) {
       final inQueue = _queue.indexWhere((e) => e.playlistId == playlist.id);
       if (_activePlaylist?.id == playlist.id || inQueue >= 0) {
-        if (inQueue >= 0 && sourceChecked && !_queue[inQueue].sourceChecked) {
-          _queue[inQueue] = (playlistId: playlist.id, sourceChecked: true);
+        if (inQueue >= 0) {
+          final queued = _queue[inQueue];
+          // The user asking for it makes it the user's run.
+          _queue[inQueue] = (
+            playlistId: playlist.id,
+            sourceChecked: queued.sourceChecked || sourceChecked,
+            scheduled: queued.scheduled && scheduled,
+          );
         }
         if (inQueue < 0) _rerunRequested.add(playlist.id);
         return DownloadStart.alreadyQueued;
       }
-      _queue.add((playlistId: playlist.id, sourceChecked: sourceChecked));
+      _queue.add((
+        playlistId: playlist.id,
+        sourceChecked: sourceChecked,
+        scheduled: scheduled,
+      ));
       _log.info('"${playlist.name}" queued after the running download');
       _setQueue();
       return DownloadStart.queued;
     }
-    _beginRun(playlist);
+    _beginRun(playlist, scheduled: scheduled);
     var entered = false;
     var downloadedCount = 0;
     var reusedCount = 0;
-    var failedCount = 0;
     var removedCount = 0;
-    final failureReasons = <String>[];
+    final failures = <DownloadFailure>[];
 
     try {
       final busy = await _gate.tryEnter('download', wait: LibraryGate.userWait);
@@ -547,6 +601,8 @@ class DownloadService {
             trackProgress: 0,
             status: 'error',
             error: busy,
+            scheduled: scheduled,
+            playlistName: playlist.name,
           ),
         );
         return DownloadStart.started;
@@ -629,8 +685,13 @@ class DownloadService {
             totalTracks: 0,
             trackProgress: 100,
             status: 'complete',
+            scheduled: scheduled,
+            playlistName: playlist.name,
           ),
         );
+        if (scheduled && sourceChecked) {
+          await _notifyScheduledFailures(playlist, const []);
+        }
         return DownloadStart.started;
       }
 
@@ -700,9 +761,15 @@ class DownloadService {
             reusedCount++;
             _downloadedSoFar++;
           case _TrackDownloadResult.failed:
-            failedCount++;
             _failedSoFar++;
-            failureReasons.add(_lastFailure ?? 'Download failed');
+            failures.add(
+              DownloadFailure(
+                trackId: item.track.id,
+                title: item.track.title,
+                error: _lastFailure ?? 'Download failed',
+                replacement: item.replace,
+              ),
+            );
           case _TrackDownloadResult.removed:
             removedCount++;
             _removedSoFar++;
@@ -742,23 +809,31 @@ class DownloadService {
         );
       }
 
-      // A run in which every attempt failed for a reason that may pass (a
-      // bot check, the network, an outdated yt-dlp) has not updated
-      // anything: leave the playlist overdue so the next worker run retries
-      // it. Videos YouTube removed, and ones that will not download for
-      // good (private, members-only, age-restricted), do not hold the
-      // update back.
-      final failedEntirely =
+      // YouTube was reached, so the update counts even when videos failed
+      // (unavailable, private, a bot check, an original YouTube no longer
+      // has): they are tried again at the next update, on the playlist's
+      // own schedule, never every hour. Only a run in which every download
+      // failed because YouTube could not be reached at all checked
+      // nothing; it stays due, and the scheduled update tries again after
+      // a growing pause.
+      final failedCount = failures.length;
+      final unreachable =
           downloadedCount + reusedCount == 0 &&
-          failedCount > 0 &&
-          failureReasons.any((reason) => !isPermanentDownloadError(reason));
-      if (failedEntirely) {
+          failures.isNotEmpty &&
+          failures.every((failure) => isNetworkDownloadError(failure.error));
+      if (unreachable) {
         _log.warn(
-          'All $failedCount downloads failed; '
+          'All $failedCount downloads failed without reaching YouTube; '
           'not stamping "${playlist.name}" as updated',
         );
-      } else if (sourceChecked) {
-        await _markPlaylistUpdated(playlist);
+      } else {
+        if (failures.isNotEmpty) {
+          _log.warn(
+            '$failedCount ${failedCount == 1 ? 'download' : 'downloads'} of '
+            '"${playlist.name}" failed; the next update tries again',
+          );
+        }
+        if (sourceChecked) await _markPlaylistUpdated(playlist);
       }
 
       _position = _workTotal;
@@ -775,7 +850,8 @@ class DownloadService {
 
       // Only now is the playlist really finished; emitting earlier left the
       // UI claiming completion while the backfill still ran for minutes.
-      if (failedEntirely) {
+      if (unreachable) {
+        // A scheduled run tries again soon; nothing to tell yet.
         _emit(
           DownloadProgress(
             playlistId: playlist.id,
@@ -783,14 +859,14 @@ class DownloadService {
             totalTracks: _workTotal,
             trackProgress: 0,
             status: 'error',
-            error: _mostCommon(failureReasons),
+            error: _mostCommon([for (final f in failures) f.error]),
             failedCount: failedCount,
             removedCount: removedCount,
+            scheduled: scheduled,
+            playlistName: playlist.name,
+            failures: failures,
           ),
         );
-        if (_gate.owner == DownloadLock.backgroundOwner) {
-          await _notifyFailures(playlist, failedCount, failureReasons);
-        }
       } else {
         _emit(
           DownloadProgress(
@@ -802,8 +878,12 @@ class DownloadService {
             downloadedCount: downloadedCount + reusedCount,
             failedCount: failedCount,
             removedCount: removedCount,
+            scheduled: scheduled,
+            playlistName: playlist.name,
+            failures: failures,
           ),
         );
+        if (scheduled) await _notifyScheduledFailures(playlist, failures);
       }
 
       if (downloadedCount > 0) {
@@ -832,6 +912,8 @@ class DownloadService {
           trackProgress: 0,
           status: 'error',
           error: e.toString(),
+          scheduled: scheduled,
+          playlistName: playlist.name,
         ),
       );
     } finally {
@@ -852,16 +934,32 @@ class DownloadService {
     return best;
   }
 
-  Future<void> _notifyFailures(
+  /// Tells, in one quiet notification, the [failures] of a scheduled run
+  /// of [playlist] that its previous scheduled run did not already have.
+  /// Called after every scheduled update that counted, also without
+  /// failures, so a track that recovers and fails again is told again.
+  Future<void> _notifyScheduledFailures(
     Playlist playlist,
-    int failedCount,
-    List<String> reasons,
+    List<DownloadFailure> failures,
   ) async {
     try {
-      await _notifications?.showDownloadsFailed(
+      final fresh = await _attempts.takeNewFailures(
+        playlist.id,
+        failures.map((failure) => failure.key),
+      );
+      final news = [
+        for (final failure in failures)
+          if (fresh.contains(failure.key)) failure,
+      ];
+      if (news.isEmpty) {
+        if (failures.isNotEmpty) {
+          _log.info('Failures already told about; not notifying again');
+        }
+        return;
+      }
+      await _notifications?.showDownloadProblems(
         playlist.name,
-        failedCount: failedCount,
-        reason: friendlyDownloadError(_mostCommon(reasons)),
+        news,
         notificationId: playlist.id,
       );
     } catch (e) {
@@ -1154,6 +1252,7 @@ class DownloadService {
         _queue.insert(0, (
           playlistId: finishedPlaylistId,
           sourceChecked: false,
+          scheduled: false,
         ));
         _setQueue();
       }
@@ -1177,7 +1276,11 @@ class DownloadService {
           _startNextQueued();
           return;
         }
-        await downloadPlaylist(playlist, sourceChecked: next.sourceChecked);
+        await downloadPlaylist(
+          playlist,
+          sourceChecked: next.sourceChecked,
+          scheduled: next.scheduled,
+        );
       } catch (e) {
         _log.warn('Queued download failed to start: $e');
       }
@@ -1491,6 +1594,11 @@ class DownloadService {
         await _db.markTrackRemovedFromYouTube(track.id, errorMsg);
         return _TrackDownloadResult.removed;
       }
+    } else if (track.replaceRequested && track.lastError != errorMsg) {
+      // The track row tells it ("YouTube version unavailable"); the next
+      // update tries again. Written only when it changes, since every
+      // track write rewrites the playlist's metadata file.
+      await _db.setTrackReplacementError(track.id, errorMsg);
     }
     return _TrackDownloadResult.failed;
   }
@@ -1592,7 +1700,11 @@ class DownloadService {
       if ((wasRunning || wasQueued) &&
           (resume || !succeeded) &&
           !_queue.any((e) => e.playlistId == playlistId)) {
-        _queue.insert(0, (playlistId: playlistId, sourceChecked: false));
+        _queue.insert(0, (
+          playlistId: playlistId,
+          sourceChecked: false,
+          scheduled: false,
+        ));
         _setQueue();
       }
       _startNextQueued();

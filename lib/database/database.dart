@@ -999,9 +999,31 @@ class AppDatabase extends _$AppDatabase {
       )).write(TracksCompanion(videoQuality: Value(quality)));
 
   Future<void> setTrackReplaceRequested(int trackId, bool requested) =>
+      transaction(() async {
+        await (update(tracks)..where(
+          (t) => t.id.equals(trackId),
+        )).write(TracksCompanion(replaceRequested: Value(requested)));
+        // A new or dropped request forgets why the last fetch of the
+        // replacement failed (see [setTrackReplacementError]).
+        await (update(tracks)..where(
+          (t) =>
+              t.id.equals(trackId) &
+              t.status.equals('complete') &
+              t.unavailableReason.isNull() &
+              t.lastError.isNotNull(),
+        )).write(const TracksCompanion(lastError: Value(null)));
+      });
+
+  /// Records why the requested replacement of a downloaded track (for
+  /// example the YouTube original of a local file) could not be fetched.
+  /// The track keeps its file and its request; the next update tries again.
+  Future<void> setTrackReplacementError(int trackId, String error) =>
       (update(tracks)..where(
-        (t) => t.id.equals(trackId),
-      )).write(TracksCompanion(replaceRequested: Value(requested)));
+        (t) =>
+            t.id.equals(trackId) &
+            t.status.equals('complete') &
+            t.replaceRequested.equals(true),
+      )).write(TracksCompanion(lastError: Value(error)));
 
   /// Records a finished download that is now the track's file.
   /// [downloadedMaxHeight] is the height cap it was downloaded under (0 =

@@ -147,11 +147,8 @@ Future<AutoUpdateReport> runBackgroundAutoUpdate({
   final db = openDatabase();
   // Decide first whether there is anything to do: most hourly runs have
   // nothing due, and starting yt-dlp and notifications costs time.
-  final due = duePlaylistsInOrder(
-    await db.getAllPlaylists(),
-    await attemptLog.read(),
-    now(),
-  );
+  final all = await db.getAllPlaylists();
+  final due = duePlaylistsInOrder(all, await attemptLog.read(), now());
   if (due.isEmpty) return const AutoUpdateReport(AutoUpdateStatus.nothingDue);
   if (isStopRequested()) {
     return AutoUpdateReport(AutoUpdateStatus.stopped, due: due.length);
@@ -193,12 +190,19 @@ Future<AutoUpdateReport> runBackgroundAutoUpdate({
     gate,
     thumbnails,
     lyrics,
+    attemptLog,
   );
 
   final runner = AutoUpdateRunner(
     syncPlaylist: playlistService.syncPlaylist,
     reloadPlaylist: db.getPlaylist,
-    downloadPlaylist: downloadService.downloadPlaylist,
+    downloadPlaylist:
+        (playlist, {required sourceChecked}) =>
+            downloadService.downloadPlaylist(
+              playlist,
+              sourceChecked: sourceChecked,
+              scheduled: true,
+            ),
     cancelDownload: downloadService.cancelActiveDownloads,
     activeTrackId: () => downloadService.activeTrackId,
     blockedReason: () async {
@@ -217,7 +221,10 @@ Future<AutoUpdateReport> runBackgroundAutoUpdate({
   onRunner(runner);
   if (isStopRequested()) await runner.requestStop();
   try {
-    return await runner.run(due);
+    return await runner.run(
+      due,
+      knownIds: [for (final playlist in all) playlist.id],
+    );
   } finally {
     sponsorBlock.dispose();
     lyrics.dispose();

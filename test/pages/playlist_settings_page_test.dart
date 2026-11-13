@@ -1181,6 +1181,7 @@ class _Downloads implements DownloadService {
     Playlist playlist, {
     bool sourceChecked = true,
     bool Function()? shouldStop,
+    bool scheduled = false,
   }) async {
     started.add((playlist.id, sourceChecked));
     return DownloadStart.started;

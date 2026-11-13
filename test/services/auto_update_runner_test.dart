@@ -51,17 +51,14 @@ class _ReadyYtDlp extends FakeYtDlpService {
 
 /// Keeps attempts in memory, so fake-time tests do no real file IO.
 class _MemoryAttempts extends AutoUpdateAttemptLog {
-  final attempts = <int, DateTime>{};
+  var attempts = <int, AutoUpdateAttempt>{};
 
   @override
-  Future<Map<int, DateTime>> read() async => {...attempts};
+  Future<Map<int, AutoUpdateAttempt>> read() async => {...attempts};
 
   @override
-  Future<void> record(
-    int playlistId,
-    DateTime at, {
-    Iterable<int>? knownIds,
-  }) async => attempts[playlistId] = at;
+  Future<void> save(Map<int, AutoUpdateAttempt> attempts) async =>
+      this.attempts = {...attempts};
 }
 
 /// Records what an [AutoUpdateRunner] did, with hooks to hold a download.
@@ -69,6 +66,10 @@ class _Recorder {
   final events = <String>[];
   final syncErrors = <int, Object>{};
   final downloadGates = <int, Completer<void>>{};
+
+  /// Playlists whose downloads cannot reach YouTube: never stamped.
+  final unreachable = <int>{};
+  final stamps = <int, DateTime>{};
   int cancels = 0;
   int? activeTrack;
   String? blocked;
@@ -86,7 +87,14 @@ class _Recorder {
     events.add('download ${playlist.id} checked=$sourceChecked');
     final gate = downloadGates[playlist.id];
     if (gate != null) await gate.future;
+    // Like DownloadService: a run that reached YouTube counts.
+    if (sourceChecked && !unreachable.contains(playlist.id) && gate == null) {
+      stamps[playlist.id] = DateTime.now();
+    }
   }
+
+  Future<Playlist> reload(int id) async =>
+      _playlist(id, lastUpdated: stamps[id]);
 
   Future<void> cancel() async {
     cancels++;
@@ -124,7 +132,7 @@ void main() {
     AutoUpdateAttemptLog? attemptLog,
   }) => AutoUpdateRunner(
     syncPlaylist: recorder.sync,
-    reloadPlaylist: (id) async => _playlist(id),
+    reloadPlaylist: recorder.reload,
     downloadPlaylist: recorder.download,
     cancelDownload: recorder.cancel,
     activeTrackId: () => recorder.activeTrack,
@@ -184,10 +192,10 @@ void main() {
       final ordered = duePlaylistsInOrder(
         [_playlist(1), _playlist(2), _playlist(3), _playlist(4)],
         {
-          1: DateTime(2026, 1, 1, 11),
-          2: DateTime(2026, 1, 1, 9),
+          1: AutoUpdateAttempt(at: DateTime(2026, 1, 1, 11)),
+          2: AutoUpdateAttempt(at: DateTime(2026, 1, 1, 9)),
           // 3 was never attempted.
-          4: DateTime(2026, 1, 1, 10),
+          4: AutoUpdateAttempt(at: DateTime(2026, 1, 1, 10)),
         },
         now,
       );
@@ -206,13 +214,105 @@ void main() {
       );
       expect([for (final p in ordered) p.id], [3]);
     });
+
+    test('failed videos do not make a playlist due before its interval', () {
+      // The update reached YouTube and counted, so a video that failed
+      // waits for the next daily update instead of coming back hourly.
+      final playlist = _playlist(
+        1,
+        frequencyHours: 24,
+        lastUpdated: now.subtract(const Duration(hours: 1)),
+      );
+      expect(
+        isDueForAutoUpdate(
+          playlist,
+          now,
+          attempt: AutoUpdateAttempt(
+            at: now.subtract(const Duration(hours: 1)),
+            failureKeys: const {'59:Video unavailable'},
+          ),
+        ),
+        isFalse,
+      );
+    });
+
+    test('runs that could not reach YouTube are retried after 1, 2, 4 ... '
+        'hours, never later than the interval', () {
+      final lastUpdated = DateTime(2025, 12, 1);
+      final playlist = _playlist(
+        1,
+        frequencyHours: 24,
+        lastUpdated: lastUpdated,
+      );
+      bool dueAfter(int unreachable, Duration sinceTry) => isDueForAutoUpdate(
+        playlist,
+        now,
+        attempt: AutoUpdateAttempt(
+          at: now.subtract(sinceTry),
+          unreachable: unreachable,
+        ),
+      );
+
+      expect(dueAfter(1, const Duration(minutes: 55)), isTrue);
+      expect(dueAfter(2, const Duration(minutes: 55)), isFalse);
+      expect(dueAfter(2, const Duration(hours: 2)), isTrue);
+      expect(dueAfter(3, const Duration(hours: 3)), isFalse);
+      expect(dueAfter(3, const Duration(hours: 4)), isTrue);
+      expect(dueAfter(6, const Duration(hours: 23)), isFalse);
+      // 32 hours, capped at the daily interval.
+      expect(dueAfter(6, const Duration(hours: 24)), isTrue);
+      expect(dueAfter(40, const Duration(hours: 24)), isTrue);
+
+      expect(
+        autoUpdateRetryDelay(5, const Duration(hours: 12)),
+        const Duration(hours: 12),
+      );
+      expect(
+        autoUpdateRetryDelay(1, const Duration(hours: 168)),
+        const Duration(hours: 1),
+      );
+      expect(autoUpdateRetryDelay(0, const Duration(hours: 24)), Duration.zero);
+    });
+
+    test('unreachable runs from before the last update do not delay it', () {
+      final playlist = _playlist(
+        1,
+        frequencyHours: 1,
+        lastUpdated: now.subtract(const Duration(hours: 1)),
+      );
+      expect(
+        isDueForAutoUpdate(
+          playlist,
+          now,
+          attempt: AutoUpdateAttempt(
+            at: now.subtract(const Duration(hours: 2)),
+            unreachable: 5,
+          ),
+        ),
+        isTrue,
+      );
+    });
+
+    test('back-off leaves out a playlist that is waiting', () {
+      final ordered = duePlaylistsInOrder(
+        [_playlist(1, frequencyHours: 24), _playlist(2)],
+        {
+          1: AutoUpdateAttempt(
+            at: now.subtract(const Duration(hours: 1)),
+            unreachable: 3,
+          ),
+        },
+        now,
+      );
+      expect([for (final p in ordered) p.id], [2]);
+    });
   });
 
   group('attempt log', () {
     test('records and reads back attempt times', () async {
       final at = DateTime(2026, 2, 3, 4, 5);
       await attempts.record(7, at);
-      expect(await attempts.read(), {7: at});
+      expect((await attempts.read())[7]!.at, at);
     });
 
     test('drops playlists that no longer exist', () async {
@@ -228,6 +328,67 @@ void main() {
       ).writeAsString('{not json');
       expect(await attempts.read(), isEmpty);
     });
+
+    test('reads the old format of bare attempt times', () async {
+      await File(
+        p.join(tempDir.path, AutoUpdateAttemptLog.fileName),
+      ).writeAsString('{"3": "2026-02-03T04:05:00.000"}');
+      final attempt = (await attempts.read())[3]!;
+      expect(attempt.at, DateTime(2026, 2, 3, 4, 5));
+      expect(attempt.unreachable, 0);
+      expect(attempt.failureKeys, isEmpty);
+    });
+
+    test('counts unreachable runs until an update counts', () async {
+      final at = DateTime(2026, 2, 3);
+      await attempts.record(4, at);
+      await attempts.recordOutcome(4, updated: false);
+      await attempts.recordOutcome(4, updated: false);
+      expect((await attempts.read())[4]!.unreachable, 2);
+      // A new attempt keeps the count; it is about the runs in a row.
+      await attempts.record(4, at.add(const Duration(hours: 2)));
+      expect((await attempts.read())[4]!.unreachable, 2);
+      expect((await attempts.read())[4]!.at, at.add(const Duration(hours: 2)));
+
+      await attempts.recordOutcome(4, updated: true);
+      expect((await attempts.read())[4]!.unreachable, 0);
+    });
+
+    test(
+      'tells only failures the previous scheduled run did not have',
+      () async {
+        expect(await attempts.takeNewFailures(5, ['1:Video unavailable']), {
+          '1:Video unavailable',
+        });
+        // The same failure again: nothing new.
+        expect(
+          await attempts.takeNewFailures(5, ['1:Video unavailable']),
+          isEmpty,
+        );
+        // Another track, and the same track for another reason, are new.
+        expect(
+          await attempts.takeNewFailures(5, [
+            '1:Video unavailable',
+            '2:Private video',
+          ]),
+          {'2:Private video'},
+        );
+        expect(await attempts.takeNewFailures(5, ['1:Network error']), {
+          '1:Network error',
+        });
+        // A run without failures forgets them, so a later one is new again.
+        expect(await attempts.takeNewFailures(5, const []), isEmpty);
+        expect(await attempts.takeNewFailures(5, ['1:Network error']), {
+          '1:Network error',
+        });
+        // Other playlists are separate, and a new attempt keeps the keys.
+        await attempts.record(5, DateTime(2026), knownIds: [5, 6]);
+        expect(await attempts.takeNewFailures(6, ['1:Network error']), {
+          '1:Network error',
+        });
+        expect((await attempts.read())[5]!.failureKeys, {'1:Network error'});
+      },
+    );
   });
 
   group('runner', () {
@@ -257,6 +418,58 @@ void main() {
       final recorder = _Recorder()..syncErrors[1] = Exception('private');
       await runnerFor(recorder).run([_playlist(1)]);
       expect(recorder.events, ['sync 1', 'download 1 checked=false']);
+    });
+
+    test('counts runs that could not reach YouTube, and forgets them once '
+        'an update counts', () async {
+      final recorder =
+          _Recorder()
+            ..syncErrors[1] = Exception('Unable to download webpage')
+            ..unreachable.add(2);
+      await runnerFor(recorder).run([_playlist(1), _playlist(2), _playlist(3)]);
+      var log = await attempts.read();
+      expect(log[1]!.unreachable, 1);
+      expect(log[2]!.unreachable, 1);
+      expect(log[3]!.unreachable, 0);
+
+      await runnerFor(recorder).run([_playlist(1), _playlist(2)]);
+      log = await attempts.read();
+      expect(log[1]!.unreachable, 2);
+      expect(log[2]!.unreachable, 2);
+
+      recorder.syncErrors.clear();
+      recorder.unreachable.clear();
+      await runnerFor(recorder).run([_playlist(1)]);
+      log = await attempts.read();
+      expect(log[1]!.unreachable, 0);
+      expect(log[2]!.unreachable, 2);
+    });
+
+    test('a stopped run is not counted as unreachable', () async {
+      final recorder = _Recorder();
+      recorder.downloadGates[1] = Completer<void>();
+      final runner = runnerFor(recorder);
+      final run = runner.run([_playlist(1)]);
+      final deadline = DateTime.now().add(const Duration(seconds: 10));
+      while (!recorder.events.contains('download 1 checked=true') &&
+          DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      await runner.requestStop();
+      await run;
+      expect((await attempts.read())[1]!.unreachable, 0);
+    });
+
+    test('keeps what it knows about playlists that were not due', () async {
+      await attempts.takeNewFailures(9, ['1:Video unavailable']);
+      await runnerFor(_Recorder()).run([_playlist(1)], knownIds: [1, 9]);
+      final log = await attempts.read();
+      expect(log.keys, unorderedEquals([1, 9]));
+      expect(log[9]!.failureKeys, {'1:Video unavailable'});
+
+      // A deleted playlist is forgotten.
+      await runnerFor(_Recorder()).run([_playlist(1)], knownIds: [1]);
+      expect((await attempts.read()).keys, [1]);
     });
 
     test('a busy library stops the run instead of trying every playlist', () {
@@ -416,6 +629,8 @@ void main() {
         DownloadLock.foregroundOwner,
         gate,
         thumbnails,
+        null,
+        attempts,
       );
       bridge = ForegroundAutoUpdateBridge(
         db: db,
@@ -473,6 +688,42 @@ void main() {
         File(p.join(tempDir.path, DownloadLock.fileName)).existsSync(),
         isFalse,
       );
+    });
+
+    test('a scheduled run marks its reports, counts despite a failed video '
+        'and is not due again within its interval', () async {
+      final playlist = await insertTestPlaylist(
+        db,
+        outputPath: folder,
+        updateFrequencyHours: 24,
+      );
+      ytdlp.playlistInfo = {
+        'title': 'Test Playlist',
+        'entries': [
+          {'id': 'abc', 'title': 'Song', 'playlist_index': 1},
+        ],
+      };
+      ytdlp.downloadError = PlatformException(
+        code: 'DOWNLOAD_ERROR',
+        message: 'ERROR: [youtube] abc: Video unavailable',
+      );
+      final events = <DownloadProgress>[];
+      final sub = downloads.progressStream.listen(events.add);
+
+      final report = await bridge.runScheduledUpdate();
+      await sub.cancel();
+
+      expect(report.status, AutoUpdateStatus.finished);
+      expect(events, isNotEmpty);
+      expect(events.every((e) => e.scheduled), isTrue);
+      expect(events.last.failures.single.title, 'Song');
+      expect((await db.getPlaylist(playlist.id)).lastUpdated, isNotNull);
+      expect((await attempts.read())[playlist.id]!.unreachable, 0);
+
+      // An hour later the worker runs again: nothing is due.
+      final later = await bridge.runScheduledUpdate();
+      expect(later.status, AutoUpdateStatus.nothingDue);
+      expect(ytdlp.requestedPlaylistUrls, [playlist.url]);
     });
 
     test('stays out while the background engine holds the library', () async {

@@ -1,5 +1,7 @@
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
+import 'download_errors.dart';
+
 typedef NotificationPresenter =
     Future<void> Function(
       int id,
@@ -38,26 +40,38 @@ class DownloadNotificationService {
     );
   }
 
-  static NotificationDetails get _details => const NotificationDetails(
-    android: AndroidNotificationDetails(
-      _channelId,
-      _channelName,
-      channelDescription: 'Download completion notifications',
-      importance: Importance.low,
-      priority: Priority.low,
-      playSound: false,
-      enableVibration: false,
-      silent: true,
-      onlyAlertOnce: true,
-    ),
-  );
+  /// [expandedBody] is shown in full when the notification is expanded.
+  static NotificationDetails _details({String? expandedBody}) =>
+      NotificationDetails(
+        android: AndroidNotificationDetails(
+          _channelId,
+          _channelName,
+          channelDescription: 'Download completion notifications',
+          importance: Importance.low,
+          priority: Priority.low,
+          playSound: false,
+          enableVibration: false,
+          silent: true,
+          onlyAlertOnce: true,
+          styleInformation:
+              expandedBody == null
+                  ? null
+                  : BigTextStyleInformation(expandedBody),
+        ),
+      );
 
-  Future<void> _show(int id, String title, String body) async {
+  Future<void> _show(
+    int id,
+    String title,
+    String body, {
+    bool expandable = false,
+  }) async {
+    final details = _details(expandedBody: expandable ? body : null);
     final presenter = _presenter;
     if (presenter != null) {
-      await presenter(id, title, body, _details);
+      await presenter(id, title, body, details);
     } else {
-      await _plugin.show(id, title, body, _details);
+      await _plugin.show(id, title, body, details);
     }
   }
 
@@ -97,20 +111,22 @@ class DownloadNotificationService {
     await _show(notificationId, title, body);
   }
 
-  /// Tells that a playlist's downloads all failed, for runs nobody watched
-  /// (the scheduled background update).
-  Future<void> showDownloadsFailed(
-    String playlistName, {
-    required int failedCount,
-    required String reason,
+  /// Tells which tracks of a playlist could not be downloaded, and why,
+  /// for runs nobody watched (the scheduled update). Names the first few
+  /// (`"Title" – video unavailable`) and counts the rest.
+  Future<void> showDownloadProblems(
+    String playlistName,
+    List<DownloadFailure> failures, {
     int notificationId = _completeNotificationId,
   }) async {
-    if (failedCount < 1) return;
-    final plural = failedCount == 1 ? 'download' : 'downloads';
+    if (failures.isEmpty) return;
+    final count = failures.length;
     await _show(
       notificationId + _failureIdOffset,
-      'Could not update $playlistName',
-      '$failedCount $plural failed: $reason',
+      '$playlistName: $count ${count == 1 ? 'download' : 'downloads'} '
+      'failed',
+      downloadFailureLines(failures).join('\n'),
+      expandable: true,
     );
   }
 }

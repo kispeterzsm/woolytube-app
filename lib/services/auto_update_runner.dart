@@ -1,19 +1,18 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
 
 import '../database/database.dart';
 import '../providers/providers.dart';
+import 'auto_update_attempts.dart';
 import 'download_service.dart';
 import 'library_gate.dart';
 import 'log_service.dart';
 import 'playlist_service.dart';
 import 'ytdlp_service.dart';
+
+export 'auto_update_attempts.dart';
 
 /// Scheduled playlist updates (the hourly WorkManager job).
 ///
@@ -47,17 +46,34 @@ const ytdlpControlChannelName = 'com.woolytube/ytdlp_control';
 const autoUpdateDueTolerance = Duration(minutes: 10);
 
 /// Whether [playlist] should be updated by a scheduled run at [now].
+///
+/// An update counts (stamps `lastUpdated`) whenever YouTube was reached,
+/// even when some videos failed: those are tried again at the next update,
+/// on the playlist's own schedule. Only when the last scheduled runs could
+/// not reach YouTube at all ([attempt] says how many in a row) is the
+/// playlist due sooner, after a growing pause ([autoUpdateRetryDelay]).
 bool isDueForAutoUpdate(
   Playlist playlist,
   DateTime now, {
   Duration tolerance = autoUpdateDueTolerance,
+  AutoUpdateAttempt? attempt,
 }) {
   // The temporary playlist has no YouTube playlist to check.
   if (!playlist.autoUpdate || playlist.isTemporary) return false;
   final lastUpdated = playlist.lastUpdated;
-  if (lastUpdated == null) return true;
   final interval = Duration(hours: playlist.updateFrequencyHours);
-  return now.difference(lastUpdated) >= interval - tolerance;
+  if (lastUpdated != null &&
+      now.difference(lastUpdated) < interval - tolerance) {
+    return false;
+  }
+  final triedAt = attempt?.at;
+  if (attempt == null || attempt.unreachable <= 0 || triedAt == null) {
+    return true;
+  }
+  // Tries from before the last update that counted do not matter.
+  if (lastUpdated != null && !triedAt.isAfter(lastUpdated)) return true;
+  final delay = autoUpdateRetryDelay(attempt.unreachable, interval);
+  return now.difference(triedAt) >= delay - tolerance;
 }
 
 /// The due playlists of [all], least recently attempted first.
@@ -67,16 +83,17 @@ bool isDueForAutoUpdate(
 /// the others. The attempt time rotates them instead.
 List<Playlist> duePlaylistsInOrder(
   Iterable<Playlist> all,
-  Map<int, DateTime> lastAttempts,
+  Map<int, AutoUpdateAttempt> attempts,
   DateTime now,
 ) {
   final due = [
     for (final playlist in all)
-      if (isDueForAutoUpdate(playlist, now)) playlist,
+      if (isDueForAutoUpdate(playlist, now, attempt: attempts[playlist.id]))
+        playlist,
   ];
   due.sort((a, b) {
-    final attemptA = lastAttempts[a.id];
-    final attemptB = lastAttempts[b.id];
+    final attemptA = attempts[a.id]?.at;
+    final attemptB = attempts[b.id]?.at;
     if (attemptA == null && attemptB != null) return -1;
     if (attemptA != null && attemptB == null) return 1;
     if (attemptA != null && attemptB != null) {
@@ -86,71 +103,6 @@ List<Playlist> duePlaylistsInOrder(
     return a.id.compareTo(b.id);
   });
   return due;
-}
-
-/// When each playlist was last picked up by a scheduled run. Kept in a small
-/// file because the app engine and the headless engine both read it, and
-/// SharedPreferences caches values per engine.
-class AutoUpdateAttemptLog {
-  AutoUpdateAttemptLog({Future<String> Function()? directoryProvider})
-    : _directoryProvider = directoryProvider ?? _defaultDirectory;
-
-  static const fileName = 'auto_update_attempts.json';
-
-  final Future<String> Function() _directoryProvider;
-
-  static Future<String> _defaultDirectory() async =>
-      (await getApplicationDocumentsDirectory()).path;
-
-  Future<File> _file() async =>
-      File(p.join(await _directoryProvider(), fileName));
-
-  Future<Map<int, DateTime>> read() async {
-    try {
-      final file = await _file();
-      if (!await file.exists()) return {};
-      final decoded = jsonDecode(await file.readAsString());
-      if (decoded is! Map) return {};
-      final result = <int, DateTime>{};
-      decoded.forEach((key, value) {
-        final id = int.tryParse('$key');
-        final at = value is String ? DateTime.tryParse(value) : null;
-        if (id != null && at != null) result[id] = at;
-      });
-      return result;
-    } catch (_) {
-      // A damaged file only loses the rotation order.
-      return {};
-    }
-  }
-
-  /// Records that [playlistId] was picked up at [at]. Entries of playlists
-  /// that are not in [knownIds] are dropped, so deleted playlists do not
-  /// pile up.
-  Future<void> record(
-    int playlistId,
-    DateTime at, {
-    Iterable<int>? knownIds,
-  }) async {
-    try {
-      final attempts = await read();
-      attempts[playlistId] = at;
-      if (knownIds != null) {
-        final keep = {...knownIds, playlistId};
-        attempts.removeWhere((id, _) => !keep.contains(id));
-      }
-      final file = await _file();
-      await file.writeAsString(
-        jsonEncode({
-          for (final entry in attempts.entries)
-            '${entry.key}': entry.value.toIso8601String(),
-        }),
-        flush: true,
-      );
-    } catch (_) {
-      // Not worth failing an update over.
-    }
-  }
 }
 
 enum AutoUpdateStatus {
@@ -288,7 +240,13 @@ class AutoUpdateRunner {
     log.info('Scheduled update: the download was stopped in the app');
   }
 
-  Future<AutoUpdateReport> run(List<Playlist> due) async {
+  /// Updates the [due] playlists. [knownIds] are the ids of every playlist
+  /// in the library: the attempt log forgets the others (they were
+  /// deleted). Without it the log forgets nothing.
+  Future<AutoUpdateReport> run(
+    List<Playlist> due, {
+    Iterable<int>? knownIds,
+  }) async {
     if (due.isEmpty) return const AutoUpdateReport(AutoUpdateStatus.nothingDue);
     if (_running) {
       return AutoUpdateReport(AutoUpdateStatus.busy, due: due.length);
@@ -297,7 +255,6 @@ class AutoUpdateRunner {
       return AutoUpdateReport(AutoUpdateStatus.stopped, due: due.length);
     }
     _running = true;
-    final knownIds = [for (final playlist in due) playlist.id];
     var handled = 0;
     var status = AutoUpdateStatus.finished;
     log.info('Scheduled update: ${due.length} playlist(s) due');
@@ -344,6 +301,15 @@ class AutoUpdateRunner {
         try {
           final fresh = await reloadPlaylist(playlist.id);
           await downloadPlaylist(fresh, sourceChecked: synced);
+          // The download stamps the playlist when YouTube was reached. A
+          // run cut short (stop, time budget) says nothing about that.
+          final after = await reloadPlaylist(playlist.id);
+          final updated =
+              after.lastUpdated != null &&
+              after.lastUpdated != playlist.lastUpdated;
+          if (updated || !_halted) {
+            await attempts.recordOutcome(playlist.id, updated: updated);
+          }
         } catch (e) {
           log.warn('Scheduled download of "${playlist.name}" failed: $e');
         }
@@ -556,16 +522,16 @@ class ForegroundAutoUpdateBridge {
     );
     _runner = runner;
     try {
-      final due = duePlaylistsInOrder(
-        await _db.getAllPlaylists(),
-        await _attempts.read(),
-        _clock(),
-      );
+      final all = await _db.getAllPlaylists();
+      final due = duePlaylistsInOrder(all, await _attempts.read(), _clock());
       if (due.isEmpty) {
         return const AutoUpdateReport(AutoUpdateStatus.nothingDue);
       }
       await _ytdlp.initialize();
-      return await runner.run(due);
+      return await runner.run(
+        due,
+        knownIds: [for (final playlist in all) playlist.id],
+      );
     } catch (e) {
       _log.warn('Scheduled update failed: $e');
       return AutoUpdateReport(AutoUpdateStatus.failed, error: '$e');
@@ -591,7 +557,11 @@ class ForegroundAutoUpdateBridge {
       if (progress.status == DownloadProgress.idle.status) cancelled = true;
     });
     try {
-      await _downloads.downloadPlaylist(playlist, sourceChecked: sourceChecked);
+      await _downloads.downloadPlaylist(
+        playlist,
+        sourceChecked: sourceChecked,
+        scheduled: true,
+      );
     } finally {
       await subscription.cancel();
     }

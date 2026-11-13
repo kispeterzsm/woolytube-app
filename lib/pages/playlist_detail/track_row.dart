@@ -360,12 +360,14 @@ class _TrackState {
     required this.hasError,
     required this.isUnavailable,
     required this.hasLocalFile,
+    required this.replacementFailed,
   });
 
   factory _TrackState.of(Track track) => _TrackState(
     hasError: track.status == 'error' && track.lastError != null,
     isUnavailable: track.status == 'unavailable',
     hasLocalFile: track.status == 'complete' && track.unavailableReason != null,
+    replacementFailed: _replacementFailed(track),
   );
 
   final bool hasError;
@@ -373,7 +375,17 @@ class _TrackState {
 
   /// A kept local file for a video YouTube no longer offers.
   final bool hasLocalFile;
+
+  /// The requested new copy (for example the YouTube original of a local
+  /// file) could not be fetched; the file stays and updates try again.
+  final bool replacementFailed;
 }
+
+bool _replacementFailed(Track track) =>
+    track.status == 'complete' &&
+    track.replaceRequested &&
+    track.unavailableReason == null &&
+    track.lastError != null;
 
 String _rowSubtitle(Track track, _TrackState state, MediaChapter? chapter) {
   final parts = <String>[
@@ -390,7 +402,9 @@ String _rowSubtitle(Track track, _TrackState state, MediaChapter? chapter) {
 Color _subtitleColor(Track track, _TrackState state) {
   if (track.alwaysSkip) return const Color(0xFFE57373);
   if (state.hasError || state.isUnavailable) return const Color(0xFFAA6666);
-  if (state.hasLocalFile) return const Color(0xFFAAAA66);
+  if (state.hasLocalFile || state.replacementFailed) {
+    return const Color(0xFFAAAA66);
+  }
   return _muted;
 }
 
@@ -400,6 +414,10 @@ String _trackSubtitle(Track track, _TrackState state) {
   }
   if (state.isUnavailable) {
     return '${_unavailableLabel(track.unavailableReason)} · ${track.videoId}';
+  }
+  if (state.replacementFailed) {
+    return '${replacementFailureReason(track.lastError!)} · '
+        '${track.isLocalReplacement ? 'keeping your file' : 'keeping the old file'}';
   }
   if (state.hasLocalFile) {
     final duration = _formatDuration(track.durationSeconds);
@@ -417,9 +435,10 @@ String _trackSubtitle(Track track, _TrackState state) {
 Widget _statusIcon(String status, _TrackState state) {
   switch (status) {
     case 'complete':
+      final kept = state.hasLocalFile || state.replacementFailed;
       return Icon(
-        state.hasLocalFile ? Icons.check_circle_outline : Icons.check_circle,
-        color: state.hasLocalFile ? const Color(0xFFAAAA66) : Colors.green,
+        kept ? Icons.check_circle_outline : Icons.check_circle,
+        color: kept ? const Color(0xFFAAAA66) : Colors.green,
         size: 20,
       );
     case 'downloading':

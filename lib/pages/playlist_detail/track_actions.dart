@@ -192,7 +192,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
             unawaited(_startTrackDownload(track));
           },
         ),
-      if (hasError)
+      if (hasError || _replacementFailed(track))
         tile(
           key: const ValueKey('track-actions-error-details'),
           icon: Icons.error_outline,

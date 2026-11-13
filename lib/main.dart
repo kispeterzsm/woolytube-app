@@ -172,16 +172,21 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
 
   @override
   Widget build(BuildContext context) {
-    // Surface download failures from anywhere in the app, including
-    // background-started downloads whose page is no longer open.
+    // Surface failures of downloads the user started from anywhere in the
+    // app, also when their page is no longer open. The scheduled update's
+    // failures never pop up here: it tells them by a quiet notification.
     ref.listen<AsyncValue<DownloadProgress>>(downloadProgressProvider, (
       prev,
       next,
     ) {
       final progress = next.valueOrNull;
-      if (progress == null || progress.status != 'error') return;
+      if (progress == null || progress.scheduled) return;
+      final failed =
+          progress.status == 'error' ||
+          (progress.status == 'complete' && progress.failures.isNotEmpty);
+      if (!failed) return;
       if (identical(prev?.valueOrNull, progress)) return;
-      _showDownloadError(progress.error ?? '');
+      _showDownloadError(progress);
     });
 
     ref.listen<AsyncValue<String>>(playbackMessagesProvider, (prev, next) {
@@ -251,15 +256,37 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
     );
   }
 
-  void _showDownloadError(String raw) {
+  void _showDownloadError(DownloadProgress progress) {
     final messenger = _messengerKey.currentState;
     if (messenger == null) return;
-    final friendly = friendlyDownloadError(raw);
+    final failures = progress.failures;
+    final String message;
+    final String friendly;
+    final String raw;
+    if (failures.isEmpty) {
+      raw = progress.error ?? '';
+      friendly = friendlyDownloadError(raw);
+      message = 'Download failed: $friendly';
+    } else {
+      // Names the playlist and the tracks: "vibe mix: "Song" – video
+      // unavailable".
+      final count = failures.length;
+      friendly =
+          '$count ${count == 1 ? 'download' : 'downloads'} failed'
+          '${progress.playlistName == null ? '' : ' in ${progress.playlistName}'}';
+      message =
+          progress.playlistName == null
+              ? downloadFailureLines(failures).join(', ')
+              : describeDownloadFailures(progress.playlistName!, failures);
+      raw = [
+        for (final failure in failures) '${failure.title}:\n${failure.error}',
+      ].join('\n\n');
+    }
     messenger
       ..hideCurrentSnackBar()
       ..showSnackBar(
         SnackBar(
-          content: Text('Download failed: $friendly'),
+          content: Text(message),
           duration: const Duration(seconds: 6),
           action:
               raw.trim().isEmpty

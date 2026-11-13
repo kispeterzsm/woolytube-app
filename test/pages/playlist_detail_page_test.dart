@@ -753,6 +753,33 @@ void main() {
     expect(find.text('Retry'), findsOneWidget);
   });
 
+  testWidgets('an original YouTube could not provide shows on the row', (
+    tester,
+  ) async {
+    useTallScreen(tester);
+    final kept = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      title: 'Old School Nightcore Mix',
+      status: 'complete',
+      filePath: '/tmp/mine.m4a',
+      isLocalReplacement: true,
+      replaceRequested: true,
+      lastError: 'Video unavailable. This video is not available',
+    );
+    await pumpPage(tester, tracks: [kept]);
+
+    expect(
+      find.text('YouTube version unavailable · keeping your file'),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(ValueKey('track-more-${kept.id}')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Show error details'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('This video is not available'), findsOneWidget);
+  });
+
   testWidgets('Download a new copy is hidden for local replacements', (
     tester,
   ) async {
@@ -2081,6 +2108,7 @@ class _Downloads implements DownloadService {
     Playlist playlist, {
     bool sourceChecked = true,
     bool Function()? shouldStop,
+    bool scheduled = false,
   }) async {
     downloadPlaylistCalls++;
     return DownloadStart.started;

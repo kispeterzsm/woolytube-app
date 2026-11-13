@@ -6,6 +6,7 @@ import 'package:drift/drift.dart' show Value;
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:woolytube/services/app_settings_service.dart';
+import 'package:woolytube/services/auto_update_attempts.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:woolytube/database/database.dart';
@@ -28,7 +29,9 @@ class FakeDownloadNotificationService extends DownloadNotificationService {
   final downloadedCounts = <int>[];
   final notificationIds = <int>[];
   final trackTitles = <String?>[];
-  final failures = <(String, int, String)>[];
+
+  /// Problem notifications: the playlist and the failures named.
+  final failures = <(String, List<DownloadFailure>)>[];
 
   @override
   Future<void> showDownloadComplete(
@@ -46,13 +49,12 @@ class FakeDownloadNotificationService extends DownloadNotificationService {
   }
 
   @override
-  Future<void> showDownloadsFailed(
-    String playlistName, {
-    required int failedCount,
-    required String reason,
+  Future<void> showDownloadProblems(
+    String playlistName,
+    List<DownloadFailure> failures, {
     int notificationId = 1001,
   }) async {
-    failures.add((playlistName, failedCount, reason));
+    this.failures.add((playlistName, failures));
   }
 }
 
@@ -128,6 +130,7 @@ void main() {
   late FakeSponsorBlockService sponsorBlock;
   late FakeDownloadNotificationService notifications;
   late DownloadLock lock;
+  late AutoUpdateAttemptLog attempts;
   late DownloadService service;
 
   DownloadService newService({String owner = DownloadLock.foregroundOwner}) =>
@@ -143,6 +146,8 @@ void main() {
         owner,
         null,
         thumbnails,
+        null,
+        attempts,
       );
 
   setUp(() async {
@@ -160,6 +165,9 @@ void main() {
     sponsorBlock = FakeSponsorBlockService(db, log);
     notifications = FakeDownloadNotificationService();
     lock = DownloadLock(directoryProvider: () async => tempDir.path);
+    attempts = AutoUpdateAttemptLog(
+      directoryProvider: () async => tempDir.path,
+    );
     service = newService();
   });
 
@@ -497,14 +505,46 @@ void main() {
     expect(updated.lastUpdated, isNotNull);
   });
 
-  test('a run in which every download failed is not stamped', () async {
+  test('a run in which every download failed still counts as an update; '
+      'the failures wait for the next one', () async {
     final playlist = await insertTestPlaylist(db, outputPath: folder);
-    await insertTestTrack(db, playlistId: playlist.id);
-    ytdlp.downloadError = StateError('permanent failure');
+    final track = await insertTestTrack(db, playlistId: playlist.id);
+    ytdlp.downloadError = PlatformException(
+      code: 'DOWNLOAD_ERROR',
+      message:
+          'ERROR: [youtube] video-1: Video unavailable. '
+          'This video is not available',
+    );
 
     await service.downloadPlaylist(playlist);
 
+    expect((await db.getPlaylist(playlist.id)).lastUpdated, isNotNull);
+    expect((await db.getTrack(track.id))!.status, 'error');
+    // Still in the queue of the next update.
+    expect(await db.getPendingTracks(playlist.id), hasLength(1));
+  });
+
+  test('a run that could not reach YouTube is not stamped', () async {
+    final playlist = await insertTestPlaylist(db, outputPath: folder);
+    await insertTestTrack(db, playlistId: playlist.id);
+    ytdlp.downloadError = PlatformException(
+      code: 'DOWNLOAD_ERROR',
+      message:
+          'ERROR: [youtube] video-1: Unable to download webpage: <urlopen '
+          'error [Errno 7] No address associated with hostname>',
+    );
+    final events = <DownloadProgress>[];
+    final sub = service.progressStream.listen(events.add);
+
+    await service.downloadPlaylist(playlist, scheduled: true);
+    await Future<void>.delayed(Duration.zero);
+    await sub.cancel();
+
     expect((await db.getPlaylist(playlist.id)).lastUpdated, isNull);
+    expect(events.last.status, 'error');
+    expect(events.last.scheduled, isTrue);
+    // The scheduled update tries again soon; nothing to tell yet.
+    expect(notifications.failures, isEmpty);
   });
 
   test('a reused file counts as progress for the update stamp', () async {
@@ -1345,6 +1385,7 @@ void main() {
       // A scheduled run is the one that notifies failures.
       final background = newService(owner: DownloadLock.backgroundOwner);
       addTearDown(background.dispose);
+
       for (var i = 1; i <= 3; i++) {
         await insertTestTrack(
           db,
@@ -1363,7 +1404,7 @@ void main() {
       final events = <DownloadProgress>[];
       final sub = background.progressStream.listen(events.add);
 
-      await background.downloadPlaylist(playlist);
+      await background.downloadPlaylist(playlist, scheduled: true);
       await Future<void>.delayed(Duration.zero);
       await sub.cancel();
 
@@ -1462,12 +1503,13 @@ void main() {
       await sub.cancel();
 
       expect((await db.getTrack(track.id))!.status, 'error');
-      expect((await db.getPlaylist(playlist.id)).lastUpdated, isNull);
-      // A run in which everything failed is reported, not "complete".
-      expect(events.last.status, 'error');
+      // YouTube answered, so the update counts; the next one tries again.
+      expect((await db.getPlaylist(playlist.id)).lastUpdated, isNotNull);
+      expect(events.last.status, 'complete');
       expect(events.last.failedCount, 1);
-      expect(friendlyDownloadError(events.last.error!), contains('not a bot'));
-      expect(isAgeGateDownloadError(events.last.error!), isFalse);
+      final error = events.last.failures.single.error;
+      expect(friendlyDownloadError(error), contains('not a bot'));
+      expect(isAgeGateDownloadError(error), isFalse);
       expect(isPermanentDownloadError('Video unavailable'), isFalse);
     });
   });
@@ -2098,6 +2140,229 @@ void main() {
       ]) {
         expect(PlaylistService.parseReuploadUrl(bad), isNull, reason: bad);
       }
+    });
+  });
+
+  group('failures', () {
+    const unavailable =
+        'ERROR: [youtube] 75oWbp5-3IA: Video unavailable. '
+        'This video is not available';
+    const longTitle =
+        'Old School Nightcore Mix | Best & Hottest Anime Gaming Songs';
+
+    PlatformException failure(String message) =>
+        PlatformException(code: 'DOWNLOAD_ERROR', message: message);
+
+    Future<List<DownloadProgress>> run(
+      Playlist playlist, {
+      bool scheduled = false,
+    }) async {
+      final events = <DownloadProgress>[];
+      final sub = service.progressStream.listen(events.add);
+      await service.downloadPlaylist(playlist, scheduled: scheduled);
+      await Future<void>.delayed(Duration.zero);
+      await sub.cancel();
+      return events;
+    }
+
+    test('an original YouTube no longer serves does not hold the update '
+        'back, shows on the track and is told once', () async {
+      final playlist = await insertTestPlaylist(
+        db,
+        name: 'vibe mix',
+        outputPath: folder,
+        audioOnly: true,
+      );
+      final path = p.join(folder, '00059_Old School.m4a');
+      await File(path).writeAsString('mine');
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 59,
+        videoId: '75oWbp5-3IA',
+        title: longTitle,
+        filePath: path,
+        status: 'complete',
+        isLocalReplacement: true,
+        replaceRequested: true,
+        sponsorBlockCheckedAt: DateTime.now(),
+      );
+      ytdlp.downloadError = failure(unavailable);
+
+      var events = await run(playlist, scheduled: true);
+
+      // The update counts: the next try is the next daily update.
+      final stamped = (await db.getPlaylist(playlist.id)).lastUpdated;
+      expect(stamped, isNotNull);
+      final kept = (await db.getTrack(track.id))!;
+      expect(kept.status, 'complete');
+      expect(kept.filePath, path);
+      expect(kept.isLocalReplacement, isTrue);
+      expect(kept.replaceRequested, isTrue);
+      expect(kept.lastError, contains('Video unavailable'));
+      expect(await File(path).readAsString(), 'mine');
+      expect(
+        replacementFailureReason(kept.lastError!),
+        'YouTube version '
+        'unavailable',
+      );
+
+      // Never shown in the app; one quiet notification naming the track.
+      expect(events.every((e) => e.scheduled), isTrue);
+      expect(events.last.status, 'complete');
+      final named = events.last.failures.single;
+      expect(named.trackId, track.id);
+      expect(named.replacement, isTrue);
+      expect(notifications.failures, hasLength(1));
+      final (name, told) = notifications.failures.single;
+      expect(name, 'vibe mix');
+      expect(downloadFailureLines(told), [
+        '"Old School Nightcore Mix | Best & Hotte…" – YouTube version '
+            'unavailable',
+      ]);
+
+      // The next scheduled update fails the same way: nothing new to tell.
+      events = await run(playlist, scheduled: true);
+      expect(events.last.failures, hasLength(1));
+      expect(notifications.failures, hasLength(1));
+
+      // Once it works the request is done and the error gone.
+      ytdlp.downloadError = null;
+      await run(playlist, scheduled: true);
+      final replaced = (await db.getTrack(track.id))!;
+      expect(replaced.replaceRequested, isFalse);
+      expect(replaced.isLocalReplacement, isFalse);
+      expect(replaced.lastError, isNull);
+      expect(notifications.failures, hasLength(1));
+    });
+
+    test('a new request starts without the old failure', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final path = p.join(folder, '00001_Mine.m4a');
+      await File(path).writeAsString('mine');
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        filePath: path,
+        status: 'complete',
+        isLocalReplacement: true,
+        replaceRequested: true,
+        lastError: unavailable,
+      );
+
+      await db.setTrackReplaceRequested(track.id, false);
+      var updated = (await db.getTrack(track.id))!;
+      expect(updated.lastError, isNull);
+
+      // Only a track asking for a replacement records its failure.
+      await db.setTrackReplacementError(track.id, unavailable);
+      expect((await db.getTrack(track.id))!.lastError, isNull);
+      await db.setTrackReplaceRequested(track.id, true);
+      await db.setTrackReplacementError(track.id, unavailable);
+      updated = (await db.getTrack(track.id))!;
+      expect(updated.lastError, unavailable);
+      expect(updated.status, 'complete');
+    });
+
+    test('a scheduled update tells only failures the previous one did not '
+        'have', () async {
+      final playlist = await insertTestPlaylist(
+        db,
+        name: 'Mix',
+        outputPath: folder,
+      );
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 1,
+        videoId: 'a',
+        title: 'A',
+      );
+      ytdlp.errorFor = (call) => failure(unavailable);
+
+      await run(playlist, scheduled: true);
+      expect(notifications.failures, hasLength(1));
+      expect([for (final f in notifications.failures.last.$2) f.title], ['A']);
+
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 2,
+        videoId: 'b',
+        title: 'B',
+      );
+      await run(playlist, scheduled: true);
+      // A fails as before; only B is news.
+      expect(notifications.failures, hasLength(2));
+      expect([for (final f in notifications.failures.last.$2) f.title], ['B']);
+
+      // A run the user started tells in the app, never by notification,
+      // and does not change what the scheduled update remembers.
+      final events = await run(playlist);
+      expect(notifications.failures, hasLength(2));
+      expect(events.last.scheduled, isFalse);
+      expect(events.last.playlistName, 'Mix');
+      expect([for (final f in events.last.failures) f.title], ['A', 'B']);
+      expect(
+        describeDownloadFailures('Mix', events.last.failures),
+        'Mix: "A" – video unavailable, "B" – video unavailable',
+      );
+
+      // A fails for another reason now: that is news.
+      ytdlp.errorFor =
+          (call) =>
+              call.videoId == 'a'
+                  ? failure('ERROR: [youtube] a: Private video')
+                  : failure(unavailable);
+      await run(playlist, scheduled: true);
+      expect(notifications.failures, hasLength(3));
+      expect(downloadFailureLines(notifications.failures.last.$2), [
+        '"A" – private video',
+      ]);
+    });
+
+    test('names three failures and counts the rest', () {
+      final failures = [
+        for (var i = 1; i <= 5; i++)
+          DownloadFailure(trackId: i, title: 'Song $i', error: unavailable),
+      ];
+      expect(downloadFailureLines(failures), [
+        '"Song 1" – video unavailable',
+        '"Song 2" – video unavailable',
+        '"Song 3" – video unavailable',
+        '+2 more',
+      ]);
+      expect(
+        describeDownloadFailures('vibe mix', failures.take(1).toList()),
+        'vibe mix: "Song 1" – video unavailable',
+      );
+      expect(
+        describeDownloadFailures('vibe mix', failures),
+        'vibe mix: "Song 1" – video unavailable, "Song 2" – video '
+        'unavailable, "Song 3" – video unavailable +2 more',
+      );
+      expect(lowerFirst('YouTube Premium only'), 'YouTube Premium only');
+      expect(
+        lowerFirst('Age-restricted — needs sign-in'),
+        'age-restricted — needs sign-in',
+      );
+      expect(lowerFirst('HTTP Error 404'), 'HTTP Error 404');
+    });
+
+    test('tells network failures apart from refusals', () {
+      expect(
+        isNetworkDownloadError(
+          'Unable to download webpage: <urlopen error [Errno 7] No address '
+          'associated with hostname>',
+        ),
+        isTrue,
+      );
+      expect(isNetworkDownloadError('Read timed out.'), isTrue);
+      expect(isNetworkDownloadError(unavailable), isFalse);
+      expect(
+        isNetworkDownloadError("Sign in to confirm you're not a bot"),
+        isFalse,
+      );
     });
   });
 }

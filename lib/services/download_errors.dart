@@ -92,3 +92,124 @@ bool isRemovedFromYouTubeError(String raw) {
   if (isBotCheckDownloadError(raw)) return false;
   return _removedFromYouTubePhrases.any(lower.contains);
 }
+
+/// Words in an error that mean the device could not reach YouTube at all,
+/// as opposed to YouTube answering with a refusal.
+const _networkErrorPatterns = [
+  'no address associated with hostname',
+  'temporary failure in name resolution',
+  'name or service not known',
+  'failed to resolve',
+  'network is unreachable',
+  'connection refused',
+  'connection reset',
+  'connection closed',
+  'connection aborted',
+  'timed out',
+  'urlopen error',
+];
+
+/// True when a download failed because YouTube could not be reached (no
+/// network, DNS, a timeout), so nothing was learned about the video.
+bool isNetworkDownloadError(String raw) {
+  final lower = raw.toLowerCase();
+  return _networkErrorPatterns.any(lower.contains);
+}
+
+/// Why a fresh copy of a track that keeps its file could not be fetched,
+/// for example the YouTube original of a local replacement:
+/// "YouTube version unavailable".
+String replacementFailureReason(String raw) {
+  final friendly = friendlyDownloadError(raw);
+  if (friendly == 'Video unavailable' || friendly == 'Removed from YouTube') {
+    return 'YouTube version unavailable';
+  }
+  return 'YouTube version failed: ${lowerFirst(friendly)}';
+}
+
+/// [text] with a lower-case first letter, unless its first word is a name
+/// or an abbreviation ("YouTube", "HTTP").
+String lowerFirst(String text) {
+  if (text.isEmpty) return text;
+  final firstWord = text.split(RegExp(r'[\s\-—:(]')).first;
+  if (firstWord.length > 1 &&
+      firstWord.substring(1) != firstWord.substring(1).toLowerCase()) {
+    return text;
+  }
+  return text[0].toLowerCase() + text.substring(1);
+}
+
+/// A track a playlist run could not download.
+class DownloadFailure {
+  const DownloadFailure({
+    required this.trackId,
+    required this.title,
+    required this.error,
+    this.replacement = false,
+  });
+
+  final int trackId;
+  final String title;
+
+  /// What the downloader said, cleaned up.
+  final String error;
+
+  /// A fresh copy of a track that has a file (the original of a local file,
+  /// or another format) failed; the file is kept.
+  final bool replacement;
+
+  /// The short reason shown to the user.
+  String get reason =>
+      replacement
+          ? replacementFailureReason(error)
+          : friendlyDownloadError(error);
+
+  /// The same track failing the same way gives the same key.
+  String get key => '$trackId:$reason';
+
+  @override
+  bool operator ==(Object other) =>
+      other is DownloadFailure &&
+      other.trackId == trackId &&
+      other.title == title &&
+      other.error == error &&
+      other.replacement == replacement;
+
+  @override
+  int get hashCode => Object.hash(trackId, title, error, replacement);
+}
+
+/// How many failed tracks a message names; the rest are counted.
+const maxNamedDownloadFailures = 3;
+
+const _maxTitleLength = 40;
+
+/// One line per failure, at most [maxNamedDownloadFailures], each
+/// `"Title" – reason`, then `+N more` for the rest.
+List<String> downloadFailureLines(List<DownloadFailure> failures) {
+  final named = failures.take(maxNamedDownloadFailures);
+  final more = failures.length - named.length;
+  return [
+    for (final failure in named)
+      '"${_shortTitle(failure.title)}" – ${lowerFirst(failure.reason)}',
+    if (more > 0) '+$more more',
+  ];
+}
+
+/// One line naming [playlistName] and its failed tracks:
+/// `vibe mix: "Old School Nightcore Mix" – video unavailable`.
+String describeDownloadFailures(
+  String playlistName,
+  List<DownloadFailure> failures,
+) {
+  final lines = downloadFailureLines(failures);
+  final more = failures.length > maxNamedDownloadFailures ? lines.last : null;
+  final named = more == null ? lines : lines.sublist(0, lines.length - 1);
+  return '$playlistName: ${named.join(', ')}${more == null ? '' : ' $more'}';
+}
+
+String _shortTitle(String title) {
+  final trimmed = title.trim();
+  if (trimmed.length <= _maxTitleLength) return trimmed;
+  return '${trimmed.substring(0, _maxTitleLength - 1).trimRight()}…';
+}

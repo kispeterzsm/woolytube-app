@@ -174,6 +174,64 @@ void main() {
     await tester.tap(find.text('Close'));
     await tester.pumpAndSettle();
 
+    // A download the user started names the playlist and the tracks.
+    progress.add(
+      const DownloadProgress(
+        playlistId: 1,
+        currentTrackIndex: 1,
+        totalTracks: 1,
+        trackProgress: 100,
+        status: 'complete',
+        failedCount: 1,
+        playlistName: 'vibe mix',
+        failures: [
+          DownloadFailure(
+            trackId: 59,
+            title: 'Old School Nightcore Mix',
+            error: 'Video unavailable. This video is not available',
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.text('vibe mix: "Old School Nightcore Mix" – video unavailable'),
+      findsOneWidget,
+    );
+    ScaffoldMessenger.of(
+      tester.element(find.byType(Scaffold).first),
+    ).hideCurrentSnackBar();
+    await tester.pumpAndSettle();
+
+    // The scheduled update never pops up in the app.
+    progress.add(
+      const DownloadProgress(
+        playlistId: 1,
+        currentTrackIndex: 1,
+        totalTracks: 1,
+        trackProgress: 0,
+        status: 'error',
+        error: 'ERROR: [youtube] abc: Private video',
+        scheduled: true,
+      ),
+    );
+    progress.add(
+      const DownloadProgress(
+        playlistId: 1,
+        currentTrackIndex: 1,
+        totalTracks: 1,
+        trackProgress: 100,
+        status: 'complete',
+        scheduled: true,
+        playlistName: 'vibe mix',
+        failures: [
+          DownloadFailure(trackId: 59, title: 'Song', error: 'Private video'),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(SnackBar), findsNothing);
+
     messages.add('Audio focus was denied');
     await tester.pumpAndSettle();
     expect(find.text('Audio focus was denied'), findsOneWidget);
