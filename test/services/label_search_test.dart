@@ -333,4 +333,176 @@ void main() {
     ];
     expect(labelUidsUsedBy(tracks), {rock, live});
   });
+
+  group('label names', () {
+    Label label(String uid, String name) => Label(
+      id: 0,
+      uid: uid,
+      name: name,
+      color: 0xFFE57373,
+      sortOrder: 0,
+      createdAt: DateTime(2026),
+      updatedAt: DateTime(2026),
+    );
+    final named = [
+      label(rock, 'Heavy'),
+      label(live, 'Élő koncert'),
+      label(jazz, 'Jazz'),
+    ];
+
+    test('labelUidsNamed matches names like titles: case and accents do '
+        'not matter, every word in any order', () {
+      expect(labelUidsNamed(named, SearchQuery('HEAVY')), {rock});
+      expect(labelUidsNamed(named, SearchQuery('elo')), {live});
+      expect(labelUidsNamed(named, SearchQuery('koncert elo')), {live});
+      expect(labelUidsNamed(named, SearchQuery('e')), {rock, live});
+      expect(labelUidsNamed(named, SearchQuery('')), isEmpty);
+      expect(labelUidsNamed(named, SearchQuery('pop')), isEmpty);
+    });
+
+    test('with the Labels chip on, words also find files and chapters by '
+        'their labels\' names: files whole, chapters alone, after title '
+        'matches', () async {
+      final tracks = [
+        await track(1, 'Song one', labels: [rock]),
+        await track(2, 'Song two'),
+        await track(
+          3,
+          'A mix',
+          chapterLabels: {
+            'b': [rock],
+            'c': [live],
+          },
+        ),
+        await track(4, 'Heavy anthem'),
+        // Its own label wins over its chapters': it plays whole.
+        await track(
+          5,
+          'Live album',
+          labels: [rock],
+          chapterLabels: {
+            'a': [rock],
+          },
+        ),
+      ];
+      final query = SearchQuery('heavy');
+      final namedLabels = labelUidsNamed(named, query);
+      // Off: only the title.
+      expect(describe(searchLibrary(tracks, query, namedLabels: namedLabels)), [
+        '4 title',
+      ]);
+      final hits = searchLibrary(
+        tracks,
+        query,
+        filters: const SearchFilters(labelSearch: true),
+        namedLabels: namedLabels,
+      );
+      expect(describe(hits), [
+        '4 title',
+        '1 labelName',
+        '3 labelName b',
+        '5 labelName',
+      ]);
+      expect(hits[1].labels, {rock});
+      expect(hits[2].labels, {rock});
+      expect([for (final hit in hits) hit.rank], [1, 6, 6, 6]);
+      final entries = searchQueueEntries(hits);
+      expect(
+        entries.map((e) => '${e.track.index} ${e.chapterIds?.join(',')}'),
+        ['4 null', '1 null', '3 b', '5 null'],
+      );
+      expect(searchLabelTargets(hits).map((item) => item.toString()), [
+        'LabelledItem(${tracks[3].id})',
+        'LabelledItem(${tracks[0].id})',
+        'LabelledItem(${tracks[2].id}, b)',
+        'LabelledItem(${tracks[4].id})',
+      ]);
+      // An empty search finds nothing by name.
+      expect(
+        searchLibrary(
+          tracks,
+          SearchQuery.empty,
+          filters: const SearchFilters(labelSearch: true),
+          namedLabels: namedLabels,
+        ),
+        hasLength(tracks.length),
+      );
+    });
+
+    test('a lyric line counts after a label name', () async {
+      final tracks = [
+        await track(1, 'Song', labels: [rock]),
+      ];
+      final query = SearchQuery('heavy');
+      final hits = searchLibrary(
+        tracks,
+        query,
+        filters: const SearchFilters(lyrics: true, labelSearch: true),
+        namedLabels: labelUidsNamed(named, query),
+        lyricHits: [
+          LyricsHit(
+            trackId: tracks.single.id,
+            docId: 1,
+            lineId: 1,
+            lineNo: 1,
+            lineText: 'We rock',
+            highlightRanges: const [LyricsHighlight(3, 7)],
+            positionMs: 1000,
+            score: 1,
+            kind: LyricsMode.lyrics,
+          ),
+        ],
+      );
+      expect(describe(hits), ['1 labelName']);
+      expect(hits.single.lyric, isNull);
+    });
+
+    test('chosen labels restrict what label names find', () async {
+      final tracks = [
+        // Heavy by name, live chosen: has both.
+        await track(1, 'One', labels: [rock, live]),
+        // Heavy by name, not live.
+        await track(2, 'Two', labels: [rock]),
+        // Chapter b heavy and live, chapter c only heavy.
+        await track(
+          3,
+          'Three',
+          chapterLabels: {
+            'b': [rock, live],
+            'c': [rock],
+          },
+        ),
+        // Heavy on the file, live on a chapter: just that chapter.
+        await track(
+          4,
+          'Four',
+          labels: [rock],
+          chapterLabels: {
+            'a': [live],
+          },
+        ),
+        // Live, but nothing named heavy.
+        await track(5, 'Five', labels: [live]),
+      ];
+      final query = SearchQuery('heavy');
+      final hits = searchLibrary(
+        tracks,
+        query,
+        filters: const SearchFilters(labelSearch: true, labels: {live}),
+        namedLabels: labelUidsNamed(named, query),
+      );
+      expect(describe(hits), ['1 labelName', '3 labelName b', '4 labelName a']);
+    });
+
+    test('filters compare the Labels chip too', () {
+      expect(
+        const SearchFilters(labelSearch: true) == const SearchFilters(),
+        isFalse,
+      );
+      expect(
+        const SearchFilters(labelSearch: true).hashCode,
+        SearchFilters().copyWith(labelSearch: true).hashCode,
+      );
+    });
+  });
 }

@@ -830,7 +830,9 @@ void main() {
     Finder tile(Track t) => find.byKey(ValueKey('search-track-${t.id}'));
 
     // With nothing typed, a label lists everything that has it.
-    await tester.tap(find.byKey(ValueKey('search-filter-label-${rock.uid}')));
+    await tester.tap(find.byKey(const ValueKey('search-filter-labels')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(ValueKey('search-label-option-${rock.uid}')));
     await tester.pumpAndSettle();
     expect(tile(song), findsOneWidget);
     expect(tile(liveSong), findsOneWidget);
@@ -843,7 +845,7 @@ void main() {
     );
 
     // Both labels: only what has both, then what has either.
-    await tester.tap(find.byKey(ValueKey('search-filter-label-${live.uid}')));
+    await tester.tap(find.byKey(ValueKey('search-label-option-${live.uid}')));
     await tester.pumpAndSettle();
     expect(tile(song), findsNothing);
     expect(tile(liveSong), findsOneWidget);
@@ -871,6 +873,142 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('search-results-menu')));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('search-label-all')), findsOneWidget);
+  });
+
+  testWidgets('search: no Labels chip without labels', (tester) async {
+    await pumpHome(tester);
+    await tester.tap(find.byTooltip('Search'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('search-filter-labels')), findsNothing);
+  });
+
+  testWidgets('search: the Labels chip offers the labels narrowed by the '
+      'words, and the words find files and chapters by label name under '
+      'Labels', (tester) async {
+    final service = LabelService(db);
+    final rock = await service.create('Rock', 0xFFE57373);
+    final live = await service.create('Live', 0xFF64B5F6);
+    labels = await service.labels();
+    var index = 0;
+    Future<Track> track(
+      String title, {
+      List<String> fileLabels = const [],
+      Map<String, List<String>> chapterLabels = const {},
+    }) {
+      index++;
+      return insertTestTrack(
+        db,
+        playlistId: playlists[3].id,
+        index: index,
+        videoId: 'labelled-$index',
+        title: title,
+        status: 'complete',
+        filePath: '/tmp/labelled-$index.m4a',
+        labelUids: encodeLabelUids(fileLabels),
+        chaptersJson:
+            chapterLabels.isEmpty
+                ? null
+                : ChapterData(
+                  downloaded: const [
+                    MediaChapter(id: 'a', title: 'One', startMs: 0, endMs: 1),
+                    MediaChapter(id: 'b', title: 'Two', startMs: 1, endMs: 2),
+                  ],
+                  chapterLabels: chapterLabels,
+                ).encode(),
+      );
+    }
+
+    final tune = await track('First tune', fileLabels: [rock.uid]);
+    final mix = await track(
+      'A mix',
+      chapterLabels: {
+        'b': [live.uid],
+      },
+    );
+    final anthem = await track('Rock anthem');
+    tracks = [...tracks, tune, mix, anthem];
+    await pumpHome(tester);
+    await tester.tap(find.byTooltip('Search'));
+    await tester.pumpAndSettle();
+    Finder tile(Track t) => find.byKey(ValueKey('search-track-${t.id}'));
+    Finder option(Label l) =>
+        find.byKey(ValueKey('search-label-option-${l.uid}'));
+    Finder reason(Track t, String text) => find.descendant(
+      of: tile(t),
+      matching: find.textContaining(text, findRichText: true),
+    );
+    final labelsChip = find.byKey(const ValueKey('search-filter-labels'));
+    final labelRow = find.byKey(const ValueKey('search-label-row'));
+    Future<void> type(String text) async {
+      await tester.enterText(find.byType(TextField), text);
+      await tester.pumpAndSettle();
+    }
+
+    // Off: one chip, no labels listed, words match titles only.
+    expect(labelsChip, findsOneWidget);
+    expect(labelRow, findsNothing);
+    await type('rock');
+    expect(tile(anthem), findsOneWidget);
+    expect(tile(tune), findsNothing);
+
+    // On: the labels whose names match, and what carries them.
+    await tester.tap(labelsChip);
+    await tester.pumpAndSettle();
+    expect(option(rock), findsOneWidget);
+    expect(option(live), findsNothing);
+    expect(tile(anthem), findsOneWidget);
+    expect(tile(tune), findsOneWidget);
+    expect(reason(tune, 'Label: Rock'), findsOneWidget);
+    expect(find.text('Tracks'), findsOneWidget);
+    // The chip and the section header.
+    expect(find.text('Labels'), findsNWidgets(2));
+    expect(
+      tester.getRect(tile(anthem)).top,
+      lessThan(tester.getRect(tile(tune)).top),
+    );
+    expect(find.text('2 tracks'), findsOneWidget);
+
+    // A chapter by its label: that chapter alone.
+    await type('live');
+    expect(option(live), findsOneWidget);
+    expect(option(rock), findsNothing);
+    expect(tile(mix), findsOneWidget);
+    expect(reason(mix, 'Label: Live'), findsOneWidget);
+    expect(reason(mix, 'Chapter: Two'), findsOneWidget);
+    expect(find.text('Tracks'), findsNothing);
+    await tester.tap(find.text('Play all'));
+    await tester.pump();
+    expect(playback.playedEntries.last, [
+      QueueEntry(mix, const {'b'}),
+    ]);
+
+    await type('zzz');
+    expect(find.text('No label matches'), findsOneWidget);
+    expect(find.text('Nothing matches'), findsOneWidget);
+
+    // Chosen labels restrict what the words find.
+    await type('rock');
+    await tester.tap(option(rock));
+    await tester.pumpAndSettle();
+    expect(tile(tune), findsOneWidget);
+    expect(tile(anthem), findsNothing);
+    expect(find.text('1 track'), findsOneWidget);
+    // Label all labels what is shown.
+    await tester.tap(find.byKey(const ValueKey('search-results-menu')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('search-label-all')), findsOneWidget);
+    await tester.tapAt(const Offset(5, 5));
+    await tester.pumpAndSettle();
+
+    // Off again: the row goes and the choice with it.
+    await tester.tap(labelsChip);
+    await tester.pumpAndSettle();
+    expect(labelRow, findsNothing);
+    expect(tile(anthem), findsOneWidget);
+    expect(tile(tune), findsNothing);
+    await tester.tap(labelsChip);
+    await tester.pumpAndSettle();
+    expect(tester.widget<FilterChip>(option(rock)).selected, isFalse);
   });
 
   testWidgets('a whole-file transcript hit plays the chapter at its time', (
@@ -1503,6 +1641,102 @@ void main() {
       );
       expect(tester.takeException(), isNull);
     });
+
+    for (final scale in [1.0, 1.3]) {
+      testWidgets('search: 30 labels stay on one line that scrolls, and a '
+          'label hit is whole, at text size $scale', (tester) async {
+        tester.platformDispatcher.textScaleFactorTestValue = scale;
+        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+        playlists[1] = playlists[1].copyWith(lyricsMode: const Value('lyrics'));
+        final service = LabelService(db);
+        final made = <Label>[];
+        for (var i = 1; i <= 30; i++) {
+          made.add(
+            await service.create(
+              i.isEven ? 'Label $i' : 'A longer label name $i',
+              0xFFE57373,
+            ),
+          );
+        }
+        labels = await service.labels();
+        final labelled = await insertTestTrack(
+          db,
+          playlistId: playlists[1].id,
+          index: 3,
+          videoId: 'labelled-long',
+          title:
+              'A very long YouTube title (Official Music Video) [Remastered '
+              '2024] feat. Somebody Else',
+          status: 'complete',
+          filePath: '/tmp/labelled-long.m4a',
+          labelUids: encodeLabelUids([made[0].uid, made[2].uid]),
+        );
+        tracks = [...tracks, labelled];
+        await pumpHome(tester);
+        usePhoneScreen(tester);
+        await tester.pumpAndSettle();
+        await tester.tap(find.byTooltip('Search'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('search-filter-labels')));
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byType(TextField), 'longer label');
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+
+        Finder option(Label l) =>
+            find.byKey(ValueKey('search-label-option-${l.uid}'));
+        final offered = [
+          for (final l in made)
+            if (l.name.startsWith('A longer')) l,
+        ];
+        expect(offered, hasLength(15));
+        expect(option(made[1]), findsNothing);
+        // One line under the chips, which are whole.
+        final top = tester.getRect(option(offered.first)).top;
+        for (final label in offered) {
+          expect(
+            tester.getRect(option(label)).top,
+            moreOrLessEquals(top),
+            reason: label.name,
+          );
+        }
+        for (final key in ['search-filter-lyrics', 'search-filter-labels']) {
+          final chip = tester.getRect(find.byKey(ValueKey(key)));
+          expect(chip.bottom, lessThanOrEqualTo(top), reason: key);
+          expect(chip.right, lessThanOrEqualTo(411), reason: key);
+        }
+        expect(tester.getRect(option(offered.last)).left, greaterThan(411));
+        await tester.dragUntilVisible(
+          option(offered.last),
+          find.byKey(const ValueKey('search-label-row')),
+          const Offset(-300, 0),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          tester.getRect(option(offered.last)).right,
+          lessThanOrEqualTo(411),
+        );
+
+        // The hit, under Labels, below the row, with Play all whole.
+        final tile = find.byKey(ValueKey('search-track-${labelled.id}'));
+        expect(
+          tester.getRect(tile).top,
+          greaterThan(tester.getRect(option(offered.first)).bottom),
+        );
+        expectNotCut(tester, find.byKey(const ValueKey('search-play-all')));
+        expectNotCut(
+          tester,
+          find.byKey(ValueKey('search-label-reason-${labelled.id}')),
+        );
+        expect(
+          tester
+              .getRect(find.byKey(ValueKey('search-track-more-${labelled.id}')))
+              .right,
+          lessThanOrEqualTo(411),
+        );
+        expect(tester.takeException(), isNull);
+      });
+    }
   });
 }
 

@@ -1016,12 +1016,14 @@ void main() {
 
     await tester.tap(find.byTooltip('Search tracks'));
     await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('search-filter-labels')));
+    await tester.pumpAndSettle();
     // Only labels something here has.
     expect(
-      find.byKey(ValueKey('search-filter-label-${unused.uid}')),
+      find.byKey(ValueKey('search-label-option-${unused.uid}')),
       findsNothing,
     );
-    await tester.tap(find.byKey(ValueKey('search-filter-label-${rock.uid}')));
+    await tester.tap(find.byKey(ValueKey('search-label-option-${rock.uid}')));
     await tester.pumpAndSettle();
     expect(row(song), findsOneWidget);
     expect(row(liveSong), findsOneWidget);
@@ -1050,7 +1052,7 @@ void main() {
 
     // Two labels: both by default, either one on request.
     expect(find.byKey(const ValueKey('search-label-match')), findsNothing);
-    await tester.tap(find.byKey(ValueKey('search-filter-label-${live.uid}')));
+    await tester.tap(find.byKey(ValueKey('search-label-option-${live.uid}')));
     await tester.pumpAndSettle();
     expect(row(song), findsNothing);
     expect(row(liveSong), findsOneWidget);
@@ -1145,6 +1147,188 @@ void main() {
       decodeLabelUids((await db.getTrack(song.id))!.labelUids),
       contains(rock.uid),
     );
+  });
+
+  testWidgets('Labels chip: hidden without labels; on, it offers the labels '
+      'narrowed by the words, the words find files and chapters by label '
+      'name, and off clears the choice', (tester) async {
+    useTallScreen(tester);
+    final rock = await labels.create('Rock', 0xFFE57373);
+    final live = await labels.create('Live', 0xFF64B5F6);
+    final prog = await labels.create('Prog rock', 0xFF81C784);
+    var index = 0;
+    Future<Track> track(
+      String title, {
+      List<String> fileLabels = const [],
+      Map<String, List<String>> chapterLabels = const {},
+    }) {
+      index++;
+      return insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: index,
+        videoId: 'video-$index',
+        title: title,
+        status: 'complete',
+        filePath: '/tmp/$index.m4a',
+        labelUids: encodeLabelUids(fileLabels),
+        chaptersJson:
+            chapterLabels.isEmpty
+                ? null
+                : ChapterData(
+                  downloaded: const [
+                    MediaChapter(id: 'a', title: 'One', startMs: 0, endMs: 1),
+                    MediaChapter(id: 'b', title: 'Two', startMs: 1, endMs: 2),
+                  ],
+                  chapterLabels: chapterLabels,
+                ).encode(),
+      );
+    }
+
+    final song = await track('First song', fileLabels: [rock.uid]);
+    final mix = await track(
+      'A mix',
+      chapterLabels: {
+        'b': [live.uid],
+      },
+    );
+    final proggy = await track('Third song', fileLabels: [prog.uid]);
+    final both = await track('Fourth song', fileLabels: [rock.uid, prog.uid]);
+    final plain = await track('Plain song');
+    await pumpPage(tester, tracks: [song, mix, proggy, both, plain]);
+    Finder row(Track t) => find.byKey(ValueKey('track-row-${t.id}'));
+    Finder option(Label l) =>
+        find.byKey(ValueKey('search-label-option-${l.uid}'));
+    final labelsChip = find.byKey(const ValueKey('search-filter-labels'));
+    final labelRow = find.byKey(const ValueKey('search-label-row'));
+    Future<void> type(String text) async {
+      await tester.enterText(find.byType(TextField), text);
+      await tester.pumpAndSettle();
+    }
+
+    // No labels yet: no chip.
+    await tester.tap(find.byTooltip('Search tracks'));
+    await tester.pumpAndSettle();
+    expect(labelsChip, findsNothing);
+    await publishLabels();
+    await tester.pumpAndSettle();
+    expect(labelsChip, findsOneWidget);
+    expect(find.byTooltip('Choose or search labels'), findsOneWidget);
+    // Off: no label row, and words do not match label names.
+    expect(labelRow, findsNothing);
+    expect(option(rock), findsNothing);
+    await type('rock');
+    expect(find.text('No matching tracks'), findsOneWidget);
+
+    // On: every label, one line, in the owner's order.
+    await tester.tap(labelsChip);
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Searching labels too'), findsOneWidget);
+    expect(labelRow, findsOneWidget);
+    // The words narrow the labels offered.
+    expect(option(rock), findsOneWidget);
+    expect(option(prog), findsOneWidget);
+    expect(option(live), findsNothing);
+    // And find what carries a label of that name.
+    expect(row(song), findsOneWidget);
+    expect(row(proggy), findsOneWidget);
+    expect(row(both), findsOneWidget);
+    expect(row(mix), findsNothing);
+    expect(row(plain), findsNothing);
+    expect(
+      find.descendant(of: row(song), matching: find.text('Label: Rock')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: row(both),
+        matching: find.text('Labels: Rock, Prog rock'),
+      ),
+      findsOneWidget,
+    );
+
+    // A chapter by its label: the chapter alone.
+    await type('live');
+    expect(option(live), findsOneWidget);
+    expect(option(rock), findsNothing);
+    expect(row(mix), findsOneWidget);
+    expect(
+      find.descendant(
+        of: row(mix),
+        matching: find.text('Label: Live · 0:00 · Two'),
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Play all'));
+    await tester.pump();
+    expect(playback.playedEntries.last, [
+      QueueEntry(mix, const {'b'}),
+    ]);
+
+    // Nothing named so.
+    await type('zzz');
+    expect(find.text('No label matches'), findsOneWidget);
+    expect(labelRow, findsNothing);
+
+    // Empty: all of them; chosen ones move to the front.
+    await type('');
+    expect(row(plain), findsOneWidget);
+    double left(Finder f) => tester.getRect(f).left;
+    expect(left(option(rock)), lessThan(left(option(live))));
+    expect(left(option(live)), lessThan(left(option(prog))));
+    await tester.tap(option(prog));
+    await tester.pumpAndSettle();
+    expect(left(option(prog)), lessThan(left(option(rock))));
+    expect(row(proggy), findsOneWidget);
+    expect(row(both), findsOneWidget);
+    expect(row(song), findsNothing);
+    expect(row(plain), findsNothing);
+
+    // Chosen labels restrict what the words find, by title or label name.
+    await type('rock');
+    expect(row(both), findsOneWidget);
+    expect(row(proggy), findsOneWidget);
+    expect(row(song), findsNothing);
+    await type('third');
+    expect(row(proggy), findsOneWidget);
+    expect(row(both), findsNothing);
+    // The chosen label stays offered whatever is typed.
+    await type('zzz');
+    expect(option(prog), findsOneWidget);
+    expect(find.text('No label matches'), findsNothing);
+
+    // Two chosen: All labels after them, before the rest.
+    await type('');
+    await tester.tap(option(rock));
+    await tester.pumpAndSettle();
+    final match = find.byKey(const ValueKey('search-label-match'));
+    expect(find.text('All labels'), findsOneWidget);
+    expect(left(match), greaterThan(left(option(prog))));
+    expect(left(match), lessThan(left(option(live))));
+    expect(row(both), findsOneWidget);
+    expect(row(song), findsNothing);
+
+    // Off: the row goes, the choice is cleared, the list is whole again.
+    await tester.tap(labelsChip);
+    await tester.pumpAndSettle();
+    expect(labelRow, findsNothing);
+    expect(match, findsNothing);
+    for (final t in [song, mix, proggy, both, plain]) {
+      expect(row(t), findsOneWidget);
+    }
+    await tester.tap(labelsChip);
+    await tester.pumpAndSettle();
+    expect(tester.widget<FilterChip>(option(rock)).selected, isFalse);
+    expect(tester.widget<FilterChip>(option(prog)).selected, isFalse);
+    expect(row(plain), findsOneWidget);
+
+    // Closing search turns it off.
+    await tester.tap(find.byTooltip('Close search'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Search tracks'));
+    await tester.pumpAndSettle();
+    expect(labelRow, findsNothing);
+    expect(tester.widget<FilterChip>(labelsChip).selected, isFalse);
   });
 
   testWidgets('a track without a file offers Download, a failed one Retry', (
@@ -2938,6 +3122,95 @@ void main() {
       );
       expect(find.byTooltip('Stop update'), findsOneWidget);
     });
+
+    for (final scale in [1.0, 1.3]) {
+      testWidgets('30 labels stay on one line that scrolls at text size '
+          '$scale', (tester) async {
+        usePhoneScreen(tester);
+        tester.platformDispatcher.textScaleFactorTestValue = scale;
+        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+        playlist = await insertTestPlaylist(
+          db,
+          url: 'lyrics-list',
+          name: 'less socially acceptable masterpieces',
+          lyricsMode: 'lyrics',
+        );
+        final made = <Label>[];
+        for (var i = 1; i <= 30; i++) {
+          made.add(
+            await labels.create(
+              i.isEven ? 'Label $i' : 'A longer label name $i',
+              0xFFE57373,
+            ),
+          );
+        }
+        await publishLabels();
+        final track = await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          title:
+              'A very long YouTube title (Official Music Video) [Remastered '
+              '2024] feat. Somebody Else',
+          status: 'complete',
+          filePath: '/tmp/1.m4a',
+          labelUids: encodeLabelUids([for (final l in made) l.uid]),
+        );
+        await pumpPage(tester, tracks: [track], opened: true);
+        await tester.tap(find.byTooltip('Search tracks'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('search-filter-labels')));
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byType(TextField), 'label');
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+
+        Finder option(Label l) =>
+            find.byKey(ValueKey('search-label-option-${l.uid}'));
+        final bar = tester.getRect(find.byType(AppBar));
+        // One line: every label at the same height, inside the bar.
+        final top = tester.getRect(option(made.first)).top;
+        for (final label in made) {
+          final rect = tester.getRect(option(label));
+          expect(rect.top, moreOrLessEquals(top), reason: label.name);
+          expect(rect.bottom, lessThanOrEqualTo(bar.bottom));
+        }
+        // The chips above it, whole and inside the bar too.
+        for (final key in ['search-filter-lyrics', 'search-filter-labels']) {
+          final chip = tester.getRect(find.byKey(ValueKey(key)));
+          expect(chip.bottom, lessThanOrEqualTo(top), reason: key);
+          expect(chip.right, lessThanOrEqualTo(411), reason: key);
+          expect(chip.top, greaterThanOrEqualTo(bar.top), reason: key);
+        }
+        expect(
+          tester.getRect(find.byType(TextField)).bottom,
+          lessThanOrEqualTo(
+            tester
+                .getRect(find.byKey(const ValueKey('search-filter-labels')))
+                .top,
+          ),
+        );
+        // It scrolls sideways to the last label.
+        expect(tester.getRect(option(made.last)).left, greaterThan(411));
+        await tester.dragUntilVisible(
+          option(made.last),
+          find.byKey(const ValueKey('search-label-row')),
+          const Offset(-300, 0),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.getRect(option(made.last)).right, lessThanOrEqualTo(411));
+        // The results start under the bar, their count whole.
+        final count = find.byKey(
+          const ValueKey('playlist-search-result-count'),
+        );
+        expectNotCut(tester, count);
+        expect(tester.getRect(count).top, greaterThanOrEqualTo(bar.bottom));
+        expect(
+          tester.getRect(find.byKey(ValueKey('track-row-${track.id}'))).top,
+          greaterThanOrEqualTo(bar.bottom),
+        );
+        expect(tester.takeException(), isNull);
+      });
+    }
   });
 }
 

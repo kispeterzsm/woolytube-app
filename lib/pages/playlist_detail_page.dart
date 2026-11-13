@@ -6,6 +6,7 @@ import 'package:cached_network_image/cached_network_image.dart'
     hide DownloadProgress;
 import 'package:drift/drift.dart' hide Column;
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show setEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter/services.dart';
@@ -100,12 +101,14 @@ class _TrackListView {
     this.query, [
     this.filters = const SearchFilters(),
     this.lyricHits = const [],
+    this.namedLabels = const {},
   ]) {
     if (!searching) {
       hits = const [];
       visible = tracks;
       chapterMatches = const {};
       lyricMatches = const {};
+      labelMatches = const {};
     } else {
       // Kept in playlist order: the search filters the list.
       hits = searchLibrary(
@@ -113,6 +116,7 @@ class _TrackListView {
         query,
         filters: filters,
         lyricHits: lyricHits,
+        namedLabels: namedLabels,
         ranked: false,
       );
       visible = [for (final hit in hits) hit.track];
@@ -123,6 +127,10 @@ class _TrackListView {
       lyricMatches = {
         for (final hit in hits)
           if (hit.lyric case final lyric?) hit.track.id: lyric,
+      };
+      labelMatches = {
+        for (final hit in hits)
+          if (hit.reason == SearchReason.labelName) hit.track.id: hit.labels,
       };
     }
     rowOf = {for (var i = 0; i < visible.length; i++) visible[i].id: i};
@@ -167,6 +175,9 @@ class _TrackListView {
   /// Lyric lines matching [query], searched while the Lyrics filter is on.
   final List<LyricsHit> lyricHits;
 
+  /// The labels whose names match [query], while the Labels chip is on.
+  final Set<String> namedLabels;
+
   /// The search results, in playlist order; empty when not searching.
   late final List<SearchHit> hits;
 
@@ -178,6 +189,9 @@ class _TrackListView {
 
   /// The best lyric line of each track whose lyrics match [query].
   late final Map<int, LyricsHit> lyricMatches;
+
+  /// The labels (uids) whose names found each track found only by them.
+  late final Map<int, Set<String>> labelMatches;
   late final List<Track> visible;
   late final Map<int, int> rowOf;
 
@@ -450,14 +464,19 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
               ref.read(labelsByUidProvider).keys.toSet(),
             )
             : _searchFilters;
+    final named =
+        filters.labelSearch
+            ? labelUidsNamed(ref.read(labelsByUidProvider).values, _query)
+            : const <String>{};
     if (cached != null &&
         identical(cached.tracks, tracks) &&
         cached.query == _query &&
         cached.filters == filters &&
-        identical(cached.lyricHits, lyrics)) {
+        identical(cached.lyricHits, lyrics) &&
+        setEquals(cached.namedLabels, named)) {
       return cached;
     }
-    return _view = _TrackListView(tracks, _query, filters, lyrics);
+    return _view = _TrackListView(tracks, _query, filters, lyrics, named);
   }
 
   // ---------------------------------------------------------------------
@@ -1095,21 +1114,33 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
               2 +
           8,
     );
+    // The Labels row shows only while there are labels to offer.
+    final chipFilters =
+        filterLabels.isEmpty
+            ? _searchFilters.copyWith(labelSearch: false)
+            : _searchFilters;
     return AppBar(
       toolbarHeight: toolbarHeight,
       bottom:
           lyricsLabel == null && filterLabels.isEmpty
               ? null
               : PreferredSize(
-                preferredSize: const Size.fromHeight(44),
+                // The chips, and while Labels is on the labels to choose
+                // under them, above 4 of padding.
+                preferredSize: Size.fromHeight(
+                  chipFilters.labelSearch
+                      ? SearchFilterChips.heightFor(context, chipFilters) + 4
+                      : 44,
+                ),
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
                   child: Align(
                     alignment: Alignment.centerLeft,
                     child: SearchFilterChips(
-                      filters: _searchFilters,
+                      filters: chipFilters,
                       lyricsLabel: lyricsLabel,
                       labels: filterLabels,
+                      query: _query,
                       onChanged: _onFiltersChanged,
                     ),
                   ),
@@ -1436,6 +1467,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                               metrics: metrics,
                               chapterMatch: view.chapterMatches[track.id],
                               lyricMatch: view.lyricMatches[track.id],
+                              labelMatch: view.labelMatches[track.id],
                               searchQuery:
                                   view.query.isEmpty ? null : view.query,
                               onTap: _onTrackTap,

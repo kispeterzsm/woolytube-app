@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../database/database.dart';
@@ -49,9 +51,14 @@ Widget searchHighlightedText(
 }
 
 /// The filter chips under a search field: Lyrics (shown when [lyricsLabel]
-/// is set), then one chip per label. All are off when search opens. With
-/// two or more labels chosen, a small switch says whether results need
-/// all of them (the default) or any one.
+/// is set) and Labels (shown when there are [labels]). Both are off when
+/// search opens.
+///
+/// Labels on shows a second row, one line that scrolls sideways, with the
+/// labels to choose: the chosen ones first, then the rest in the owner's
+/// order, narrowed to those whose names match [query]. With two or more
+/// chosen, a small switch after them says whether results need all of
+/// them (the default) or any one.
 class SearchFilterChips extends StatelessWidget {
   const SearchFilterChips({
     super.key,
@@ -59,6 +66,7 @@ class SearchFilterChips extends StatelessWidget {
     required this.onChanged,
     this.lyricsLabel,
     this.labels = const [],
+    this.query,
   });
 
   final SearchFilters filters;
@@ -67,8 +75,21 @@ class SearchFilterChips extends StatelessWidget {
   /// "Lyrics" or "Transcript"; null hides the chip (lyrics are off).
   final String? lyricsLabel;
 
-  /// The labels to offer, in the owner's order.
+  /// The labels to offer, in the owner's order. Empty hides the Labels
+  /// chip.
   final List<Label> labels;
+
+  /// What is typed: it narrows the labels offered.
+  final SearchQuery? query;
+
+  /// The height of one row of chips at the current text size.
+  static double rowHeight(BuildContext context) =>
+      math.max(44, MediaQuery.textScalerOf(context).scale(14) * 1.45 + 24);
+
+  /// How tall the chips are with [filters]: one row, or two while Labels is
+  /// on.
+  static double heightFor(BuildContext context, SearchFilters filters) =>
+      rowHeight(context) * (filters.labelSearch ? 2 : 1);
 
   void _toggleLabel(String uid, bool on) {
     final chosen = {...filters.labels};
@@ -79,8 +100,8 @@ class SearchFilterChips extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final label = lyricsLabel;
-    final matchAll = filters.labelMatch == LabelMatch.all;
-    return SingleChildScrollView(
+    final showLabels = labels.isNotEmpty;
+    final chips = SingleChildScrollView(
       scrollDirection: Axis.horizontal,
       child: Row(
         spacing: 6,
@@ -102,25 +123,85 @@ class SearchFilterChips extends StatelessWidget {
               visualDensity: VisualDensity.compact,
               onSelected: (on) => onChanged(filters.copyWith(lyrics: on)),
             ),
-          for (final item in labels)
+          if (showLabels)
             FilterChip(
-              key: ValueKey('search-filter-label-${item.uid}'),
-              avatar: LabelSwatch(
-                color: item.color,
-                icon: filters.labels.contains(item.uid) ? Icons.check : null,
-              ),
-              label: Text(item.name),
+              key: const ValueKey('search-filter-labels'),
+              avatar:
+                  filters.labelSearch
+                      ? null
+                      : const Icon(Icons.label_outline, size: 18),
+              label: const Text('Labels'),
               tooltip:
-                  filters.labels.contains(item.uid)
-                      ? 'Only what has "${item.name}"'
-                      : 'Show what has "${item.name}"',
-              selected: filters.labels.contains(item.uid),
-              showCheckmark: false,
+                  filters.labelSearch
+                      ? 'Searching labels too'
+                      : 'Choose or search labels',
+              selected: filters.labelSearch,
+              showCheckmark: true,
               visualDensity: VisualDensity.compact,
-              onSelected: (on) => _toggleLabel(item.uid, on),
+              onSelected:
+                  (on) => onChanged(
+                    on
+                        ? filters.copyWith(labelSearch: true)
+                        : filters.copyWith(
+                          labelSearch: false,
+                          labels: const {},
+                          labelMatch: LabelMatch.all,
+                        ),
+                  ),
             ),
-          // Last, so the chips never move under the finger.
-          if (filters.labels.length >= 2)
+        ],
+      ),
+    );
+    if (!showLabels || !filters.labelSearch) return chips;
+    final height = rowHeight(context);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          height: height,
+          child: Align(alignment: Alignment.centerLeft, child: chips),
+        ),
+        SizedBox(
+          height: height,
+          child: Align(alignment: Alignment.centerLeft, child: _labelRow()),
+        ),
+      ],
+    );
+  }
+
+  Widget _labelRow() {
+    final query = this.query ?? SearchQuery.empty;
+    final named = labelUidsNamed(labels, query);
+    final chosen = [
+      for (final item in labels)
+        if (filters.labels.contains(item.uid)) item,
+    ];
+    final rest = [
+      for (final item in labels)
+        if (!filters.labels.contains(item.uid) &&
+            (query.isEmpty || named.contains(item.uid)))
+          item,
+    ];
+    if (chosen.isEmpty && rest.isEmpty) {
+      return const Text(
+        'No label matches',
+        key: ValueKey('search-label-none'),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(color: _muted),
+      );
+    }
+    final matchAll = filters.labelMatch == LabelMatch.all;
+    return SingleChildScrollView(
+      key: const ValueKey('search-label-row'),
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        spacing: 6,
+        children: [
+          for (final item in chosen) _labelChip(item, true),
+          // After the chosen ones: it is about them.
+          if (chosen.length >= 2)
             ActionChip(
               key: const ValueKey('search-label-match'),
               avatar: Icon(
@@ -142,10 +223,25 @@ class SearchFilterChips extends StatelessWidget {
                     ),
                   ),
             ),
+          for (final item in rest) _labelChip(item, false),
         ],
       ),
     );
   }
+
+  Widget _labelChip(Label item, bool chosen) => FilterChip(
+    key: ValueKey('search-label-option-${item.uid}'),
+    avatar: LabelSwatch(color: item.color, icon: chosen ? Icons.check : null),
+    label: Text(item.name),
+    tooltip:
+        chosen
+            ? 'Only what has "${item.name}"'
+            : 'Show what has "${item.name}"',
+    selected: chosen,
+    showCheckmark: false,
+    visualDensity: VisualDensity.compact,
+    onSelected: (on) => _toggleLabel(item.uid, on),
+  );
 }
 
 /// "Play all" for search results, with a menu that adds them to Up next

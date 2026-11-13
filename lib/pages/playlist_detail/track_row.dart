@@ -93,6 +93,7 @@ class _TrackRow extends ConsumerWidget {
     required this.metrics,
     required this.chapterMatch,
     this.lyricMatch,
+    this.labelMatch,
     this.searchQuery,
     required this.onTap,
     required this.onActions,
@@ -106,6 +107,10 @@ class _TrackRow extends ConsumerWidget {
 
   /// The lyric line the search query matched, if any. A chapter match wins.
   final LyricsHit? lyricMatch;
+
+  /// The labels (uids) whose names the search query matched, when only
+  /// they found the track.
+  final Set<String>? labelMatch;
 
   /// The search, whose words are highlighted in the title.
   final SearchQuery? searchQuery;
@@ -126,14 +131,17 @@ class _TrackRow extends ConsumerWidget {
         );
     final state = _TrackState.of(track);
     // Dots on the thumbnail: the row's text keeps all its room.
+    final allLabels = ref.watch(labelsProvider).valueOrNull ?? const <Label>[];
     final labels =
         track.labelUids == null
             ? const <Label>[]
-            : carriedLabels(
-              ref.watch(labelsProvider).valueOrNull ?? const [],
-              decodeLabelUids(track.labelUids),
-            );
-    final subtitles = _rowSubtitles(track, chapterMatch);
+            : carriedLabels(allLabels, decodeLabelUids(track.labelUids));
+    final named = labelMatch;
+    final subtitles = _rowSubtitles(
+      track,
+      chapterMatch,
+      named == null ? null : carriedLabels(allLabels, named),
+    );
     final lyric = chapterMatch == null ? lyricMatch : null;
     final subtitleStyle = TextStyle(
       color: _subtitleColor(track, state),
@@ -403,13 +411,26 @@ class _TrackState {
 }
 
 /// The one grey line under a track: its short status, or for a chapter
-/// the search matched, where that chapter starts and its title.
+/// the search matched, where that chapter starts and its title. For a
+/// track found by label names, those labels first (`Label: Rock`).
 ///
 /// Longest first: when "Always skip" in front of a long status would not
 /// fit, the row says "Skip", and if even that is too long, only "Always
 /// skip" (the icon and the ⋮ sheet still tell the state). The red colour
 /// marks the row either way.
-List<String> _rowSubtitles(Track track, MediaChapter? chapter) {
+List<String> _rowSubtitles(
+  Track track,
+  MediaChapter? chapter, [
+  List<Label>? named,
+]) {
+  if (named != null && named.isNotEmpty) {
+    final names = named.map((label) => label.name).join(', ');
+    final found = [
+      named.length == 1 ? 'Label: $names' : 'Labels: $names',
+      if (chapter != null) '${_formatMs(chapter.startMs)} · ${chapter.title}',
+    ].join(' · ');
+    return [track.alwaysSkip ? 'Always skip · $found' : found];
+  }
   if (chapter != null) {
     final match = '${_formatMs(chapter.startMs)} · ${chapter.title}';
     return [track.alwaysSkip ? 'Always skip · $match' : match];

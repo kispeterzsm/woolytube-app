@@ -957,6 +957,7 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
   SearchFilters? _searchedFilters;
   List<LyricsHit>? _searchedLyrics;
   List<Playlist>? _searchedPlaylists;
+  List<Label>? _searchedLabels;
   List<SearchHit> _hits = const [];
 
   // The tracks grouped by playlist, as a queue for playback.
@@ -1033,6 +1034,7 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
   List<SearchHit> _search(
     List<Track> tracks,
     List<Playlist> playlists,
+    List<Label> labels,
     SearchFilters filters,
   ) {
     final lyricHits = _currentLyricHits;
@@ -1040,17 +1042,23 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
         _query != _searchedQuery ||
         filters != _searchedFilters ||
         !identical(lyricHits, _searchedLyrics) ||
-        !identical(playlists, _searchedPlaylists)) {
+        !identical(playlists, _searchedPlaylists) ||
+        !identical(labels, _searchedLabels)) {
       _searchedTracks = tracks;
       _searchedQuery = _query;
       _searchedFilters = filters;
       _searchedLyrics = lyricHits;
       _searchedPlaylists = playlists;
+      _searchedLabels = labels;
       _hits = searchLibrary(
         tracks,
         _query,
         filters: filters,
         lyricHits: lyricHits,
+        namedLabels:
+            filters.labelSearch
+                ? labelUidsNamed(labels, _query)
+                : const <String>{},
         playlistOrder: {
           for (var i = 0; i < playlists.length; i++) playlists[i].id: i,
         },
@@ -1118,18 +1126,28 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
               for (final p in visibleAsync.valueOrNull ?? playlists)
                 if (matchesSearchText(p.name, query)) p,
             ];
-    final hits = _search(tracks, playlists, filters);
-    // Tracks found only by a lyric line show as their lines, below.
+    final hits = _search(tracks, playlists, labels, filters);
+    // Tracks found only by a label name show under Labels, those found only
+    // by a lyric line as their lines, below.
     final trackHits = [
       for (final hit in hits)
-        if (hit.reason != SearchReason.lyrics) hit,
+        if (hit.reason != SearchReason.lyrics &&
+            hit.reason != SearchReason.labelName)
+          hit,
+    ];
+    final labelHits = [
+      for (final hit in hits)
+        if (hit.reason == SearchReason.labelName) hit,
     ];
     final lyricHits = _lyricRows(tracks, filters);
     final lyricsLabel = _lyricsLabel(playlists);
     final entries = searching ? searchQueueEntries(hits) : const <QueueEntry>[];
 
     final Widget results;
-    if (trackHits.isEmpty && matchingPlaylists.isEmpty && lyricHits.isEmpty) {
+    if (trackHits.isEmpty &&
+        matchingPlaylists.isEmpty &&
+        labelHits.isEmpty &&
+        lyricHits.isEmpty) {
       results =
           lyricsLabel != null && !widget.filters.lyrics && query.canSearchLyrics
               ? SearchLyricsNudge(
@@ -1147,20 +1165,23 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
         playlistsById: playlistsById,
         matchingPlaylists: matchingPlaylists,
         trackHits: trackHits,
+        labelHits: labelHits,
         lyricHits: lyricHits,
         tracks: tracks,
       );
     }
 
     final showActions = searching && hits.isNotEmpty;
-    // Label chips get a row of their own: beside Play all only a few would
-    // show. Lyrics alone still shares the row with it.
+    // With Labels the chips get a row of their own (the labels to choose
+    // under it): beside Play all both chips would not fit. Lyrics alone
+    // still shares the row with it.
     final chipsOwnRow = labels.isNotEmpty;
     final chipsBesideActions = lyricsLabel != null && !chipsOwnRow;
     final chips = SearchFilterChips(
       filters: filters,
       lyricsLabel: lyricsLabel,
       labels: labels,
+      query: query,
       onChanged: widget.onFiltersChanged,
     );
     return Column(
@@ -1238,19 +1259,40 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
     required Map<int, Playlist> playlistsById,
     required List<Playlist> matchingPlaylists,
     required List<SearchHit> trackHits,
+    required List<SearchHit> labelHits,
     required List<(LyricsHit, Track)> lyricHits,
     required List<Track> tracks,
   }) {
     // Rows: [playlist header + playlists], [tracks header] + tracks,
-    // [lyrics header + lyric lines].
-    final showHeaders = matchingPlaylists.isNotEmpty || lyricHits.isNotEmpty;
+    // [labels header + tracks found by label names], [lyrics header +
+    // lyric lines].
+    final showHeaders =
+        matchingPlaylists.isNotEmpty ||
+        labelHits.isNotEmpty ||
+        lyricHits.isNotEmpty;
     final playlistRows =
         matchingPlaylists.isEmpty ? 0 : matchingPlaylists.length + 1;
     final trackHeader = showHeaders && trackHits.isNotEmpty ? 1 : 0;
     final trackRows = trackHeader + trackHits.length;
+    final labelRows = labelHits.isEmpty ? 0 : labelHits.length + 1;
     final lyricRows = lyricHits.isEmpty ? 0 : lyricHits.length + 1;
-    final itemCount = playlistRows + trackRows + lyricRows;
-    final indexWidth = _indexWidth(context, trackHits);
+    final itemCount = playlistRows + trackRows + labelRows + lyricRows;
+    final indexWidth = _indexWidth(context, [...trackHits, ...labelHits]);
+
+    Widget trackTile(SearchHit hit) {
+      final track = hit.track;
+      final playlist = playlistsById[track.playlistId];
+      return _SearchTrackTile(
+        key: ValueKey('search-track-${track.id}'),
+        hit: hit,
+        query: query,
+        playlist: playlist,
+        indexWidth: indexWidth,
+        onTap: () => _onTrackTap(hit, playlist, tracks),
+        // The file's menu, also when a chapter of it was found.
+        onActions: () => widget.onTrackActions(track),
+      );
+    }
 
     return ValueListenableBuilder<double>(
       valueListenable: audioPlayerOverlayHeightNotifier,
@@ -1276,8 +1318,8 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
                 );
               }
               var i = index - playlistRows;
-              if (i >= trackRows) {
-                i -= trackRows;
+              if (i >= trackRows + labelRows) {
+                i -= trackRows + labelRows;
                 if (i == 0) return const _SearchHeader('Lyrics');
                 final (hit, track) = lyricHits[i - 1];
                 final playlist = playlistsById[track.playlistId];
@@ -1290,23 +1332,16 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
                   onActions: () => widget.onTrackActions(track),
                 );
               }
+              if (i >= trackRows) {
+                i -= trackRows;
+                if (i == 0) return const _SearchHeader('Labels');
+                return trackTile(labelHits[i - 1]);
+              }
               if (trackHeader == 1) {
                 if (i == 0) return const _SearchHeader('Tracks');
                 i--;
               }
-              final hit = trackHits[i];
-              final track = hit.track;
-              final playlist = playlistsById[track.playlistId];
-              return _SearchTrackTile(
-                key: ValueKey('search-track-${track.id}'),
-                hit: hit,
-                query: query,
-                playlist: playlist,
-                indexWidth: indexWidth,
-                onTap: () => _onTrackTap(hit, playlist, tracks),
-                // The file's menu, also when a chapter of it was found.
-                onActions: () => widget.onTrackActions(track),
-              );
+              return trackTile(trackHits[i]);
             },
           ),
     );
@@ -1654,13 +1689,15 @@ class _SearchTrackTile extends ConsumerWidget {
         details.isEmpty ? playlistName : '$playlistName · $details';
     final thumbnailWidth =
         MediaQuery.sizeOf(context).width < 360 ? 96.0 : 112.0;
+    final allLabels = ref.watch(labelsProvider).valueOrNull ?? const <Label>[];
     final labels =
         track.labelUids == null
             ? const <Label>[]
-            : carriedLabels(
-              ref.watch(labelsProvider).valueOrNull ?? const [],
-              decodeLabelUids(track.labelUids),
-            );
+            : carriedLabels(allLabels, decodeLabelUids(track.labelUids));
+    final named =
+        hit.reason == SearchReason.labelName
+            ? carriedLabels(allLabels, hit.labels)
+            : const <Label>[];
 
     return Material(
       color: isCurrentTrack ? const Color(0xFF2A2A2A) : Colors.transparent,
@@ -1740,6 +1777,19 @@ class _SearchTrackTile extends ConsumerWidget {
                       ),
                       maxLines: 2,
                     ),
+                    if (named.isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      Text.rich(
+                        _labelLine(named),
+                        key: ValueKey('search-label-reason-${track.id}'),
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Color(0xFFAAAAAA),
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
                     if (hit.chapter case final chapter?) ...[
                       const SizedBox(height: 2),
                       Text.rich(
@@ -1792,6 +1842,22 @@ class _SearchTrackTile extends ConsumerWidget {
           ),
         ),
       ),
+    );
+  }
+
+  /// `Label: Rock` (or `Labels: Rock, Prog rock`), the names whose words
+  /// were found highlighted.
+  TextSpan _labelLine(List<Label> named) {
+    final names = named.map((label) => label.name).join(', ');
+    return TextSpan(
+      children: [
+        TextSpan(text: named.length == 1 ? 'Label: ' : 'Labels: '),
+        ...lyricsSpans(
+          names,
+          searchHighlights(names, query),
+          const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+        ),
+      ],
     );
   }
 
