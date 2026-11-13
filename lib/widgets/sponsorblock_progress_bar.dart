@@ -18,6 +18,9 @@ void paintSponsorBlockSegments(
   final radius = Radius.circular(track.height / 2);
   final paint = Paint();
   for (final segment in segments) {
+    // Segments of the previous file can arrive with the next file's shorter
+    // length for a moment; one that starts past the end has nothing to draw.
+    if (segment.startMs >= durationMs) continue;
     final start = segment.startMs.clamp(0, durationMs);
     final end = segment.endMs.clamp(start + 1, durationMs);
     final left = track.left + track.width * start / durationMs;

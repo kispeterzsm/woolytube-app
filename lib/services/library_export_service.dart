@@ -352,6 +352,11 @@ class LibraryExportService {
   /// The hash of the settings file this run last wrote or found unchanged.
   int? _settingsFileHash;
 
+  /// When this run last wrote the settings file. Some phones report an
+  /// older modified time for a rewritten file, so this is preferred when
+  /// it is later.
+  DateTime? _settingsWrittenAt;
+
   /// The settings file write in progress, if any.
   Future<String>? _settingsWrite;
 
@@ -404,7 +409,10 @@ class LibraryExportService {
     final file = File(p.join(backupDir, settingsFileName));
     try {
       if (!await file.exists()) return (savedAt: null, upToDate: false);
-      final savedAt = await file.lastModified();
+      final modified = await file.lastModified();
+      final written = _settingsWrittenAt;
+      final savedAt =
+          written != null && written.isAfter(modified) ? written : modified;
       final upToDate =
           await file.readAsString() == await _settingsFileContent();
       return (savedAt: savedAt, upToDate: upToDate);
@@ -445,6 +453,7 @@ class LibraryExportService {
     final tmp = File('$target.partial');
     await tmp.writeAsString(content, flush: true);
     await tmp.rename(target);
+    _settingsWrittenAt = DateTime.now();
     await _rememberSettingsFile(hash);
     return target;
   }

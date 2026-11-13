@@ -21,6 +21,7 @@ import 'services/subtitles.dart';
 import 'pages/home_page.dart';
 import 'player/player_shell.dart';
 import 'services/auto_update_runner.dart';
+import 'widgets/timed_snack_bars.dart';
 
 @pragma('vm:entry-point')
 void backgroundMain() {
@@ -215,7 +216,6 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
     return MaterialApp(
       title: 'WoolyTube',
       navigatorKey: _navigatorKey,
-      scaffoldMessengerKey: _messengerKey,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -261,7 +261,11 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
       ),
       // The root navigator holds the shell (pages + player) and every popup.
       // In picture-in-picture only the video is drawn.
-      builder: (context, child) => _PictureInPictureFrame(child: child!),
+      builder:
+          (context, child) => TimedSnackBars(
+            messengerKey: _messengerKey,
+            child: _PictureInPictureFrame(child: child!),
+          ),
       home: const PlayerShell(home: InitWrapper()),
     );
   }
