@@ -78,7 +78,7 @@ class SidecarMirror {
   /// Operations that move or empty a playlist folder. While one runs, the
   /// mirror waits, so it never puts a sidecar back into a folder being
   /// emptied or left. Downloads and syncs write their own sidecars.
-  static const _folderChangingOperations = {
+  static const folderChangingOperations = {
     'playlist deletion',
     'format switch',
     'startup check',
@@ -91,7 +91,7 @@ class SidecarMirror {
       _pending = true;
       return;
     }
-    if (_folderChangingOperations.contains(_gate.activeOperation)) {
+    if (folderChangingOperations.contains(_gate.activeOperation)) {
       _schedule();
       return;
     }
@@ -111,7 +111,7 @@ class SidecarMirror {
           // the startup check gives each its own folder first.
           continue;
         }
-        if (_folderChangingOperations.contains(_gate.activeOperation)) {
+        if (folderChangingOperations.contains(_gate.activeOperation)) {
           // Started meanwhile; finish after it.
           _pending = true;
           break;

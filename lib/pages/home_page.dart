@@ -607,6 +607,8 @@ class _HomePageState extends ConsumerState<HomePage> {
       if (result.settingsRestored != null) {
         await applyRestoredSettings(settings, player, loudness);
       }
+      // The imported songs, with the measurements their folders kept.
+      if (result.imported > 0) loudness?.rescan();
       if (result.resumeRestored) {
         try {
           await player?.restoreRememberedSession();

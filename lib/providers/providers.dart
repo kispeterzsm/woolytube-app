@@ -10,6 +10,7 @@ import '../services/playlist_service.dart';
 import '../services/download_service.dart';
 import '../services/log_service.dart';
 import '../services/loudness_service.dart';
+import '../services/loudness_mirror.dart';
 import '../services/metadata_service.dart';
 import '../services/notification_service.dart';
 import '../services/update_service.dart';
@@ -231,6 +232,20 @@ final sidecarMirrorProvider = Provider<SidecarMirror>((ref) {
     ref.watch(metadataServiceProvider),
     ref.watch(libraryGateProvider),
     log: ref.watch(logServiceProvider),
+  );
+  ref.onDispose(mirror.dispose);
+  return mirror;
+});
+
+/// Rewrites each playlist folder's loudness file at most once a minute
+/// while songs are measured, and takes measurements kept in the folders
+/// back once per start.
+final loudnessMirrorProvider = Provider<LoudnessMirror>((ref) {
+  final mirror = LoudnessMirror(
+    ref.watch(databaseProvider),
+    ref.watch(libraryGateProvider),
+    log: ref.watch(logServiceProvider),
+    onSeeded: (_) => ref.read(loudnessServiceProvider).rescan(),
   );
   ref.onDispose(mirror.dispose);
   return mirror;
@@ -507,6 +522,8 @@ class LibraryStartup {
     _ref.read(settingsMirrorProvider).start();
     // And the home page order and the last song reach the library file.
     _ref.read(libraryMirrorProvider).start();
+    // And the loudness measurements reach each playlist folder.
+    _ref.read(loudnessMirrorProvider).start();
     // Offline covers for older downloads; not urgent.
     unawaited(_backfillThumbnails());
   }

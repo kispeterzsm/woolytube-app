@@ -8,6 +8,7 @@ import 'sponsorblock_categories.dart';
 import 'chapters.dart';
 import 'library_layout.dart';
 import 'log_service.dart';
+import 'loudness_file.dart';
 import 'media_thumbnail_service.dart';
 import 'subtitles.dart';
 import 'track_title.dart';
@@ -1984,6 +1985,19 @@ for video) to keep a complete backup.
     // Link files the sidecar did not name (it may be older than the folder).
     final playlist = await _db.getPlaylist(playlistId);
     await reconcilePlaylist(playlist);
+
+    // The loudness measured before, for files that are still the same.
+    try {
+      final seeded = await seedLoudnessFromFolder(
+        _db,
+        await _db.getPlaylist(playlistId),
+      );
+      if (seeded > 0) {
+        _log?.info('import: took back $seeded loudness measurements');
+      }
+    } catch (e) {
+      _log?.warn('import: could not read the loudness file: $e');
+    }
     return playlistId;
   }
 

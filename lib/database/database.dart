@@ -1533,6 +1533,20 @@ class AppDatabase extends _$AppDatabase {
   Future<void> saveLoudnessMeasurement(LoudnessMeasurementsCompanion entry) =>
       into(loudnessMeasurements).insertOnConflictUpdate(entry);
 
+  /// Stores a measurement only when the track has none yet; returns whether
+  /// it was stored. For measurements read back from the library folders,
+  /// which must never replace one this app made.
+  Future<bool> seedLoudnessMeasurement(
+    LoudnessMeasurementsCompanion entry,
+  ) async {
+    final before = await getLoudnessMeasurement(entry.trackId.value);
+    if (before != null) return false;
+    await into(
+      loudnessMeasurements,
+    ).insert(entry, mode: InsertMode.insertOrIgnore);
+    return true;
+  }
+
   Future<void> deleteSegment(int segmentId) =>
       (delete(sponsorBlockSegments)..where((s) => s.id.equals(segmentId))).go();
 
