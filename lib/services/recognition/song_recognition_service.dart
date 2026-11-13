@@ -9,11 +9,13 @@ import 'package:path/path.dart' as p;
 
 import '../../database/database.dart';
 import '../chapters.dart';
+import '../library_layout.dart';
 import '../metadata_service.dart';
 import '../ytdlp_service.dart';
 import 'audio_window_decoder.dart';
 import 'chapter_estimator.dart';
 import 'decoder_accuracy.dart';
+import 'recognition_files.dart';
 import 'shazam_client.dart';
 import 'shazam_signature.dart';
 import 'silence_detector.dart';
@@ -381,12 +383,19 @@ class SongRecognitionService {
   }
 
   /// The last completed run for [track], if its file is unchanged.
+  ///
+  /// When this app has none (after a reinstall, or on another phone), the
+  /// copy in the playlist folder is taken over if it was made from the same
+  /// file content, with its cached lookups.
   Future<RecognitionRun?> loadRun(Track track) async {
     final path = _filePath(track);
     if (path == null) return null;
     final dir = await _runDirectory(track, path);
     final file = File(p.join(dir, 'run.json'));
-    if (!await file.exists()) return null;
+    if (!await file.exists() &&
+        !await _adoptFolderCopy(track, dir, withRun: true)) {
+      return null;
+    }
     try {
       final run = RecognitionRun.fromJson(
         jsonDecode(await file.readAsString()) as Map<String, dynamic>,
@@ -403,9 +412,9 @@ class SongRecognitionService {
     }
   }
 
-  /// Stores review edits of [run]. Does nothing when [track]'s file is no
-  /// longer the one the run was made from, so a run never lands in the
-  /// cache of a replacement file.
+  /// Stores review edits of [run], here and in the playlist folder. Does
+  /// nothing when [track]'s file is no longer the one the run was made
+  /// from, so a run never lands in the cache of a replacement file.
   Future<void> saveRun(RecognitionRun run, Track track) async {
     final path = _filePath(track);
     if (path == null) return;
@@ -415,13 +424,29 @@ class SongRecognitionService {
     await File(
       p.join(dir.path, 'run.json'),
     ).writeAsString(jsonEncode(run.toJson()));
+    await _mirrorRun(track, dir, run);
   }
 
+  /// Forgets [track]'s run, also the playlist folder's copy of it (a copy
+  /// made from other content is left alone).
   Future<void> discardRun(Track track) async {
     final path = _filePath(track);
     if (path == null) return;
-    final file = File(p.join(await _runDirectory(track, path), 'run.json'));
+    final dir = await _runDirectory(track, path);
+    final file = File(p.join(dir, 'run.json'));
     if (await file.exists()) await file.delete();
+    try {
+      final folder = await _folderOf(track);
+      if (folder == null) return;
+      final copy = await readRecognitionFile(folder, track.videoId);
+      if (copy == null || copy.contentKey != _contentKey(track, dir)) return;
+      final folderFile = File(
+        LibraryLayout.recognitionJsonPath(folder, track.videoId),
+      );
+      if (await folderFile.exists()) await folderFile.delete();
+    } catch (_) {
+      // A copy left behind is only offered for this same file content.
+    }
   }
 
   /// Removes cached lookups and runs for files that no longer exist or
@@ -481,6 +506,8 @@ class SongRecognitionService {
     final dir = Directory(await _runDirectory(track, path));
     await _pruneStaleCaches(track, dir);
     await dir.create(recursive: true);
+    // After a reinstall: the lookups kept in the playlist folder.
+    await _adoptFolderCopy(track, dir.path, withRun: false);
     final starts = sampleStartsMs(durationMs);
     _emit(
       RecognitionProgress(
@@ -577,6 +604,7 @@ class SongRecognitionService {
       await File(
         p.join(dir.path, 'run.json'),
       ).writeAsString(jsonEncode(run.toJson()));
+      await _mirrorRun(track, dir, run);
       _emit(
         RecognitionProgress(
           trackId: track.id,
@@ -842,6 +870,7 @@ class SongRecognitionService {
     final dir = Directory(await _runDirectory(track, path));
     final sampleDir = Directory(p.join(dir.path, 'samples'));
     await sampleDir.create(recursive: true);
+    await _adoptFolderCopy(track, dir.path, withRun: false);
     final from = startMs.clamp(0, durationMs);
     final to = endMs.clamp(from, durationMs);
     final starts = rangeSampleStartsMs(from, to, durationMs);
@@ -1200,6 +1229,140 @@ class SongRecognitionService {
     throw StateError(
       'Could not determine the duration of "${track.displayTitle}".',
     );
+  }
+
+  /// The playlist folder of [track], or null when the playlist is gone.
+  Future<String?> _folderOf(Track track) async =>
+      (await _db.getPlaylistOrNull(track.playlistId))?.outputPath;
+
+  /// The content part of a run directory's name (`<trackId>-<content>`).
+  static String _contentKey(Track track, String runDirectory) {
+    final name = p.basename(runDirectory);
+    final prefix = '${track.id}-';
+    return name.startsWith(prefix) ? name.substring(prefix.length) : name;
+  }
+
+  /// Copies [run] with the lookups and quiet gaps cached in [dir] to the
+  /// playlist folder, so it survives a reinstall and moves with the
+  /// folder. A failure only costs a new scan after a reinstall.
+  Future<void> _mirrorRun(
+    Track track,
+    Directory dir,
+    RecognitionRun run,
+  ) async {
+    try {
+      final folder = await _folderOf(track);
+      if (folder == null) return;
+      final samples = <Map<String, dynamic>>[];
+      final sampleDir = Directory(p.join(dir.path, 'samples'));
+      if (await sampleDir.exists()) {
+        await for (final entity in sampleDir.list()) {
+          if (entity is! File || !entity.path.endsWith('.json')) continue;
+          try {
+            final json = jsonDecode(await entity.readAsString());
+            if (json is Map<String, dynamic>) samples.add(json);
+          } catch (_) {
+            // A broken entry is looked up again by the next scan.
+          }
+        }
+      }
+      final silences = <({int fromMs, int toMs, Object? content})>[];
+      final silenceDir = Directory(p.join(dir.path, 'silences'));
+      if (await silenceDir.exists()) {
+        await for (final entity in silenceDir.list()) {
+          if (entity is! File) continue;
+          final match = _silenceFileName.firstMatch(p.basename(entity.path));
+          if (match == null) continue;
+          try {
+            silences.add((
+              fromMs: int.parse(match.group(1)!),
+              toMs: int.parse(match.group(2)!),
+              content: jsonDecode(await entity.readAsString()),
+            ));
+          } catch (_) {
+            // Measured again by the next scan.
+          }
+        }
+      }
+      await writeRecognitionFile(
+        folder,
+        track.videoId,
+        recognitionFileJson(
+          videoId: track.videoId,
+          contentKey: _contentKey(track, dir.path),
+          run: run.toJson(),
+          samples: samples,
+          silences: silences,
+        ),
+      );
+    } catch (_) {
+      // Kept in the app either way.
+    }
+  }
+
+  static final _silenceFileName = RegExp(r'^(\d+)-(\d+)\.json$');
+
+  /// Takes over what the playlist folder's copy of a run made from the same
+  /// content as [track]'s file holds: its cached lookups and quiet gaps
+  /// that this app does not have, and, with [withRun], the run itself under
+  /// this track. Returns whether a run was taken over. Never replaces
+  /// anything this app already has.
+  Future<bool> _adoptFolderCopy(
+    Track track,
+    String runDirectory, {
+    required bool withRun,
+  }) async {
+    try {
+      final folder = await _folderOf(track);
+      if (folder == null) return false;
+      final copy = await readRecognitionFile(folder, track.videoId);
+      if (copy == null || copy.contentKey != _contentKey(track, runDirectory)) {
+        return false;
+      }
+      final RecognitionRun? run;
+      if (withRun) {
+        run = RecognitionRun.fromJson({
+          ...copy.run,
+          'trackId': track.id,
+          'fileKey': p.basename(runDirectory),
+        });
+      } else {
+        run = null;
+      }
+      Future<void> writeNew(File file, Object? json) async {
+        if (await file.exists()) return;
+        await file.parent.create(recursive: true);
+        await file.writeAsString(jsonEncode(json));
+      }
+
+      for (final sample in copy.samples) {
+        await writeNew(
+          File(
+            p.join(runDirectory, 'samples', '${sample['sampleStartMs']}.json'),
+          ),
+          sample,
+        );
+      }
+      for (final silence in copy.silences) {
+        await writeNew(
+          File(
+            p.join(
+              runDirectory,
+              'silences',
+              '${silence.fromMs}-${silence.toMs}.json',
+            ),
+          ),
+          silence.content,
+        );
+      }
+      if (run == null) return false;
+      final runFile = File(p.join(runDirectory, 'run.json'));
+      if (await runFile.exists()) return true;
+      await writeNew(runFile, run.toJson());
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   String? _filePath(Track track) =>

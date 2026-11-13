@@ -463,6 +463,9 @@ class PlaylistService {
         if (!keptVideoIds.contains(track.videoId)) {
           await deleteFile(LibraryLayout.infoJsonPath(folder, track.videoId));
           await deleteFile(LibraryLayout.lyricsJsonPath(folder, track.videoId));
+          await deleteFile(
+            LibraryLayout.recognitionJsonPath(folder, track.videoId),
+          );
         }
       }
       final numbered = RegExp(r'^(\d+)_');
@@ -975,6 +978,10 @@ class PlaylistService {
         (
           LibraryLayout.lyricsJsonPath(oldFolder, track.videoId),
           LibraryLayout.lyricsJsonPath(newFolder, track.videoId),
+        ),
+        (
+          LibraryLayout.recognitionJsonPath(oldFolder, track.videoId),
+          LibraryLayout.recognitionJsonPath(newFolder, track.videoId),
         ),
       ]) {
         final file = File(from);

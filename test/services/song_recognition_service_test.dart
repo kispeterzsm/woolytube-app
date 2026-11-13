@@ -9,8 +9,10 @@ import 'package:path/path.dart' as p;
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/services/chapter_service.dart';
 import 'package:woolytube/services/chapters.dart';
+import 'package:woolytube/services/library_layout.dart';
 import 'package:woolytube/services/recognition/audio_window_decoder.dart';
 import 'package:woolytube/services/recognition/decoder_accuracy.dart';
+import 'package:woolytube/services/recognition/recognition_files.dart';
 import 'package:woolytube/services/recognition/shazam_client.dart';
 import 'package:woolytube/services/recognition/shazam_signature.dart';
 import 'package:woolytube/services/recognition/song_recognition_service.dart';
@@ -987,6 +989,222 @@ void main() {
       ChapterData.decode((await db.getTrack(track.id))!.chaptersJson).custom,
       isEmpty,
     );
+  });
+
+  group('playlist folder copy', () {
+    File folderFile() =>
+        File(LibraryLayout.recognitionJsonPath(dir.path, track.videoId));
+
+    Future<Map<String, dynamic>> folderJson() async =>
+        jsonDecode(await folderFile().readAsString()) as Map<String, dynamic>;
+
+    /// Another phone: an empty database and app storage, the same playlist
+    /// folder. A track is added first, so the song gets another id.
+    Future<(AppDatabase, Track, SongRecognitionService, FakeRecognizer)>
+    reinstall() async {
+      final fresh = openTestDatabase();
+      addTearDown(fresh.close);
+      final playlist = await insertTestPlaylist(fresh, outputPath: dir.path);
+      await insertTestTrack(fresh, playlistId: playlist.id, videoId: 'other');
+      final moved = await insertTestTrack(
+        fresh,
+        playlistId: playlist.id,
+        index: 2,
+        status: 'complete',
+        filePath: track.filePath,
+        durationSeconds: 300,
+      );
+      expect(moved.id, isNot(track.id));
+      final root = await Directory(
+        p.join(dir.path, 'other-phone'),
+      ).create(recursive: true);
+      final freshRecognizer = FakeRecognizer(decoder, recognizer.byStartMs);
+      final service = SongRecognitionService(
+        fresh,
+        decoder: decoder,
+        recognizer: freshRecognizer,
+        rootDirectory: () async => root,
+      );
+      addTearDown(service.dispose);
+      return (fresh, moved, service, freshRecognizer);
+    }
+
+    test('a scan and its review edits are kept in the playlist folder, '
+        'keyed by the file content instead of the track id', () async {
+      final run = await service.scan(track);
+      final contentKey = await SongRecognitionService.fileKey(track.filePath!);
+      expect(run.fileKey, '${track.id}-$contentKey');
+
+      var json = await folderJson();
+      expect(json['version'], 1);
+      expect(json['videoId'], track.videoId);
+      expect(json['contentKey'], contentKey);
+      final stored = json['run'] as Map<String, dynamic>;
+      expect(stored.containsKey('trackId'), isFalse);
+      expect(stored['fileKey'], contentKey);
+      expect(stored['runId'], run.runId);
+      expect((json['samples'] as List).map((s) => (s as Map)['startMs']), [
+        30000,
+        90000,
+        150000,
+        210000,
+        270000,
+        288000,
+      ]);
+      expect((json['samples'] as List).first, {
+        'startMs': 30000,
+        'durationMs': 12000,
+        'decoderVersion': decoderAccuracyVersion,
+        'recordedAt': isA<String>(),
+        'key': 'A',
+        'title': 'First song',
+        'artist': 'Artist',
+        'matches': [
+          ['ref-A', 30],
+        ],
+      });
+      expect(json['silences'], isNotEmpty);
+
+      final edited = run.copyWith(
+        proposals: [run.proposals.first.copyWith(title: 'Renamed')],
+      );
+      await service.saveRun(edited, track);
+      json = await folderJson();
+      final proposals = (json['run'] as Map)['proposals'] as List;
+      expect(proposals, hasLength(1));
+      expect((proposals.single as Map)['title'], 'Renamed');
+    });
+
+    test('after a reinstall the run comes back for the same file, with its '
+        'review edits, and a new scan needs no lookups', () async {
+      final run = await service.scan(track);
+      final edited = run.copyWith(
+        proposals: [run.proposals.first.copyWith(title: 'Renamed')],
+      );
+      await service.saveRun(edited, track);
+
+      final (_, moved, other, otherRecognizer) = await reinstall();
+      final loaded = (await other.loadRun(moved))!;
+      expect(loaded.trackId, moved.id);
+      expect(
+        loaded.fileKey,
+        await SongRecognitionService.currentFileKey(moved),
+      );
+      expect(loaded.runId, run.runId);
+      expect(loaded.epoch, run.epoch);
+      expect(loaded.decoderOutdated, isFalse);
+      expect(
+        loaded.proposals.map((c) => c.toJson()).toList(),
+        edited.proposals.map((c) => c.toJson()).toList(),
+      );
+
+      final decodes = decoder.decodeCalls;
+      final again = await other.scan(moved);
+      expect(otherRecognizer.attempts, isEmpty);
+      // Neither the windows nor the quiet gaps are decoded again.
+      expect(decoder.decodeCalls, decodes);
+      expect(
+        again.proposals.map((c) => (c.title, c.startMs, c.endMs)).toList(),
+        run.proposals.map((c) => (c.title, c.startMs, c.endMs)).toList(),
+      );
+    });
+
+    test('a copy made from other file content is never taken over', () async {
+      await service.scan(track);
+      await File(track.filePath!).writeAsBytes(List.filled(4096, 9));
+      final (_, moved, other, otherRecognizer) = await reinstall();
+      expect(await other.loadRun(moved), isNull);
+      await other.scan(moved);
+      expect(otherRecognizer.calls, hasLength(6));
+    });
+
+    test('the copy never replaces a run this app has', () async {
+      final run = await service.scan(track);
+      final local = run.copyWith(
+        proposals: [run.proposals.last.copyWith(title: 'Mine')],
+      );
+      // Saved here only, as an older version of the app did.
+      await File(
+        p.join(dir.path, 'recognition', run.fileKey, 'run.json'),
+      ).writeAsString(jsonEncode(local.toJson()));
+      final loaded = (await service.loadRun(track))!;
+      expect(loaded.proposals.single.title, 'Mine');
+    });
+
+    test('discarding the run also forgets the folder copy', () async {
+      await service.scan(track);
+      expect(await folderFile().exists(), isTrue);
+      await service.discardRun(track);
+      expect(await folderFile().exists(), isFalse);
+      expect(await service.loadRun(track), isNull);
+    });
+
+    test('a broken or newer copy is ignored and a newer one kept', () async {
+      await Directory(p.dirname(folderFile().path)).create(recursive: true);
+      await folderFile().writeAsString('{not json');
+      expect(await service.loadRun(track), isNull);
+      await service.scan(track);
+      expect((await folderJson())['version'], 1);
+
+      final newer = {...await folderJson(), 'version': 2, 'future': true};
+      await folderFile().writeAsString(jsonEncode(newer));
+      final run = (await service.loadRun(track))!;
+      await service.saveRun(
+        run.copyWith(proposals: [run.proposals.first]),
+        track,
+      );
+      expect((await folderJson())['future'], isTrue);
+    });
+
+    test('compact lookups read back as the same Shazam result', () {
+      final cached = {
+        'sampleStartMs': 60000,
+        'sampleDurationMs': 12000,
+        'recordedAt': '2026-11-13T10:00:00.000Z',
+        'decoderVersion': 2,
+        'response': {
+          'track': {
+            'key': '41037976',
+            'title': 'Fly-day Chinatown',
+            'subtitle': 'Yasuha',
+            'images': {'coverart': 'https://example.com/a.jpg'},
+          },
+          'matches': [
+            {'id': '608157095', 'offset': 60.378, 'timeskew': 0.1},
+            {'id': '632179612', 'offset': 60.577},
+          ],
+          'tagid': 'x',
+        },
+      };
+      final compact = compactSample(cached)!;
+      final back = expandSample(jsonDecode(jsonEncode(compact)))!;
+      expect(back['sampleStartMs'], 60000);
+      expect(back['sampleDurationMs'], 12000);
+      expect(back['recordedAt'], cached['recordedAt']);
+      expect(back['decoderVersion'], 2);
+      final a = ShazamResult.fromJson(
+        cached['response'] as Map<String, dynamic>,
+      );
+      final b = ShazamResult.fromJson(back['response'] as Map<String, dynamic>);
+      expect(b.trackKey, a.trackKey);
+      expect(b.title, a.title);
+      expect(b.artist, a.artist);
+      expect(
+        b.offsets.map((o) => (o.referenceId, o.offsetSeconds)).toList(),
+        a.offsets.map((o) => (o.referenceId, o.offsetSeconds)).toList(),
+      );
+
+      final silent =
+          compactSample({'sampleStartMs': 0, 'response': <String, dynamic>{}})!;
+      expect(silent, {'startMs': 0});
+      final silentBack = expandSample(silent)!;
+      expect(
+        ShazamResult.fromJson(
+          silentBack['response'] as Map<String, dynamic>,
+        ).recognized,
+        isFalse,
+      );
+    });
   });
 
   group('decoder accuracy version', () {

@@ -98,6 +98,19 @@ class LibraryLayout {
   static String lyricsJsonPath(String playlistPath, String videoId) =>
       p.join(infoDir(playlistPath), '${safeId(videoId)}.lyrics.json');
 
+  /// A track's last song recognition run with the review edits and the
+  /// lookups it was made from, so a reinstall can review or re-run it
+  /// without scanning again (see `recognition_files.dart`).
+  static String recognitionJsonPath(String playlistPath, String videoId) =>
+      p.join(infoDir(playlistPath), '${safeId(videoId)}.recognition.json');
+
+  /// The playlist's loudness measurements, so a reinstall does not measure
+  /// every song again (see `loudness_file.dart`).
+  static const loudnessFileName = 'loudness.json';
+
+  static String loudnessJsonPath(String playlistPath) =>
+      p.join(infoDir(playlistPath), loudnessFileName);
+
   /// Whether [path] lies strictly inside one of the two library roots, one
   /// level down (a playlist folder). Guards every recursive operation.
   static bool isPlaylistFolder(String path) {
