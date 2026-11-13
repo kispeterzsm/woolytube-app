@@ -1068,6 +1068,12 @@ class _BackupCheckDialog extends StatelessWidget {
                 'cannot be fetched: removed, private or unavailable on '
                 'YouTube.',
               ),
+            if (report.ownFilesWithoutCover > 0)
+              Text(
+                '${_count(report.ownFilesWithoutCover, 'file')} you added '
+                'yourself ${report.ownFilesWithoutCover == 1 ? 'has' : 'have'} '
+                'no cover image.',
+              ),
             if (newer.isNotEmpty) ...[
               gap(),
               Text(

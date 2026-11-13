@@ -30,6 +30,7 @@ class PlaylistBackupStatus {
     this.newerMetadataVersion,
     this.tracks = 0,
     this.missingCovers = 0,
+    this.ownFilesWithoutCover = 0,
     this.missingPlaylistCover = false,
     this.missingLyricsFiles = 0,
     this.outdatedLyricsFiles = 0,
@@ -63,8 +64,14 @@ class PlaylistBackupStatus {
   /// Downloaded tracks.
   final int tracks;
 
-  /// Downloaded tracks without a cover file.
+  /// Downloaded tracks without a cover file that "Fix" can look for.
   final int missingCovers;
+
+  /// Files the owner added (in place of a video, or inserted) without a
+  /// cover file. Their cover can only come from the file itself, which
+  /// the app's start already tries, so "Fix" has nothing to add and they
+  /// are not a gap in the backup.
+  final int ownFilesWithoutCover;
 
   final bool missingPlaylistCover;
 
@@ -146,6 +153,10 @@ class BackupReport {
   int get infoTotal =>
       _sumOfFolders((pl) => pl.infoFiles + pl.missingInfoFiles);
   int get infoUnavailable => _sumOfFolders((pl) => pl.unavailableInfoFiles);
+
+  /// See [PlaylistBackupStatus.ownFilesWithoutCover].
+  int get ownFilesWithoutCover =>
+      _sumOfFolders((pl) => pl.ownFilesWithoutCover);
 
   int _sumOfFolders(int Function(PlaylistBackupStatus pl) count) =>
       playlists.fold(0, (sum, pl) => sum + (pl.folderMissing ? 0 : count(pl)));
@@ -232,6 +243,13 @@ class BackupCheckService {
 
   static bool _never() => false;
 
+  /// A track whose cover can only be taken from its own file (see
+  /// `ThumbnailBackfillService`): there is no YouTube video to fetch one
+  /// from.
+  static bool _coverOnlyFromFile(Track track) =>
+      track.isLocalReplacement ||
+      track.videoId.startsWith(forcedInsertVideoIdPrefix);
+
   /// Checks every playlist folder and the library's own files. Writes
   /// nothing.
   Future<BackupReport> check({
@@ -311,13 +329,20 @@ class BackupCheckService {
     final tracks = await _db.getTracksForPlaylist(playlist.id);
     var downloaded = 0;
     var missingCovers = 0;
+    var ownFilesWithoutCover = 0;
     var infoFiles = 0;
     var missingInfo = 0;
     var unavailableInfo = 0;
     for (final track in tracks) {
       if (track.status != 'complete' || track.filePath == null) continue;
       downloaded++;
-      if (!await thumbnailFileExists(track.thumbnailPath)) missingCovers++;
+      if (!await thumbnailFileExists(track.thumbnailPath)) {
+        if (_coverOnlyFromFile(track)) {
+          ownFilesWithoutCover++;
+        } else {
+          missingCovers++;
+        }
+      }
       if (!keepsYouTubeInfo(track)) continue;
       if (await File(
         LibraryLayout.infoJsonPath(folder, track.videoId),
@@ -351,6 +376,7 @@ class BackupCheckService {
       newerMetadataVersion: sidecar?.newerVersionKept,
       tracks: downloaded,
       missingCovers: missingCovers,
+      ownFilesWithoutCover: ownFilesWithoutCover,
       missingPlaylistCover:
           downloaded > 0 && !await thumbnailFileExists(playlist.thumbnailPath),
       missingLyricsFiles: lyrics?.missing ?? 0,

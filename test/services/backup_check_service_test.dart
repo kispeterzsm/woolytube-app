@@ -488,6 +488,47 @@ void main() {
     expect(snapshot(), before);
   });
 
+  test('the owner\'s own files without a cover are not a gap Fix '
+      'could fill', () async {
+    // Found by the real-data check: local files without embedded art kept
+    // "Backup needs fixing" up for good, and Fix could never add a cover.
+    final mix = await addPlaylist('Mix', tracks: 4, withoutCover: {2, 3, 4});
+    final tracks = await db.getTracksForPlaylist(mix.id);
+    Future<void> change(int index, TracksCompanion fields) =>
+        (db.update(db.tracks)..where(
+          (t) => t.id.equals(tracks.firstWhere((t) => t.index == index).id),
+        )).write(fields);
+    // 2: a local file in place of the video; 3: a forced insert; 4: a
+    // YouTube video, whose cover Fix can download.
+    await change(2, const TracksCompanion(isLocalReplacement: Value(true)));
+    await change(
+      3,
+      const TracksCompanion(videoId: Value('${forcedInsertVideoIdPrefix}1')),
+    );
+    final s = servicesFor();
+    await s.metadata.writeMetadataFor(mix.id);
+    await s.exporter.writeSettingsFile();
+    await s.libraryFile.write();
+
+    final report = await s.service.check();
+
+    expect(report.problems, ['"Mix": 1 track without a cover']);
+    expect(report.playlists.single.missingCovers, 1);
+    expect(report.ownFilesWithoutCover, 2);
+
+    // With the YouTube video's cover in place, the backup is complete.
+    final cover = p.join(LibraryLayout.thumbnailsDir(mix.outputPath), 'c.jpg');
+    await File(cover).writeAsBytes(_jpeg);
+    await change(4, TracksCompanion(thumbnailPath: Value(cover)));
+    await s.metadata.writeMetadataFor(mix.id);
+
+    final complete = await s.service.check();
+
+    expect(complete.problems, isEmpty);
+    expect(complete.needsFix, isFalse);
+    expect(complete.ownFilesWithoutCover, 2);
+  });
+
   test('Fix writes again files changed on disk after this run wrote '
       'them', () async {
     final mix = await addPlaylist('Mix');
