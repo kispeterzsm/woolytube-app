@@ -394,6 +394,7 @@ class _HomePageState extends ConsumerState<HomePage> {
                   onFiltersChanged:
                       (filters) => setState(() => _searchFilters = filters),
                   onOpenPlaylist: _navigateToDetail,
+                  onTrackActions: _showTrackActions,
                 ),
           ),
         ),
@@ -639,6 +640,16 @@ class _HomePageState extends ConsumerState<HomePage> {
             ),
       ),
     );
+  }
+
+  /// The options sheet of a file found by the search, as on its playlist
+  /// page. It opens from this page, not from the result: results come and go
+  /// as the library changes (a rename can move or drop the row, closing the
+  /// search drops them all), while this page stays for the sheet and the
+  /// renames, downloads and messages it starts.
+  void _showTrackActions(Track track) {
+    FocusManager.instance.primaryFocus?.unfocus();
+    showTrackActionsSheet(context, ref, track);
   }
 
   void _navigateToSettings(Playlist playlist) {
@@ -910,12 +921,16 @@ class _SearchResults extends ConsumerStatefulWidget {
     required this.filters,
     required this.onFiltersChanged,
     required this.onOpenPlaylist,
+    required this.onTrackActions,
   });
 
   final String query;
   final SearchFilters filters;
   final ValueChanged<SearchFilters> onFiltersChanged;
   final ValueChanged<Playlist> onOpenPlaylist;
+
+  /// Opens the options sheet of a file (its own row, never a chapter).
+  final ValueChanged<Track> onTrackActions;
 
   @override
   ConsumerState<_SearchResults> createState() => _SearchResultsState();
@@ -1193,6 +1208,7 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
     final trackRows = trackHeader + trackHits.length;
     final lyricRows = lyricHits.isEmpty ? 0 : lyricHits.length + 1;
     final itemCount = playlistRows + trackRows + lyricRows;
+    final indexWidth = _indexWidth(context, trackHits);
 
     return ValueListenableBuilder<double>(
       valueListenable: audioPlayerOverlayHeightNotifier,
@@ -1229,6 +1245,7 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
                   track: track,
                   playlist: playlist,
                   onTap: () => _onLyricsTap(hit, track, playlist, tracks),
+                  onActions: () => widget.onTrackActions(track),
                 );
               }
               if (trackHeader == 1) {
@@ -1243,11 +1260,38 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
                 hit: hit,
                 query: query,
                 playlist: playlist,
+                indexWidth: indexWidth,
                 onTap: () => _onTrackTap(hit, playlist, tracks),
+                // The file's menu, also when a chapter of it was found.
+                onActions: () => widget.onTrackActions(track),
               );
             },
           ),
     );
+  }
+
+  /// The width of the track numbers' column: as wide as the longest number
+  /// found, as on the playlist page, so the title keeps its room next to
+  /// the ⋮.
+  static double _indexWidth(BuildContext context, List<SearchHit> hits) {
+    var maxIndex = 9;
+    for (final hit in hits) {
+      if (hit.track.index > maxIndex) maxIndex = hit.track.index;
+    }
+    final painter = TextPainter(
+      text: TextSpan(
+        text: '$maxIndex',
+        style: DefaultTextStyle.of(
+          context,
+        ).style.copyWith(fontSize: 13, fontWeight: FontWeight.w600),
+      ),
+      textDirection: TextDirection.ltr,
+      textScaler: MediaQuery.textScalerOf(context),
+      maxLines: 1,
+    )..layout();
+    final width = painter.width.ceilToDouble() + 2;
+    painter.dispose();
+    return width;
   }
 
   void _playAll(List<QueueEntry> entries) {
@@ -1331,7 +1375,8 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
 const _searchMuted = Color(0xFF888888);
 
 /// One matched lyric or transcript line: the track (or chapter) title, then
-/// the line with its matched words highlighted and its time.
+/// the line with its matched words highlighted and its time, and the ⋮ of
+/// the file it is in.
 class _LyricsResultTile extends ConsumerWidget {
   const _LyricsResultTile({
     super.key,
@@ -1339,12 +1384,16 @@ class _LyricsResultTile extends ConsumerWidget {
     required this.track,
     required this.playlist,
     required this.onTap,
+    required this.onActions,
   });
 
   final LyricsHit hit;
   final Track track;
   final Playlist? playlist;
   final VoidCallback onTap;
+
+  /// Opens the file's options sheet (⋮ or a long press).
+  final VoidCallback onActions;
 
   static const _muted = Color(0xFF888888);
   static const _accent = Color(0xFF2196F3);
@@ -1361,8 +1410,10 @@ class _LyricsResultTile extends ConsumerWidget {
       color: isCurrentTrack ? const Color(0xFF2A2A2A) : Colors.transparent,
       child: InkWell(
         onTap: onTap,
+        onLongPress: onActions,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          // The ⋮ brings its own room on the right.
+          padding: const EdgeInsets.fromLTRB(16, 8, 0, 8),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -1417,6 +1468,10 @@ class _LyricsResultTile extends ConsumerWidget {
                   style: const TextStyle(color: _muted, fontSize: 12),
                 ),
               ],
+              _TrackMoreButton(
+                key: ValueKey('search-lyrics-more-${hit.docId}'),
+                onPressed: onActions,
+              ),
             ],
           ),
         ),
@@ -1498,21 +1553,29 @@ class _PlaylistResultTile extends StatelessWidget {
 }
 
 /// One track in the search results, with the words found highlighted and
-/// the chapter found, if any. Only this tile rebuilds when it starts or
-/// stops being the playing track.
+/// the chapter found, if any, and the file's ⋮. Only this tile rebuilds
+/// when it starts or stops being the playing track.
 class _SearchTrackTile extends ConsumerWidget {
   const _SearchTrackTile({
     super.key,
     required this.hit,
     required this.query,
     required this.playlist,
+    required this.indexWidth,
     required this.onTap,
+    required this.onActions,
   });
 
   final SearchHit hit;
   final SearchQuery query;
   final Playlist? playlist;
+
+  /// The width of the track number, the same in every row.
+  final double indexWidth;
   final VoidCallback onTap;
+
+  /// Opens the file's options sheet (⋮ or a long press).
+  final VoidCallback onActions;
 
   Track get track => hit.track;
 
@@ -1544,12 +1607,14 @@ class _SearchTrackTile extends ConsumerWidget {
       color: isCurrentTrack ? const Color(0xFF2A2A2A) : Colors.transparent,
       child: InkWell(
         onTap: onTap,
+        onLongPress: onActions,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          // As on the playlist page; the ⋮ brings its own room on the right.
+          padding: const EdgeInsets.fromLTRB(12, 8, 0, 8),
           child: Row(
             children: [
               SizedBox(
-                width: 32,
+                width: indexWidth,
                 child: Text(
                   track.index.toString(),
                   textAlign: TextAlign.center,
@@ -1563,7 +1628,7 @@ class _SearchTrackTile extends ConsumerWidget {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 8),
               ClipRRect(
                 borderRadius: BorderRadius.circular(4),
                 child: SizedBox(
@@ -1637,7 +1702,7 @@ class _SearchTrackTile extends ConsumerWidget {
                   ],
                 ),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 4),
               SizedBox(
                 width: 24,
                 child: Center(
@@ -1650,6 +1715,10 @@ class _SearchTrackTile extends ConsumerWidget {
                           )
                           : _statusIcon(hasLocalFile: hasLocalFile),
                 ),
+              ),
+              _TrackMoreButton(
+                key: ValueKey('search-track-more-${track.id}'),
+                onPressed: onActions,
               ),
             ],
           ),
@@ -1735,5 +1804,29 @@ class _SearchTrackTile extends ConsumerWidget {
       default:
         return const Icon(Icons.download, color: Color(0xFF555555), size: 20);
     }
+  }
+}
+
+/// The ⋮ of a file in the search results, like the one of its row on the
+/// playlist page. It is narrower than a usual button (still a full 48 tall,
+/// at the edge of the screen), so the title loses next to none of the room
+/// it had before the ⋮ and is not cut sooner.
+class _TrackMoreButton extends StatelessWidget {
+  const _TrackMoreButton({super.key, required this.onPressed});
+
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      icon: const Icon(Icons.more_vert, color: _searchMuted, size: 20),
+      tooltip: 'Track options',
+      onPressed: onPressed,
+      style: IconButton.styleFrom(
+        minimumSize: const Size(36, 48),
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
+    );
   }
 }
