@@ -70,6 +70,10 @@ dev_dependencies:
 dependency_overrides:
   media_kit_libs_android_video:
     path: plugins/media_kit_libs_android_video
+  # Patched so stopping playback removes the media notification. See
+  # plugins/audio_service/README.md.
+  audio_service:
+    path: plugins/audio_service
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
