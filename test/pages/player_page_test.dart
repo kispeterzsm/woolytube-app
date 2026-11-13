@@ -419,7 +419,9 @@ void main() {
     expect(harness.playback.stopCalls, 1);
     expect(_background, findsNothing);
     expect(shell.presence.value, 0);
-    expect(find.text('Playback stopped'), findsOneWidget);
+    // No message pops up where the bar was.
+    expect(find.text('Playback stopped'), findsNothing);
+    expect(find.byType(SnackBar), findsNothing);
 
     // A small swipe springs back and keeps playing.
     harness.play(harness.audioTrack);

@@ -219,14 +219,9 @@ class PlayerShellState extends ConsumerState<PlayerShell>
         if (stop) {
           dismissal.animateTo(1, curve: Curves.easeOut).whenCompleteOrCancel(
             () {
-              if (mounted && dismissal.value == 1) {
-                stopPlayback();
-                ScaffoldMessenger.maybeOf(context)
-                  ?..hideCurrentSnackBar()
-                  ..showSnackBar(
-                    const SnackBar(content: Text('Playback stopped')),
-                  );
-              }
+              // No snackbar: it would pop up right where the bar slid
+              // away, and the bar leaving already shows playback stopped.
+              if (mounted && dismissal.value == 1) stopPlayback();
             },
           );
         } else {
