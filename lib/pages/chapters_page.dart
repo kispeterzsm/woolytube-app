@@ -725,9 +725,9 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
       true => _ShuffleChapters.shuffle,
       false => _ShuffleChapters.noShuffle,
     };
-    // Chapters marked Always skip leave the shuffle; with fewer than two
-    // left there is nothing to mix.
-    final unskipped = data.active.where((c) => !data.isSkipped(c.id)).length;
+    // Chapters marked Always skip still count: tapping the file plays them
+    // all when every one is skipped, a tapped skipped chapter plays, and a
+    // search can pick them, so the order still matters.
     final shuffleNote =
         !chaptersOn
             ? 'This video plays as one whole file, so its chapters can\'t '
@@ -735,12 +735,6 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
             : data.active.length == 1
             ? 'This video has only one chapter, so there is nothing to '
                 'shuffle.'
-            : unskipped == 0
-            ? 'All chapters of this video are set to Always skip, so there '
-                'is nothing to shuffle.'
-            : unskipped == 1
-            ? 'Only one chapter of this video is not set to Always skip, so '
-                'there is nothing to shuffle.'
             : null;
     final durationMs = ChapterService.knownDurationMs(track);
     // Sets the clock format of the times listed (h:mm:ss for an hour or

@@ -225,7 +225,7 @@ void main() {
       await unmount(tester);
     });
 
-    testWidgets('is greyed out with fewer than two chapters to play', (
+    testWidgets('is greyed out for a file with only one chapter', (
       tester,
     ) async {
       final one = await addTrack(
@@ -239,39 +239,42 @@ void main() {
       await pumpPage(tester, one);
       expect(shuffleEnabled(tester), isFalse);
       expect(find.textContaining('only one chapter'), findsOneWidget);
-      await unmount(tester);
-
-      // Two chapters, one marked Always skip: one is left to play.
-      final skipped = await addTrack(
-        chapters: youTubeChapters.withChapterSkip('a', true),
-        videoId: 'video-2',
-      );
-      await pumpPage(tester, skipped);
-      expect(shuffleEnabled(tester), isFalse);
-      expect(
-        find.textContaining(
-          'Only one chapter of this video is not set to '
-          'Always skip',
-        ),
-        findsOneWidget,
-      );
       expect(find.textContaining('"Shuffle chapters", which is'), findsNothing);
       await tester.tap(segment('Shuffle'), warnIfMissed: false);
       await tester.pumpAndSettle();
-      expect((await storedChapters(skipped.id)).shuffleChapters, isNull);
-
-      // Taking the mark off makes it a choice again.
-      await db.writeTrackChapters(
-        skipped.id,
-        (await storedChapters(skipped.id)).withChapterSkip('a', false),
-      );
-      await tester.pumpAndSettle();
-      expect(shuffleEnabled(tester), isTrue);
-      expect(
-        find.textContaining('"Shuffle chapters", which is'),
-        findsOneWidget,
-      );
+      expect((await storedChapters(one.id)).shuffleChapters, isNull);
       await unmount(tester);
+    });
+
+    testWidgets('stays a choice when chapters are marked Always skip', (
+      tester,
+    ) async {
+      // Tapping a skipped chapter plays it along with the rest, and a file
+      // whose chapters are all skipped plays them all when tapped, so the
+      // order still matters.
+      for (final (index, chapters)
+          in [
+            youTubeChapters.withChapterSkip('a', true),
+            youTubeChapters
+                .withChapterSkip('a', true)
+                .withChapterSkip('b', true),
+          ].indexed) {
+        final track = await addTrack(
+          chapters: chapters,
+          videoId: 'video-skip-$index',
+        );
+        await pumpPage(tester, track);
+        expect(shuffleEnabled(tester), isTrue);
+        expect(find.textContaining('nothing to shuffle'), findsNothing);
+        expect(
+          find.textContaining('"Shuffle chapters", which is'),
+          findsOneWidget,
+        );
+        await tester.tap(segment('Don\'t shuffle'));
+        await tester.pumpAndSettle();
+        expect((await storedChapters(track.id)).shuffleChapters, isFalse);
+        await unmount(tester);
+      }
     });
 
     testWidgets('is not shown for a file without chapters', (tester) async {
