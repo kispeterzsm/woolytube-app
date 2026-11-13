@@ -27,8 +27,8 @@ typedef _TapState = ({int ms, bool playing, bool parked, bool known});
 /// nudging or tapping "Set here" while it plays. Works the same for YouTube
 /// chapters, recognised ones and a file with no chapters yet.
 ///
-/// Nothing is stored until [onSave]; the page then pops with its result
-/// (true when saved).
+/// Nothing is stored until [onSave]. Saving keeps the editor open (unless
+/// [closeOnSave]); leaving pops the page with whether anything was saved.
 class ChapterEditorPage extends ConsumerStatefulWidget {
   const ChapterEditorPage({
     super.key,
@@ -40,6 +40,9 @@ class ChapterEditorPage extends ConsumerStatefulWidget {
     required this.onSave,
     this.title = 'Edit chapters',
     this.notesById = const {},
+    this.closeOnSave = false,
+    this.playingAtMs,
+    this.playerPositionMs,
   });
 
   final Track track;
@@ -60,6 +63,20 @@ class ChapterEditorPage extends ConsumerStatefulWidget {
 
   /// Review notes shown under chapters.
   final Map<String, List<String>> notesById;
+
+  /// Leaves the editor after a successful save, for a save that hands the
+  /// result back ("Done") rather than storing it.
+  final bool closeOnSave;
+
+  /// Where the app's player is in this file when the editor opens, when it
+  /// plays (or paused on) this file. Without [focusChapterId] the editor
+  /// then opens on the start of the chapter there, with the preview
+  /// playhead on that exact spot.
+  final int? playingAtMs;
+
+  /// Where the app's player is in this file as it moves, or null once it
+  /// is on another file. Shown in the top bar.
+  final Stream<int?>? playerPositionMs;
 
   /// Forgets the choices kept for the session (zoom, lead time, replay).
   @visibleForTesting
@@ -97,7 +114,9 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
 
   late ChapterDraft _draft;
   late List<DraftEdge> _edges;
-  late final Map<String, MediaChapter> _initialById;
+
+  /// The chapters as they were when the editor opened or was last saved.
+  late Map<String, MediaChapter> _initialById;
 
   /// The selected boundary, by [DraftEdge.key]; [_selectedHint] finds the
   /// closest one when the key no longer exists.
@@ -153,6 +172,12 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
   bool _durationKnown = false;
 
   bool _saving = false;
+
+  /// Something was saved since the editor opened: leaving pops with true.
+  bool _savedAny = false;
+
+  /// Where the app's player is in this file, for the top bar.
+  late final ValueNotifier<int?> _playerAt;
   final _scroll = ScrollController();
 
   @override
@@ -168,6 +193,15 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
     _initialById = {for (final c in widget.initial) c.id: c};
     _selectInitial();
     _ticker = createTicker((_) => _setPlayhead(_preview?.positionMs ?? 0));
+    _playerAt = ValueNotifier(widget.playingAtMs);
+    final positions = widget.playerPositionMs;
+    if (positions != null) {
+      _subscriptions.add(
+        positions.listen((ms) {
+          if (mounted) _playerAt.value = ms;
+        }),
+      );
+    }
     _waveforms = ref.read(waveformServiceProvider);
     final path = _path = resolveTrackMediaPath(widget.track);
     if (path == null) {
@@ -177,6 +211,15 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
           _preview = ref.read(chapterPreviewPlayerFactoryProvider)(path);
       _listenTo(preview);
       unawaited(_open());
+      final playingAt = widget.playingAtMs;
+      if (playingAt != null) {
+        // The playhead starts where the app's player is: Play goes on from
+        // there, and Set here moves the boundary there. A failed open is
+        // shown by _open.
+        _setPlayhead(playingAt);
+        _playheadKnown = true;
+        unawaited(preview.seek(playingAt).catchError((Object _) {}));
+      }
     }
     _refreshQuiet();
   }
@@ -193,6 +236,7 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
     _preview = null;
     if (preview != null) unawaited(preview.dispose());
     _playhead.dispose();
+    _playerAt.dispose();
     _scroll.dispose();
     super.dispose();
   }
@@ -461,6 +505,16 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
       pick =
           _edges.where((e) => e.rightId == focus).firstOrNull ??
           _edges.where((e) => e.leftId == focus).firstOrNull;
+    }
+    // The chapter the app's player is in: its start, so the playing part
+    // can be fixed. In a gap, the chapter before it.
+    final playingAt = widget.playingAtMs;
+    if (pick == null && playingAt != null) {
+      final playing =
+          _draft.chapters.where((c) => c.startMs <= playingAt).lastOrNull;
+      if (playing != null) {
+        pick = _edges.where((e) => e.rightId == playing.id).firstOrNull;
+      }
     }
     // The start of the file is rarely the boundary to fix.
     pick ??= _edges.where((e) => e.shared).firstOrNull ?? _edges.firstOrNull;
@@ -837,12 +891,25 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
     setState(() => _saving = true);
     try {
       unawaited(_preview?.pause());
+      final result = _draft.toChapters();
       // 0 when the length is unknown: the stored length is kept then.
       final saved = await widget.onSave(
-        _draft.toChapters(),
+        result,
         _durationKnown ? _draft.durationMs : 0,
       );
-      if (mounted) Navigator.of(context).pop(saved);
+      _savedAny = _savedAny || saved;
+      if (!mounted) return;
+      if (widget.closeOnSave) {
+        Navigator.of(context).pop(saved);
+        return;
+      }
+      // Stays open: what was saved is the new starting point, so back
+      // leaves without asking until the next change.
+      setState(() {
+        _draft = _draft.markSaved();
+        _initialById = {for (final c in result) c.id: c};
+      });
+      _message(saved ? 'Chapters saved.' : 'Already saved: nothing changed.');
     } catch (error) {
       _message(
         error is FormatException
@@ -876,7 +943,7 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
             ],
           ),
     );
-    if (discard == true && mounted) Navigator.of(context).pop(false);
+    if (discard == true && mounted) Navigator.of(context).pop(_savedAny);
   }
 
   void _message(String text, {SnackBarAction? action}) {
@@ -938,10 +1005,16 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
     final canListen = _preview != null && _playerError == null;
 
     return PopScope(
-      // Back is ignored while saving; the save pops the page itself.
-      canPop: !dirty && !_saving,
+      // Back is ignored while saving. After a save, the page pops itself
+      // so the result says that something was saved.
+      canPop: !dirty && !_saving && !_savedAny,
       onPopInvokedWithResult: (didPop, _) {
-        if (!didPop && !_saving) unawaited(_confirmDiscard());
+        if (didPop || _saving) return;
+        if (dirty) {
+          unawaited(_confirmDiscard());
+        } else {
+          Navigator.of(context).pop(_savedAny);
+        }
       },
       child: Scaffold(
         appBar: AppBar(
@@ -951,11 +1024,46 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(widget.title, maxLines: 1, overflow: TextOverflow.ellipsis),
-              Text(
-                widget.track.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 12, color: EditorColors.muted),
+              // Where the app's player is in this file, to the millisecond,
+              // while it is on this file.
+              ValueListenableBuilder<int?>(
+                valueListenable: _playerAt,
+                builder:
+                    (context, ms, _) => Text.rich(
+                      TextSpan(
+                        children: [
+                          if (ms != null) ...[
+                            const WidgetSpan(
+                              alignment: PlaceholderAlignment.middle,
+                              child: Padding(
+                                padding: EdgeInsets.only(right: 3),
+                                child: Icon(
+                                  Icons.graphic_eq,
+                                  size: 12,
+                                  color: EditorColors.playhead,
+                                ),
+                              ),
+                            ),
+                            TextSpan(
+                              text: preciseTime(ms),
+                              style: const TextStyle(
+                                color: EditorColors.playhead,
+                                fontFeatures: tabularFigures,
+                              ),
+                            ),
+                            const TextSpan(text: ' · '),
+                          ],
+                          TextSpan(text: widget.track.title),
+                        ],
+                      ),
+                      key: const ValueKey('editor-player-position'),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: EditorColors.muted,
+                      ),
+                    ),
               ),
             ],
           ),

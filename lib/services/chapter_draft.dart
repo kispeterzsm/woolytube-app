@@ -229,6 +229,17 @@ class ChapterDraft {
     );
   }
 
+  /// The same draft after its chapters were saved: not [dirty] until the
+  /// next change. Undo and redo keep their steps, and a step away from the
+  /// saved list makes it dirty again.
+  ChapterDraft markSaved() => ChapterDraft._(
+    chapters,
+    durationMs: durationMs,
+    past: _past,
+    future: _future,
+    initial: chapters,
+  );
+
   /// The same draft with a corrected file length (e.g. the real length from
   /// the player). It is not an undoable change.
   ChapterDraft withDuration(int durationMs) => ChapterDraft._(

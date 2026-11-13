@@ -263,6 +263,23 @@ void main() {
       expect(back.dirty, isFalse);
       expect(back.canUndo, isTrue);
     });
+
+    test('markSaved makes the saved list the clean one and keeps undo', () {
+      final d = sample();
+      final moved = d.moveEdge(d.edges[1], 15000);
+      final saved = moved.markSaved();
+      expect(saved.dirty, isFalse);
+      expect(ranges(saved), ranges(moved));
+      expect(saved.canUndo, isTrue);
+
+      final again = saved.moveEdge(saved.edges[1], 16000);
+      expect(again.dirty, isTrue);
+      // Undo back to what was saved is clean; one more step is not.
+      final undone = again.undo();
+      expect(undone.dirty, isFalse);
+      expect(undone.undo().dirty, isTrue);
+      expect(ranges(undone.undo()), ranges(d));
+    });
   });
 
   group('splitAt', () {

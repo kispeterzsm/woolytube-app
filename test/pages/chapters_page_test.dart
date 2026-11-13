@@ -282,6 +282,14 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('editor-save')));
     await tester.pumpAndSettle();
 
+    // Saving stores the list and stays in the editor; back then leaves
+    // without asking.
+    expect(find.byType(ChapterEditorPage), findsOneWidget);
+    expect(find.text('Chapters saved.'), findsOneWidget);
+    expect(player.chaptersChanged, [track.id]);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.text('Discard changes?'), findsNothing);
     expect(find.byType(ChapterEditorPage), findsNothing);
     expect(
       find.text('Chapters saved. Undo last chapter change takes it back.'),
@@ -389,6 +397,36 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('chapter-actions-always-skip')));
     await tester.pumpAndSettle();
     expect((await storedChapters(track.id)).isSkipped('b'), isFalse);
+    await unmount(tester);
+  });
+
+  testWidgets('Edit chapters on the file that is playing opens on the '
+      'chapter it plays and shows where the player is', (tester) async {
+    final track = await addTrack(chapters: youTubeChapters);
+    player.item = PlaybackItem(track);
+    player.position = const Duration(milliseconds: 30250);
+    await pumpPage(tester, track);
+    String topBar() =>
+        tester
+            .widget<Text>(find.byKey(const ValueKey('editor-player-position')))
+            .textSpan!
+            .toPlainText();
+
+    await tester.tap(find.byKey(const ValueKey('chapters-edit')));
+    await tester.pumpAndSettle();
+    // "Intro" plays: its start is selected, not the usual first shared
+    // boundary, and the preview playhead is where the player is.
+    expect(find.text('Boundary 1 of 3'), findsOneWidget);
+    expect(previews.last.seeks, [30250]);
+    expect(topBar(), contains('0:30.250'));
+
+    // The top bar follows the player.
+    player.position = const Duration(milliseconds: 31500);
+    await tester.pumpAndSettle();
+    expect(topBar(), contains('0:31.500'));
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.byType(ChapterEditorPage), findsNothing);
     await unmount(tester);
   });
 
@@ -798,6 +836,8 @@ class _Player implements PlaybackService {
   bool get isPlaying => _isPlaying;
   @override
   PlaybackItem? get currentItem => item;
+  @override
+  Duration get position => _position;
 
   @override
   Future<bool> playChapterOfCurrentFile(int trackId, String chapterId) async {

@@ -2,10 +2,12 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:rxdart/rxdart.dart';
 
 import '../database/database.dart';
 import '../providers/playback_providers.dart';
 import '../providers/providers.dart';
+import '../services/chapter_playback.dart';
 import '../services/chapter_service.dart';
 import '../services/chapters.dart';
 import '../services/playback_service.dart';
@@ -170,6 +172,13 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
     // Read now: the editor saves while this page is covered.
     final chapters = _chapters;
     final player = _player;
+    // When this file is the one playing (or paused), the editor opens on
+    // the chapter the player is in and shows where exactly it is.
+    final item = player.currentItem;
+    final playingAtMs =
+        item != null && item.track.id == track.id
+            ? item.startMs + player.position.inMilliseconds
+            : null;
     final saved = await Navigator.of(context, rootNavigator: true).push<bool>(
       MaterialPageRoute(
         builder:
@@ -178,6 +187,8 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
               initial: data.active,
               durationMs: _durationOf(track),
               focusChapterId: focusChapterId,
+              playingAtMs: playingAtMs,
+              playerPositionMs: _filePositionMs(player, track.id),
               title: data.active.isEmpty ? 'Create chapters' : 'Edit chapters',
               saveLabel: 'Save',
               notesById: {
@@ -204,6 +215,18 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
       _showMessage('Chapters saved. Undo last chapter change takes it back.');
     }
   }
+
+  /// Where [player] is in the file of [trackId] as it plays, or null while
+  /// it is on another file. The position is on the item's own timeline.
+  static Stream<int?> _filePositionMs(PlaybackService player, int trackId) =>
+      Rx.combineLatest2<PlaybackItem?, Duration, int?>(
+        player.currentItemStream,
+        player.positionStream,
+        (item, position) =>
+            item == null || item.track.id != trackId
+                ? null
+                : item.startMs + position.inMilliseconds,
+      ).distinct();
 
   Future<void> _rename(Track track, MediaChapter chapter) async {
     final title = await showDialog<String>(

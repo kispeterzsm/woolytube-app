@@ -81,6 +81,9 @@ void main() {
     Size size = const Size(400, 1800),
     Map<String, List<String>> notes = const {},
     Future<bool> Function(List<MediaChapter>, int)? onSave,
+    bool closeOnSave = false,
+    int? playingAtMs,
+    Stream<int?>? playerPositionMs,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
@@ -107,6 +110,9 @@ void main() {
                               focusChapterId: focus,
                               saveLabel: 'Save',
                               notesById: notes,
+                              closeOnSave: closeOnSave,
+                              playingAtMs: playingAtMs,
+                              playerPositionMs: playerPositionMs,
                               onSave:
                                   onSave ??
                                   (list, duration) async {
@@ -793,6 +799,9 @@ void main() {
     final saved = saves.single.$1;
     expect(saved.map((c) => (c.id, c.title)), [('b', 'Song'), ('c', 'Outro')]);
     expect(saved.first.startMs, 0);
+    expect(find.byType(ChapterEditorPage), findsOneWidget);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
     expect(popped, isTrue);
   });
 
@@ -952,8 +961,163 @@ void main() {
 
     saving.complete(true);
     await tester.pumpAndSettle();
+    expect(find.byType(ChapterEditorPage), findsOneWidget);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
     expect(find.byType(ChapterEditorPage), findsNothing);
     expect(popped, isTrue);
+  });
+
+  bool saveEnabled(WidgetTester tester) =>
+      tester
+          .widget<FilledButton>(find.byKey(const ValueKey('editor-save')))
+          .onPressed !=
+      null;
+
+  testWidgets('Save keeps the editor open; back then leaves without asking '
+      'until the next change', (tester) async {
+    await pumpEditor(tester);
+    await tapKey(tester, 'editor-nudge-1000');
+    await tester.pump(const Duration(milliseconds: 200));
+    await finishPreview(tester);
+    expect(saveEnabled(tester), isTrue);
+
+    await tapKey(tester, 'editor-save');
+    await tester.pumpAndSettle();
+    expect(saves.single.$1[1].startMs, 61000);
+    expect(find.byType(ChapterEditorPage), findsOneWidget);
+    expect(find.text('Chapters saved.'), findsOneWidget);
+    expect(saveEnabled(tester), isFalse);
+    // The saved spot is now where the boundary "was".
+    expect(timeShown(tester), '1:01.000');
+    expect(find.text('Where it was'), findsOneWidget);
+
+    // A change after the save asks again on back, and is saved on its own.
+    await tapKey(tester, 'editor-nudge-100');
+    await tester.pump(const Duration(milliseconds: 200));
+    await finishPreview(tester);
+    expect(saveEnabled(tester), isTrue);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.text('Discard changes?'), findsOneWidget);
+    await tester.tap(find.text('Keep editing'));
+    await tester.pumpAndSettle();
+    await tapKey(tester, 'editor-save');
+    await tester.pumpAndSettle();
+    expect(saves, hasLength(2));
+    expect(saves.last.$1[1].startMs, 61100);
+
+    // Undo steps back past the save: that is a change again.
+    await tapKey(tester, 'editor-undo');
+    expect(saveEnabled(tester), isTrue);
+    await tapKey(tester, 'editor-redo');
+    expect(saveEnabled(tester), isFalse);
+    await tester.pumpAndSettle();
+
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.text('Discard changes?'), findsNothing);
+    expect(find.byType(ChapterEditorPage), findsNothing);
+    expect(popped, isTrue);
+  });
+
+  testWidgets('discarding after a save still reports the save', (tester) async {
+    await pumpEditor(tester);
+    await tapKey(tester, 'editor-nudge-1000');
+    await tester.pump(const Duration(milliseconds: 200));
+    await finishPreview(tester);
+    await tapKey(tester, 'editor-save');
+    await tester.pumpAndSettle();
+    await tapKey(tester, 'editor-nudge-1000');
+    await tester.pump(const Duration(milliseconds: 200));
+    await finishPreview(tester);
+
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('editor-discard')));
+    await tester.pumpAndSettle();
+    expect(find.byType(ChapterEditorPage), findsNothing);
+    expect(popped, isTrue);
+    expect(saves, hasLength(1));
+  });
+
+  testWidgets('with closeOnSave, Save leaves with the result', (tester) async {
+    await pumpEditor(tester, closeOnSave: true);
+    await tapKey(tester, 'editor-nudge-1000');
+    await tester.pump(const Duration(milliseconds: 200));
+    await finishPreview(tester);
+    await tapKey(tester, 'editor-save');
+    await tester.pumpAndSettle();
+    expect(saves, hasLength(1));
+    expect(find.byType(ChapterEditorPage), findsNothing);
+    expect(popped, isTrue);
+  });
+
+  group('opened while the app plays this file', () {
+    String topBar(WidgetTester tester) =>
+        tester
+            .widget<Text>(find.byKey(const ValueKey('editor-player-position')))
+            .textSpan!
+            .toPlainText();
+
+    testWidgets('selects the start of the playing chapter and puts the '
+        'playhead where the player is', (tester) async {
+      await pumpEditor(tester, playingAtMs: 135420);
+      expect(find.text('Boundary 3 of 4'), findsOneWidget);
+      expect(timeShown(tester), '2:00.000');
+      expect(previews.last.seeks, [135420]);
+      expect(
+        tester.widget<Text>(find.byKey(const ValueKey('editor-position'))).data,
+        '2:15.420',
+      );
+      expect(topBar(tester), endsWith('2:15.420 · Long mix'));
+      // The playhead is a spot the user listened to: Set here moves the
+      // boundary there.
+      await tapKey(tester, 'editor-set-here');
+      expect(timeShown(tester), '2:15.420');
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('in a gap it selects the chapter before it', (tester) async {
+      await pumpEditor(
+        tester,
+        initial: [_youTube[0], _youTube[2]],
+        playingAtMs: 90000,
+      );
+      expect(find.text('Boundary 1 of 4'), findsOneWidget);
+    });
+
+    testWidgets('the chapter it was opened for comes first', (tester) async {
+      await pumpEditor(tester, focus: 'b', playingAtMs: 135420);
+      expect(find.text('Boundary 2 of 4'), findsOneWidget);
+    });
+
+    testWidgets('the top bar follows the player to the millisecond', (
+      tester,
+    ) async {
+      final positions = StreamController<int?>();
+      addTearDown(positions.close);
+      await pumpEditor(
+        tester,
+        playingAtMs: 1000,
+        playerPositionMs: positions.stream,
+      );
+      expect(topBar(tester), endsWith('0:01.000 · Long mix'));
+      positions.add(61234);
+      await tester.pumpAndSettle();
+      expect(topBar(tester), endsWith('1:01.234 · Long mix'));
+      // The player moved on to another file.
+      positions.add(null);
+      await tester.pumpAndSettle();
+      expect(topBar(tester), 'Long mix');
+    });
+
+    testWidgets('without the player on this file the top bar shows the '
+        'title alone', (tester) async {
+      await pumpEditor(tester);
+      expect(topBar(tester), 'Long mix');
+      expect(previews.last.seeks, isEmpty);
+    });
   });
 
   testWidgets('a length the file never reported is not saved', (tester) async {

@@ -150,6 +150,8 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
               focusChapterId: focusId,
               title: 'Adjust proposals',
               saveLabel: 'Done',
+              // Hands the proposals back here; nothing is stored yet.
+              closeOnSave: true,
               notesById: {
                 for (final p in _proposals)
                   if (p.notes.isNotEmpty) p.id: p.notes,
