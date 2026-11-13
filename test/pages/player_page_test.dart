@@ -581,17 +581,13 @@ void main() {
     expect(tester.widget<Text>(panelTitle).maxLines, 1);
   });
 
-  testWidgets('More offers Next file only while chapters play as tracks', (
+  testWidgets('Next file is in the row only while chapters play as tracks', (
     tester,
   ) async {
     final harness = await pumpPlayerShell(tester);
     harness.shellState(tester).expand();
     await tester.pumpAndSettle();
-    await tester.tap(find.text('More'));
-    await tester.pumpAndSettle();
-    expect(find.text('Next file'), findsNothing);
-    await tester.tapAt(const Offset(10, 10));
-    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('next-file-button')), findsNothing);
 
     const chapter = MediaChapter(
       id: 'c1',
@@ -602,13 +598,29 @@ void main() {
     harness.item.add(PlaybackItem(harness.audioTrack, chapter));
     await tester.pumpAndSettle();
     expect(find.byTooltip('Next chapter'), findsOneWidget);
+    final nextFile = find.byKey(const ValueKey('next-file-button'));
+    expect(nextFile, findsOneWidget);
+    expect(
+      tester.getCenter(nextFile).dx,
+      lessThan(tester.getCenter(find.text('Shuffle')).dx),
+      reason: 'Next file comes first in the row',
+    );
+
     await tester.tap(find.text('More'));
     await tester.pumpAndSettle();
-    expect(find.text('Next file'), findsOneWidget);
-    await tester.tap(find.text('Next file'));
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('player-more-list')),
+        matching: find.text('Next file'),
+      ),
+      findsNothing,
+    );
+    await tester.tapAt(const Offset(10, 10));
+    await tester.pumpAndSettle();
+
+    await tester.tap(nextFile);
     await tester.pumpAndSettle();
     expect(harness.playback.nextFileCalls, 1);
-    expect(find.byKey(const ValueKey('player-more-list')), findsNothing);
   });
 
   testWidgets('seek bar holds the dragged position until the seek lands', (

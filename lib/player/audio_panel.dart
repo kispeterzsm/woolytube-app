@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/playback_providers.dart';
 import '../widgets/chapters_button.dart';
+import '../widgets/next_file_button.dart';
 import '../widgets/player_controls.dart';
 import '../widgets/player_more_button.dart';
 import 'player_layout.dart';
@@ -388,9 +389,9 @@ class _TransportButton extends StatelessWidget {
   }
 }
 
-/// Labelled toggles and actions under the transport row, always the same
-/// five slots so Queue stays in the middle: Shuffle, Autoplay, Queue,
-/// Chapters and More (End segment while a skip segment is being marked).
+/// Labelled toggles and actions under the transport row: Shuffle, Autoplay,
+/// Queue, Chapters and More (End segment while a skip segment is being
+/// marked). While a chapter plays as its own track, Next file comes first.
 /// The rarer actions (lyrics, share, sleep timer, the file's own menu) are
 /// in More.
 class _SecondaryRow extends ConsumerWidget {
@@ -400,9 +401,11 @@ class _SecondaryRow extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final shuffle = ref.watch(shuffleEnabledProvider).valueOrNull ?? false;
     final autoplay = ref.watch(autoplayEnabledProvider).valueOrNull ?? true;
+    final chapter = ref.watch(isChapterItemProvider);
     final service = ref.read(playbackServiceProvider);
 
     final items = <Widget>[
+      if (chapter) const NextFileButton(),
       PlayerActionButton(
         icon: Icons.shuffle_rounded,
         label: 'Shuffle',

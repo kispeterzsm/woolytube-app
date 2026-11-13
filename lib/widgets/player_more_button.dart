@@ -269,17 +269,6 @@ List<Widget> _moreTiles(
         unawaited(showSleepTimerSheet(hostContext, hostRef));
       },
     ),
-    if (item?.chapter != null)
-      tile(
-        key: const ValueKey('player-more-next-file'),
-        icon: Icons.last_page_rounded,
-        title: 'Next file',
-        subtitle: 'Skip the remaining chapters of this file',
-        onTap: () {
-          close();
-          unawaited(service.nextFile());
-        },
-      ),
     if (currentPlaylist?.audioOnly == false)
       tile(
         key: const ValueKey('player-more-audio-only'),
