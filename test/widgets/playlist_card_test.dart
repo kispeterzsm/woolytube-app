@@ -89,7 +89,7 @@ void main() {
     expect(updates, 1);
   });
 
-  testWidgets('counts against the tracks that can still be downloaded', (
+  testWidgets('counts against the whole playlist, like its page', (
     tester,
   ) async {
     final db = openTestDatabase();
@@ -111,12 +111,13 @@ void main() {
         );
 
     // The owner's case: 2 videos removed from YouTube no longer leave the
-    // playlist at "662/664" forever.
+    // playlist at "662/664" forever. The total is the playlist's, as on
+    // its page ("664 tracks · 662 downloaded · 2 unavailable").
     await pumpCard(
       tester,
       card(const PlaylistCounts(total: 664, downloaded: 662, unavailable: 2)),
     );
-    expect(find.text('662 tracks · updated 3d ago'), findsOneWidget);
+    expect(find.text('664 tracks · updated 3d ago'), findsOneWidget);
     expect(find.text('2 unavailable'), findsOneWidget);
 
     await pumpCard(
@@ -130,8 +131,17 @@ void main() {
         ),
       ),
     );
-    expect(find.text('580 of 595 downloaded · updated 3d ago'), findsOneWidget);
+    expect(find.text('580 of 600 downloaded · updated 3d ago'), findsOneWidget);
     expect(find.text('3 failed · 5 unavailable'), findsOneWidget);
+
+    // A kept file is downloaded, with a note in grey, never "failed".
+    await pumpCard(
+      tester,
+      card(const PlaylistCounts(total: 80, downloaded: 80, noYouTubeCopy: 1)),
+    );
+    expect(find.text('80 tracks · updated 3d ago'), findsOneWidget);
+    expect(find.text('1 no YouTube copy'), findsOneWidget);
+    expect(find.textContaining('failed'), findsNothing);
 
     // No flash of "Not updated yet" while the counts load.
     await pumpCard(tester, card(null, loaded: false));

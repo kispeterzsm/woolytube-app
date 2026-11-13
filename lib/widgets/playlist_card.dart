@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import '../database/database.dart';
 import '../services/media_thumbnail_service.dart';
+import '../services/playlist_summary.dart';
 
 /// What a playlist is busy with, as its card shows it.
 enum PlaylistCardActivity {
@@ -217,39 +218,33 @@ class PlaylistCard extends StatelessWidget {
     if (c == null || c.total == 0) {
       return when == null ? 'Not updated yet' : 'No videos · $when';
     }
-    final available = c.available;
-    final String amount;
-    if (c.downloaded >= available) {
-      amount = '$available track${available == 1 ? '' : 's'}';
-    } else {
-      amount = '${c.downloaded} of $available downloaded';
-    }
+    final amount = playlistDownloadedText(c);
     return when == null ? amount : '$amount · $when';
   }
 
-  /// Failed and unavailable tracks, in their own colours.
+  /// Failed, unavailable and kept tracks, in the playlist page's words;
+  /// failed ones in red.
   Widget? _secondaryLine() {
     final c = counts;
     if (c == null || activity != PlaylistCardActivity.idle) return null;
     final spans = <InlineSpan>[];
-    if (c.failed > 0) {
+    for (final (kind, count) in trackCountNotes(c)) {
+      if (spans.isNotEmpty) spans.add(const TextSpan(text: ' · '));
       spans.add(
         TextSpan(
-          text: '${c.failed} failed',
-          style: const TextStyle(color: Color(0xFFE57373)),
+          text: trackCountLabel(kind, count),
+          style:
+              kind.isProblem ? const TextStyle(color: Color(0xFFE57373)) : null,
         ),
       );
-    }
-    if (c.unavailable > 0) {
-      if (spans.isNotEmpty) spans.add(const TextSpan(text: ' · '));
-      spans.add(TextSpan(text: '${c.unavailable} unavailable'));
     }
     if (spans.isEmpty) return null;
     return Text.rich(
       TextSpan(children: spans),
       key: const ValueKey('playlist-card-problems'),
       style: const TextStyle(color: Color(0xFF777777), fontSize: 12),
-      maxLines: 1,
+      // Two lines: all four kinds do not fit one beside the cover.
+      maxLines: 2,
       overflow: TextOverflow.ellipsis,
     );
   }

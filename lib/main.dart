@@ -16,6 +16,7 @@ import 'services/background_worker.dart' as background_worker;
 import 'services/app_settings_service.dart';
 import 'services/download_errors.dart';
 import 'services/download_service.dart';
+import 'services/playlist_summary.dart';
 import 'services/subtitles.dart';
 import 'pages/home_page.dart';
 import 'player/player_shell.dart';
@@ -279,9 +280,8 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
     } else {
       // Names the playlist and the tracks: "vibe mix: "Song" – video
       // unavailable".
-      final count = failures.length;
       friendly =
-          '$count ${count == 1 ? 'download' : 'downloads'} failed'
+          '${downloadFailuresHeadline(failures)}'
           '${progress.playlistName == null ? '' : ' in ${progress.playlistName}'}';
       message =
           progress.playlistName == null

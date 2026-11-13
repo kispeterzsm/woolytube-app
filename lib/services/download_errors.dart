@@ -150,13 +150,15 @@ bool isNetworkDownloadError(String raw) {
   return _networkErrorPatterns.any(lower.contains);
 }
 
+const _youTubeVersionUnavailable = 'YouTube version unavailable';
+
 /// Why a fresh copy of a track that keeps its file could not be fetched,
 /// for example the YouTube original of a local replacement:
 /// "YouTube version unavailable".
 String replacementFailureReason(String raw) {
   final friendly = friendlyDownloadError(raw);
   if (friendly == 'Video unavailable' || friendly == 'Removed from YouTube') {
-    return 'YouTube version unavailable';
+    return _youTubeVersionUnavailable;
   }
   return 'YouTube version failed: ${lowerFirst(friendly)}';
 }
@@ -198,6 +200,11 @@ class DownloadFailure {
           ? replacementFailureReason(error)
           : friendlyDownloadError(error);
 
+  /// A fresh copy failed because YouTube no longer has the video; the file
+  /// is kept.
+  bool get youTubeCopyUnavailable =>
+      replacement && reason == _youTubeVersionUnavailable;
+
   /// The same track failing the same way gives the same key.
   String get key => '$trackId:$reason';
 
@@ -225,7 +232,8 @@ List<String> downloadFailureLines(List<DownloadFailure> failures) {
   final more = failures.length - named.length;
   return [
     for (final failure in named)
-      '"${_shortTitle(failure.title)}" – ${lowerFirst(failure.reason)}',
+      '"${_shortTitle(failure.title)}" – ${lowerFirst(failure.reason)}'
+          '${failure.replacement ? ', file kept' : ''}',
     if (more > 0) '+$more more',
   ];
 }

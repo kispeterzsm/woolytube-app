@@ -1,6 +1,7 @@
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import 'download_errors.dart';
+import 'playlist_summary.dart';
 
 typedef NotificationPresenter =
     Future<void> Function(
@@ -94,7 +95,6 @@ class DownloadNotificationService {
     List<DownloadFailure> failures = const [],
   }) async {
     if (downloadedCount < 1) return;
-    final failedCount = failures.length;
 
     final noun = audioOnly ? 'song' : 'video';
     final String title;
@@ -110,7 +110,7 @@ class DownloadNotificationService {
               : 'New ${noun}s downloaded';
       body =
           '$downloadedCount new $plural downloaded to $playlistName'
-          '${failedCount > 0 ? ' · $failedCount failed' : ''}';
+          '${failures.isEmpty ? '' : ' · ${downloadFailuresCount(failures)}'}';
     }
     if (failures.isEmpty) {
       await _show(notificationId, title, body);
@@ -127,18 +127,18 @@ class DownloadNotificationService {
 
   /// Tells which tracks of a playlist could not be downloaded, and why,
   /// for runs nobody watched (the scheduled update). Names the first few
-  /// (`"Title" – video unavailable`) and counts the rest.
+  /// (`"Title" – video unavailable`) and counts the rest. A track that
+  /// keeps its file is not called a failed download: "vibe mix: YouTube
+  /// copy unavailable, your file is kept".
   Future<void> showDownloadProblems(
     String playlistName,
     List<DownloadFailure> failures, {
     int notificationId = _completeNotificationId,
   }) async {
     if (failures.isEmpty) return;
-    final count = failures.length;
     await _show(
       notificationId + _failureIdOffset,
-      '$playlistName: $count ${count == 1 ? 'download' : 'downloads'} '
-      'failed',
+      '$playlistName: ${downloadFailuresHeadline(failures)}',
       downloadFailureLines(failures).join('\n'),
       expandable: true,
     );

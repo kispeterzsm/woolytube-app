@@ -137,7 +137,7 @@ void main() {
     expect(find.byTooltip('Settings'), findsOneWidget);
 
     expect(
-      find.descendant(of: card(0), matching: find.text('662 tracks')),
+      find.descendant(of: card(0), matching: find.text('664 tracks')),
       findsOneWidget,
     );
     expect(

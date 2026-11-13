@@ -18,6 +18,7 @@ import 'package:woolytube/services/lyrics/lyrics_service.dart';
 import 'package:woolytube/services/metadata_service.dart';
 import 'package:woolytube/services/notification_service.dart';
 import 'package:woolytube/services/playlist_service.dart';
+import 'package:woolytube/services/playlist_summary.dart';
 import 'package:woolytube/services/sponsorblock_service.dart';
 
 import '../helpers/fakes.dart';
@@ -2295,8 +2296,13 @@ void main() {
       expect(name, 'vibe mix');
       expect(downloadFailureLines(told), [
         '"Old School Nightcore Mix | Best & Hotte…" – YouTube version '
-            'unavailable',
+            'unavailable, file kept',
       ]);
+      // The user's file plays: the notification does not call it failed.
+      expect(
+        downloadFailuresHeadline(told),
+        'YouTube copy unavailable, your file is kept',
+      );
 
       // The next scheduled update fails the same way: nothing new to tell.
       events = await run(playlist, scheduled: true);

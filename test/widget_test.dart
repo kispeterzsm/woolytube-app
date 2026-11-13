@@ -82,6 +82,26 @@ void main() {
           videoId: 'v5',
           status: 'error',
         ),
+        // Removed from YouTube, its file kept.
+        await insertTestTrack(
+          db,
+          playlistId: a.id,
+          index: 5,
+          videoId: 'v6',
+          status: 'complete',
+          unavailableReason: removedFromYouTubeReason,
+        ),
+        // The user's own file; its YouTube copy is unavailable.
+        await insertTestTrack(
+          db,
+          playlistId: a.id,
+          index: 6,
+          videoId: 'v7',
+          status: 'complete',
+          isLocalReplacement: true,
+          replaceRequested: true,
+          lastError: 'Video unavailable. This video is not available',
+        ),
         await insertTestTrack(
           db,
           playlistId: b.id,
@@ -93,13 +113,16 @@ void main() {
       expect(
         counts[a.id],
         const PlaylistCounts(
-          total: 4,
-          downloaded: 1,
+          total: 6,
+          downloaded: 3,
           unavailable: 1,
           failed: 1,
+          removedKept: 1,
+          noYouTubeCopy: 1,
         ),
       );
-      expect(counts[a.id]!.available, 3);
+      expect(counts[a.id]!.available, 5);
+      expect(counts[a.id]!.notDownloaded, 1);
       expect(counts[b.id], const PlaylistCounts(total: 1, downloaded: 1));
       expect(counts.containsKey(999), isFalse);
 

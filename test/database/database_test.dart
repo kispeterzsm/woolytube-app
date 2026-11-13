@@ -574,6 +574,26 @@ void main() {
       videoId: 'c',
       status: 'error',
     );
+    await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 4,
+      videoId: 'd',
+      status: 'complete',
+      filePath: '/x/00004_d.m4a',
+      unavailableReason: 'private',
+    );
+    await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 5,
+      videoId: 'e',
+      status: 'complete',
+      filePath: '/x/00005_e.m4a',
+      isLocalReplacement: true,
+      replaceRequested: true,
+      lastError: 'Video unavailable',
+    );
 
     final emitted = <Map<int, PlaylistCounts>>[];
     final sub = db.watchPlaylistTrackCounts().listen(emitted.add);
@@ -581,7 +601,14 @@ void main() {
     await pumpEventQueue();
     expect(
       emitted.single[playlist.id],
-      const PlaylistCounts(total: 3, downloaded: 1, unavailable: 1, failed: 1),
+      const PlaylistCounts(
+        total: 5,
+        downloaded: 3,
+        unavailable: 1,
+        failed: 1,
+        removedKept: 1,
+        noYouTubeCopy: 1,
+      ),
     );
 
     // A write that changes no count does not emit.

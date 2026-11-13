@@ -104,10 +104,14 @@ void main() {
     ], notificationId: 7);
 
     expect(presenter.id, 7 + (1 << 20));
-    expect(presenter.title, 'vibe mix: 1 download failed');
+    // The user's file is kept and plays: not a failed download.
+    expect(
+      presenter.title,
+      'vibe mix: YouTube copy unavailable, your file is kept',
+    );
     expect(
       presenter.body,
-      '"Old School Nightcore Mix" – YouTube version unavailable',
+      '"Old School Nightcore Mix" – YouTube version unavailable, file kept',
     );
     final android = presenter.details!.android!;
     expect(android.silent, isTrue);
@@ -122,6 +126,31 @@ void main() {
       presenter.body,
       '"Song 1" – private video\n"Song 2" – private video\n'
       '"Song 3" – private video\n+1 more',
+    );
+  });
+
+  test('a completion counts a kept file apart from failures', () async {
+    final presenter = RecordingNotificationPresenter();
+    final service = DownloadNotificationService(presenter: presenter.call);
+
+    await service.showDownloadComplete(
+      'vibe mix',
+      downloadedCount: 2,
+      audioOnly: true,
+      failures: const [
+        DownloadFailure(trackId: 3, title: 'Song', error: 'Private video'),
+        DownloadFailure(
+          trackId: 59,
+          title: 'Track 59',
+          error: 'Video unavailable',
+          replacement: true,
+        ),
+      ],
+    );
+
+    expect(
+      presenter.body,
+      '2 new songs downloaded to vibe mix · 1 failed · 1 no YouTube copy',
     );
   });
 

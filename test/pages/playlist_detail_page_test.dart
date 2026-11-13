@@ -19,6 +19,7 @@ import 'package:woolytube/services/lyrics/lyrics_search.dart';
 import 'package:woolytube/services/metadata_service.dart';
 import 'package:woolytube/services/playback_service.dart';
 import 'package:woolytube/services/playlist_service.dart';
+import 'package:woolytube/widgets/playlist_card.dart';
 
 import '../helpers/player_shell_harness.dart';
 import '../helpers/real_fonts.dart';
@@ -2124,7 +2125,10 @@ void main() {
 
       expectNotCut(tester, find.byKey(const ValueKey('playlist-detail-name')));
       expect(
-        find.text('10 tracks · 5 downloaded · 2 unavailable · 10 h 25 min'),
+        find.text(
+          '10 tracks · 5 downloaded · 3 failed · 2 unavailable · '
+          '3 removed, kept · 1 no YouTube copy · 10 h 25 min',
+        ),
         findsOneWidget,
       );
       expectNotCut(
@@ -2171,6 +2175,94 @@ void main() {
         findsOneWidget,
       );
       expectNotCut(tester, find.byKey(const ValueKey('track-actions-details')));
+    });
+
+    testWidgets('the summary and the home card count the same tracks', (
+      tester,
+    ) async {
+      usePhoneScreen(tester);
+      playlist = await insertTestPlaylist(
+        db,
+        url: 'spit-it-out',
+        name: 'If you have something to say',
+      );
+      var index = 0;
+      Future<Track> track(
+        String status, {
+        String? unavailableReason,
+        String? lastError,
+        bool keptOwnFile = false,
+      }) {
+        index++;
+        return insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: index,
+          videoId: 'video-$index',
+          title: 'Song $index',
+          status: status,
+          filePath: status == 'complete' ? '/tmp/$index.m4a' : null,
+          unavailableReason: unavailableReason,
+          lastError: lastError,
+          isLocalReplacement: keptOwnFile,
+          replaceRequested: keptOwnFile,
+        );
+      }
+
+      // The owner's playlist in small: downloaded tracks, two failed, one
+      // removed from YouTube without a file, and (like vibe mix #59) the
+      // user's own file whose YouTube copy is unavailable.
+      final tracks = [
+        for (var i = 0; i < 7; i++) await track('complete'),
+        await track('error', lastError: 'HTTP Error 403: Forbidden'),
+        await track('error', lastError: 'HTTP Error 403: Forbidden'),
+        await track('unavailable', unavailableReason: removedFromYouTubeReason),
+        await track(
+          'complete',
+          keptOwnFile: true,
+          lastError: 'Video unavailable. This video is not available',
+        ),
+      ];
+      await pumpPage(tester, tracks: tracks);
+      final summary = find.byKey(const ValueKey('playlist-detail-summary'));
+      expect(
+        tester.widget<Text>(summary).data,
+        '11 tracks · 8 downloaded · 2 failed · 1 unavailable · '
+        '1 no YouTube copy',
+      );
+      expectNotCut(tester, summary);
+
+      // The home card, from the database aggregate.
+      final counts = await tester.runAsync(
+        () => db.watchPlaylistTrackCounts().first,
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ListView(
+              padding: const EdgeInsets.all(12),
+              children: [
+                PlaylistCard(
+                  playlist: playlist,
+                  counts: counts![playlist.id],
+                  onTap: () {},
+                  onUpdate: () {},
+                  onSettings: () {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      final status = find.byKey(const ValueKey('playlist-card-status'));
+      expect(tester.widget<Text>(status).data, '8 of 11 downloaded');
+      final problems = find.byKey(const ValueKey('playlist-card-problems'));
+      expect(
+        tester.widget<Text>(problems).textSpan!.toPlainText(),
+        '2 failed · 1 unavailable · 1 no YouTube copy',
+      );
+      expectNotCut(tester, status);
+      expectNotCut(tester, problems);
     });
 
     testWidgets('an Always skip track keeps its grey line whole', (

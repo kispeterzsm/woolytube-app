@@ -1,9 +1,11 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../database/database.dart';
+import '../services/track_status_labels.dart';
 import 'providers.dart';
 
-/// Track counts of one playlist (total, downloaded, unavailable, failed).
+/// Track counts of one playlist (total, downloaded, unavailable, failed,
+/// and the downloaded ones kept without a YouTube copy).
 typedef PlaylistTrackCounts = PlaylistCounts;
 
 /// Per-playlist track counts, or null until the first answer arrived.
@@ -28,32 +30,46 @@ final playlistCountsProvider = Provider.autoDispose
     });
 
 /// The same numbers as the database aggregate, from a list of tracks (for
-/// code that already holds the tracks, and for tests).
+/// code that already holds the tracks, like the playlist page, and for
+/// tests). Keep the two in step: the home card shows the aggregate, the
+/// playlist page these.
 Map<int, PlaylistCounts> countTracksByPlaylist(Iterable<Track> tracks) {
-  final total = <int, int>{};
-  final downloaded = <int, int>{};
-  final unavailable = <int, int>{};
-  final failed = <int, int>{};
-  void bump(Map<int, int> map, int id) =>
-      map.update(id, (n) => n + 1, ifAbsent: () => 1);
+  final byPlaylist = <int, List<Track>>{};
   for (final track in tracks) {
-    bump(total, track.playlistId);
-    switch (track.status) {
-      case 'complete':
-        bump(downloaded, track.playlistId);
-      case 'unavailable':
-        bump(unavailable, track.playlistId);
-      case 'error':
-        bump(failed, track.playlistId);
-    }
+    byPlaylist.putIfAbsent(track.playlistId, () => []).add(track);
   }
   return {
-    for (final entry in total.entries)
-      entry.key: PlaylistCounts(
-        total: entry.value,
-        downloaded: downloaded[entry.key] ?? 0,
-        unavailable: unavailable[entry.key] ?? 0,
-        failed: failed[entry.key] ?? 0,
-      ),
+    for (final entry in byPlaylist.entries) entry.key: countTracks(entry.value),
   };
+}
+
+/// The counts of [tracks] taken together (one playlist's, usually).
+PlaylistCounts countTracks(Iterable<Track> tracks) {
+  var total = 0;
+  var downloaded = 0;
+  var unavailable = 0;
+  var failed = 0;
+  var removedKept = 0;
+  var noYouTubeCopy = 0;
+  for (final track in tracks) {
+    total++;
+    switch (track.status) {
+      case 'complete':
+        downloaded++;
+        if (track.unavailableReason != null) removedKept++;
+        if (trackReplacementFailed(track)) noYouTubeCopy++;
+      case 'unavailable':
+        unavailable++;
+      case 'error':
+        failed++;
+    }
+  }
+  return PlaylistCounts(
+    total: total,
+    downloaded: downloaded,
+    unavailable: unavailable,
+    failed: failed,
+    removedKept: removedKept,
+    noYouTubeCopy: noYouTubeCopy,
+  );
 }

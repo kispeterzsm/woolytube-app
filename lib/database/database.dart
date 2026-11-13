@@ -846,14 +846,21 @@ class AppDatabase extends _$AppDatabase {
   ])).watch().distinct(listsEqual);
 
   /// Per playlist: how many tracks it has, how many are downloaded, how many
-  /// YouTube no longer provides (and have no file), and how many failed.
-  /// Cheap (one aggregate over an index) and only emits when a number
-  /// changes, so it does not wake the home page on every track write.
+  /// YouTube no longer provides (and have no file), how many failed, and
+  /// how many keep their file without a YouTube copy (see
+  /// [PlaylistCounts]). Cheap (one aggregate over an index) and only emits
+  /// when a number changes, so it does not wake the home page on every
+  /// track write.
   Stream<Map<int, PlaylistCounts>> watchPlaylistTrackCounts() => customSelect(
         'SELECT playlist_id, COUNT(*) AS total, '
         "COALESCE(SUM(status = 'complete'), 0) AS downloaded, "
         "COALESCE(SUM(status = 'unavailable'), 0) AS unavailable, "
-        "COALESCE(SUM(status = 'error'), 0) AS failed "
+        "COALESCE(SUM(status = 'error'), 0) AS failed, "
+        "COALESCE(SUM(status = 'complete' AND unavailable_reason IS NOT NULL), "
+        '0) AS removed_kept, '
+        "COALESCE(SUM(status = 'complete' AND replace_requested = 1 AND "
+        'unavailable_reason IS NULL AND last_error IS NOT NULL), 0) '
+        'AS no_youtube_copy '
         'FROM tracks GROUP BY playlist_id',
         readsFrom: {tracks},
       )
@@ -866,6 +873,8 @@ class AppDatabase extends _$AppDatabase {
               downloaded: row.read<int>('downloaded'),
               unavailable: row.read<int>('unavailable'),
               failed: row.read<int>('failed'),
+              removedKept: row.read<int>('removed_kept'),
+              noYouTubeCopy: row.read<int>('no_youtube_copy'),
             ),
         },
       )
@@ -1871,12 +1880,16 @@ class PlaylistCounts {
     required this.downloaded,
     this.unavailable = 0,
     this.failed = 0,
+    this.removedKept = 0,
+    this.noYouTubeCopy = 0,
   });
 
-  /// Every track of the playlist.
+  /// Every track of the playlist: [downloaded], [unavailable], [failed] and
+  /// [notDownloaded] add up to it.
   final int total;
 
-  /// Tracks with a downloaded file.
+  /// Tracks with a downloaded file, [removedKept] and [noYouTubeCopy]
+  /// included: they play.
   final int downloaded;
 
   /// Tracks YouTube no longer provides and that have no file; updates do
@@ -1886,8 +1899,24 @@ class PlaylistCounts {
   /// Tracks whose last download failed; the next update tries them again.
   final int failed;
 
+  /// Downloaded tracks YouTube (or the YouTube playlist) no longer has; the
+  /// app keeps their file.
+  final int removedKept;
+
+  /// Downloaded tracks whose requested YouTube copy (for example the
+  /// original of the user's own file) could not be fetched; their file is
+  /// kept and plays. Not failed downloads.
+  final int noYouTubeCopy;
+
   /// Tracks that are, or can still be, downloaded.
   int get available => total - unavailable;
+
+  /// Tracks waiting for their first download (pending or downloading).
+  int get notDownloaded => total - downloaded - unavailable - failed;
+
+  /// Every track that can be downloaded has its file: only unavailable ones
+  /// are missing, and nothing waits or failed.
+  bool get nothingToDownload => downloaded + unavailable >= total;
 
   @override
   bool operator ==(Object other) =>
@@ -1895,15 +1924,25 @@ class PlaylistCounts {
       other.total == total &&
       other.downloaded == downloaded &&
       other.unavailable == unavailable &&
-      other.failed == failed;
+      other.failed == failed &&
+      other.removedKept == removedKept &&
+      other.noYouTubeCopy == noYouTubeCopy;
 
   @override
-  int get hashCode => Object.hash(total, downloaded, unavailable, failed);
+  int get hashCode => Object.hash(
+    total,
+    downloaded,
+    unavailable,
+    failed,
+    removedKept,
+    noYouTubeCopy,
+  );
 
   @override
   String toString() =>
       'PlaylistCounts(total: $total, downloaded: $downloaded, '
-      'unavailable: $unavailable, failed: $failed)';
+      'unavailable: $unavailable, failed: $failed, '
+      'removedKept: $removedKept, noYouTubeCopy: $noYouTubeCopy)';
 }
 
 /// Element-wise equality of two lists (drift's data classes compare by

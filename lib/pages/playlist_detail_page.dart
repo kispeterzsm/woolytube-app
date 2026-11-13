@@ -15,6 +15,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../database/database.dart';
 import '../providers/chapter_fetch_jobs.dart';
+import '../providers/playlist_counts_provider.dart';
 import '../providers/playback_providers.dart';
 import '../providers/providers.dart';
 import '../services/chapter_playback.dart';
@@ -25,6 +26,7 @@ import '../services/library_gate.dart';
 import '../services/lyrics/lyrics_models.dart';
 import '../services/media_thumbnail_service.dart';
 import '../services/playlist_service.dart';
+import '../services/playlist_summary.dart';
 import '../services/sponsorblock_service.dart';
 import '../services/track_search.dart';
 import '../services/track_status_labels.dart';
@@ -129,14 +131,10 @@ class _TrackListView {
         if (_isRemovedTrack(visible[i])) i,
     ];
 
-    var downloaded = 0;
-    var unavailable = 0;
     var seconds = 0;
     var maxIndex = 0;
     var playable = false;
     for (final track in tracks) {
-      if (track.status == 'complete') downloaded++;
-      if (track.status == 'unavailable') unavailable++;
       seconds += track.durationSeconds ?? 0;
       if (track.index > maxIndex) maxIndex = track.index;
       if (!playable && track.status == 'complete' && !track.alwaysSkip) {
@@ -145,7 +143,11 @@ class _TrackListView {
     }
     this.maxIndex = maxIndex;
     hasPlayable = playable;
-    summary = _summaryText(tracks.length, downloaded, unavailable, seconds);
+    // The home card's numbers and words (see playlist_summary.dart).
+    summary = playlistSummaryText(
+      countTracks(tracks),
+      duration: seconds > 0 ? _formatTotalDuration(seconds) : null,
+    );
   }
 
   final List<Track> tracks;
@@ -177,22 +179,6 @@ class _TrackListView {
   late final int maxIndex;
   late final bool hasPlayable;
   late final String summary;
-
-  static String _summaryText(
-    int total,
-    int downloaded,
-    int unavailable,
-    int seconds,
-  ) {
-    if (total == 0) return 'No tracks';
-    final parts = <String>[
-      total == 1 ? '1 track' : '$total tracks',
-      downloaded == total ? 'all downloaded' : '$downloaded downloaded',
-      if (unavailable > 0) '$unavailable unavailable',
-    ];
-    if (seconds > 0) parts.add(_formatTotalDuration(seconds));
-    return parts.join(' · ');
-  }
 }
 
 const _nameFontSize = 18.0;
