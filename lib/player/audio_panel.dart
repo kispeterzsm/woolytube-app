@@ -3,10 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/playback_providers.dart';
 import '../widgets/chapters_button.dart';
-import '../widgets/next_file_button.dart';
 import '../widgets/player_controls.dart';
-import '../widgets/segment_mark_button.dart';
-import '../widgets/sleep_timer_button.dart';
+import '../widgets/player_more_button.dart';
 import 'player_layout.dart';
 import 'player_widgets.dart';
 
@@ -287,7 +285,11 @@ class _TransportButton extends StatelessWidget {
   }
 }
 
-/// Labelled toggles and actions under the transport row.
+/// Labelled toggles and actions under the transport row, always the same
+/// five slots so Queue stays in the middle: Shuffle, Autoplay, Queue,
+/// Chapters and More (End segment while a skip segment is being marked).
+/// The rarer actions (lyrics, share, sleep timer, the file's own menu) are
+/// in More.
 class _SecondaryRow extends ConsumerWidget {
   const _SecondaryRow();
 
@@ -295,17 +297,9 @@ class _SecondaryRow extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final shuffle = ref.watch(shuffleEnabledProvider).valueOrNull ?? false;
     final autoplay = ref.watch(autoplayEnabledProvider).valueOrNull ?? true;
-    final audioOnly = ref.watch(audioOnlyModeProvider).valueOrNull ?? false;
-    final videoPlaylist = ref.watch(
-      currentPlaylistProvider.select(
-        (value) => value.valueOrNull?.audioOnly == false,
-      ),
-    );
-    final chapter = ref.watch(isChapterItemProvider);
     final service = ref.read(playbackServiceProvider);
 
     final items = <Widget>[
-      if (chapter) const NextFileButton(),
       PlayerActionButton(
         icon: Icons.shuffle_rounded,
         label: 'Shuffle',
@@ -323,30 +317,9 @@ class _SecondaryRow extends ConsumerWidget {
         toggled: autoplay,
         onPressed: service.toggleAutoplay,
       ),
-      const SleepTimerButton(
-        showLabel: true,
-        iconSize: 24,
-        activeColor: PlayerLayout.activeToggle,
-        inactiveColor: Colors.white70,
-      ),
+      const QueueButton(),
       const ChaptersButton(showLabel: true),
-      const SegmentMarkButton(
-        showLabel: true,
-        iconSize: 24,
-        activeColor: PlayerLayout.activeToggle,
-        inactiveColor: Colors.white70,
-      ),
-      if (videoPlaylist)
-        PlayerActionButton(
-          icon: Icons.headphones_rounded,
-          label: 'Audio only',
-          tooltip:
-              audioOnly
-                  ? 'Audio only: on (tap to play the video)'
-                  : 'Audio only: off (tap to hide the video)',
-          toggled: audioOnly,
-          onPressed: service.toggleAudioOnlyMode,
-        ),
+      const PlayerMoreButton(),
     ];
 
     return Padding(

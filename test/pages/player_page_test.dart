@@ -489,11 +489,23 @@ void main() {
     harness.shellState(tester).expand();
     await tester.pumpAndSettle();
 
-    for (final label in ['Shuffle', 'Autoplay', 'Sleep', 'Chapters']) {
+    // Always the same five slots, Queue in the middle; the rest is in More.
+    const row = ['Shuffle', 'Autoplay', 'Queue', 'Chapters', 'More'];
+    for (final label in row) {
       expect(find.text(label), findsOneWidget, reason: label);
     }
-    expect(find.text('Audio only'), findsOneWidget);
-    expect(find.text('Next file'), findsNothing);
+    final xs = [for (final label in row) tester.getCenter(find.text(label)).dx];
+    for (var i = 1; i < xs.length; i++) {
+      expect(xs[i], greaterThan(xs[i - 1]), reason: row[i]);
+    }
+    expect(
+      xs[2],
+      closeTo(tester.getCenter(find.byTooltip('Pause')).dx, 1),
+      reason: 'Queue sits under play/pause',
+    );
+    for (final moved in ['Sleep', 'Audio only', 'Next file', 'Mark part']) {
+      expect(find.text(moved), findsNothing, reason: moved);
+    }
     expect(find.byTooltip('Next'), findsOneWidget);
 
     await tester.tap(find.byTooltip('Next'));
@@ -513,13 +525,17 @@ void main() {
     expect(_background, findsNothing);
   });
 
-  testWidgets('Next file appears only while chapters play as tracks', (
+  testWidgets('More offers Next file only while chapters play as tracks', (
     tester,
   ) async {
     final harness = await pumpPlayerShell(tester);
     harness.shellState(tester).expand();
     await tester.pumpAndSettle();
+    await tester.tap(find.text('More'));
+    await tester.pumpAndSettle();
     expect(find.text('Next file'), findsNothing);
+    await tester.tapAt(const Offset(10, 10));
+    await tester.pumpAndSettle();
 
     const chapter = MediaChapter(
       id: 'c1',
@@ -529,10 +545,14 @@ void main() {
     );
     harness.item.add(PlaybackItem(harness.audioTrack, chapter));
     await tester.pumpAndSettle();
-    expect(find.text('Next file'), findsOneWidget);
     expect(find.byTooltip('Next chapter'), findsOneWidget);
+    await tester.tap(find.text('More'));
+    await tester.pumpAndSettle();
+    expect(find.text('Next file'), findsOneWidget);
     await tester.tap(find.text('Next file'));
+    await tester.pumpAndSettle();
     expect(harness.playback.nextFileCalls, 1);
+    expect(find.byKey(const ValueKey('player-more-list')), findsNothing);
   });
 
   testWidgets('seek bar holds the dragged position until the seek lands', (

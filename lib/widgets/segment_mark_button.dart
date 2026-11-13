@@ -5,6 +5,8 @@ import '../player/player_widgets.dart';
 import '../providers/playback_providers.dart';
 import '../services/sponsorblock_service.dart';
 
+/// Starts a skip segment, or ends the one being marked. Used by the video
+/// player's controls; the audio panel reaches the same actions through More.
 class SegmentMarkButton extends ConsumerWidget {
   final Color activeColor;
   final Color inactiveColor;
@@ -27,75 +29,79 @@ class SegmentMarkButton extends ConsumerWidget {
         ref.watch(pendingSegmentMarkStartProvider).valueOrNull != null;
     return PlayerActionButton(
       icon: pending ? Icons.bookmark : Icons.bookmark_add_outlined,
-      label: pending ? 'End part' : 'Mark part',
+      label: pending ? 'End segment' : 'Add skip segment',
       tooltip:
           pending
-              ? 'Mark where the part to skip ends'
-              : 'Mark the start of a part to skip',
+              ? 'End segment: mark where the part to skip ends'
+              : 'Add skip segment: mark where the part to skip starts',
       toggled: pending,
       showLabel: showLabel,
       activeColor: activeColor,
       inactiveColor: inactiveColor,
       iconSize: iconSize,
-      onPressed: () => _handlePressed(context, ref, pending),
+      onPressed: () async {
+        if (pending) {
+          await finishSkipSegment(context, ref);
+        } else {
+          await startSkipSegment(context, ref);
+        }
+        onAction?.call();
+      },
     );
   }
+}
 
-  Future<void> _handlePressed(
-    BuildContext context,
-    WidgetRef ref,
-    bool pending,
-  ) async {
-    final svc = ref.read(playbackServiceProvider);
-    if (!pending) {
-      final result = await svc.markLocalSegmentBoundary('sponsor');
-      // The active bookmark immediately confirms the start. In particular,
-      // avoid a SnackBar here because it covers the video controls and makes
-      // it impossible to finish very short segments promptly.
-      if (context.mounted && result.error != null) {
-        _showMessage(context, result.error!);
-      }
-      onAction?.call();
-      return;
-    }
+/// Marks the current position as the start of a skip segment. The pending
+/// mark (see [pendingSegmentMarkStartProvider]) is the confirmation.
+Future<void> startSkipSegment(BuildContext context, WidgetRef ref) async {
+  final result = await ref
+      .read(playbackServiceProvider)
+      .markLocalSegmentBoundary('sponsor');
+  // The active bookmark immediately confirms the start. In particular,
+  // avoid a SnackBar here because it covers the video controls and makes
+  // it impossible to finish very short segments promptly.
+  if (context.mounted && result.error != null) {
+    _showSegmentMessage(context, result.error!);
+  }
+}
 
-    final category = await showModalBottomSheet<String>(
-      context: context,
-      backgroundColor: const Color(0xFF2A2A2A),
-      isScrollControlled: true,
-      builder:
-          (context) => SafeArea(
-            child: FractionallySizedBox(
-              heightFactor: 0.9,
-              child: SegmentCategoryPicker(
-                onCategorySelected:
-                    (category) => Navigator.pop(context, category),
-                onDiscard: () {
-                  svc.cancelLocalSegmentMark();
-                  Navigator.pop(context);
-                },
-              ),
+/// Ends the pending skip segment at the current position: asks for its
+/// category (or to discard it) and saves it.
+Future<void> finishSkipSegment(BuildContext context, WidgetRef ref) async {
+  final svc = ref.read(playbackServiceProvider);
+  final category = await showModalBottomSheet<String>(
+    context: context,
+    backgroundColor: const Color(0xFF2A2A2A),
+    isScrollControlled: true,
+    builder:
+        (context) => SafeArea(
+          child: FractionallySizedBox(
+            heightFactor: 0.9,
+            child: SegmentCategoryPicker(
+              onCategorySelected:
+                  (category) => Navigator.pop(context, category),
+              onDiscard: () {
+                svc.cancelLocalSegmentMark();
+                Navigator.pop(context);
+              },
             ),
           ),
-    );
-    if (category == null) return;
+        ),
+  );
+  if (category == null) return;
 
-    final result = await svc.markLocalSegmentBoundary(category);
-    if (context.mounted) {
-      _showMessage(
-        context,
-        result.error ??
-            'Segment saved as ${sponsorBlockCategoryLabels[category] ?? category}',
-      );
-    }
-    onAction?.call();
-  }
-
-  void _showMessage(BuildContext context, String message) {
-    ScaffoldMessenger.of(
+  final result = await svc.markLocalSegmentBoundary(category);
+  if (context.mounted) {
+    _showSegmentMessage(
       context,
-    ).showSnackBar(SnackBar(content: Text(message)));
+      result.error ??
+          'Segment saved as ${sponsorBlockCategoryLabels[category] ?? category}',
+    );
   }
+}
+
+void _showSegmentMessage(BuildContext context, String message) {
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
 }
 
 /// Scrollable category selector shared by the audio and video segment marker.

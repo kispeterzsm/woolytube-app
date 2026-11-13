@@ -159,6 +159,9 @@ class PlayerActionButton extends StatelessWidget {
   final Color inactiveColor;
   final double iconSize;
 
+  /// Drawn over the icon's top-right corner, such as a count or a dot.
+  final Widget? badge;
+
   const PlayerActionButton({
     super.key,
     required this.icon,
@@ -170,6 +173,7 @@ class PlayerActionButton extends StatelessWidget {
     this.activeColor = PlayerLayout.activeToggle,
     this.inactiveColor = Colors.white70,
     this.iconSize = 24,
+    this.badge,
   });
 
   @override
@@ -182,11 +186,18 @@ class PlayerActionButton extends StatelessWidget {
             : active
             ? activeColor
             : inactiveColor;
+    Widget iconWidget = Icon(icon, size: iconSize, color: color);
+    if (badge != null) {
+      iconWidget = Stack(
+        clipBehavior: Clip.none,
+        children: [iconWidget, Positioned(top: -4, right: -8, child: badge!)],
+      );
+    }
     if (!showLabel) {
       return Semantics(
         toggled: toggled,
         child: IconButton(
-          icon: Icon(icon, size: iconSize),
+          icon: iconWidget,
           color: color,
           tooltip: tooltip,
           onPressed: onPressed,
@@ -214,7 +225,7 @@ class PlayerActionButton extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(icon, size: iconSize, color: color),
+                  iconWidget,
                   const SizedBox(height: 4),
                   FittedBox(
                     fit: BoxFit.scaleDown,

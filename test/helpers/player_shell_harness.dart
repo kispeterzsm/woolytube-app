@@ -26,7 +26,12 @@ class FakePlayback implements PlaybackService {
   int previousCalls = 0;
   int nextFileCalls = 0;
   int stopCalls = 0;
+  int audioOnlyToggles = 0;
+  int cancelMarkCalls = 0;
   final seeks = <Duration>[];
+
+  /// Categories passed to [markLocalSegmentBoundary], oldest first.
+  final segmentMarks = <String>[];
 
   @override
   bool get isVideoContent => video;
@@ -68,7 +73,38 @@ class FakePlayback implements PlaybackService {
   void toggleAutoplay() {}
 
   @override
-  Future<void> toggleAudioOnlyMode() async {}
+  Future<void> toggleAudioOnlyMode() async => audioOnlyToggles++;
+
+  /// Starts a mark when none is pending, else saves it, like the service.
+  @override
+  Future<SegmentMarkResult> markLocalSegmentBoundary(String category) async {
+    segmentMarks.add(category);
+    final start = harness.pendingMark.value;
+    if (start == null) {
+      harness.pendingMark.add(position);
+      return SegmentMarkResult.started(position);
+    }
+    harness.pendingMark.add(null);
+    return SegmentMarkResult.saved(start, position);
+  }
+
+  /// Tracks passed to [playNext], oldest first.
+  final playedNext = <Track>[];
+
+  @override
+  Future<bool> playNext(Track track, {String? chapterId}) async {
+    playedNext.add(track);
+    return true;
+  }
+
+  @override
+  Future<bool> startUpNextQueueIfIdle() async => false;
+
+  @override
+  void cancelLocalSegmentMark() {
+    cancelMarkCalls++;
+    harness.pendingMark.add(null);
+  }
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -83,6 +119,10 @@ class PlayerShellHarness {
   final position = BehaviorSubject<Duration>.seeded(Duration.zero);
   final duration = BehaviorSubject<Duration>.seeded(const Duration(minutes: 3));
   final item = BehaviorSubject<PlaybackItem?>.seeded(null);
+  final upNext = BehaviorSubject<List<Track>>.seeded(const []);
+  final sleepRemaining = BehaviorSubject<Duration?>.seeded(null);
+  final stopAfterCurrent = BehaviorSubject<bool>.seeded(false);
+  final pendingMark = BehaviorSubject<Duration?>.seeded(null);
   final pagesKey = GlobalKey<NavigatorState>();
   late final FakePlayback playback = FakePlayback(this);
   final systemCalls = <MethodCall>[];
@@ -113,6 +153,10 @@ class PlayerShellHarness {
     await position.close();
     await duration.close();
     await item.close();
+    await upNext.close();
+    await sleepRemaining.close();
+    await stopAfterCurrent.close();
+    await pendingMark.close();
   }
 
   /// Starts [next] as the playing track, like the playback service does.
@@ -125,11 +169,17 @@ class PlayerShellHarness {
 }
 
 /// Pumps the real app shell with [home] as the first page.
+///
+/// [withLibrary] also serves the test database, its playlist and
+/// [PlayerShellHarness.upNext] to the library providers, for sheets that
+/// read them (Up next, track options). Leave it off when [overrides] brings
+/// its own.
 Future<PlayerShellHarness> pumpPlayerShell(
   WidgetTester tester, {
   Widget? home,
   bool startPlaying = true,
   bool video = false,
+  bool withLibrary = false,
   List<Override> overrides = const [],
 }) async {
   final harness = PlayerShellHarness();
@@ -194,11 +244,24 @@ Future<PlayerShellHarness> pumpPlayerShell(
         autoplayEnabledProvider.overrideWith((ref) => Stream.value(true)),
         audioOnlyModeProvider.overrideWith((ref) => Stream.value(false)),
         sleepTimerRemainingProvider.overrideWith(
-          (ref) => Stream<Duration?>.value(null),
+          (ref) => harness.sleepRemaining.stream,
+        ),
+        stopAfterCurrentProvider.overrideWith(
+          (ref) => harness.stopAfterCurrent.stream,
+        ),
+        currentItemIsChapterProvider.overrideWith(
+          (ref) => harness.item.stream.map((item) => item?.chapter != null),
         ),
         pendingSegmentMarkStartProvider.overrideWith(
-          (ref) => Stream<Duration?>.value(null),
+          (ref) => harness.pendingMark.stream,
         ),
+        if (withLibrary) ...[
+          upNextQueueProvider.overrideWith((ref) => harness.upNext.stream),
+          databaseProvider.overrideWithValue(db),
+          playlistsProvider.overrideWith(
+            (ref) => Stream.value([harness.testPlaylist]),
+          ),
+        ],
         tracksProvider(harness.testPlaylist.id).overrideWith(
           (ref) => Stream.value([harness.audioTrack, harness.videoTrack]),
         ),

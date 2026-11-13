@@ -13,6 +13,17 @@ bool hasYouTubeTimeline(Track track) =>
     !track.videoId.startsWith(forcedInsertVideoIdPrefix) &&
     !track.isLocalReplacement;
 
+/// The YouTube watch link of [track]'s video.
+String youTubeVideoUrl(Track track) =>
+    'https://www.youtube.com/watch?v=${track.videoId}';
+
+/// Opens the system share sheet with [track]'s YouTube link.
+Future<void> shareYouTubeVideo(Track track, {SharePlus? sharePlus}) async {
+  await (sharePlus ?? SharePlus.instance).share(
+    ShareParams(uri: Uri.parse(youTubeVideoUrl(track)), title: track.title),
+  );
+}
+
 /// A short YouTube link that starts [videoId] at [startMs], rounded down to
 /// the whole second (YouTube's `t=` takes seconds).
 String youTubeTimestampUrl(String videoId, {required int startMs}) {

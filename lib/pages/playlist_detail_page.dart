@@ -11,7 +11,6 @@ import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
-import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../database/database.dart';
@@ -28,6 +27,7 @@ import '../services/playlist_service.dart';
 import '../services/sponsorblock_service.dart';
 import '../services/track_search.dart';
 import '../services/video_quality.dart';
+import '../services/youtube_links.dart';
 import '../widgets/lyrics_line_text.dart';
 import '../widgets/mobile_data_download_guard.dart';
 import '../widgets/tap_to_place_cursor_text_field.dart';
@@ -177,8 +177,7 @@ String _formatTotalDuration(int seconds) {
   return minutes == 0 ? '$hours h' : '$hours h $minutes min';
 }
 
-class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
-    with _TrackActions {
+class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   static const _followAnimation = Duration(milliseconds: 250);
 
   /// After the user scrolls the list, a track change does not move it for
@@ -236,12 +235,18 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage>
   Set<int>? _lyricsSettled;
   final ValueNotifier<bool> _showJumpToPlaying = ValueNotifier(false);
 
-  @override
   Playlist? get _playlist {
     final playlists = ref.read(playlistsProvider).valueOrNull;
     return playlists?.where((p) => p.id == widget.playlistId).firstOrNull ??
         _fetchedPlaylist;
   }
+
+  void _showTrackActions(Track track) => _TrackActions(
+    context: context,
+    ref: ref,
+    playlistId: widget.playlistId,
+    playlist: () => _playlist,
+  ).show(track);
 
   @override
   void initState() {

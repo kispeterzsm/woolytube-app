@@ -3,18 +3,55 @@ part of '../playlist_detail_page.dart';
 const _sheetTitleStyle = TextStyle(color: Colors.white);
 const _sheetSubtitleStyle = TextStyle(color: _muted);
 
-/// The track options sheet and everything it starts. A mixin so the page
-/// file stays about the list.
-mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
-  /// The playlist row as currently known (live when available).
-  Playlist? get _playlist;
+/// Opens the options sheet of [track], the same one as the ⋮ of its row on
+/// the playlist page, from anywhere in the app.
+///
+/// [context] and [ref] must outlive the sheet and the flows it starts
+/// (renames, replacements, downloads), so pass a long-lived host such as
+/// the player shell, not a widget that may go away meanwhile. [track] must be
+/// the file's own row, never a chapter shown as a track.
+void showTrackActionsSheet(BuildContext context, WidgetRef ref, Track track) {
+  _TrackActions(
+    context: context,
+    ref: ref,
+    playlistId: track.playlistId,
+    playlist:
+        () =>
+            ref
+                .read(playlistsProvider)
+                .valueOrNull
+                ?.where((playlist) => playlist.id == track.playlistId)
+                .firstOrNull,
+  ).show(track);
+}
 
-  String _videoUrl(Track track) =>
-      'https://www.youtube.com/watch?v=${track.videoId}';
+/// The track options sheet and everything it starts, for one host: the
+/// playlist page, or the player through [showTrackActionsSheet]. Kept apart
+/// so the page file stays about the list.
+class _TrackActions {
+  _TrackActions({
+    required this.context,
+    required this.ref,
+    required this.playlistId,
+    required Playlist? Function() playlist,
+  }) : _playlistOf = playlist;
+
+  /// The host's context; dialogs, pages and messages open from it.
+  final BuildContext context;
+  final WidgetRef ref;
+
+  /// The playlist of the tracks this host shows.
+  final int playlistId;
+  final Playlist? Function() _playlistOf;
+
+  /// The playlist row as currently known (live when available).
+  Playlist? get _playlist => _playlistOf();
+
+  String _videoUrl(Track track) => youTubeVideoUrl(track);
 
   /// One flat sheet: header, the common actions, then labelled File and
   /// YouTube sections. Nothing is nested.
-  void _showTrackActions(Track track) {
+  void show(Track track) {
     bool? alwaysSkipOverride;
     showModalBottomSheet<void>(
       context: context,
@@ -28,7 +65,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
               // Live row, so a download finishing or a rename shows here.
               final live =
                   sheetRef.watch(
-                    tracksProvider(widget.playlistId).select(
+                    tracksProvider(playlistId).select(
                       (tracks) =>
                           tracks.valueOrNull
                               ?.where((t) => t.id == track.id)
@@ -69,7 +106,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
                                       () => alwaysSkipOverride = !value,
                                     );
                                   }
-                                  if (mounted) {
+                                  if (context.mounted) {
                                     ScaffoldMessenger.of(context).showSnackBar(
                                       SnackBar(
                                         content: Text('Could not save: $e'),
@@ -386,7 +423,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
             await ref
                 .read(playlistServiceProvider)
                 .requestOriginalDownload(track);
-            if (!mounted) return;
+            if (!context.mounted) return;
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
                 content: Text(
@@ -455,7 +492,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
         next
             ? await playbackService.playNext(track)
             : await playbackService.addToUpNextQueue(track);
-    if (!mounted) return;
+    if (!context.mounted) return;
     if (!added) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -465,7 +502,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
       return;
     }
     final started = await playbackService.startUpNextQueueIfIdle();
-    if (!mounted) return;
+    if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
@@ -481,11 +518,9 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
 
   Future<void> _shareTrack(Track track) async {
     try {
-      await SharePlus.instance.share(
-        ShareParams(uri: Uri.parse(_videoUrl(track)), title: track.title),
-      );
+      await shareYouTubeVideo(track);
     } catch (e) {
-      if (!mounted) return;
+      if (!context.mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('Could not share: $e')));
@@ -497,7 +532,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
     if (playlist == null) return;
 
     if (!await Directory(playlist.outputPath).exists()) {
-      if (mounted) {
+      if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Playlist folder not found')),
         );
@@ -535,7 +570,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
     final picked = result.files.single;
     final sourcePath = picked.path;
     if (sourcePath == null) {
-      if (mounted) {
+      if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Could not access picked file')),
         );
@@ -550,7 +585,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
           "\n\nThe current file is not deleted: it is kept in this playlist's "
           'replaced-files folder (.woolytube_replaced).';
     }
-    if (!mounted) return;
+    if (!context.mounted) return;
     final confirmed = await showDialog<bool>(
       context: context,
       builder:
@@ -577,7 +612,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
             ],
           ),
     );
-    if (confirmed != true || !mounted) return;
+    if (confirmed != true || !context.mounted) return;
 
     try {
       final updated = await ref
@@ -587,7 +622,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
             sourcePath: sourcePath,
             sourceFileName: picked.name,
           );
-      if (mounted) {
+      if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Replaced with ${p.basename(updated.filePath!)}'),
@@ -595,13 +630,13 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
         );
       }
     } on LibraryBusyException catch (e) {
-      if (mounted) {
+      if (context.mounted) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text(e.message)));
       }
     } catch (e) {
-      if (mounted) {
+      if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Replacement failed: ${_errorText(e)}')),
         );
@@ -621,7 +656,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
     } catch (_) {
       // Prefilling is a convenience only.
     }
-    if (!mounted) return;
+    if (!context.mounted) return;
     final prefill =
         clipboard != null &&
                 PlaylistService.parseReuploadUrl(clipboard) != null &&
@@ -630,7 +665,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
             : '';
     final hasFile =
         track.filePath != null && await File(track.filePath!).exists();
-    if (!mounted) return;
+    if (!context.mounted) return;
     final url = await showDialog<String>(
       context: context,
       builder:
@@ -640,7 +675,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
             keepsCurrentFile: hasFile,
           ),
     );
-    if (url == null || !mounted) return;
+    if (url == null || !context.mounted) return;
     await _downloadReplacement(track, url, source: 'the reupload');
   }
 
@@ -649,7 +684,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
   Future<void> _replaceWithArchivedCopy(Track track) async {
     final hasFile =
         track.filePath != null && await File(track.filePath!).exists();
-    if (!mounted) return;
+    if (!context.mounted) return;
     final confirmed = await showDialog<bool>(
       context: context,
       builder:
@@ -681,7 +716,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
             ],
           ),
     );
-    if (confirmed != true || !mounted) return;
+    if (confirmed != true || !context.mounted) return;
     await _downloadReplacement(
       track,
       PlaylistService.archivedCopyUrl(track.videoId),
@@ -700,7 +735,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
     if (playlist == null) return;
     final downloadService = ref.read(downloadServiceProvider);
     void showMessage(String message) {
-      if (!mounted) return;
+      if (!context.mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(message)));
@@ -762,7 +797,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
       RegExp(r'^\d+_'),
       '',
     );
-    if (!mounted) return;
+    if (!context.mounted) return;
 
     final edit = await showDialog<_TrackRenameResult>(
       context: context,
@@ -773,7 +808,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
             hasFile: hasFile,
           ),
     );
-    if (edit == null || !mounted) return;
+    if (edit == null || !context.mounted) return;
 
     final newFilename = edit.fileName.trim();
     String message;
@@ -801,7 +836,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
       message = 'Rename failed: $e';
     }
 
-    if (mounted) {
+    if (context.mounted) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(message)));
@@ -891,7 +926,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
 
     final downloadService = ref.read(downloadServiceProvider);
     void showBusy() {
-      if (!mounted) return;
+      if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('A download is already in progress')),
       );
@@ -917,7 +952,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
     }
 
     final hadFile = track.status == 'complete' && track.filePath != null;
-    if (mounted) {
+    if (context.mounted) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('Downloading "${track.title}"')));
@@ -928,7 +963,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
           .downloadTrack(playlist, track)
           .then(
             (downloaded) {
-              if (!mounted) return;
+              if (!context.mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(
                   content: Text(
@@ -942,7 +977,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
             onError: (Object e, StackTrace _) {
               // The service throws the recorded yt-dlp reason itself.
               final reason = friendlyDownloadError(_errorText(e));
-              if (!mounted) return;
+              if (!context.mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(
                   content: Text(
@@ -990,7 +1025,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
             ],
           ),
     );
-    if (confirmed != true || !mounted) return;
+    if (confirmed != true || !context.mounted) return;
     await _startTrackDownload(track);
   }
 
@@ -998,8 +1033,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
   Future<void> _removeFromTemporary(Track track) async {
     final downloads = ref.read(downloadServiceProvider);
     final downloading =
-        downloads.isDownloading &&
-        downloads.activePlaylistId == widget.playlistId;
+        downloads.isDownloading && downloads.activePlaylistId == playlistId;
     final confirmed = await showDialog<bool>(
       context: context,
       builder:
@@ -1030,11 +1064,9 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
             ],
           ),
     );
-    if (confirmed != true || !mounted) return;
+    if (confirmed != true || !context.mounted) return;
     final messenger = ScaffoldMessenger.of(context);
-    final error = await removeTemporaryVideos(ref, widget.playlistId, {
-      track.id,
-    });
+    final error = await removeTemporaryVideos(ref, playlistId, {track.id});
     messenger.showSnackBar(
       SnackBar(content: Text(error ?? 'Removed "${track.title}"')),
     );
@@ -1051,11 +1083,13 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
       forTrack: true,
       playlistQuality: playlist.videoQuality,
     );
-    if (picked == null || !mounted || picked.value == track.videoQuality) {
+    if (picked == null ||
+        !context.mounted ||
+        picked.value == track.videoQuality) {
       return;
     }
     void showMessage(String message) {
-      if (!mounted) return;
+      if (!context.mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(message)));
@@ -1076,7 +1110,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
       showMessage('Could not save: ${_errorText(e)}');
       return;
     }
-    if (affected.isEmpty || !mounted) return;
+    if (affected.isEmpty || !context.mounted) return;
     final newMax = effectiveMaxHeight(playlist, updated);
     if (!await confirmQualityRedownload(
           context,
@@ -1084,7 +1118,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
           maxHeight: newMax,
           singleTrack: true,
         ) ||
-        !mounted) {
+        !context.mounted) {
       return;
     }
     final downloads = ref.read(downloadServiceProvider);
@@ -1099,7 +1133,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
       showMessage('Could not save: ${_errorText(e)}');
       return;
     }
-    if (!mounted || explainDownloadsUnavailable(context, ref)) return;
+    if (!context.mounted || explainDownloadsUnavailable(context, ref)) return;
     if (!await confirmManualDownload(
       context,
       ref.read(downloadNetworkPolicyProvider),
@@ -1123,7 +1157,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
     final db = ref.read(databaseProvider);
     final playback = ref.read(playbackServiceProvider);
     final segments = await db.getSegmentsForTrack(track.id);
-    if (!mounted) return;
+    if (!context.mounted) return;
     await showModalBottomSheet<void>(
       context: context,
       backgroundColor: const Color(0xFF2A2A2A),
@@ -1137,7 +1171,7 @@ mixin _TrackActions on ConsumerState<PlaylistDetailPage> {
             initialSegments: segments,
             onChanged: playback.refreshCurrentSegments,
             onError: (message) {
-              if (!mounted) return;
+              if (!context.mounted) return;
               ScaffoldMessenger.of(
                 context,
               ).showSnackBar(SnackBar(content: Text(message)));
