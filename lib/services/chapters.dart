@@ -402,6 +402,21 @@ class ChapterData {
   }
 }
 
+/// The title song recognition gives a section it could not identify.
+const unrecognizedChapterTitle = 'Unrecognized section';
+
+final _numberedChapterTitle = RegExp(r'^chapter\s*\d+$', caseSensitive: false);
+
+/// Whether [title] is a stand-in rather than a real name: the title song
+/// recognition gives an unidentified section, or a default "Chapter N"
+/// (YouTube chapters without a title, a split in the chapter editor).
+/// Lists show these in the error color, so unknown parts are easy to find.
+bool isPlaceholderChapterTitle(String title) {
+  final trimmed = title.trim();
+  return trimmed.toLowerCase() == unrecognizedChapterTitle.toLowerCase() ||
+      _numberedChapterTitle.hasMatch(trimmed);
+}
+
 String chapterTimestamp(int ms) {
   final d = Duration(milliseconds: ms);
   final seconds = (d.inSeconds % 60).toString().padLeft(2, '0');

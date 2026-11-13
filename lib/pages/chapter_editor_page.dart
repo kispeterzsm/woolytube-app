@@ -1544,11 +1544,18 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
                   children: [
                     Text(
                       c.title,
+                      key: ValueKey('editor-chapter-title-${c.id}'),
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontSize: 15,
                         fontWeight: selected ? FontWeight.w600 : null,
+                        // Stand-in names stand out, so unknown parts are
+                        // easy to find.
+                        color:
+                            isPlaceholderChapterTitle(c.title)
+                                ? theme.colorScheme.error
+                                : null,
                       ),
                     ),
                     const SizedBox(height: 2),

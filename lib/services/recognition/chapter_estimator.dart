@@ -397,7 +397,7 @@ class ChapterEstimator {
           title:
               key != null
                   ? '${first.artist} — ${first.title}'
-                  : 'Unrecognized section',
+                  : unrecognizedChapterTitle,
           startMs: start,
           endMs: durationMs,
           trackKey: key,

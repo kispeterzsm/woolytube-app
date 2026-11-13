@@ -462,6 +462,158 @@ void main() {
     await unmount(tester);
   });
 
+  group('the playing chapter', () {
+    const accent = Color(0xFF2196F3);
+    // The Recognize songs button uses the same icon, so only rows count.
+    final playingIcon = find.byWidgetPredicate(
+      (w) =>
+          w is Icon &&
+          w.icon == Icons.graphic_eq &&
+          w.key is ValueKey<String> &&
+          (w.key! as ValueKey<String>).value.startsWith('chapter-playing-'),
+    );
+
+    Text title(WidgetTester tester, String id) =>
+        tester.widget<Text>(find.byKey(ValueKey('chapter-title-$id')));
+
+    Finder playingMark(String id) =>
+        find.byKey(ValueKey('chapter-playing-$id'));
+
+    testWidgets('is marked like the current track and follows the position '
+        'while the whole file plays', (tester) async {
+      final track = await addTrack(chapters: youTubeChapters);
+      player.item = PlaybackItem(track);
+      player.playing = true;
+      await pumpPage(tester, track);
+
+      expect(playingMark('a'), findsOneWidget);
+      expect(playingIcon, findsOneWidget);
+      expect(title(tester, 'a').style?.color, accent);
+      expect(title(tester, 'a').style?.fontWeight, FontWeight.w600);
+      expect(title(tester, 'b').style?.color, isNull);
+
+      player.position = const Duration(seconds: 30);
+      await tester.pumpAndSettle();
+      expect(playingMark('a'), findsOneWidget);
+
+      player.position = const Duration(seconds: 90);
+      await tester.pumpAndSettle();
+      expect(playingMark('b'), findsOneWidget);
+      expect(playingIcon, findsOneWidget);
+      expect(title(tester, 'a').style?.color, isNull);
+      expect(title(tester, 'b').style?.color, accent);
+
+      // Paused: still marked, without the playing icon.
+      player.playing = false;
+      await tester.pumpAndSettle();
+      expect(playingIcon, findsNothing);
+      expect(title(tester, 'b').style?.color, accent);
+      await unmount(tester);
+    });
+
+    testWidgets('is the chapter played as its own track', (tester) async {
+      final track = await addTrack(chapters: youTubeChapters);
+      player.item = PlaybackItem(track, youTubeChapters.downloaded.last);
+      player.playing = true;
+      await pumpPage(tester, track);
+      expect(playingMark('b'), findsOneWidget);
+
+      // The position is on the chapter's own timeline: 10 s into 'b'.
+      player.position = const Duration(seconds: 10);
+      await tester.pumpAndSettle();
+      expect(playingMark('b'), findsOneWidget);
+
+      player.item = PlaybackItem(track, youTubeChapters.downloaded.first);
+      await tester.pumpAndSettle();
+      expect(playingMark('a'), findsOneWidget);
+      expect(playingIcon, findsOneWidget);
+      await unmount(tester);
+    });
+
+    testWidgets('is not marked while another file plays', (tester) async {
+      final track = await addTrack(chapters: youTubeChapters);
+      final other = (await db.getTracksForPlaylist(
+        track.playlistId,
+      )).firstWhere((t) => t.id != track.id);
+      player.item = PlaybackItem(other);
+      player.playing = true;
+      await pumpPage(tester, track);
+      expect(playingIcon, findsNothing);
+      expect(title(tester, 'a').style?.color, isNull);
+      expect(title(tester, 'b').style?.color, isNull);
+      await unmount(tester);
+    });
+  });
+
+  testWidgets('stand-in chapter names are red, even while playing', (
+    tester,
+  ) async {
+    final track = await addTrack(
+      chapters: const ChapterData(
+        downloaded: [
+          MediaChapter(id: 'a', title: 'Chapter 1', startMs: 0, endMs: 60000),
+          MediaChapter(
+            id: 'b',
+            title: unrecognizedChapterTitle,
+            startMs: 60000,
+            endMs: 120000,
+          ),
+          MediaChapter(
+            id: 'c',
+            title: 'Chapter 3 (live)',
+            startMs: 120000,
+            endMs: 180000,
+          ),
+        ],
+        durationMs: 180000,
+      ),
+    );
+    player.item = PlaybackItem(track);
+    player.playing = true;
+    await pumpPage(tester, track);
+
+    Color? colorOf(String id) =>
+        tester
+            .widget<Text>(find.byKey(ValueKey('chapter-title-$id')))
+            .style
+            ?.color;
+    final error =
+        Theme.of(
+          tester.element(find.byKey(const ValueKey('chapter-title-c'))),
+        ).colorScheme.error;
+    expect(find.byKey(const ValueKey('chapter-playing-a')), findsOneWidget);
+    expect(colorOf('a'), error);
+    expect(colorOf('b'), error);
+    expect(colorOf('c'), isNot(error));
+    await unmount(tester);
+  });
+
+  testWidgets('chapter lengths are right-aligned', (tester) async {
+    final track = await addTrack(
+      chapters: const ChapterData(
+        downloaded: [
+          MediaChapter(id: 'a', title: 'Intro', startMs: 0, endMs: 5000),
+          MediaChapter(id: 'b', title: 'Song', startMs: 5000, endMs: 180000),
+        ],
+        durationMs: 180000,
+      ),
+    );
+    await pumpPage(tester, track);
+
+    final a = find.byKey(const ValueKey('chapter-length-a'));
+    final b = find.byKey(const ValueKey('chapter-length-b'));
+    expect(tester.widget<Text>(a).data, '0:05');
+    expect(tester.widget<Text>(b).data, '2:55');
+    expect(tester.getTopRight(a).dx, tester.getTopRight(b).dx);
+    // Past the times, at the right of the row's text.
+    final times = find.descendant(
+      of: find.byKey(const ValueKey('chapter-b')),
+      matching: find.textContaining('0:05 – 3:00'),
+    );
+    expect(tester.getTopLeft(b).dx, greaterThan(tester.getTopRight(times).dx));
+    await unmount(tester);
+  });
+
   testWidgets('the chapter list fits a narrow phone', (tester) async {
     final track = await addTrack(
       chapters: youTubeChapters.withChapterSkip('b', true),
@@ -487,9 +639,32 @@ class _Chapters extends ChapterService {
 
 class _Player implements PlaybackService {
   final _current = StreamController<Track?>.broadcast();
+  final _items = StreamController<PlaybackItem?>.broadcast();
+  final _positions = StreamController<Duration>.broadcast();
+  final _playing = StreamController<bool>.broadcast();
   Track? current;
-  PlaybackItem? item;
-  bool playing = false;
+  PlaybackItem? _item;
+  bool _isPlaying = false;
+  Duration _position = Duration.zero;
+
+  PlaybackItem? get item => _item;
+  set item(PlaybackItem? value) {
+    _item = value;
+    _items.add(value);
+  }
+
+  bool get playing => _isPlaying;
+  set playing(bool value) {
+    _isPlaying = value;
+    _playing.add(value);
+  }
+
+  /// The position on the current item's own timeline.
+  set position(Duration value) {
+    _position = value;
+    _positions.add(value);
+  }
+
   int pauses = 0;
   int resumes = 0;
   final seeks = <Duration>[];
@@ -502,16 +677,31 @@ class _Player implements PlaybackService {
   final queued = <(int, String?, bool)>[];
   int idleStarts = 0;
 
-  Future<void> close() => _current.close();
+  Future<void> close() async {
+    await _current.close();
+    await _items.close();
+    await _positions.close();
+    await _playing.close();
+  }
 
   @override
   Stream<Track?> get currentTrackStream => _current.stream;
   @override
-  Stream<Duration> get positionStream => const Stream.empty();
+  Stream<PlaybackItem?> get currentItemStream async* {
+    yield _item;
+    yield* _items.stream;
+  }
+
+  @override
+  Stream<Duration> get positionStream async* {
+    yield _position;
+    yield* _positions.stream;
+  }
+
   @override
   Stream<Duration> get durationStream => const Stream.empty();
   @override
-  Stream<bool> get isPlayingStream => const Stream.empty();
+  Stream<bool> get isPlayingStream => _playing.stream;
   @override
   Track? get currentTrack => current;
   @override
@@ -520,7 +710,7 @@ class _Player implements PlaybackService {
   Duration get sourceDuration =>
       current == null ? Duration.zero : const Duration(minutes: 3);
   @override
-  bool get isPlaying => playing;
+  bool get isPlaying => _isPlaying;
   @override
   PlaybackItem? get currentItem => item;
 

@@ -192,6 +192,31 @@ void main() {
     expect(timeShown(tester), '2:00.000');
   });
 
+  testWidgets('stand-in chapter names are red in the chapter list', (
+    tester,
+  ) async {
+    await pumpEditor(
+      tester,
+      initial: [
+        _youTube[0].copyWith(title: 'chapter 1'),
+        _youTube[1].copyWith(title: unrecognizedChapterTitle),
+        _youTube[2],
+      ],
+    );
+    Color? colorOf(String id) {
+      final key = ValueKey('editor-chapter-title-$id');
+      return tester.widget<Text>(find.byKey(key)).style?.color;
+    }
+
+    final error =
+        Theme.of(
+          tester.element(find.byKey(const ValueKey('editor-chapter-title-c'))),
+        ).colorScheme.error;
+    expect(colorOf('a'), error);
+    expect(colorOf('b'), error);
+    expect(colorOf('c'), isNot(error));
+  });
+
   testWidgets('the listen buttons play around the boundary and stop there', (
     tester,
   ) async {

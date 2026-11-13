@@ -829,26 +829,48 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                   ),
                 Opacity(
                   opacity: chaptersOn ? 1 : 0.6,
-                  child: Column(
-                    children: [
-                      for (final (i, chapter) in data.active.indexed)
-                        _ChapterRow(
-                          key: ValueKey('chapter-${chapter.id}'),
-                          number: i + 1,
-                          chapter: chapter,
-                          skipped: data.isSkipped(chapter.id),
-                          playable: playable,
-                          enabled: !_busy,
-                          onTap: () => _run(() => _playChapter(track, chapter)),
-                          onMore:
-                              () => _showChapterActions(
-                                track,
-                                chapter,
-                                playable: playable,
-                                lyricsMode: lyricsMode,
-                              ),
-                        ),
-                    ],
+                  // Only the list follows playback, and only when the
+                  // playing chapter (or play/pause) changes.
+                  child: Consumer(
+                    builder: (context, ref, _) {
+                      final current = _watchCurrentChapterIndex(
+                        ref,
+                        track.id,
+                        data.active,
+                      );
+                      final isPlaying =
+                          current != null &&
+                          ref.watch(
+                            isPlayingProvider.select(
+                              (playing) => playing.valueOrNull ?? false,
+                            ),
+                          );
+                      return Column(
+                        children: [
+                          for (final (i, chapter) in data.active.indexed)
+                            _ChapterRow(
+                              key: ValueKey('chapter-${chapter.id}'),
+                              number: i + 1,
+                              chapter: chapter,
+                              skipped: data.isSkipped(chapter.id),
+                              playable: playable,
+                              enabled: !_busy,
+                              isCurrent: i == current,
+                              isPlaying: i == current && isPlaying,
+                              onTap:
+                                  () =>
+                                      _run(() => _playChapter(track, chapter)),
+                              onMore:
+                                  () => _showChapterActions(
+                                    track,
+                                    chapter,
+                                    playable: playable,
+                                    lyricsMode: lyricsMode,
+                                  ),
+                            ),
+                        ],
+                      );
+                    },
                   ),
                 ),
                 // Below the list, so the page reads as before for files that
@@ -867,6 +889,44 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
       ),
     );
   }
+}
+
+/// The playing chapter's colour, as in the playlist's track list.
+const _accent = Color(0xFF2196F3);
+
+/// The index in [chapters] of the chapter playing now, or null when
+/// [trackId] is not the file playing (or it plays in a gap). A chapter
+/// played as its own track is found by id; while the whole file plays (or
+/// that chapter was since edited away) it is the one at the position. Both
+/// are watched through selects, so a position tick inside the same chapter
+/// rebuilds nothing.
+int? _watchCurrentChapterIndex(
+  WidgetRef ref,
+  int trackId,
+  List<MediaChapter> chapters,
+) {
+  final item = ref.watch(
+    currentPlaybackItemProvider.select((value) {
+      final item = value.valueOrNull;
+      return item == null || item.track.id != trackId
+          ? null
+          : (chapterId: item.chapter?.id, startMs: item.startMs);
+    }),
+  );
+  if (item == null) return null;
+  final chapterId = item.chapterId;
+  if (chapterId != null) {
+    final index = chapters.indexWhere((c) => c.id == chapterId);
+    if (index >= 0) return index;
+  }
+  return ref.watch(
+    positionProvider.select((value) {
+      // The position is on the item's own timeline.
+      final ms = item.startMs + (value.valueOrNull?.inMilliseconds ?? 0);
+      final index = chapters.indexWhere((c) => ms >= c.startMs && ms < c.endMs);
+      return index < 0 ? null : index;
+    }),
+  );
 }
 
 class _Notice extends StatelessWidget {
@@ -1179,6 +1239,8 @@ class _ChapterRow extends StatelessWidget {
     required this.skipped,
     required this.playable,
     required this.enabled,
+    required this.isCurrent,
+    required this.isPlaying,
     required this.onTap,
     required this.onMore,
   });
@@ -1190,6 +1252,11 @@ class _ChapterRow extends StatelessWidget {
   final bool skipped;
   final bool playable;
   final bool enabled;
+
+  /// The chapter the player is on (playing or paused), marked like the
+  /// current track of a playlist.
+  final bool isCurrent;
+  final bool isPlaying;
   final VoidCallback onTap;
   final VoidCallback onMore;
 
@@ -1203,41 +1270,97 @@ class _ChapterRow extends StatelessWidget {
       _ => '',
     };
     final review = chapter.reviewReasons.firstOrNull;
+    final weight = isCurrent ? FontWeight.w600 : FontWeight.normal;
+    // A stand-in name stays red even while it plays, so it is never missed.
+    final titleColor =
+        isPlaceholderChapterTitle(chapter.title)
+            ? Theme.of(context).colorScheme.error
+            : isCurrent
+            ? _accent
+            : null;
     return ListTile(
+      tileColor: isCurrent ? const Color(0xFF2A2A2A) : null,
       leading: SizedBox(
         width: 28,
         child: Text(
           '$number',
           textAlign: TextAlign.center,
-          style: const TextStyle(color: Color(0xFF999999)),
+          style: TextStyle(
+            color: isCurrent ? _accent : const Color(0xFF999999),
+            fontWeight: weight,
+          ),
         ),
       ),
-      title: Text(chapter.title, maxLines: 2, overflow: TextOverflow.ellipsis),
-      subtitle: Text.rich(
-        TextSpan(
-          children: [
-            if (skipped)
-              const TextSpan(
-                text: 'Always skip · ',
-                style: TextStyle(color: Color(0xFFE57373)),
+      title: Text(
+        chapter.title,
+        key: ValueKey('chapter-title-${chapter.id}'),
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(color: titleColor, fontWeight: weight),
+      ),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Text.rich(
+                  TextSpan(
+                    children: [
+                      if (skipped)
+                        const TextSpan(
+                          text: 'Always skip · ',
+                          style: TextStyle(color: Color(0xFFE57373)),
+                        ),
+                      TextSpan(
+                        text:
+                            '${chapterTimestamp(chapter.startMs)} – '
+                            '${chapterTimestamp(chapter.endMs)}$origin',
+                      ),
+                    ],
+                  ),
+                ),
               ),
-            TextSpan(
-              text:
-                  '${chapterTimestamp(chapter.startMs)} – '
-                  '${chapterTimestamp(chapter.endMs)} · '
-                  '${chapterTimestamp(chapter.duration.inMilliseconds)}'
-                  '$origin${review == null ? '' : '\n$review'}',
-            ),
-          ],
-        ),
+              const SizedBox(width: 8),
+              // Right-aligned, so the lengths line up in a column.
+              Text(
+                chapterTimestamp(chapter.duration.inMilliseconds),
+                key: ValueKey('chapter-length-${chapter.id}'),
+                textAlign: TextAlign.right,
+                style: const TextStyle(
+                  fontFeatures: [FontFeature.tabularFigures()],
+                ),
+              ),
+            ],
+          ),
+          if (review != null) Text(review),
+        ],
       ),
       isThreeLine: review != null,
       enabled: enabled && playable,
       onTap: onTap,
-      trailing: IconButton(
-        tooltip: 'Chapter options',
-        onPressed: enabled ? onMore : null,
-        icon: const Icon(Icons.more_vert),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 24,
+            child:
+                isPlaying
+                    ? Icon(
+                      Icons.graphic_eq,
+                      key: ValueKey('chapter-playing-${chapter.id}'),
+                      color: _accent,
+                      size: 20,
+                    )
+                    : null,
+          ),
+          IconButton(
+            tooltip: 'Chapter options',
+            onPressed: enabled ? onMore : null,
+            icon: const Icon(Icons.more_vert),
+          ),
+        ],
       ),
     );
   }
