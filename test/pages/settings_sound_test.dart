@@ -12,6 +12,7 @@ import 'package:woolytube/services/app_settings_service.dart';
 import 'package:woolytube/services/audio_processing.dart';
 import 'package:woolytube/services/loudness_service.dart';
 import 'package:woolytube/services/playback_service.dart';
+import 'package:woolytube/widgets/settings_section_header.dart';
 
 /// Records what the settings page tells the player.
 class _Player implements PlaybackService {
@@ -107,6 +108,28 @@ void main() {
     expect(tester.widget<SwitchListTile>(tile).value, isTrue);
     expect(player.settings.value.evenOutVolume, isTrue);
     expect(await AppSettingsService().getEvenOutVolume(), isTrue);
+  });
+
+  testWidgets('plane mode sits right below "Even out volume" in Sound', (
+    tester,
+  ) async {
+    await pumpSettings(tester);
+    final sound = find.widgetWithText(SettingsSectionHeader, 'Sound');
+    final even = find.byKey(const ValueKey('even-out-volume'));
+    final plane = find.byKey(const ValueKey('plane-mode-setting'));
+    final playback = find.widgetWithText(SettingsSectionHeader, 'Playback');
+    expect(
+      tester.getTopLeft(even).dy,
+      greaterThan(tester.getTopLeft(sound).dy),
+    );
+    expect(tester.getTopLeft(plane).dy, tester.getBottomLeft(even).dy);
+    expect(
+      tester.getTopLeft(find.byKey(const ValueKey('plane-mode-strength'))).dy,
+      inExclusiveRange(
+        tester.getTopLeft(plane).dy,
+        tester.getTopLeft(playback).dy,
+      ),
+    );
   });
 
   testWidgets('the strength is saved and handed to the player', (tester) async {

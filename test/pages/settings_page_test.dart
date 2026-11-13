@@ -13,6 +13,7 @@ import 'package:woolytube/providers/providers.dart';
 import 'package:woolytube/services/app_settings_service.dart';
 import 'package:woolytube/services/library_export_service.dart';
 import 'package:woolytube/services/playback_service.dart';
+import 'package:woolytube/widgets/settings_section_header.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -52,6 +53,50 @@ void main() {
     );
     await tester.pumpAndSettle();
   }
+
+  testWidgets('sections run update, downloads, backup, sound, playback', (
+    tester,
+  ) async {
+    await pumpSettings(tester);
+    double top(Finder finder) => tester.getTopLeft(finder).dy;
+    final headers = [
+      'Update',
+      'Downloads and updates',
+      'Backup and restore',
+      'Sound',
+      'Playback',
+      'Troubleshooting',
+    ];
+    final tops = [
+      for (final header in headers)
+        top(find.widgetWithText(SettingsSectionHeader, header)),
+    ];
+    expect(tops, orderedEquals([...tops]..sort()));
+
+    // The app update comes first, before any section of settings.
+    expect(
+      top(find.byKey(const ValueKey('app-update'))),
+      lessThan(top(find.text('Downloads and updates'))),
+    );
+    // Each row stays under its own header.
+    expect(
+      top(find.text('Update playlists on mobile data')),
+      inExclusiveRange(tops[1], tops[2]),
+    );
+    expect(
+      top(find.text('Downloader (yt-dlp)')),
+      inExclusiveRange(tops[1], tops[2]),
+    );
+    expect(
+      top(find.byKey(const ValueKey('restore-settings'))),
+      inExclusiveRange(tops[2], tops[3]),
+    );
+    expect(
+      top(find.text('Pause when other apps play sound')),
+      inExclusiveRange(tops[4], tops[5]),
+    );
+    expect(top(find.byKey(const ValueKey('debug-log'))), greaterThan(tops[5]));
+  });
 
   testWidgets('enables subtitle downloads and saves validated languages', (
     tester,

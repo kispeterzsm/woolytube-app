@@ -336,60 +336,54 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     );
   }
 
-  List<Widget> _rows() {
+  /// Top to bottom: app update, downloads, backup, sound, playback, then
+  /// troubleshooting.
+  List<Widget> _rows() => [
+    ..._updateRows(),
+    ..._downloadRows(),
+    ..._backupRows(),
+    ..._soundRows(),
+    ..._playbackRows(),
+    ..._troubleshootingRows(),
+  ];
+
+  /// The app's version, and checking for and installing a new one.
+  List<Widget> _updateRows() {
+    return [
+      const SettingsSectionHeader('Update'),
+      ListTile(
+        key: const ValueKey('app-update'),
+        leading: Icon(
+          _isDownloadingUpdate ? Icons.downloading : Icons.system_update,
+          color:
+              _availableUpdate == null
+                  ? const Color(0xFF888888)
+                  : const Color(0xFF2196F3),
+        ),
+        title: Text(
+          _appVersion == null ? 'WoolyTube' : 'WoolyTube $_appVersion',
+        ),
+        subtitle: Text(_updateStatusText),
+        trailing:
+            _isCheckingForUpdate || _isDownloadingUpdate
+                ? const SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+                : null,
+        onTap:
+            _isCheckingForUpdate || _isDownloadingUpdate
+                ? null
+                : _onUpdatePressed,
+      ),
+    ];
+  }
+
+  /// What gets downloaded and when, and the downloader itself.
+  List<Widget> _downloadRows() {
     final saving = _isSavingSettings;
     return [
-      const SettingsSectionHeader('Playback'),
-      SwitchListTile(
-        secondary: const Icon(Icons.pause_circle_outline),
-        title: const Text('Pause when other apps play sound'),
-        subtitle: const Text(
-          'Also resumes after a call. Unplugging headphones always pauses.',
-        ),
-        value: _pauseOnAudioInterruption,
-        onChanged: saving ? null : _setPauseOnAudioInterruption,
-      ),
-      const SettingsSectionHeader('Sound'),
-      _PlaneModeTile(enabled: !saving),
-      ListTile(
-        key: const ValueKey('plane-mode-strength'),
-        leading: const Icon(Icons.tune),
-        title: const Text('Plane mode strength'),
-        subtitle: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(switch (_planeModeStrength) {
-              PlaneModeStrength.standard =>
-                'Standard: gentle, fine for a whole flight.',
-              PlaneModeStrength.strong =>
-                'Strong: lifts quiet parts further; can sound squeezed.',
-            }),
-            const SizedBox(height: 8),
-            SegmentedButton<PlaneModeStrength>(
-              showSelectedIcon: false,
-              segments: [
-                for (final strength in PlaneModeStrength.values)
-                  ButtonSegment(value: strength, label: Text(strength.label)),
-              ],
-              selected: {_planeModeStrength},
-              onSelectionChanged:
-                  saving ? null : (value) => _setPlaneModeStrength(value.first),
-            ),
-          ],
-        ),
-      ),
-      SwitchListTile(
-        key: const ValueKey('even-out-volume'),
-        secondary: const Icon(Icons.equalizer),
-        title: const Text('Even out volume'),
-        subtitle: const Text(
-          'Plays every song at a similar loudness, so a loud song does not '
-          'follow a quiet one.',
-        ),
-        value: _evenOutVolume,
-        onChanged: saving ? null : _setEvenOutVolume,
-      ),
-      const _LoudnessProgressTile(),
       const SettingsSectionHeader('Downloads and updates'),
       SwitchListTile(
         secondary: const Icon(Icons.network_cell),
@@ -420,6 +414,22 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           trailing: const Icon(Icons.chevron_right),
           onTap: _editSubtitleLanguages,
         ),
+      ListTile(
+        leading: const Icon(Icons.download_for_offline_outlined),
+        title: const Text('Downloader (yt-dlp)'),
+        subtitle: Text(
+          _lastYtDlpUpdateCheck == null
+              ? 'Updates itself when the app starts'
+              : 'Last update check: '
+                  '${_dateFormat.format(_lastYtDlpUpdateCheck!)}',
+        ),
+      ),
+    ];
+  }
+
+  /// Backing up the library and bringing playlists or settings back.
+  List<Widget> _backupRows() {
+    return [
       const SettingsSectionHeader('Backup and restore'),
       ListTile(
         leading: const Icon(Icons.save_alt),
@@ -464,43 +474,78 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 : null,
         onTap: _isRestoringSettings ? null : _restoreSettings,
       ),
-      const SettingsSectionHeader('About'),
-      ListTile(
-        key: const ValueKey('app-update'),
-        leading: Icon(
-          _isDownloadingUpdate ? Icons.downloading : Icons.system_update,
-          color:
-              _availableUpdate == null
-                  ? const Color(0xFF888888)
-                  : const Color(0xFF2196F3),
+    ];
+  }
+
+  /// Loudness and other audio processing.
+  List<Widget> _soundRows() {
+    final saving = _isSavingSettings;
+    return [
+      const SettingsSectionHeader('Sound'),
+      SwitchListTile(
+        key: const ValueKey('even-out-volume'),
+        secondary: const Icon(Icons.equalizer),
+        title: const Text('Even out volume'),
+        subtitle: const Text(
+          'Plays every song at a similar loudness, so a loud song does not '
+          'follow a quiet one.',
         ),
-        title: Text(
-          _appVersion == null ? 'WoolyTube' : 'WoolyTube $_appVersion',
-        ),
-        subtitle: Text(_updateStatusText),
-        trailing:
-            _isCheckingForUpdate || _isDownloadingUpdate
-                ? const SizedBox(
-                  width: 22,
-                  height: 22,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-                : null,
-        onTap:
-            _isCheckingForUpdate || _isDownloadingUpdate
-                ? null
-                : _onUpdatePressed,
+        value: _evenOutVolume,
+        onChanged: saving ? null : _setEvenOutVolume,
       ),
+      _PlaneModeTile(enabled: !saving),
       ListTile(
-        leading: const Icon(Icons.download_for_offline_outlined),
-        title: const Text('Downloader (yt-dlp)'),
-        subtitle: Text(
-          _lastYtDlpUpdateCheck == null
-              ? 'Updates itself when the app starts'
-              : 'Last update check: '
-                  '${_dateFormat.format(_lastYtDlpUpdateCheck!)}',
+        key: const ValueKey('plane-mode-strength'),
+        leading: const Icon(Icons.tune),
+        title: const Text('Plane mode strength'),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(switch (_planeModeStrength) {
+              PlaneModeStrength.standard =>
+                'Standard: gentle, fine for a whole flight.',
+              PlaneModeStrength.strong =>
+                'Strong: lifts quiet parts further; can sound squeezed.',
+            }),
+            const SizedBox(height: 8),
+            SegmentedButton<PlaneModeStrength>(
+              showSelectedIcon: false,
+              segments: [
+                for (final strength in PlaneModeStrength.values)
+                  ButtonSegment(value: strength, label: Text(strength.label)),
+              ],
+              selected: {_planeModeStrength},
+              onSelectionChanged:
+                  saving ? null : (value) => _setPlaneModeStrength(value.first),
+            ),
+          ],
         ),
       ),
+      const _LoudnessProgressTile(),
+    ];
+  }
+
+  /// How playback behaves.
+  List<Widget> _playbackRows() {
+    final saving = _isSavingSettings;
+    return [
+      const SettingsSectionHeader('Playback'),
+      SwitchListTile(
+        secondary: const Icon(Icons.pause_circle_outline),
+        title: const Text('Pause when other apps play sound'),
+        subtitle: const Text(
+          'Also resumes after a call. Unplugging headphones always pauses.',
+        ),
+        value: _pauseOnAudioInterruption,
+        onChanged: saving ? null : _setPauseOnAudioInterruption,
+      ),
+    ];
+  }
+
+  /// Help with finding out what went wrong.
+  List<Widget> _troubleshootingRows() {
+    return [
+      const SettingsSectionHeader('Troubleshooting'),
       ListTile(
         key: const ValueKey('debug-log'),
         leading: const Icon(Icons.bug_report_outlined),
