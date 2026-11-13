@@ -63,6 +63,33 @@ void main() {
     expect(presenter.body, '1 new video downloaded to Playlist 7');
   });
 
+  test('a completion with failures names them when expanded', () async {
+    final presenter = RecordingNotificationPresenter();
+    final service = DownloadNotificationService(presenter: presenter.call);
+
+    await service.showDownloadComplete(
+      'vibe mix',
+      downloadedCount: 2,
+      audioOnly: true,
+      failures: const [
+        DownloadFailure(
+          trackId: 59,
+          title: 'Track 59',
+          error: 'ERROR: [youtube] x: Video unavailable',
+        ),
+      ],
+    );
+
+    expect(presenter.body, '2 new songs downloaded to vibe mix · 1 failed');
+    final style =
+        presenter.details!.android!.styleInformation as BigTextStyleInformation;
+    expect(
+      style.bigText,
+      '2 new songs downloaded to vibe mix · 1 failed\n'
+      '"Track 59" – video unavailable',
+    );
+  });
+
   test('failure notifications name the playlist and the tracks', () async {
     final presenter = RecordingNotificationPresenter();
     final service = DownloadNotificationService(presenter: presenter.call);

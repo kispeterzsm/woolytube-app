@@ -65,8 +65,11 @@ class DownloadNotificationService {
     String title,
     String body, {
     bool expandable = false,
+    String? expandedBody,
   }) async {
-    final details = _details(expandedBody: expandable ? body : null);
+    final details = _details(
+      expandedBody: expandedBody ?? (expandable ? body : null),
+    );
     final presenter = _presenter;
     if (presenter != null) {
       await presenter(id, title, body, details);
@@ -80,17 +83,18 @@ class DownloadNotificationService {
   /// their own notification instead of overwriting one shared entry.
   ///
   /// With [trackTitle], the notification is about that one track. Audio
-  /// playlists ([audioOnly]) say "song" instead of "video". [failedCount]
-  /// adds how many downloads of the run failed.
+  /// playlists ([audioOnly]) say "song" instead of "video". [failures] adds
+  /// how many downloads of the run failed, and names them when expanded.
   Future<void> showDownloadComplete(
     String playlistName, {
     int downloadedCount = 1,
     int notificationId = _completeNotificationId,
     String? trackTitle,
     bool audioOnly = false,
-    int failedCount = 0,
+    List<DownloadFailure> failures = const [],
   }) async {
     if (downloadedCount < 1) return;
+    final failedCount = failures.length;
 
     final noun = audioOnly ? 'song' : 'video';
     final String title;
@@ -108,7 +112,17 @@ class DownloadNotificationService {
           '$downloadedCount new $plural downloaded to $playlistName'
           '${failedCount > 0 ? ' · $failedCount failed' : ''}';
     }
-    await _show(notificationId, title, body);
+    if (failures.isEmpty) {
+      await _show(notificationId, title, body);
+      return;
+    }
+    // Expanded, it also names what failed.
+    await _show(
+      notificationId,
+      title,
+      body,
+      expandedBody: [body, ...downloadFailureLines(failures)].join('\n'),
+    );
   }
 
   /// Tells which tracks of a playlist could not be downloaded, and why,

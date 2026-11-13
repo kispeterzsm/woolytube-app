@@ -1059,12 +1059,15 @@ class AppDatabase extends _$AppDatabase {
   /// Records why the requested replacement of a downloaded track (for
   /// example the YouTube original of a local file) could not be fetched.
   /// The track keeps its file and its request; the next update tries again.
+  /// A track YouTube no longer offers (an `unavailableReason`) keeps the
+  /// message that says why: a later bot check must not replace it.
   Future<void> setTrackReplacementError(int trackId, String error) =>
       (update(tracks)..where(
         (t) =>
             t.id.equals(trackId) &
             t.status.equals('complete') &
-            t.replaceRequested.equals(true),
+            t.replaceRequested.equals(true) &
+            t.unavailableReason.isNull(),
       )).write(TracksCompanion(lastError: Value(error)));
 
   /// Records a finished download that is now the track's file.

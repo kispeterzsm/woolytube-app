@@ -373,8 +373,10 @@ class DownloadService {
 
   /// Playlists asked to download while they were already downloading. The
   /// running pass chose its work when it started, so each gets one more
-  /// pass right after it, which picks up what was added meanwhile.
-  final _rerunRequested = <int>{};
+  /// pass right after it, which picks up what was added meanwhile. The
+  /// value says whether only the scheduled update asked: then that pass is
+  /// a scheduled one too (quiet), not the user's.
+  final _rerunRequested = <int, bool>{};
 
   /// While above zero, queued playlists wait, and new requests queue
   /// instead of starting (see [runWithDownloadStopped]).
@@ -568,7 +570,10 @@ class DownloadService {
             scheduled: queued.scheduled && scheduled,
           );
         }
-        if (inQueue < 0) _rerunRequested.add(playlist.id);
+        if (inQueue < 0) {
+          _rerunRequested[playlist.id] =
+              (_rerunRequested[playlist.id] ?? true) && scheduled;
+        }
         return DownloadStart.alreadyQueued;
       }
       _queue.add((
@@ -890,7 +895,9 @@ class DownloadService {
           downloadedCount: downloadedCount,
           notificationId: playlist.id,
           audioOnly: playlist.audioOnly,
-          failedCount: failedCount,
+          // A scheduled run tells new failures in its own notification and
+          // never repeats ones already told.
+          failures: scheduled ? const [] : failures,
         );
       }
     } catch (e) {
@@ -1243,15 +1250,19 @@ class DownloadService {
       _resetRunState();
       if (identical(_runCompleter, completer)) _runCompleter = null;
       if (completer != null && !completer.isCompleted) completer.complete();
+      final rerunScheduled =
+          finishedPlaylistId == null
+              ? null
+              : _rerunRequested.remove(finishedPlaylistId);
       if (finishedPlaylistId != null &&
-          _rerunRequested.remove(finishedPlaylistId) &&
+          rerunScheduled != null &&
           !_cancelRequested &&
           !_queue.any((e) => e.playlistId == finishedPlaylistId)) {
-        // Ahead of the queue: the user just asked for it.
+        // Ahead of the queue: it was just asked for.
         _queue.insert(0, (
           playlistId: finishedPlaylistId,
           sourceChecked: false,
-          scheduled: false,
+          scheduled: rerunScheduled,
         ));
         _setQueue();
       }
@@ -1677,8 +1688,14 @@ class DownloadService {
         'Wait until the current download finishes.',
       );
     }
-    final wasQueued = removeFromQueue(playlistId);
     final wasRunning = _isDownloading;
+    // A scheduled run that is stopped or taken out stays scheduled (quiet)
+    // when it is put back.
+    final wasScheduled =
+        wasRunning
+            ? _scheduledRun
+            : _queue.any((e) => e.playlistId == playlistId && e.scheduled);
+    final wasQueued = removeFromQueue(playlistId);
     var succeeded = false;
     _queueHolds++;
     try {
@@ -1705,7 +1722,7 @@ class DownloadService {
         _queue.insert(0, (
           playlistId: playlistId,
           sourceChecked: false,
-          scheduled: false,
+          scheduled: wasScheduled,
         ));
         _setQueue();
       }
@@ -1738,25 +1755,21 @@ class DownloadService {
     }
   }
 
-  static const _transientErrorPatterns = [
-    'no address associated with hostname',
+  /// Refusals worth another try in a moment. Errors that never reached
+  /// YouTube ([isNetworkDownloadError]) are retried too, from the same list
+  /// that decides whether a run could not reach YouTube at all.
+  static const _retryableRefusalPatterns = [
     'unable to download webpage',
     'http error 5',
     'http error 429',
     'too many requests',
-    'connection reset',
-    'connection refused',
-    'connection closed',
-    'timed out',
-    'timeout',
     'rate limited',
-    'temporary failure in name resolution',
-    'network is unreachable',
   ];
 
   static bool _isTransientError(String message) {
+    if (isNetworkDownloadError(message)) return true;
     final lower = message.toLowerCase();
-    return _transientErrorPatterns.any(lower.contains);
+    return _retryableRefusalPatterns.any(lower.contains);
   }
 
   static bool _isExtrasError(String message) {

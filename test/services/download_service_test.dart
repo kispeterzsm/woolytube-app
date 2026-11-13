@@ -29,6 +29,9 @@ class FakeDownloadNotificationService extends DownloadNotificationService {
   final notificationIds = <int>[];
   final trackTitles = <String?>[];
 
+  /// The failures each completion notification named.
+  final completionFailures = <List<DownloadFailure>>[];
+
   /// Problem notifications: the playlist and the failures named.
   final failures = <(String, List<DownloadFailure>)>[];
 
@@ -39,12 +42,13 @@ class FakeDownloadNotificationService extends DownloadNotificationService {
     int notificationId = 1001,
     String? trackTitle,
     bool audioOnly = false,
-    int failedCount = 0,
+    List<DownloadFailure> failures = const [],
   }) async {
     playlistNames.add(playlistName);
     downloadedCounts.add(downloadedCount);
     notificationIds.add(notificationId);
     trackTitles.add(trackTitle);
+    completionFailures.add(failures);
   }
 
   @override
@@ -1745,6 +1749,60 @@ void main() {
       expect(service.isDownloading, isFalse);
     });
 
+    test('a second pass only the scheduled update asked for stays '
+        'scheduled; one the user asked for is the user\'s', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      var nextIndex = 1;
+
+      Future<List<bool>> secondPass({required bool scheduledAsks}) async {
+        await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: nextIndex,
+          videoId: 'v$nextIndex',
+        );
+        nextIndex++;
+        final hold = Completer<void>();
+        ytdlp.downloadCompleter = hold;
+        ytdlp.downloadStarted = Completer<void>();
+        final events = <DownloadProgress>[];
+        final sub = service.progressStream.listen(events.add);
+        final running = service.downloadPlaylist(playlist);
+        await ytdlp.downloadStarted!.future;
+        ytdlp.downloadStarted = null;
+        final later = 'v$nextIndex';
+        await insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: nextIndex,
+          videoId: later,
+        );
+        nextIndex++;
+        expect(
+          await service.downloadPlaylist(playlist, scheduled: scheduledAsks),
+          DownloadStart.alreadyQueued,
+        );
+        // The first pass finishes; the second runs without waiting.
+        ytdlp.downloadCompleter = null;
+        hold.complete();
+        await running;
+        for (var i = 0; i < 50 && ytdlp.calls.last.videoId != later; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+        await service.runFinished;
+        await Future<void>.delayed(Duration.zero);
+        await sub.cancel();
+        expect(ytdlp.calls.last.videoId, later);
+        return [
+          for (final e in events)
+            if (e.status == 'complete') e.scheduled,
+        ];
+      }
+
+      expect(await secondPass(scheduledAsks: true), [false, true]);
+      expect(await secondPass(scheduledAsks: false), [false, false]);
+    });
+
     test('stopping drops a requested second pass', () async {
       final playlist = await insertTestPlaylist(db, outputPath: folder);
       await insertTestTrack(
@@ -2283,6 +2341,33 @@ void main() {
       expect(updated.status, 'complete');
     });
 
+    test('a failed original of a kept removed video keeps the removal '
+        'message', () async {
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      final path = p.join(folder, '00001_Kept.m4a');
+      await File(path).writeAsString('kept');
+      const removal = 'This video has been removed by the uploader';
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        filePath: path,
+        status: 'complete',
+        unavailableReason: removedFromYouTubeReason,
+        replaceRequested: true,
+        lastError: removal,
+      );
+      ytdlp.downloadError = failure(
+        'ERROR: [youtube] x: Sign in to confirm you\'re not a bot',
+      );
+
+      await run(playlist);
+
+      final kept = (await db.getTrack(track.id))!;
+      expect(kept.lastError, removal);
+      expect(kept.replaceRequested, isTrue);
+      expect(kept.filePath, path);
+    });
+
     test('a scheduled update tells only failures the previous one did not '
         'have', () async {
       final playlist = await insertTestPlaylist(
@@ -2340,6 +2425,56 @@ void main() {
       ]);
     });
 
+    test('the completion notification names a user run\'s failures; a '
+        'scheduled one leaves them to its own notification', () async {
+      final playlist = await insertTestPlaylist(
+        db,
+        name: 'vibe mix',
+        outputPath: folder,
+      );
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 1,
+        videoId: 'ok',
+        title: 'Fine',
+      );
+      final broken = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 2,
+        videoId: 'bad',
+        title: 'Track 59',
+      );
+      ytdlp.errorFor =
+          (call) => call.videoId == 'bad' ? failure(unavailable) : null;
+
+      await run(playlist);
+      expect(notifications.downloadedCounts, [1]);
+      expect(
+        [for (final f in notifications.completionFailures.single) f.title],
+        ['Track 59'],
+      );
+
+      // Track 59 fails again in a scheduled run that also downloads a new
+      // video: the completion does not repeat the failure.
+      await db.updateTrackStatus(broken.id, 'pending');
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 3,
+        videoId: 'new',
+        title: 'New',
+      );
+      await run(playlist, scheduled: true);
+      expect(notifications.downloadedCounts, [1, 1]);
+      expect(notifications.completionFailures.last, isEmpty);
+      expect(
+        [for (final f in notifications.failures.single.$2) f.title],
+        ['Track 59'],
+      );
+    });
+
     test('names three failures and counts the rest', () {
       final failures = [
         for (var i = 1; i <= 5; i++)
@@ -2377,6 +2512,11 @@ void main() {
         isTrue,
       );
       expect(isNetworkDownloadError('Read timed out.'), isTrue);
+      // Retried as transient, so it must also count as not reaching YouTube.
+      expect(
+        isNetworkDownloadError('ERROR: ReadTimeoutError: read timeout'),
+        isTrue,
+      );
       expect(isNetworkDownloadError(unavailable), isFalse);
       expect(
         isNetworkDownloadError("Sign in to confirm you're not a bot"),

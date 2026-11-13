@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:woolytube/database/database.dart';
+import 'package:woolytube/services/app_settings_service.dart';
 import 'package:woolytube/services/auto_update_runner.dart';
 import 'package:woolytube/services/background_worker.dart';
 import 'package:woolytube/services/download_service.dart';
@@ -82,17 +83,22 @@ class _Recorder {
     if (error != null) throw error;
   }
 
-  Future<void> download(
+  /// Playlists that the user's running download queues instead.
+  final queuedBehindUser = <int>{};
+
+  Future<DownloadStart> download(
     Playlist playlist, {
     required bool sourceChecked,
   }) async {
     events.add('download ${playlist.id} checked=$sourceChecked');
+    if (queuedBehindUser.contains(playlist.id)) return DownloadStart.queued;
     final gate = downloadGates[playlist.id];
     if (gate != null) await gate.future;
     // Like DownloadService: a run that reached YouTube counts.
     if (sourceChecked && !unreachable.contains(playlist.id) && gate == null) {
       stamps[playlist.id] = DateTime.now();
     }
+    return DownloadStart.started;
   }
 
   Future<Playlist> reload(int id) async =>
@@ -460,6 +466,22 @@ void main() {
       await runner.requestStop();
       await run;
       expect((await attempts.read())[1]!.unreachable, 0);
+    });
+
+    test('a playlist queued behind the user\'s download is not counted as '
+        'unreachable', () async {
+      final recorder = _Recorder()..unreachable.add(1);
+      await runnerFor(recorder).run([_playlist(1)]);
+      expect((await attempts.read())[1]!.unreachable, 1);
+
+      // The user taps Update on another playlist between two due ones: this
+      // one is queued behind it and YouTube is never asked.
+      recorder
+        ..unreachable.clear()
+        ..queuedBehindUser.add(1);
+      final report = await runnerFor(recorder).run([_playlist(1)]);
+      expect(report.status, AutoUpdateStatus.finished);
+      expect((await attempts.read())[1]!.unreachable, 1);
     });
 
     test('keeps what it knows about playlists that were not due', () async {
@@ -968,6 +990,30 @@ void main() {
       );
       expect(calls.last, 'taskFailed {error: boom}');
       expect(savedWhenReported, contains('Scheduled update failed: boom'));
+    });
+
+    test('moves the old global subtitle choice to the video playlists, '
+        'even when nothing is due', () async {
+      SharedPreferences.setMockInitialValues({
+        AppSettingsService.legacyDownloadSubtitlesKey: true,
+        AppSettingsService.legacySubtitleLanguagesKey: 'en,hu',
+      });
+      final video = await insertTestPlaylist(db, lastUpdated: DateTime.now());
+      final report = await runBackgroundAutoUpdate(
+        openDatabase: () => db,
+        isStopRequested: () => false,
+        onRunner: (_) {},
+        ytdlp: _ReadyYtDlp(),
+        lock: DownloadLock(directoryProvider: () async => tempDir.path),
+        attempts: attempts,
+        log: log,
+        settings: AppSettingsService(),
+      );
+      expect(report.status, AutoUpdateStatus.nothingDue);
+      final fresh = await db.getPlaylist(video.id);
+      expect(fresh.downloadSubtitles, isTrue);
+      expect(fresh.subtitleLanguages, 'en,hu');
+      expect(await AppSettingsService().readLegacySubtitleSetting(), isNull);
     });
 
     test('with nothing due it does not start yt-dlp', () async {

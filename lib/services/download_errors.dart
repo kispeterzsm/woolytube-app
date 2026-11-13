@@ -139,6 +139,7 @@ const _networkErrorPatterns = [
   'connection closed',
   'connection aborted',
   'timed out',
+  'timeout',
   'urlopen error',
 ];
 

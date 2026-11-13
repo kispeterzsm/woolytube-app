@@ -187,7 +187,14 @@ class AutoUpdateRunner {
 
   final Future<void> Function(Playlist playlist) syncPlaylist;
   final Future<Playlist> Function(int playlistId) reloadPlaylist;
-  final Future<void> Function(Playlist playlist, {required bool sourceChecked})
+
+  /// Downloads a playlist. Anything but [DownloadStart.started] means a
+  /// download the user started holds the queue and this playlist waits for
+  /// it: YouTube was not asked, so it says nothing about reaching it.
+  final Future<DownloadStart> Function(
+    Playlist playlist, {
+    required bool sourceChecked,
+  })
   downloadPlaylist;
 
   /// Stops the running download; its track returns to the queue.
@@ -300,7 +307,15 @@ class AutoUpdateRunner {
 
         try {
           final fresh = await reloadPlaylist(playlist.id);
-          await downloadPlaylist(fresh, sourceChecked: synced);
+          final start = await downloadPlaylist(fresh, sourceChecked: synced);
+          if (start != DownloadStart.started) {
+            // Queued behind the user's download, which runs it later.
+            log.info(
+              'Scheduled update: "${playlist.name}" waits for the '
+              'running download',
+            );
+            continue;
+          }
           // The download stamps the playlist when YouTube was reached. A
           // run cut short (stop, time budget) says nothing about that.
           final after = await reloadPlaylist(playlist.id);
@@ -544,7 +559,7 @@ class ForegroundAutoUpdateBridge {
   /// (and the app closing) cancel that service directly, which only ends
   /// this one playlist; the run must end too, or the next due playlist
   /// starts right after the user pressed Stop.
-  Future<void> _downloadPlaylist(
+  Future<DownloadStart> _downloadPlaylist(
     AutoUpdateRunner runner,
     Playlist playlist, {
     required bool sourceChecked,
@@ -556,8 +571,9 @@ class ForegroundAutoUpdateBridge {
     final subscription = _downloads.progressStream.listen((progress) {
       if (progress.status == DownloadProgress.idle.status) cancelled = true;
     });
+    final DownloadStart start;
     try {
-      await _downloads.downloadPlaylist(
+      start = await _downloads.downloadPlaylist(
         playlist,
         sourceChecked: sourceChecked,
         scheduled: true,
@@ -566,6 +582,7 @@ class ForegroundAutoUpdateBridge {
       await subscription.cancel();
     }
     if (cancelled) runner.stopAfterOutsideCancel();
+    return start;
   }
 
   static Duration _hardBudgetFor(Duration? budget) {
