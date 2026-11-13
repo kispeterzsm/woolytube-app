@@ -1599,17 +1599,13 @@ class _SearchTrackTile extends ConsumerWidget {
                     ),
                     if (hit.chapter case final chapter?) ...[
                       const SizedBox(height: 2),
-                      searchHighlightedText(
+                      Text.rich(
                         _chapterLine(chapter),
-                        query,
                         maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
                           color: Color(0xFFAAAAAA),
                           fontSize: 12,
-                        ),
-                        highlightStyle: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w600,
                         ),
                       ),
                     ],
@@ -1652,11 +1648,25 @@ class _SearchTrackTile extends ConsumerWidget {
     );
   }
 
-  /// `Chapter: Title · 1:20`, and how many more chapters matched.
-  String _chapterLine(MediaChapter chapter) {
+  /// `Chapter: Title · 1:20`, and how many more chapters matched. Only the
+  /// title is highlighted, not the label, the time or the count.
+  TextSpan _chapterLine(MediaChapter chapter) {
     final more = hit.chapters.length - 1;
-    return 'Chapter: ${chapter.title} · ${formatLyricsTime(chapter.startMs)}'
-        '${more > 0 ? ' · +$more more' : ''}';
+    return TextSpan(
+      children: [
+        const TextSpan(text: 'Chapter: '),
+        ...lyricsSpans(
+          chapter.title,
+          searchHighlights(chapter.title, query),
+          const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+        ),
+        TextSpan(
+          text:
+              ' · ${formatLyricsTime(chapter.startMs)}'
+              '${more > 0 ? ' · +$more more' : ''}',
+        ),
+      ],
+    );
   }
 
   Widget _buildThumbnail(BuildContext context, double width) {

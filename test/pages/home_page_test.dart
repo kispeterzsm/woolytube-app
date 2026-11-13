@@ -593,6 +593,58 @@ void main() {
     expect(lyrics.queries, ['you and me', 'you and me and you']);
   });
 
+  testWidgets('search: only the chapter title is highlighted', (tester) async {
+    final set = await insertTestTrack(
+      db,
+      playlistId: playlists[0].id,
+      videoId: 'set',
+      title: 'Live set',
+      status: 'complete',
+      filePath: '/tmp/set.m4a',
+    );
+    await db.writeTrackChapters(
+      set.id,
+      const ChapterData(
+        downloaded: [
+          MediaChapter(id: 'a', title: 'Intro', startMs: 0, endMs: 70000),
+          MediaChapter(id: 'b', title: 'Part 1', startMs: 70000, endMs: 90000),
+          MediaChapter(
+            id: 'c',
+            title: 'Part 1 again',
+            startMs: 90000,
+            endMs: 110000,
+          ),
+        ],
+      ),
+    );
+    tracks = [...tracks, (await db.getTrack(set.id))!];
+    await pumpHome(tester);
+    await tester.tap(find.byTooltip('Search'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'part 1');
+    await tester.pump();
+
+    final line = find.descendant(
+      of: find.byKey(ValueKey('search-track-${set.id}')),
+      matching: find.text(
+        'Chapter: Part 1 · 1:10 · +1 more',
+        findRichText: true,
+      ),
+    );
+    expect(line, findsOneWidget);
+    final highlighted = <String>[];
+    tester.widget<RichText>(line).text.visitChildren((span) {
+      if (span is TextSpan &&
+          span.text != null &&
+          span.style?.fontWeight == FontWeight.w600) {
+        highlighted.add(span.text!);
+      }
+      return true;
+    });
+    // Not the label, the "1" in the time or the count.
+    expect(highlighted.join(), 'Part1');
+  });
+
   testWidgets('search: best matches first, the chapter found, and Play all', (
     tester,
   ) async {
