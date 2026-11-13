@@ -326,8 +326,6 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
                   child: Text(
                     friendly,
                     style: const TextStyle(color: Colors.white, fontSize: 16),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
               ],

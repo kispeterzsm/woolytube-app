@@ -125,7 +125,7 @@ class _TrackRow extends ConsumerWidget {
           isPlayingProvider.select((playing) => playing.valueOrNull ?? false),
         );
     final state = _TrackState.of(track);
-    final subtitle = _rowSubtitle(track, state, chapterMatch);
+    final subtitle = _rowSubtitle(track, chapterMatch);
     final lyric = chapterMatch == null ? lyricMatch : null;
     final subtitleStyle = TextStyle(
       color: _subtitleColor(track, state),
@@ -222,6 +222,7 @@ class _TrackRow extends ConsumerWidget {
                       else
                         Text(
                           subtitle,
+                          key: ValueKey('track-subtitle-${track.id}'),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           strutStyle: _subtitleStrut,
@@ -391,14 +392,16 @@ bool _replacementFailed(Track track) =>
     track.unavailableReason == null &&
     track.lastError != null;
 
-String _rowSubtitle(Track track, _TrackState state, MediaChapter? chapter) {
+/// The one grey line under a track: its short status, or for a chapter
+/// the search matched, where that chapter starts and its title.
+String _rowSubtitle(Track track, MediaChapter? chapter) {
   final parts = <String>[
     if (track.alwaysSkip) 'Always skip',
     if (chapter != null)
-      'Chapter: ${chapter.title} · ${_formatMs(chapter.startMs)}',
-  ];
-  final status = _trackSubtitle(track, state);
-  if (status.isNotEmpty) parts.add(status);
+      '${_formatMs(chapter.startMs)} · ${chapter.title}'
+    else
+      shortTrackStatus(track),
+  ]..removeWhere((part) => part.isEmpty);
   // Never empty, so every row lays out the same two text blocks.
   return parts.isEmpty ? ' ' : parts.join(' · ');
 }
@@ -410,30 +413,6 @@ Color _subtitleColor(Track track, _TrackState state) {
     return const Color(0xFFAAAA66);
   }
   return _muted;
-}
-
-String _trackSubtitle(Track track, _TrackState state) {
-  if (state.hasError) {
-    return 'Download failed · ${friendlyDownloadError(track.lastError!)}';
-  }
-  if (state.isUnavailable) {
-    return '${_unavailableLabel(track.unavailableReason)} · ${track.videoId}';
-  }
-  if (state.replacementFailed) {
-    return '${replacementFailureReason(track.lastError!)} · '
-        '${track.isLocalReplacement ? 'keeping your file' : 'keeping the old file'}';
-  }
-  if (state.hasLocalFile) {
-    final duration = _formatDuration(track.durationSeconds);
-    final localLabel =
-        '${_unavailableLabel(track.unavailableReason)} (local file)';
-    return duration.isEmpty ? localLabel : '$duration · $localLabel';
-  }
-  final duration = _formatDuration(track.durationSeconds);
-  if (track.status == 'downloading') {
-    return duration.isEmpty ? 'Downloading…' : '$duration · Downloading…';
-  }
-  return duration;
 }
 
 Widget _statusIcon(String status, _TrackState state) {
@@ -460,17 +439,6 @@ Widget _statusIcon(String status, _TrackState state) {
   }
 }
 
-String _formatDuration(int? seconds) {
-  if (seconds == null || seconds == 0) return '';
-  final h = seconds ~/ 3600;
-  final m = (seconds % 3600) ~/ 60;
-  final s = seconds % 60;
-  if (h > 0) {
-    return '$h:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
-  }
-  return '$m:${s.toString().padLeft(2, '0')}';
-}
-
 String _formatMs(int ms) {
   final duration = Duration(milliseconds: ms);
   final h = duration.inHours;
@@ -482,21 +450,4 @@ String _formatMs(int ms) {
   return '$m:${s.toString().padLeft(2, '0')}';
 }
 
-String _unavailableLabel(String? reason) {
-  switch (reason) {
-    case 'private':
-      return 'Private video';
-    case 'deleted':
-      return 'Deleted video';
-    case 'removed':
-      return 'Removed from playlist';
-    case 'removed_by_youtube':
-      return 'Removed from YouTube';
-    case 'needs_auth':
-      return 'Requires sign-in';
-    case 'premium_only':
-      return 'Premium only';
-    default:
-      return 'Unavailable';
-  }
-}
+String _unavailableLabel(String? reason) => unavailableTrackLabel(reason);

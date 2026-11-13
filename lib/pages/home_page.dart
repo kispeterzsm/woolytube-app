@@ -19,6 +19,7 @@ import '../services/chapters.dart';
 import '../services/media_thumbnail_service.dart';
 import '../services/metadata_service.dart';
 import '../services/track_search.dart';
+import '../services/track_status_labels.dart';
 import '../services/update_service.dart';
 import '../widgets/lyrics_line_text.dart';
 import '../widgets/mobile_data_download_guard.dart';
@@ -1371,7 +1372,8 @@ class _LyricsResultTile extends ConsumerWidget {
                   children: [
                     Text(
                       chapter?.title ?? track.title,
-                      maxLines: 1,
+                      key: ValueKey('search-lyric-title-${track.id}'),
+                      maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: isCurrentTrack ? _accent : Colors.white,
@@ -1382,8 +1384,7 @@ class _LyricsResultTile extends ConsumerWidget {
                       chapter == null
                           ? playlistName
                           : '${track.title} · $playlistName',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                      key: ValueKey('search-lyric-source-${track.id}'),
                       style: const TextStyle(color: _muted, fontSize: 12),
                     ),
                     const SizedBox(height: 4),
@@ -1520,11 +1521,7 @@ class _SearchTrackTile extends ConsumerWidget {
     final hasLocalFile =
         track.status == 'complete' && track.unavailableReason != null;
     final hasError = track.status == 'error' && track.lastError != null;
-    final details = _details(
-      hasError: hasError,
-      isUnavailable: isUnavailable,
-      hasLocalFile: hasLocalFile,
-    );
+    final details = shortTrackStatus(track);
     final playlistName = playlist?.name ?? 'Playlist #${track.playlistId}';
     final subtitle =
         details.isEmpty ? playlistName : '$playlistName · $details';
@@ -1603,6 +1600,7 @@ class _SearchTrackTile extends ConsumerWidget {
                       searchHighlightedText(
                         _chapterLine(chapter),
                         query,
+                        maxLines: 2,
                         style: const TextStyle(
                           color: Color(0xFFAAAAAA),
                           fontSize: 12,
@@ -1715,45 +1713,5 @@ class _SearchTrackTile extends ConsumerWidget {
       default:
         return const Icon(Icons.download, color: Color(0xFF555555), size: 20);
     }
-  }
-
-  String _details({
-    required bool hasError,
-    required bool isUnavailable,
-    required bool hasLocalFile,
-  }) {
-    if (hasError) return 'Download failed';
-    if (isUnavailable) return _unavailableTrackLabel(track.unavailableReason);
-    if (hasLocalFile) {
-      return '${_unavailableTrackLabel(track.unavailableReason)} (local file)';
-    }
-    return _formatDuration(track.durationSeconds);
-  }
-
-  static String _formatDuration(int? seconds) {
-    if (seconds == null || seconds == 0) return '';
-    final minutes = seconds ~/ 60;
-    final remainingSeconds = seconds % 60;
-    return '$minutes:${remainingSeconds.toString().padLeft(2, '0')}';
-  }
-}
-
-/// Why a track cannot be downloaded, in words.
-String _unavailableTrackLabel(String? reason) {
-  switch (reason) {
-    case removedFromYouTubeReason:
-      return 'Removed from YouTube';
-    case 'private':
-      return 'Private video';
-    case 'deleted':
-      return 'Deleted video';
-    case 'removed':
-      return 'Removed from playlist';
-    case 'needs_auth':
-      return 'Requires sign-in';
-    case 'premium_only':
-      return 'Premium only';
-    default:
-      return 'Unavailable';
   }
 }

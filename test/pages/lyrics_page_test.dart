@@ -13,6 +13,7 @@ import 'package:woolytube/services/download_network_policy.dart';
 import 'package:woolytube/services/lyrics/lyrics_models.dart';
 import 'package:woolytube/services/playback_service.dart';
 
+import '../helpers/real_fonts.dart';
 import '../helpers/test_database.dart';
 import 'lyrics_fakes.dart';
 
@@ -489,6 +490,49 @@ void main() {
     expect(lyricsMenuSubtitle(null), contains('playlist settings'));
     expect(lyricsTimestamp(65000), '1:05');
     expect(lyricsTimestamp(3725000), '1:02:05');
+  });
+
+  // Last in the file: Roboto stays loaded for the rest of the run.
+  group('with the phone font on a 411 dp screen', () {
+    setUpAll(loadRoboto);
+
+    testWidgets('the length and album of a candidate are not cut', (
+      tester,
+    ) async {
+      final track = await addTrack();
+      await db.replaceLyricsDoc(found(track.id));
+      lyrics.candidates = const [
+        LyricsCandidate(
+          id: 7,
+          artist: 'Avicii',
+          title: 'Hey Brother',
+          album: 'Stories (Deluxe Edition, Remastered)',
+          durationSeconds: 255,
+          synced: true,
+          instrumental: false,
+          plainPreview: 'Hey brother',
+          localSeconds: 240,
+          timingFits: true,
+        ),
+      ];
+      await pumpPage(tester, track);
+      usePhoneScreen(tester);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('lyrics-wrong-song')));
+      await tester.pumpAndSettle();
+      expect(
+        find.text(
+          '4:15 · your file 4:00 · Stories (Deluxe Edition, Remastered)',
+        ),
+        findsOneWidget,
+      );
+      expectNotCut(
+        tester,
+        find.byKey(const ValueKey('lyrics-candidate-7-details')),
+      );
+      await unmount(tester);
+    });
   });
 }
 

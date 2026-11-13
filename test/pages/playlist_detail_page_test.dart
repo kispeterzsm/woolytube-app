@@ -21,6 +21,7 @@ import 'package:woolytube/services/playback_service.dart';
 import 'package:woolytube/services/playlist_service.dart';
 
 import '../helpers/player_shell_harness.dart';
+import '../helpers/real_fonts.dart';
 import '../helpers/test_database.dart';
 
 void main() {
@@ -293,10 +294,7 @@ void main() {
     await tester.enterText(find.byType(TextField), 'melody');
     await tester.pumpAndSettle();
     expect(find.text('Another file'), findsNothing);
-    expect(
-      find.textContaining('Chapter: Hidden Melody · 1:20'),
-      findsOneWidget,
-    );
+    expect(find.textContaining('1:20 · Hidden Melody'), findsOneWidget);
     // Play all plays only the chapter found, not the whole album.
     await tester.tap(find.text('Play all'));
     await tester.pump();
@@ -863,12 +861,14 @@ void main() {
     );
     await pumpPage(tester, tracks: [kept]);
 
-    expect(
-      find.text('YouTube version unavailable · keeping your file'),
-      findsOneWidget,
-    );
+    // The row says it in a few words, the options sheet in full.
+    expect(find.text('No YouTube copy'), findsOneWidget);
     await tester.tap(find.byKey(ValueKey('track-more-${kept.id}')));
     await tester.pumpAndSettle();
+    expect(
+      find.textContaining('YouTube version unavailable · keeping your file'),
+      findsOneWidget,
+    );
     await tester.tap(find.text('Show error details'));
     await tester.pumpAndSettle();
     expect(find.textContaining('This video is not available'), findsOneWidget);
@@ -1011,7 +1011,8 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(find.byKey(const ValueKey('playlist-detail-update')), findsNothing);
-    expect(find.text('Stop download'), findsOneWidget);
+    expect(find.text('Stop'), findsOneWidget);
+    expect(find.byTooltip('Stop download'), findsOneWidget);
     expect(find.text('Getting ready to download…'), findsOneWidget);
 
     progress.add(
@@ -1025,7 +1026,8 @@ void main() {
     );
     await tester.pump();
     await tester.pump();
-    expect(find.text('Downloading 1 of 3 · First song'), findsOneWidget);
+    expect(find.text('Downloading 1 of 3 · '), findsOneWidget);
+    expect(find.text('First song'), findsOneWidget);
     LinearProgressIndicator bar() => tester.widget<LinearProgressIndicator>(
       find.byKey(const ValueKey('playlist-download-progress')),
     );
@@ -1042,7 +1044,8 @@ void main() {
     );
     await tester.pump();
     await tester.pump();
-    expect(find.text('Downloading 2 of 3 · Second song'), findsOneWidget);
+    expect(find.text('Downloading 2 of 3 · '), findsOneWidget);
+    expect(find.text('Second song'), findsOneWidget);
     expect(bar().value, closeTo(1.1 / 3, 0.001));
 
     await tester.tap(find.byKey(const ValueKey('playlist-detail-cancel')));
@@ -1054,7 +1057,12 @@ void main() {
 
     await tester.tap(find.byKey(const ValueKey('playlist-detail-cancel')));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Stop'));
+    await tester.tap(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.text('Stop'),
+      ),
+    );
     await tester.pumpAndSettle();
     expect(downloads.cancelCalls, 1);
 
@@ -1977,6 +1985,158 @@ void main() {
       Navigator.of(tester.element(find.byType(PlaylistSettingsPage))),
       same(pages),
     );
+  });
+
+  // Last in the file: Roboto stays loaded for the rest of the run.
+  group('with the phone font on a 411 dp screen, nothing is cut', () {
+    setUpAll(loadRoboto);
+
+    testWidgets('the name, summary, track lines and Update', (tester) async {
+      usePhoneScreen(tester);
+      playlist = await insertTestPlaylist(
+        db,
+        name: 'less socially acceptable masterpieces',
+      );
+      var index = 0;
+      Future<Track> track({
+        required String status,
+        String title = 'Song',
+        int? durationSeconds = 3753,
+        String? unavailableReason,
+        String? lastError,
+        bool replaceRequested = false,
+        bool isLocalReplacement = false,
+      }) {
+        index++;
+        return insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: index,
+          videoId: 'video-$index',
+          title: title,
+          status: status,
+          filePath: status == 'complete' ? '/tmp/$index.m4a' : null,
+          durationSeconds: durationSeconds,
+          unavailableReason: unavailableReason,
+          lastError: lastError,
+          replaceRequested: replaceRequested,
+          isLocalReplacement: isLocalReplacement,
+        );
+      }
+
+      final tracks = [
+        await track(
+          status: 'complete',
+          title:
+              'A very long YouTube title (Official Music Video) [Remastered '
+              '2024] feat. Somebody Else and Their Band - Live at Wembley',
+        ),
+        await track(
+          status: 'complete',
+          unavailableReason: 'removed_by_youtube',
+        ),
+        await track(status: 'complete', unavailableReason: 'private'),
+        await track(status: 'complete', unavailableReason: 'removed'),
+        await track(status: 'unavailable', unavailableReason: 'removed'),
+        await track(status: 'unavailable', unavailableReason: 'private'),
+        await track(
+          status: 'error',
+          lastError:
+              "ERROR: [youtube] abc: Sign in to confirm you're not a bot. "
+              'Use --cookies-from-browser or --cookies for the '
+              'authentication.',
+        ),
+        await track(status: 'error', lastError: 'HTTP Error 403: Forbidden'),
+        await track(
+          status: 'error',
+          lastError:
+              'Something nobody has seen before went wrong while merging '
+              'the formats into one file, and it says so at length',
+        ),
+        await track(
+          status: 'complete',
+          isLocalReplacement: true,
+          replaceRequested: true,
+          lastError: 'Video unavailable. This video is not available',
+        ),
+      ];
+      await pumpPage(tester, tracks: tracks);
+
+      expectNotCut(tester, find.byKey(const ValueKey('playlist-detail-name')));
+      expect(
+        find.text('10 tracks · 5 downloaded · 2 unavailable · 10 h 25 min'),
+        findsOneWidget,
+      );
+      expectNotCut(
+        tester,
+        find.byKey(const ValueKey('playlist-detail-summary')),
+      );
+      // A video playlist: the narrowest room for Update.
+      expectNotCut(
+        tester,
+        find.byKey(const ValueKey('playlist-detail-update')),
+      );
+      for (final track in tracks) {
+        final subtitle = find.byKey(ValueKey('track-subtitle-${track.id}'));
+        await tester.scrollUntilVisible(subtitle, 200);
+        expectNotCut(tester, subtitle);
+      }
+      expect(find.text('1:02:33 · Removed, kept'), findsOneWidget);
+      expect(find.text('Bot check, try later'), findsOneWidget);
+      expect(find.text('Rate-limited'), findsOneWidget);
+      // No video ID on an unavailable row.
+      expect(find.text('Private video'), findsOneWidget);
+      expect(find.textContaining('video-6'), findsNothing);
+
+      // The options sheet has every word and the whole title.
+      final first = tracks.first;
+      await tester.scrollUntilVisible(
+        find.byKey(ValueKey('track-more-${first.id}')),
+        -200,
+      );
+      await tester.tap(find.byKey(ValueKey('track-more-${first.id}')));
+      await tester.pumpAndSettle();
+      expectNotCut(tester, find.byKey(const ValueKey('track-actions-title')));
+      await tester.tapAt(const Offset(200, 40));
+      await tester.pumpAndSettle();
+      final failed = tracks[8];
+      await tester.scrollUntilVisible(
+        find.byKey(ValueKey('track-more-${failed.id}')),
+        200,
+      );
+      await tester.tap(find.byKey(ValueKey('track-more-${failed.id}')));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('Download failed: Something nobody has seen'),
+        findsOneWidget,
+      );
+      expectNotCut(tester, find.byKey(const ValueKey('track-actions-details')));
+    });
+
+    testWidgets('Stop and Leave queue fit beside Play', (tester) async {
+      usePhoneScreen(tester);
+      final track = await insertTestTrack(db, playlistId: playlist.id);
+      await pumpPage(tester, tracks: [track]);
+
+      queued.add([playlist.id]);
+      await tester.pump();
+      await tester.pump();
+      expectNotCut(
+        tester,
+        find.byKey(const ValueKey('playlist-detail-leave-queue')),
+      );
+      expect(find.byTooltip('Remove from the download queue'), findsOneWidget);
+
+      queued.add(const []);
+      syncing.add({playlist.id});
+      await tester.pump();
+      await tester.pump();
+      expectNotCut(
+        tester,
+        find.byKey(const ValueKey('playlist-detail-stop-check')),
+      );
+      expect(find.byTooltip('Stop update'), findsOneWidget);
+    });
   });
 }
 

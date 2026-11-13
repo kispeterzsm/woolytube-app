@@ -848,11 +848,7 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
                 SimpleDialogOption(
                   key: ValueKey('editor-keep-${value ? 'left' : 'right'}'),
                   onPressed: () => Navigator.pop(ctx, value),
-                  child: Text(
-                    'Keep "$title"',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
+                  child: Text('Keep "$title"'),
                 ),
               Align(
                 alignment: AlignmentDirectional.centerEnd,
@@ -1356,7 +1352,8 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
                                 ? 'Where it was'
                                 : '${signedSeconds(liveMs - original)} from '
                                     'where it was',
-                            maxLines: 1,
+                            key: const ValueKey('editor-moved-by'),
+                            maxLines: 2,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
                               fontSize: 12,
@@ -1947,8 +1944,8 @@ class _Legend extends StatelessWidget {
     final origins = {for (final c in chapters) c.origin};
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 2, 16, 0),
-      child: SizedBox(
-        height: 22,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 22),
         child: Row(
           children: [
             for (final origin in ChapterOrigin.values)
@@ -1971,14 +1968,28 @@ class _Legend extends StatelessWidget {
                 ),
                 const SizedBox(width: 12),
               ],
-            const Spacer(),
-            const Icon(Icons.touch_app, size: 14, color: Color(0xFF777777)),
-            const SizedBox(width: 4),
-            const Flexible(
-              child: Text(
-                'Tap a boundary to pick it · drag to scrub',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+            // The hint takes all the room the legend leaves, and wraps
+            // rather than being cut.
+            const Expanded(
+              child: Text.rich(
+                TextSpan(
+                  children: [
+                    WidgetSpan(
+                      alignment: PlaceholderAlignment.middle,
+                      child: Padding(
+                        padding: EdgeInsets.only(right: 4),
+                        child: Icon(
+                          Icons.touch_app,
+                          size: 14,
+                          color: Color(0xFF777777),
+                        ),
+                      ),
+                    ),
+                    TextSpan(text: 'Tap a boundary · drag to scrub'),
+                  ],
+                ),
+                key: ValueKey('editor-legend-hint'),
+                textAlign: TextAlign.end,
                 style: TextStyle(color: Color(0xFF777777), fontSize: 11),
               ),
             ),
@@ -2348,6 +2359,7 @@ class _TimeDialogState extends State<_TimeDialog> {
       decoration: InputDecoration(
         labelText: 'Time (m:ss.mmm or h:mm:ss.mmm)',
         errorText: _error,
+        errorMaxLines: 2,
       ),
     ),
     actions: [

@@ -75,6 +75,7 @@ class _TrackRenameDialogState extends State<_TrackRenameDialog> {
                   widget.hasFile
                       ? 'The number in front and the extension stay the same'
                       : null,
+              helperMaxLines: 2,
               helperStyle: const TextStyle(color: Color(0xFF666666)),
               border: const OutlineInputBorder(),
             ),

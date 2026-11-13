@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:woolytube/player/player_layout.dart';
@@ -523,6 +524,61 @@ void main() {
     expect(harness.playback.stopCalls, 1);
     expect(audioPlayerOverlayHeightNotifier.value, 0);
     expect(_background, findsNothing);
+  });
+
+  testWidgets('tapping the panel title shows the whole title', (tester) async {
+    final harness = await pumpPlayerShell(tester);
+    const long =
+        'A very long YouTube title (Official Music Video) [Remastered 2024] '
+        'feat. Somebody Else and Their Band - Live at Wembley Stadium 1986';
+    harness.play(harness.audioTrack.copyWith(title: long));
+    harness.shellState(tester).expand();
+    await tester.pumpAndSettle();
+    // The panel's title slot is two lines, so a title this long is cut.
+    final panelTitle = find.byKey(const ValueKey('player-panel-title'));
+    expect(tester.widget<Text>(panelTitle).maxLines, 2);
+
+    await tester.tap(panelTitle);
+    await tester.pumpAndSettle();
+    final full = find.byKey(const ValueKey('player-full-title-text'));
+    expect(tester.widget<SelectableText>(full).data, long);
+    expect(find.text('Test Playlist'), findsWidgets);
+
+    String? copied;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copied = (call.arguments as Map)['text'] as String?;
+        }
+        return null;
+      },
+    );
+    await tester.tap(find.byKey(const ValueKey('player-full-title-copy')));
+    await tester.pumpAndSettle();
+    expect(copied, long);
+    expect(full, findsNothing);
+    // The panel is still open.
+    expect(panelTitle, findsOneWidget);
+  });
+
+  testWidgets('with large text a long panel title takes one line', (
+    tester,
+  ) async {
+    tester.platformDispatcher.textScaleFactorTestValue = 1.5;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    final harness = await pumpPlayerShell(tester);
+    harness.play(
+      harness.audioTrack.copyWith(
+        title: 'A very long YouTube title (Official Music Video) [Remastered]',
+      ),
+    );
+    harness.shellState(tester).expand();
+    await tester.pumpAndSettle();
+    // No overflow: the playlist and position lines keep their room.
+    expect(tester.takeException(), isNull);
+    final panelTitle = find.byKey(const ValueKey('player-panel-title'));
+    expect(tester.widget<Text>(panelTitle).maxLines, 1);
   });
 
   testWidgets('More offers Next file only while chapters play as tracks', (

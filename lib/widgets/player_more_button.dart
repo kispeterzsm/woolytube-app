@@ -200,12 +200,7 @@ List<Widget> _moreTiles(
       subtitle:
           subtitle == null
               ? null
-              : Text(
-                subtitle,
-                style: const TextStyle(color: _muted),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
+              : Text(subtitle, style: const TextStyle(color: _muted)),
       enabled: onTap != null,
       onTap: onTap,
     );

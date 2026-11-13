@@ -27,6 +27,7 @@ import '../services/media_thumbnail_service.dart';
 import '../services/playlist_service.dart';
 import '../services/sponsorblock_service.dart';
 import '../services/track_search.dart';
+import '../services/track_status_labels.dart';
 import '../services/video_quality.dart';
 import '../services/youtube_links.dart';
 import '../widgets/lyrics_line_text.dart';
@@ -188,6 +189,9 @@ class _TrackListView {
     return parts.join(' · ');
   }
 }
+
+const _nameFontSize = 18.0;
+const _nameLineHeight = 1.2;
 
 String _formatTotalDuration(int seconds) {
   final hours = seconds ~/ 3600;
@@ -954,6 +958,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                         (tracks) => Column(
                           children: [
                             _buildHeader(_viewFor(tracks), playlist),
+                            _SummaryLine(_viewFor(tracks).summary),
                             _RunStatus(playlistId: widget.playlistId),
                             Expanded(child: _buildTrackList(_viewFor(tracks))),
                           ],
@@ -968,6 +973,14 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     final name = playlist?.name ?? widget.initialName ?? '';
     final lyricsLabel = _showSearch ? _lyricsFilterLabel : null;
     return AppBar(
+      // Room for two lines of the name, also with large text.
+      toolbarHeight: math.max(
+        kToolbarHeight,
+        MediaQuery.textScalerOf(context).scale(_nameFontSize) *
+                _nameLineHeight *
+                2 +
+            8,
+      ),
       bottom:
           lyricsLabel == null
               ? null
@@ -1015,20 +1028,18 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                 ),
                 onChanged: _onSearchChanged,
               )
-              : Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
-                  if (view != null)
-                    Text(
-                      view.summary,
-                      key: const ValueKey('playlist-detail-summary'),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: _muted, fontSize: 12),
-                    ),
-                ],
+              // Two lines at a smaller size, so long names fit beside the
+              // actions; the summary line is under Play and Update.
+              : Text(
+                name,
+                key: const ValueKey('playlist-detail-name'),
+                maxLines: 2,
+                softWrap: true,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: _nameFontSize,
+                  height: _nameLineHeight,
+                ),
               ),
       actions: [
         IconButton(
@@ -1156,7 +1167,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
               children: [
                 // Shrinks with very large text instead of pushing the toggles off.
                 Flexible(
-                  flex: 3,
+                  flex: filtering ? 3 : 2,
                   child:
                       filtering
                           ? FittedBox(
@@ -1188,7 +1199,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                 ),
                 const SizedBox(width: 4),
                 Flexible(
-                  flex: 2,
+                  flex: filtering ? 2 : 3,
                   child: Align(
                     alignment: Alignment.centerLeft,
                     child: _UpdateControl(
@@ -1706,22 +1717,28 @@ class _UpdateControl extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final run = _watchRun(ref, playlistId);
+    // Short labels, so they fit beside Play and the toggles even on a video
+    // playlist; the tooltip says it in full.
     Widget button({
       required Key key,
       required Widget icon,
       required String label,
+      required String tooltip,
       required VoidCallback? onPressed,
       Color color = _accent,
     }) {
-      return TextButton.icon(
-        key: key,
-        onPressed: onPressed,
-        icon: icon,
-        label: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
-        style: TextButton.styleFrom(
-          foregroundColor: color,
-          disabledForegroundColor: _muted,
-          minimumSize: const Size(48, 48),
+      return Tooltip(
+        message: tooltip,
+        child: TextButton.icon(
+          key: key,
+          onPressed: onPressed,
+          icon: icon,
+          label: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+          style: TextButton.styleFrom(
+            foregroundColor: color,
+            disabledForegroundColor: _muted,
+            minimumSize: const Size(48, 48),
+          ),
         ),
       );
     }
@@ -1731,7 +1748,8 @@ class _UpdateControl extends ConsumerWidget {
         return button(
           key: const ValueKey('playlist-detail-cancel'),
           icon: const Icon(Icons.stop_circle_outlined),
-          label: 'Stop download',
+          label: 'Stop',
+          tooltip: 'Stop download',
           onPressed: onStopDownload,
           color: const Color(0xFFE57373),
         );
@@ -1739,7 +1757,8 @@ class _UpdateControl extends ConsumerWidget {
         return button(
           key: const ValueKey('playlist-detail-stop-check'),
           icon: const Icon(Icons.stop_circle_outlined),
-          label: 'Stop update',
+          label: 'Stop',
+          tooltip: 'Stop update',
           onPressed: onStopCheck,
           color: const Color(0xFFE57373),
         );
@@ -1747,7 +1766,8 @@ class _UpdateControl extends ConsumerWidget {
         return button(
           key: const ValueKey('playlist-detail-leave-queue'),
           icon: const Icon(Icons.remove_circle_outline),
-          label: 'Remove from queue',
+          label: 'Leave queue',
+          tooltip: 'Remove from the download queue',
           onPressed: onLeaveQueue,
         );
       case _Run.idle:
@@ -1765,9 +1785,33 @@ class _UpdateControl extends ConsumerWidget {
                   )
                   : const Icon(Icons.sync),
           label: starting ? 'Updating…' : 'Update',
+          tooltip: starting ? 'Updating…' : 'Update the playlist from YouTube',
           onPressed: starting ? null : onUpdate,
         );
     }
+  }
+}
+
+/// "669 tracks · all downloaded · 41 h 12 min" under Play and Update, the
+/// full width of the page, so it is never cut.
+class _SummaryLine extends StatelessWidget {
+  const _SummaryLine(this.summary);
+
+  final String summary;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          summary,
+          key: const ValueKey('playlist-detail-summary'),
+          style: const TextStyle(color: _muted, fontSize: 12),
+        ),
+      ),
+    );
   }
 }
 
@@ -1834,13 +1878,13 @@ class _RunText extends StatelessWidget {
       child: Text(
         text,
         key: const ValueKey('playlist-run-text'),
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: const TextStyle(color: Color(0xFFCCCCCC), fontSize: 13),
+        style: _runTextStyle,
       ),
     );
   }
 }
+
+const _runTextStyle = TextStyle(color: Color(0xFFCCCCCC), fontSize: 13);
 
 /// "Downloading 2 of 5 · Title"; rebuilds only when the track changes.
 class _DownloadingText extends ConsumerWidget {
@@ -1859,11 +1903,25 @@ class _DownloadingText extends ConsumerWidget {
         return (value.currentTrackIndex, value.totalTracks, value.currentTitle);
       }),
     );
-    final parts = [
-      total > 0 ? 'Downloading $index of $total' : 'Downloading',
-      if (title != null && title.isNotEmpty) title,
-    ];
-    return _RunText(parts.join(' · '));
+    final counter = total > 0 ? 'Downloading $index of $total' : 'Downloading';
+    if (title == null || title.isEmpty) return _RunText(counter);
+    // The counter always shows whole; only the title, which is also in the
+    // track list, is cut to the one line.
+    return Row(
+      key: const ValueKey('playlist-run-text'),
+      children: [
+        Text('$counter · ', style: _runTextStyle),
+        Expanded(
+          child: Text(
+            title,
+            key: const ValueKey('playlist-run-title'),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: _runTextStyle,
+          ),
+        ),
+      ],
+    );
   }
 }
 
@@ -2133,10 +2191,8 @@ class _UpNextSheetState extends ConsumerState<_UpNextSheet> {
                         overflow: TextOverflow.ellipsis,
                       ),
                       subtitle: Text(
-                        '${index + 1}. $playlistName · #${track.index}',
+                        '${index + 1}. #${track.index} · $playlistName',
                         style: const TextStyle(color: _muted),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
                       ),
                       onTap: () {
                         Navigator.pop(context);

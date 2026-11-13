@@ -176,14 +176,7 @@ class _TrackActions {
         leading: Icon(icon, color: onTap == null ? _muted : iconColor),
         title: Text(title, style: _sheetTitleStyle),
         subtitle:
-            subtitle == null
-                ? null
-                : Text(
-                  subtitle,
-                  style: subtitleStyle,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
+            subtitle == null ? null : Text(subtitle, style: subtitleStyle),
         enabled: onTap != null,
         onTap: onTap,
       );
@@ -860,8 +853,6 @@ class _TrackActions {
                   child: Text(
                     friendlyDownloadError(raw),
                     style: const TextStyle(color: Colors.white, fontSize: 16),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
               ],
@@ -1255,6 +1246,7 @@ class _ReuploadLinkDialogState extends State<_ReuploadLinkDialog> {
                 labelText: 'Link to the reupload',
                 hintText: 'https://www.youtube.com/watch?v=…',
                 errorText: _error,
+                errorMaxLines: 2,
                 suffixIcon: IconButton(
                   tooltip: 'Paste',
                   icon: const Icon(Icons.content_paste),
@@ -1323,21 +1315,11 @@ class _TrackSheetHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final state = _TrackState.of(track);
-    final duration = _formatDuration(track.durationSeconds);
-    final status = switch (track.status) {
-      'complete' when state.hasLocalFile =>
-        '${_unavailableLabel(track.unavailableReason)} (local file)',
-      'complete' when track.isLocalReplacement => 'Your own file',
-      'complete' => 'Downloaded',
-      'downloading' => 'Downloading…',
-      'error' => 'Download failed',
-      'unavailable' => _unavailableLabel(track.unavailableReason),
-      _ => 'Not downloaded',
-    };
+    final duration = formatTrackLength(track.durationSeconds);
     final details = [
       '#${track.index}',
       if (duration.isNotEmpty) duration,
-      status,
+      trackStatusInFull(track),
     ].join(' · ');
 
     return Padding(
@@ -1366,8 +1348,6 @@ class _TrackSheetHeader extends StatelessWidget {
                     fontSize: 16,
                     fontWeight: FontWeight.w600,
                   ),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
                 ),
                 const SizedBox(height: 4),
                 Text(
@@ -1380,8 +1360,6 @@ class _TrackSheetHeader extends StatelessWidget {
                             : _muted,
                     fontSize: 13,
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                 ),
               ],
             ),

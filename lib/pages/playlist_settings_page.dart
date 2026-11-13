@@ -839,11 +839,7 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
                       key: const ValueKey('playlist-open-youtube'),
                       leading: const Icon(Icons.open_in_new),
                       title: const Text('Open on YouTube'),
-                      subtitle: Text(
-                        playlist.url,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
+                      subtitle: Text(playlist.url),
                       onTap: _openPlaylistOnYouTube,
                       trailing: IconButton(
                         tooltip: 'Copy link',
@@ -1390,6 +1386,7 @@ class _ForceInsertIndexDialogState extends State<_ForceInsertIndexDialog> {
             decoration: InputDecoration(
               labelText: 'Position',
               errorText: _errorText,
+              errorMaxLines: 2,
               border: const OutlineInputBorder(),
             ),
             onSubmitted: (_) => _submit(),

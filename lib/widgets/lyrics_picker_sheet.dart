@@ -463,7 +463,12 @@ class _CandidateTile extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(color: Colors.white),
           ),
-          subtitle: Row(
+          // The details go on the next line when they do not fit beside
+          // the badge, so the album is never cut.
+          subtitle: Wrap(
+            spacing: 8,
+            runSpacing: 2,
+            crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
@@ -477,18 +482,12 @@ class _CandidateTile extends StatelessWidget {
                   style: TextStyle(color: badgeColor, fontSize: 11),
                 ),
               ),
-              if (details.isNotEmpty) ...[
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    details,
-                    key: ValueKey('lyrics-candidate-${c.id}-details'),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: _muted),
-                  ),
+              if (details.isNotEmpty)
+                Text(
+                  details,
+                  key: ValueKey('lyrics-candidate-${c.id}-details'),
+                  style: const TextStyle(color: _muted),
                 ),
-              ],
             ],
           ),
           trailing:

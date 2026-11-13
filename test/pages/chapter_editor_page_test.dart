@@ -12,6 +12,7 @@ import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/recognition/audio_window_decoder.dart';
 import 'package:woolytube/services/waveform_service.dart';
 
+import '../helpers/real_fonts.dart';
 import '../helpers/test_database.dart';
 import 'chapter_editor_fakes.dart';
 
@@ -1263,6 +1264,53 @@ void main() {
       await tester.pumpAndSettle();
     });
   }
+
+  // Last in the file: Roboto stays loaded for the rest of the run.
+  group('with the phone font on a 411 dp screen, nothing is cut', () {
+    setUpAll(loadRoboto);
+
+    testWidgets('the legend hint, the moved-by line and the merge choices', (
+      tester,
+    ) async {
+      const long =
+          ' with a very long name from a long YouTube description that never '
+          'ends';
+      await pumpEditor(
+        tester,
+        size: const Size(411, 1800),
+        initial: [
+          _youTube[0].copyWith(title: '${_youTube[0].title}$long'),
+          _youTube[1].copyWith(
+            title: '${_youTube[1].title}$long',
+            origin: ChapterOrigin.auto,
+          ),
+          _youTube[2].copyWith(origin: ChapterOrigin.user),
+        ],
+      );
+      // All three sources in the legend, and the hint still whole.
+      for (final source in ['YouTube', 'Auto', 'Yours']) {
+        expect(find.text(source), findsWidgets);
+      }
+      expectNotCut(tester, find.byKey(const ValueKey('editor-legend-hint')));
+
+      await tapKey(tester, 'editor-nudge--1000');
+      await tapKey(tester, 'editor-nudge--10');
+      await tester.pump(const Duration(milliseconds: 200));
+      await finishPreview(tester);
+      expect(find.text('−1.010 s from where it was'), findsOneWidget);
+      expectNotCut(tester, find.byKey(const ValueKey('editor-moved-by')));
+      await tapKey(tester, 'editor-undo');
+      await tapKey(tester, 'editor-undo');
+      await tester.pumpAndSettle();
+
+      await tapKey(tester, 'editor-edge-menu');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Remove this boundary'));
+      await tester.pumpAndSettle();
+      expectNotCut(tester, find.byKey(const ValueKey('editor-keep-left')));
+      expectNotCut(tester, find.byKey(const ValueKey('editor-keep-right')));
+    });
+  });
 }
 
 /// A decoder that cannot read the file.

@@ -1,44 +1,70 @@
+/// The known kinds of download failure, each with the sentence the app
+/// shows ([friendly]) and the few words a one-line list row has room for
+/// ([short]).
+enum _DownloadErrorKind {
+  notArchived('No archived copy was found', 'No archived copy'),
+  removedFromYouTube('Removed from YouTube', 'Removed from YouTube'),
+  botCheck(
+    'YouTube asked to confirm this is not a bot. Try again later.',
+    'Bot check, try later',
+  ),
+  ageGate('Age-restricted — needs sign-in', 'Age-restricted'),
+  private('Private video', 'Private video'),
+  membersOnly('Members-only video', 'Members only'),
+  premium('YouTube Premium only', 'Premium only'),
+  rateLimited('Blocked by YouTube (rate-limited)', 'Rate-limited'),
+  geoRestricted('Geo-restricted', 'Geo-restricted'),
+  liveEvent('Live event, not downloadable', 'Live event'),
+  unavailable('Video unavailable', 'Video unavailable'),
+  network('Network error', 'Network error');
+
+  const _DownloadErrorKind(this.friendly, this.short);
+
+  final String friendly;
+  final String short;
+
+  static _DownloadErrorKind? of(String raw) {
+    final lower = raw.toLowerCase();
+    // The Wayback Machine has no saved copy of this video.
+    if (lower.contains('not archived or indexed')) return notArchived;
+    if (isRemovedFromYouTubeError(raw)) return removedFromYouTube;
+    // "Sign in to confirm you're not a bot" is YouTube blocking the
+    // downloader, not an age check. It usually passes after a while or with
+    // a newer yt-dlp.
+    if (isBotCheckDownloadError(raw)) return botCheck;
+    if (isAgeGateDownloadError(raw)) return ageGate;
+    if (lower.contains('private video')) return private;
+    if (lower.contains('members-only') || lower.contains('members only')) {
+      return membersOnly;
+    }
+    if (lower.contains('premium')) return premium;
+    if (lower.contains('http error 403') ||
+        lower.contains('rate-limit') ||
+        lower.contains(' 429')) {
+      return rateLimited;
+    }
+    if (lower.contains('geo') && lower.contains('restrict')) {
+      return geoRestricted;
+    }
+    if (lower.contains('live event')) return liveEvent;
+    if (lower.contains('video unavailable') ||
+        lower.contains('this video is not available')) {
+      return unavailable;
+    }
+    if (lower.contains('network') || lower.contains('connection')) {
+      return network;
+    }
+    return null;
+  }
+}
+
 /// Maps raw yt-dlp / download exception text to a short user-facing message.
 ///
 /// Falls back to the first line of [raw], truncated, when no known pattern
 /// matches so the user still sees something meaningful.
 String friendlyDownloadError(String raw) {
-  final lower = raw.toLowerCase();
-  // The Wayback Machine has no saved copy of this video.
-  if (lower.contains('not archived or indexed')) {
-    return 'No archived copy was found';
-  }
-  if (isRemovedFromYouTubeError(raw)) return 'Removed from YouTube';
-  // "Sign in to confirm you're not a bot" is YouTube blocking the
-  // downloader, not an age check. It usually passes after a while or with
-  // a newer yt-dlp.
-  if (isBotCheckDownloadError(raw)) {
-    return 'YouTube asked to confirm this is not a bot. Try again later.';
-  }
-  if (isAgeGateDownloadError(raw)) {
-    return 'Age-restricted — needs sign-in';
-  }
-  if (lower.contains('private video')) return 'Private video';
-  if (lower.contains('members-only') || lower.contains('members only')) {
-    return 'Members-only video';
-  }
-  if (lower.contains('premium')) return 'YouTube Premium only';
-  if (lower.contains('http error 403') ||
-      lower.contains('rate-limit') ||
-      lower.contains(' 429')) {
-    return 'Blocked by YouTube (rate-limited)';
-  }
-  if (lower.contains('geo') && lower.contains('restrict')) {
-    return 'Geo-restricted';
-  }
-  if (lower.contains('live event')) return 'Live event, not downloadable';
-  if (lower.contains('video unavailable') ||
-      lower.contains('this video is not available')) {
-    return 'Video unavailable';
-  }
-  if (lower.contains('network') || lower.contains('connection')) {
-    return 'Network error';
-  }
+  final kind = _DownloadErrorKind.of(raw);
+  if (kind != null) return kind.friendly;
   // Fallback: first non-empty line, truncated.
   final firstLine = raw
       .split('\n')
@@ -50,6 +76,13 @@ String friendlyDownloadError(String raw) {
   }
   return firstLine;
 }
+
+/// The reason a download failed in at most a few words, for the one grey
+/// line under a track in a list ("Rate-limited", "Bot check, try later").
+/// An unknown error is just "Download failed"; the track's options sheet
+/// and its error details have the full text.
+String shortDownloadError(String raw) =>
+    _DownloadErrorKind.of(raw)?.short ?? 'Download failed';
 
 /// True when [raw] describes YouTube's age-confirmation gate.
 bool isAgeGateDownloadError(String raw) {

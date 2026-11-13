@@ -1680,12 +1680,7 @@ class _ChapterActionsSheet extends StatelessWidget {
         subtitle:
             subtitle == null
                 ? null
-                : Text(
-                  subtitle,
-                  style: _sheetSubtitleStyle,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
+                : Text(subtitle, style: _sheetSubtitleStyle),
         enabled: onTap != null,
         onTap: onTap,
       );
@@ -1708,8 +1703,6 @@ class _ChapterActionsSheet extends StatelessWidget {
                     Text(
                       chapter.title,
                       key: const ValueKey('chapter-actions-title'),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: Colors.white,
                         fontSize: 16,
@@ -1999,6 +1992,7 @@ class _ChapterEditDialogState extends State<ChapterEditDialog> {
                       ? null
                       : 'The file is ${chapterTimestamp(widget.durationMs!)} '
                           'long',
+              helperMaxLines: 2,
             ),
           ),
           if (_error != null)

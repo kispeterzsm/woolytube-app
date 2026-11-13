@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/playback_providers.dart';
@@ -6,6 +9,7 @@ import '../widgets/chapters_button.dart';
 import '../widgets/player_controls.dart';
 import '../widgets/player_more_button.dart';
 import 'player_layout.dart';
+import 'player_shell.dart';
 import 'player_widgets.dart';
 
 /// Content of the expanded audio panel, laid out with the fixed row heights
@@ -163,6 +167,9 @@ class _PanelHeader extends StatelessWidget {
   }
 }
 
+/// The title, playlist and position under the artwork. Their slot has a
+/// fixed height (the mini bar morphs into it), so a long title is cut to
+/// two lines; tapping the block shows it in full.
 class _PanelTitleBlock extends ConsumerWidget {
   const _PanelTitleBlock();
 
@@ -174,6 +181,43 @@ class _PanelTitleBlock extends ConsumerWidget {
     final playlistName = ref.watch(
       currentPlaylistProvider.select((value) => value.valueOrNull?.name ?? ''),
     );
+    return Semantics(
+      button: true,
+      hint: 'Shows the full title',
+      child: GestureDetector(
+        key: const ValueKey('player-panel-title-block'),
+        behavior: HitTestBehavior.opaque,
+        onTap:
+            title.isEmpty
+                ? null
+                : () => _showFullTitle(context, title, playlistName),
+        child: LayoutBuilder(
+          builder:
+              (context, constraints) => _titleColumn(
+                title,
+                playlistName,
+                _titleLines(context, constraints.maxHeight),
+              ),
+        ),
+      ),
+    );
+  }
+
+  static const _lineHeight = 1.2;
+  static const _playlistFontSize = 13.0;
+  static const _captionFontSize = 12.0;
+
+  /// Two title lines when they fit above the playlist and position lines,
+  /// one with large text, so nothing in the fixed slot is cut off.
+  static int _titleLines(BuildContext context, double height) {
+    final scaler = MediaQuery.textScalerOf(context);
+    double line(double fontSize) => scaler.scale(fontSize) * _lineHeight;
+    final rest = 3 + line(_playlistFontSize) + 2 + line(_captionFontSize);
+    final lines = (height - rest) / line(PlayerLayout.panelTitleFontSize);
+    return lines >= 2 ? 2 : 1;
+  }
+
+  Widget _titleColumn(String title, String playlistName, int titleLines) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -185,9 +229,9 @@ class _PanelTitleBlock extends ConsumerWidget {
             color: Colors.white,
             fontSize: PlayerLayout.panelTitleFontSize,
             fontWeight: FontWeight.w700,
-            height: 1.2,
+            height: _lineHeight,
           ),
-          maxLines: 2,
+          maxLines: titleLines,
           overflow: TextOverflow.ellipsis,
         ),
         if (playlistName.isNotEmpty) ...[
@@ -196,7 +240,8 @@ class _PanelTitleBlock extends ConsumerWidget {
             playlistName,
             style: const TextStyle(
               color: PlayerLayout.secondaryText,
-              fontSize: 13,
+              fontSize: _playlistFontSize,
+              height: _lineHeight,
             ),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
@@ -204,11 +249,69 @@ class _PanelTitleBlock extends ConsumerWidget {
         ],
         const SizedBox(height: 2),
         const PlaylistPositionCaption(
-          style: TextStyle(color: PlayerLayout.mutedText, fontSize: 12),
+          style: TextStyle(
+            color: PlayerLayout.mutedText,
+            fontSize: _captionFontSize,
+            height: _lineHeight,
+          ),
         ),
       ],
     );
   }
+}
+
+/// The playing track's whole title and playlist name, selectable, with a
+/// button that copies the title.
+void _showFullTitle(BuildContext context, String title, String playlistName) {
+  final host = PlayerShell.maybeOf(context);
+  final hostContext = host != null && host.mounted ? host.context : context;
+  showDialog<void>(
+    context: hostContext,
+    builder:
+        (dialogContext) => AlertDialog(
+          key: const ValueKey('player-full-title'),
+          backgroundColor: const Color(0xFF2A2A2A),
+          content: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SelectableText(
+                  title,
+                  key: const ValueKey('player-full-title-text'),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                if (playlistName.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  SelectableText(
+                    playlistName,
+                    style: const TextStyle(color: PlayerLayout.secondaryText),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton.icon(
+              key: const ValueKey('player-full-title-copy'),
+              icon: const Icon(Icons.copy, size: 18),
+              label: const Text('Copy title'),
+              onPressed: () {
+                unawaited(Clipboard.setData(ClipboardData(text: title)));
+                Navigator.pop(dialogContext);
+              },
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+  );
 }
 
 /// −10 s, previous, play/pause, next, +10 s. The row never changes shape, so

@@ -360,11 +360,7 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
                   ),
                   const SizedBox(height: 8),
                   for (final c in removed.take(shown))
-                    Text(
-                      '• ${c.title} (${chapterTimestamp(c.startMs)})',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
+                    Text('• ${c.title} (${chapterTimestamp(c.startMs)})'),
                   if (removed.length > shown)
                     Text('…and ${removed.length - shown} more'),
                   if (lyrics.isNotEmpty) ...[
@@ -616,12 +612,13 @@ class _PreviewCard extends StatelessWidget {
                       builder: (context, range) {
                         final r = range.data;
                         final end = r?.endMs;
+                        // The Stop preview button already says what plays.
                         return Text(
                           [
-                            'Preview · ${chapterTimestamp(preview.positionMs ~/ 100 * 100)}',
-                            if (r != null && end != null)
-                              'until ${chapterTimestamp(end)}',
-                          ].join(' '),
+                            chapterTimestamp(preview.positionMs ~/ 100 * 100),
+                            if (r != null && end != null) chapterTimestamp(end),
+                          ].join(' → '),
+                          key: const ValueKey('review-preview-position'),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
