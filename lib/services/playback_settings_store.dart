@@ -168,6 +168,7 @@ class SharedPreferencesPlaybackSettingsStore implements PlaybackSettingsStore {
     } else {
       await preferences.setString(sessionKey, jsonEncode(session.toJson()));
     }
+    ResumePointChanges.notify();
   }
 }
 

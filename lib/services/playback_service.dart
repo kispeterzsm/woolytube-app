@@ -2685,6 +2685,17 @@ class PlaybackService
     }
   }
 
+  /// Shows the remembered last song, paused, when nothing is playing: for
+  /// a restore that brought back where the player was on another phone.
+  Future<void> restoreRememberedSession() => _transition(() async {
+    final store = _settingsStore;
+    if (store == null || currentItem != null) return;
+    final preferences = await store.load();
+    final session = preferences.session;
+    if (session == null) return;
+    await _restoreSession(session, audioOnly: preferences.audioOnly ?? false);
+  });
+
   /// Shows the last song again, paused and not yet opened, in its playlist
   /// queue. Play opens it at the remembered position. Video files are not
   /// restored, so start-up never opens the video player by itself.

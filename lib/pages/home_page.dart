@@ -13,11 +13,14 @@ import '../providers/playlist_counts_provider.dart';
 import '../providers/providers.dart';
 import '../services/download_errors.dart';
 import '../services/download_service.dart';
+import '../services/library_restore_service.dart';
+import '../services/loudness_service.dart';
 import '../services/lyrics/lyrics_models.dart';
 import '../services/chapter_playback.dart';
 import '../services/chapters.dart';
 import '../services/media_thumbnail_service.dart';
 import '../services/metadata_service.dart';
+import '../services/playback_service.dart';
 import '../services/track_search.dart';
 import '../services/track_status_labels.dart';
 import '../services/update_service.dart';
@@ -578,49 +581,55 @@ class _HomePageState extends ConsumerState<HomePage> {
   Future<void> _importAll(List<DiscoveredPlaylist> imports) async {
     if (_importing) return;
     setState(() => _importing = true);
-    final metadata = ref.read(metadataServiceProvider);
-    final failures = <String>[];
-    var imported = 0;
+    // Read now: the import may end after the page is gone.
+    final restore = ref.read(libraryRestoreServiceProvider);
+    final pending = ref.read(pendingImportsProvider.notifier);
+    final settings = ref.read(appSettingsServiceProvider);
+    final player = _playerOrNull();
+    LoudnessService? loudness;
     try {
-      for (final discovered in imports) {
+      loudness = ref.read(loudnessServiceProvider);
+    } catch (_) {}
+    final messenger = ScaffoldMessenger.of(context);
+    String message;
+    try {
+      // On a fresh install this also brings back the settings, the home
+      // order and where the player was.
+      final result = await restore.importAll(
+        imports,
+        onSettled:
+            (discovered) =>
+                pending.state =
+                    pending.state
+                        .where((p) => p.url != discovered.url)
+                        .toList(),
+      );
+      if (result.settingsRestored != null) {
+        await applyRestoredSettings(settings, player, loudness);
+      }
+      if (result.resumeRestored) {
         try {
-          await metadata.importPlaylist(discovered);
-          imported++;
-          final remaining = ref.read(pendingImportsProvider);
-          ref.read(pendingImportsProvider.notifier).state =
-              remaining.where((p) => p.url != discovered.url).toList();
-        } on PlaylistExistsException {
-          // Already in the library (for example added again by URL since
-          // the banner appeared): nothing to import.
-          final remaining = ref.read(pendingImportsProvider);
-          ref.read(pendingImportsProvider.notifier).state =
-              remaining.where((p) => p.url != discovered.url).toList();
-        } catch (e) {
-          failures.add(discovered.name);
-          ref
-              .read(logServiceProvider)
-              .warn('import of ${discovered.name} failed: $e');
+          await player?.restoreRememberedSession();
+        } catch (_) {
+          // Shown at the next start.
         }
       }
+      message = result.message;
+    } catch (e) {
+      message = 'Could not import: $e';
     } finally {
       if (mounted) setState(() => _importing = false);
     }
-    if (!mounted) return;
-    final String message;
-    if (failures.isEmpty) {
-      message = 'Imported $imported playlist${imported == 1 ? '' : 's'}';
-    } else if (imported == 0) {
-      message =
-          'Could not import ${failures.length} '
-          'playlist${failures.length == 1 ? '' : 's'}: ${failures.join(', ')}';
-    } else {
-      message =
-          'Imported $imported, failed ${failures.length}: '
-          '${failures.join(', ')}';
+    messenger.showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// The player; there is none in some tests.
+  PlaybackService? _playerOrNull() {
+    try {
+      return ref.read(playbackServiceProvider);
+    } catch (_) {
+      return null;
     }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   void _navigateToAddPlaylist() {

@@ -965,6 +965,40 @@ void main() {
       expect(playback.hasLoadedMedia, isTrue);
     });
 
+    test(
+      'a last song a library restore brought back is shown paused',
+      () async {
+        final tracks = await addTracks(3);
+        final store = MemoryPlaybackSettingsStore();
+        await playback.dispose();
+        playback = await createPlayback(store: store);
+        await settle();
+        expect(playback.currentTrack, isNull);
+
+        // "Import all" on a fresh install stored where the old phone was.
+        await store.saveSession(
+          PlaybackSession(
+            playlistId: playlist.id,
+            trackId: tracks[2].id,
+            positionMs: 7000,
+          ),
+        );
+        await playback.restoreRememberedSession();
+        expect(playback.currentTrack!.id, tracks[2].id);
+        expect(playback.position, const Duration(seconds: 7));
+        expect(playback.hasLoadedMedia, isFalse);
+        expect(player.opened, isEmpty);
+
+        // Never replaces what is playing.
+        await playback.playTrack(tracks[0], tracks);
+        await store.saveSession(
+          PlaybackSession(playlistId: playlist.id, trackId: tracks[1].id),
+        );
+        await playback.restoreRememberedSession();
+        expect(playback.currentTrack!.id, tracks[0].id);
+      },
+    );
+
     test('Play while the last song is still being restored opens it', () async {
       final tracks = await addTracks(2);
       final store = MemoryPlaybackSettingsStore();

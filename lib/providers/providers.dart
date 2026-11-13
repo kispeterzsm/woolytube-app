@@ -21,6 +21,9 @@ import '../services/library_gate.dart';
 import '../services/settings_mirror.dart';
 import '../services/sidecar_mirror.dart';
 import '../services/library_export_service.dart';
+import '../services/library_file.dart';
+import '../services/library_mirror.dart';
+import '../services/library_restore_service.dart';
 import '../services/thumbnail_backfill_service.dart';
 import '../services/recognition/audio_window_decoder.dart';
 import '../services/recognition/shazam_client.dart';
@@ -258,6 +261,38 @@ final settingsMirrorProvider = Provider<SettingsMirror>((ref) {
   return mirror;
 });
 
+/// The library file in the top library folders: home page order and where
+/// the player was.
+final libraryFileServiceProvider = Provider<LibraryFileService>((ref) {
+  return LibraryFileService(
+    ref.watch(databaseProvider),
+    log: ref.watch(logServiceProvider),
+  );
+});
+
+/// Rewrites the library file shortly after the home page order or the
+/// player's "where I was" point changes.
+final libraryMirrorProvider = Provider<LibraryMirror>((ref) {
+  final mirror = LibraryMirror(
+    ref.watch(databaseProvider),
+    ref.watch(libraryFileServiceProvider),
+    log: ref.watch(logServiceProvider),
+  );
+  ref.onDispose(mirror.dispose);
+  return mirror;
+});
+
+/// Imports a copied library with its order, settings and last song.
+final libraryRestoreServiceProvider = Provider<LibraryRestoreService>((ref) {
+  return LibraryRestoreService(
+    ref.watch(databaseProvider),
+    ref.watch(metadataServiceProvider),
+    ref.watch(libraryExportServiceProvider),
+    ref.watch(libraryFileServiceProvider),
+    log: ref.watch(logServiceProvider),
+  );
+});
+
 /// Minimum spacing between yt-dlp self-update attempts.
 const ytDlpUpdateInterval = Duration(hours: 24);
 
@@ -470,6 +505,8 @@ class LibraryStartup {
     _ref.read(sidecarMirrorProvider).start();
     // And every settings change reaches the settings file.
     _ref.read(settingsMirrorProvider).start();
+    // And the home page order and the last song reach the library file.
+    _ref.read(libraryMirrorProvider).start();
     // Offline covers for older downloads; not urgent.
     unawaited(_backfillThumbnails());
   }

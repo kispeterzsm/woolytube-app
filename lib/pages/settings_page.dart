@@ -11,50 +11,16 @@ import 'package:package_info_plus/package_info_plus.dart';
 import '../providers/playback_providers.dart';
 import '../providers/providers.dart';
 import '../services/update_service.dart';
-import '../services/app_settings_service.dart';
 import '../services/audio_processing.dart';
 import '../services/library_export_service.dart';
 import '../services/library_layout.dart';
+import '../services/library_restore_service.dart';
 import '../services/loudness_service.dart';
 import '../services/metadata_service.dart';
 import '../services/playback_service.dart';
 import '../widgets/plane_mode_toggle.dart';
 import '../widgets/settings_section_header.dart';
 import 'debug_log_page.dart';
-
-/// Gives the player and the loudness measuring the settings a restore just
-/// stored. Runs also when the page that started the restore is already
-/// closed.
-Future<void> _applyRestoredSettings(
-  AppSettingsService settings,
-  PlaybackService? player,
-  LoudnessService? loudness,
-) async {
-  try {
-    loudness?.setOnlyWhileCharging(
-      await settings.getLoudnessOnlyWhileCharging(),
-    );
-  } catch (_) {
-    // Applies at the next start.
-  }
-  if (player == null) return;
-  try {
-    await player.setPauseOnAudioInterruption(
-      await settings.getPauseOnAudioInterruption(),
-    );
-    await player.setEvenOutVolume(await settings.getEvenOutVolume());
-    await player.setEvenOutMode(await settings.getEvenOutMode());
-    await player.setPlaneModeStrength(await settings.getPlaneModeStrength());
-  } catch (_) {
-    // Applies at the next start.
-  }
-  try {
-    // Shuffle, autoplay, audio-only and the plane mode switch.
-    await player.applyRememberedOptions();
-  } catch (_) {
-    // Applies at the next start.
-  }
-}
 
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key, this.initialUpdate, this.onUpdateChanged});
@@ -316,7 +282,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               ? 'No settings file found in the library folder.'
               : 'Restored ${_count(applied, 'setting')}.';
       if (applied != null) {
-        await _applyRestoredSettings(settings, player, loudness);
+        await applyRestoredSettings(settings, player, loudness);
         // Shows what is stored now.
         if (mounted) await _loadSettings();
       }
@@ -993,7 +959,7 @@ class _RestorePlaylistsPageState extends ConsumerState<_RestorePlaylistsPage> {
               ? 'No settings backup found in this folder.'
               : 'Restored ${_count(applied, 'setting')}.';
       if (applied != null) {
-        await _applyRestoredSettings(settings, player, loudness);
+        await applyRestoredSettings(settings, player, loudness);
       }
     } catch (e) {
       message = 'Could not restore settings: $e';
@@ -1017,13 +983,15 @@ class _RestorePlaylistsPageState extends ConsumerState<_RestorePlaylistsPage> {
 
   Future<void> _import(DiscoveredPlaylist discovered) async {
     final metadata = ref.read(metadataServiceProvider);
+    final restore = ref.read(libraryRestoreServiceProvider);
     final settings = ref.read(appSettingsServiceProvider);
     final log = ref.read(logServiceProvider);
     final pendingImports = ref.read(pendingImportsProvider.notifier);
     setState(() => _importingFolder = discovered.folderPath);
     String message;
     try {
-      await metadata.importPlaylist(discovered);
+      // Goes where the copied library had it on the home page.
+      await restore.importOne(discovered, folder: _source);
       try {
         await settings.removeDismissedImportUrl(discovered.url);
       } catch (e) {
