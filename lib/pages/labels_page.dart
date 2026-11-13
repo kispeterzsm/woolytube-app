@@ -101,24 +101,34 @@ class _LabelsPageState extends ConsumerState<LabelsPage> {
             ],
           ),
     );
-    if (confirmed != true) return;
+    if (confirmed != true || !mounted) return;
+    // The SnackBar outlives this page (it is on the app's messenger), so
+    // its Undo must not need this page's ref or context.
+    final service = _service;
+    final messenger = ScaffoldMessenger.of(context);
+    void show(String message, {SnackBarAction? action}) {
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text(message), action: action));
+    }
+
     try {
-      await _service.delete(label.uid);
+      await service.delete(label.uid);
     } catch (e) {
-      _showMessage('Could not delete: $e');
+      show('Could not delete: $e');
       return;
     }
-    _showMessage(
+    show(
       'Deleted "${label.name}"',
       action: SnackBarAction(
         label: 'Undo',
         onPressed: () async {
           try {
-            await _service.restore(label.uid);
+            await service.restore(label.uid);
           } on LabelException catch (e) {
-            _showMessage(e.message);
+            show(e.message);
           } catch (e) {
-            _showMessage('Could not bring it back: $e');
+            show('Could not bring it back: $e');
           }
         },
       ),

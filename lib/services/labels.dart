@@ -225,6 +225,29 @@ List<LabelledItem> itemsWithLabels(
 bool? labelStateOf(Iterable<LabelledItem> items, String uid) {
   var some = false;
   var all = true;
+  for (final carries in _carrying(items, uid)) {
+    if (carries) {
+      some = true;
+    } else {
+      all = false;
+    }
+    if (some && !all) return null;
+  }
+  return some && all;
+}
+
+/// Those of [items] that carry label [uid], judged as in [labelStateOf].
+List<LabelledItem> itemsWithLabel(List<LabelledItem> items, String uid) {
+  final carrying = _carrying(items, uid).toList();
+  return [
+    for (var i = 0; i < items.length; i++)
+      if (carrying[i]) items[i],
+  ];
+}
+
+/// For each of [items], whether it carries label [uid]: a file item by
+/// the file's own labels, a chapter item by that chapter's.
+Iterable<bool> _carrying(Iterable<LabelledItem> items, String uid) sync* {
   final chapterData = <int, ChapterData>{};
   for (final item in items) {
     final chapter = item.chapter;
@@ -237,12 +260,6 @@ bool? labelStateOf(Iterable<LabelledItem> items, String uid) {
                   () => ChapterData.decode(item.track.chaptersJson),
                 )
                 .labelsOf(chapter.id);
-    if (carried.contains(uid)) {
-      some = true;
-    } else {
-      all = false;
-    }
-    if (some && !all) return null;
+    yield carried.contains(uid);
   }
-  return some && all;
 }

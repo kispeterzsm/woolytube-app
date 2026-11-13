@@ -1095,6 +1095,56 @@ void main() {
       [rock.uid, unused.uid],
     );
     expect((await db.getTrack(plain.id))!.labelUids, isNull);
+
+    // A label only some results have: on all, off all, then back on just
+    // the ones that had it, so a stray tap can be undone.
+    Future<List<bool>> hasLive() async => [
+      decodeLabelUids(
+        (await db.getTrack(song.id))!.labelUids,
+      ).contains(live.uid),
+      decodeLabelUids(
+        (await db.getTrack(liveSong.id))!.labelUids,
+      ).contains(live.uid),
+      ChapterData.decode(
+        (await db.getTrack(mix.id))!.chaptersJson,
+      ).labelsOf('b').contains(live.uid),
+    ];
+    Icon? liveIcon() =>
+        tester
+            .widgetList<Icon>(
+              find.descendant(
+                of: find.byKey(ValueKey('label-picker-${live.uid}')),
+                matching: find.byType(Icon),
+              ),
+            )
+            .firstOrNull;
+    final liveChip = find.byKey(ValueKey('label-picker-${live.uid}'));
+    expect(liveIcon()?.icon, Icons.remove);
+    await tester.tap(liveChip);
+    await tester.pumpAndSettle();
+    expect(await hasLive(), [true, true, true]);
+    expect(liveIcon()?.icon, Icons.check);
+    await tester.tap(liveChip);
+    await tester.pumpAndSettle();
+    expect(await hasLive(), [false, false, false]);
+    expect(liveIcon(), isNull);
+    await tester.tap(liveChip);
+    await tester.pumpAndSettle();
+    expect(await hasLive(), [false, true, false]);
+    expect(liveIcon()?.icon, Icons.remove);
+    // And round again.
+    await tester.tap(liveChip);
+    await tester.pumpAndSettle();
+    expect(await hasLive(), [true, true, true]);
+    // A label all of them had goes only off and on.
+    await tester.tap(find.byKey(ValueKey('label-picker-${rock.uid}')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(ValueKey('label-picker-${rock.uid}')));
+    await tester.pumpAndSettle();
+    expect(
+      decodeLabelUids((await db.getTrack(song.id))!.labelUids),
+      contains(rock.uid),
+    );
   });
 
   testWidgets('a track without a file offers Download, a failed one Retry', (

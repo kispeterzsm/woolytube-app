@@ -352,6 +352,7 @@ class LabelPickerSheet extends ConsumerStatefulWidget {
     this.note,
     required this.initial,
     required this.onChanged,
+    this.onRestore,
   });
 
   final String title;
@@ -367,6 +368,12 @@ class LabelPickerSheet extends ConsumerStatefulWidget {
   /// Saves label [uid] on or off. A [LabelException] shows in the sheet.
   final Future<void> Function(String uid, bool on) onChanged;
 
+  /// Puts label [uid], which [initial] has on only some items and which
+  /// is now off all of them, back on the items that had it. With it, such
+  /// a chip goes some → all → none → some again, so a stray tap can be
+  /// undone; without it, it goes only between all and none.
+  final Future<void> Function(String uid)? onRestore;
+
   @override
   ConsumerState<LabelPickerSheet> createState() => _LabelPickerSheetState();
 }
@@ -376,7 +383,9 @@ class _LabelPickerSheetState extends ConsumerState<LabelPickerSheet> {
   final _saving = <String>{};
   String? _error;
 
-  Future<void> _set(String uid, bool on) async {
+  /// Turns label [uid] on or off, or with [on] null back to how it was
+  /// on each item (see [LabelPickerSheet.onRestore]).
+  Future<void> _set(String uid, bool? on) async {
     if (_saving.contains(uid)) return;
     final before = _state.containsKey(uid) ? _state[uid] : false;
     setState(() {
@@ -385,7 +394,11 @@ class _LabelPickerSheetState extends ConsumerState<LabelPickerSheet> {
       _error = null;
     });
     try {
-      await widget.onChanged(uid, on);
+      if (on == null) {
+        await widget.onRestore!(uid);
+      } else {
+        await widget.onChanged(uid, on);
+      }
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -491,8 +504,25 @@ class _LabelPickerSheetState extends ConsumerState<LabelPickerSheet> {
     );
   }
 
+  /// Whether label [uid] started on only some items and can be put back
+  /// that way.
+  bool _restorable(String uid) =>
+      widget.onRestore != null &&
+      widget.initial.containsKey(uid) &&
+      widget.initial[uid] == null;
+
   Widget _chip(Label label) {
     final state = _state.containsKey(label.uid) ? _state[label.uid] : false;
+    final restorable = _restorable(label.uid);
+    // Some → all → none (→ some again when it started that way).
+    final bool? next =
+        state == null
+            ? true
+            : state
+            ? false
+            : restorable
+            ? null
+            : true;
     return FilterChip(
       key: ValueKey('label-picker-${label.uid}'),
       avatar: LabelSwatch(
@@ -510,10 +540,12 @@ class _LabelPickerSheetState extends ConsumerState<LabelPickerSheet> {
               ? 'On some of them. Tap to put it on all'
               : state
               ? 'Tap to take it off'
+              : next == null
+              ? 'Tap to put it back on the ones that had it'
               : 'Tap to put it on',
       selected: state != false,
       showCheckmark: false,
-      onSelected: (_) => unawaited(_set(label.uid, state != true)),
+      onSelected: (_) => unawaited(_set(label.uid, next)),
     );
   }
 }
@@ -583,7 +615,8 @@ Future<void> showChapterLabelPicker(
 
 /// Labels for many search results at once ([items], see
 /// `searchLabelTargets`): a tap puts a label on all of them, or takes it
-/// off all when all have it.
+/// off all when all have it. A label only some of them had goes on all,
+/// then off all, then back on just the ones that had it.
 Future<void> showLabelAllPicker(
   BuildContext context,
   WidgetRef ref,
@@ -611,6 +644,9 @@ Future<void> showLabelAllPicker(
         for (final label in labels) label.uid: labelStateOf(items, label.uid),
       },
       onChanged: (uid, on) => service.setLabelOnItems(items, uid, on),
+      onRestore:
+          (uid) =>
+              service.setLabelOnItems(itemsWithLabel(items, uid), uid, true),
     ),
   );
 }

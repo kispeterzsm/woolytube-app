@@ -148,4 +148,60 @@ void main() {
     expect(find.text('1 file · 2 chapters'), findsOneWidget);
     await unmount(tester);
   });
+
+  testWidgets('Undo still works after leaving the page', (tester) async {
+    final rock = await labels.create('Rock', labelPalette[0].$2);
+    final playlist = await insertTestPlaylist(db);
+    final song = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      title: 'Song',
+    );
+    await labels.setTrackLabel(song.id, rock.uid, true);
+    tester.view.physicalSize = const Size(411 * 3, 900 * 3);
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [databaseProvider.overrideWithValue(db)],
+        child: MaterialApp(
+          theme: ThemeData.dark(),
+          home: Builder(
+            builder:
+                (context) => Scaffold(
+                  body: Center(
+                    child: TextButton(
+                      onPressed:
+                          () => Navigator.of(context).push(
+                            MaterialPageRoute<void>(
+                              builder: (_) => const LabelsPage(),
+                            ),
+                          ),
+                      child: const Text('Open labels'),
+                    ),
+                  ),
+                ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Open labels'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(ValueKey('label-delete-${rock.uid}')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('label-delete-confirm')));
+    await tester.pumpAndSettle();
+    expect(await labels.labels(), isEmpty);
+
+    // Back at once; the SnackBar stays over the page below.
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.byType(LabelsPage), findsNothing);
+    expect(find.text('Deleted "Rock"'), findsOneWidget);
+    await tester.tap(find.text('Undo'));
+    await tester.pumpAndSettle();
+    expect((await labels.labels()).single.uid, rock.uid);
+    expect((await labels.usage())[rock.uid]?.files, 1);
+    await unmount(tester);
+  });
 }
