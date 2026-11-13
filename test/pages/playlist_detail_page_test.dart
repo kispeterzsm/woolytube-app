@@ -1216,7 +1216,7 @@ void main() {
     expect(find.textContaining('Try removed videos again'), findsNothing);
     expect(find.text('Jump to next removed (1)'), findsOneWidget);
     // Removed, not failed: it is not counted twice.
-    expect(find.textContaining('Jump to next failed'), findsNothing);
+    expect(find.textContaining('Jump to next problem'), findsNothing);
   });
 
   testWidgets('Play next puts a track at the front of Up next', (tester) async {
@@ -1351,8 +1351,8 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('playlist-detail-menu')));
       await tester.pumpAndSettle();
       expect(find.text('Jump to next removed (1)'), findsOneWidget);
-      expect(find.text('Jump to next failed (2)'), findsOneWidget);
-      await tester.tap(find.text('Jump to next failed (2)'));
+      expect(find.text('Jump to next problem (2)'), findsOneWidget);
+      await tester.tap(find.text('Jump to next problem (2)'));
       await tester.pumpAndSettle();
     }
 
@@ -1394,7 +1394,7 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('playlist-detail-menu')));
       await tester.pumpAndSettle();
       // #30 has no file but is removed, not failed: only #20 failed.
-      expect(find.text('Jump to next failed (1)'), findsOneWidget);
+      expect(find.text('Jump to next problem (1)'), findsOneWidget);
       expect(find.text('Jump to next removed (2)'), findsOneWidget);
       await tester.tap(find.text('Jump to next removed (2)'));
       // The landed-on row is tinted for a moment.
@@ -1449,7 +1449,7 @@ void main() {
 
     await tester.tap(find.byKey(const ValueKey('playlist-detail-menu')));
     await tester.pumpAndSettle();
-    expect(find.textContaining('Jump to next failed'), findsOneWidget);
+    expect(find.textContaining('Jump to next problem'), findsOneWidget);
     expect(find.textContaining('Jump to next removed'), findsNothing);
   });
 
@@ -1716,7 +1716,7 @@ void main() {
     await pumpPage(tester, tracks: const []);
     await tester.tap(find.byKey(const ValueKey('playlist-detail-menu')));
     await tester.pumpAndSettle();
-    expect(find.textContaining('Jump to next failed'), findsNothing);
+    expect(find.textContaining('Jump to next problem'), findsNothing);
   });
 
   testWidgets('the menu opens the playlist settings', (tester) async {
@@ -2274,6 +2274,39 @@ void main() {
       );
       expectNotCut(tester, status);
       expectNotCut(tester, problems);
+    });
+
+    testWidgets('the menu jump does not repeat a different "failed" count', (
+      tester,
+    ) async {
+      usePhoneScreen(tester);
+      final tracks = [
+        for (var i = 1; i <= 5; i++)
+          await insertTestTrack(
+            db,
+            playlistId: playlist.id,
+            index: i,
+            videoId: 'v$i',
+            title: 'Track $i',
+            // Two failed downloads and one private video without a file.
+            status: i <= 2 ? 'error' : (i == 3 ? 'unavailable' : 'complete'),
+            filePath: i <= 3 ? null : '/tmp/$i.m4a',
+            lastError: i <= 2 ? 'HTTP Error 403' : null,
+            unavailableReason: i == 3 ? 'private' : null,
+          ),
+      ];
+      await pumpPage(tester, tracks: tracks);
+      final summary = find.byKey(const ValueKey('playlist-detail-summary'));
+      expect(
+        tester.widget<Text>(summary).data,
+        startsWith('5 tracks · 2 downloaded · 2 failed · 1 unavailable'),
+      );
+
+      await tester.tap(find.byKey(const ValueKey('playlist-detail-menu')));
+      await tester.pumpAndSettle();
+      // The jump visits the failed and the unavailable tracks: 2 + 1.
+      expect(find.text('Jump to next problem (3)'), findsOneWidget);
+      expect(find.textContaining('Jump to next failed'), findsNothing);
     });
 
     testWidgets('a track without a file offers no file actions', (

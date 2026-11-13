@@ -280,9 +280,13 @@ class _WoolyTubeAppState extends ConsumerState<WoolyTubeApp>
     } else {
       // Names the playlist and the tracks: "vibe mix: "Song" – video
       // unavailable".
+      // The dialog title reads like the notification: "vibe mix: YouTube
+      // copy unavailable, your file is kept".
+      final headline = downloadFailuresHeadline(failures);
       friendly =
-          '${downloadFailuresHeadline(failures)}'
-          '${progress.playlistName == null ? '' : ' in ${progress.playlistName}'}';
+          progress.playlistName == null
+              ? headline
+              : '${progress.playlistName}: $headline';
       message =
           progress.playlistName == null
               ? downloadFailureLines(failures).join(', ')

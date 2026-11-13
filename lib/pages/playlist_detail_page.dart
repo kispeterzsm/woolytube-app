@@ -77,7 +77,9 @@ class PlaylistDetailPage extends ConsumerStatefulWidget {
 
 /// Everything the page derives from one tracks list and one search query.
 /// Rebuilt only when either changes, never on playback or download ticks.
-/// A track whose download failed or that cannot be downloaded. Tracks
+/// A track whose download failed or that cannot be downloaded: the
+/// summary's "failed" and "unavailable" together, so the menu calls them
+/// problems rather than repeating a different "failed" count. Tracks
 /// removed from YouTube or from the playlist are not: they have their own
 /// jump ([_isRemovedTrack]), so no track is counted under both.
 bool _isProblemTrack(Track track) =>
@@ -1089,8 +1091,8 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                 ),
                 onChanged: _onSearchChanged,
               )
-              // Two lines at a smaller size, so long names fit beside the
-              // actions; the summary line is under Play and Update.
+              // Shrinks to fit beside the actions (tap to see a name that is
+              // still cut); the summary line is under Play and Update.
               : _PlaylistName(name, maxHeight: toolbarHeight - 4),
       actions: [
         IconButton(
@@ -1144,7 +1146,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                         color: Color(0xFFE57373),
                       ),
                       title: Text(
-                        'Jump to next failed (${view.problemRows.length})',
+                        'Jump to next problem (${view.problemRows.length})',
                       ),
                       contentPadding: EdgeInsets.zero,
                     ),
