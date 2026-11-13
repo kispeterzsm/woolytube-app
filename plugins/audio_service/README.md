@@ -23,6 +23,35 @@ All changes are in `android/src/main/java/com/ryanheise/audioservice/AudioServic
 
 The app's handler (`lib/services/audio_handler.dart`) also overrides `onNotificationDeleted`, whose default would stop playback and forget the saved session.
 
+## How to test on the phone
+
+The native changes are not covered by `flutter test`, so check them on the phone after installing a build with this copy. Run these read-only commands from the computer while testing:
+
+```
+# 1. Is the notification there? (no output = gone)
+adb shell dumpsys notification --noredact | grep -A3 'pkg=com.woolytube.woolytube id=1124'
+# 2. Is the media service in the foreground?
+adb shell dumpsys activity services com.woolytube.woolytube | grep -E 'AudioService|isForeground'
+# 3. Does the plugin hold the CPU awake? (no output = released)
+adb shell dumpsys power | grep -i 'com.ryanheise.audioservice'
+# Optional: follow what happens
+adb logcat -v time | grep -iE 'audioservice|MediaSessionService.*woolytube|ForegroundService'
+```
+
+"Gone" below means: command 1 prints nothing, command 2 shows `isForeground=false` (or no `AudioService` record at all), and command 3 prints nothing. Wait about 1 s after the action before checking.
+
+1. **Stop by swiping the mini player away (the original bug).** Play a song, swipe the mini player away, press Home. The notification is gone. Before the fix it stayed with "Play" and its buttons did nothing.
+2. **Stop by deleting.** Play a song and delete it from the app. Do it again with a playing song's playlist. Each time the notification is gone, and nothing keeps playing.
+3. **Play again after a stop.** After step 1 or 2, start a song from the app. The notification comes back with the right title and buttons, command 2 shows `isForeground=true`, and command 3 lists the wake lock while it plays.
+4. **Pause stays, and the CPU may sleep.** Play, press Home, pause from the notification. The notification stays (no time limit), and command 2 still shows `isForeground=true`. After more than 10 s, command 3 prints nothing. Turn the screen off for a minute or more, then resume in turn from the notification, the lock screen and a headset button (single click; also try a double click for Next). Each resumes at once, and command 3 lists the wake lock again while playing.
+5. **Paused, then swiped from Recents.** Play, pause, swipe WoolyTube away in Recents. The notification stays. Wait more than 10 s with the screen off, then press Play and Next on the notification: both work, and the paused song continues from where it was. Also check that a playing song keeps playing after a Recents swipe.
+6. **Song changes with the screen off.** Play a playlist, turn the screen off, and let at least two songs end on their own (also a song that has to load slowly, if there is one). The next song starts every time. This checks that the 10 s grace between songs is enough.
+7. **Audio focus.** Play, press Home, take a phone call (or start something that briefly takes the audio, such as a voice message or navigation prompt), and end it. Playback resumes as before. This is the case commit `1485430` protects, and the service stays in the foreground while paused, so it should still work.
+8. **Resume where I left off.** Pause a song in the middle and close the app from Recents. If Android lets you swipe the paused notification away, do that too. Open the app again: the same song is shown paused at the same position. Only the stop in step 1 or a delete in step 2 forgets it, as before.
+9. **No orphan at startup.** Close the app with nothing playing (after step 1), then open it again. Command 1 prints nothing while nothing plays.
+
+If something fails, save the output of the three commands and `adb logcat -d -v time > log.txt` right after it happens.
+
 ## Updating
 
 Copy the new upstream package over this folder (without `example/` and `test/`), then re-apply the changes above. Check upstream's CHANGELOG first: if it fixes `stop()` leaving the foreground, some of them may no longer be needed.
