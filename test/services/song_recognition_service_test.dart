@@ -683,6 +683,19 @@ void main() {
       expect(service.rangeSampleStartsMs(100000, 110000, 300000), [99000]);
       // At the very end only the grid's last window fits.
       expect(service.rangeSampleStartsMs(280000, 300000, 300000), [288000]);
+      // Just past the grid window at 30 s, too short to keep clear of it
+      // and not holding it whole: one window, as far from it as fits.
+      expect(service.rangeSampleStartsMs(31000, 56000, 300000), [41000]);
+      for (var start = 0; start < 288000; start += 1000) {
+        for (final length in [12000, 18000, 25000, 40000]) {
+          final end = min(start + length, 300000);
+          expect(
+            service.rangeSampleStartsMs(start, end, 300000),
+            isNotEmpty,
+            reason: '$start-$end',
+          );
+        }
+      }
     });
 
     test('looks up only new windows, reuses the scan\'s, and changes '

@@ -924,7 +924,9 @@ class SongRecognitionService {
   /// [rangeMaxWindows] new ones spread over the chapter, at least
   /// [rangeEdgeMs] from its edges and a whole window away from every grid
   /// window and from each other, so they listen to audio the scan did not.
-  /// A chapter too short for that gets one window over its middle.
+  /// A chapter too short for that gets one window over its middle; one where
+  /// no such spot is free gets one as far from the grid as it allows, so
+  /// there is always at least one window.
   List<int> rangeSampleStartsMs(int startMs, int endMs, int durationMs) {
     final windowMs = windowSeconds * 1000;
     final lastStart = math.max(0, durationMs - windowMs);
@@ -965,6 +967,24 @@ class SongRecognitionService {
           }
         }
         if (best != null) fresh.add(best);
+      }
+      // A short chapter just past a grid window: no spot is a whole window
+      // away from the grid, and that window is not wholly inside. Listen
+      // anyway, as far from the grid as the chapter allows.
+      if (inside.isEmpty && fresh.isEmpty) {
+        var best = from;
+        var bestGap = -1;
+        for (var s = from; s <= to; s += 1000) {
+          final gap = grid.fold<int>(
+            windowMs,
+            (gap, g) => math.min(gap, (s - g).abs()),
+          );
+          if (gap > bestGap) {
+            best = s;
+            bestGap = gap;
+          }
+        }
+        fresh.add(best);
       }
     }
     return {...inside, ...fresh}.toList()..sort();
