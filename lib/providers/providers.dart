@@ -52,7 +52,10 @@ final ytdlpServiceProvider = Provider<YtDlpService>((ref) {
 });
 
 final metadataServiceProvider = Provider<MetadataService>((ref) {
-  return MetadataService(ref.watch(databaseProvider));
+  return MetadataService(
+    ref.watch(databaseProvider),
+    log: ref.watch(logServiceProvider),
+  );
 });
 
 final mediaThumbnailServiceProvider = Provider<MediaThumbnailService>((ref) {

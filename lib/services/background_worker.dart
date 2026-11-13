@@ -172,7 +172,7 @@ Future<AutoUpdateReport> runBackgroundAutoUpdate({
     logService.warn('Notifications unavailable: $e');
   }
 
-  final metadata = MetadataService(db);
+  final metadata = MetadataService(db, log: logService);
   final sponsorBlock = SponsorBlockService(db, logService);
   final lyrics = LyricsService(db, logService, ytdlp: yt);
   final gate = LibraryGate(

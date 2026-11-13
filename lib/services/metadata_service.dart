@@ -7,6 +7,7 @@ import '../database/database.dart';
 import 'sponsorblock_categories.dart';
 import 'chapters.dart';
 import 'library_layout.dart';
+import 'log_service.dart';
 import 'media_thumbnail_service.dart';
 import 'subtitles.dart';
 import 'track_title.dart';
@@ -245,8 +246,9 @@ const _downloadOnlyInfoKeys = {
 
 class MetadataService {
   final AppDatabase _db;
+  final LogService? _log;
 
-  MetadataService(this._db);
+  MetadataService(this._db, {LogService? log}) : _log = log;
 
   static String get metaFileName => _metaFileName;
 
@@ -422,6 +424,9 @@ class MetadataService {
   final _writtenRevisions = <int, int>{};
   var _metadataWriteCounter = 0;
 
+  /// Sidecars left alone because a newer app wrote them, already logged.
+  final _newerSidecarsReported = <String>{};
+
   /// Playlists with at least this many tracks build their files on a
   /// worker isolate, so the UI never stalls on a big JSON document.
   static const isolateTrackThreshold = 40;
@@ -501,11 +506,21 @@ class MetadataService {
       tempSuffix:
           '${DateTime.now().microsecondsSinceEpoch}.${_metadataWriteCounter++}',
     );
-    final hashes =
+    final result =
         tracks.length >= isolateTrackThreshold
             ? await Isolate.run(() => writeSidecarFiles(job))
             : await writeSidecarFiles(job);
-    _writtenHashes.addAll(hashes);
+    _writtenHashes.addAll(result.hashes);
+    if (result.newerVersionKept case final version?) {
+      // Said once per run: the mirror tries again after every change.
+      if (_newerSidecarsReported.add(metaPath)) {
+        _log?.warn(
+          'Left the metadata file of "${playlist.name}" as it is: a newer '
+          'app wrote it (format $version, this app knows $sidecarVersion). '
+          'Update the app to keep that folder up to date.',
+        );
+      }
+    }
     _writtenRevisions[playlistId] = revision;
     await _writeLibraryReadme(p.dirname(playlist.outputPath));
   }
@@ -2273,8 +2288,80 @@ class SidecarJob {
   final String tempSuffix;
 }
 
+/// The sidecar format version this build writes. A sidecar with a higher
+/// version was written by a newer app and is never overwritten.
+const sidecarVersion = 2;
+
+/// The top-level, playlist and track keys this build writes. Any other key
+/// in a sidecar comes from a newer app and is kept when the file is
+/// rewritten (see [keepUnknownSidecarKeys]). A key written only when set
+/// must be listed too, or clearing it would bring the old value back.
+const sidecarTopLevelKeys = {'version', 'playlist', 'tracks'};
+const sidecarPlaylistKeys = {
+  'url',
+  'name',
+  'thumbnailUrl',
+  'thumbnailFileName',
+  'audioOnly',
+  'playChapters',
+  'autoUpdate',
+  'updateFrequencyHours',
+  'includeThumbnails',
+  'sponsorBlockEnabled',
+  'sponsorBlockCategories',
+  'sponsorBlockCategoryActions',
+  'lastUpdated',
+  'createdAt',
+  'videoQuality',
+  'temporary',
+  'lyricsMode',
+  'downloadSubtitles',
+  'subtitleLanguages',
+  'shuffleChapters',
+};
+const sidecarTrackKeys = {
+  'index',
+  'videoId',
+  'title',
+  'thumbnailUrl',
+  'thumbnailFileName',
+  'durationSeconds',
+  'status',
+  'unavailableReason',
+  'isLocalReplacement',
+  'alwaysSkip',
+  'chapters',
+  'chaptersEnabled',
+  'sponsorBlockCheckedAt',
+  'downloadedAt',
+  'replaceRequested',
+  'fileName',
+  'videoQuality',
+  'downloadedMaxHeight',
+  'sponsorBlockSegments',
+  'lyricsPins',
+};
+
 /// The sidecar JSON of a playlist.
 String buildSidecarJson(
+  Playlist playlist,
+  List<Track> tracks,
+  Map<int, List<SponsorBlockSegment>> segmentsByTrack, {
+  Map<int, List<LyricsDoc>> lyricsPinsByTrack = const {},
+}) => encodeSidecar(
+  buildSidecarData(
+    playlist,
+    tracks,
+    segmentsByTrack,
+    lyricsPinsByTrack: lyricsPinsByTrack,
+  ),
+);
+
+String encodeSidecar(Map<String, Object?> data) =>
+    const JsonEncoder.withIndent('  ').convert(data);
+
+/// The sidecar of a playlist, before it is encoded.
+Map<String, Object?> buildSidecarData(
   Playlist playlist,
   List<Track> tracks,
   Map<int, List<SponsorBlockSegment>> segmentsByTrack, {
@@ -2282,7 +2369,7 @@ String buildSidecarJson(
 }) {
   String? relative(String? path) =>
       MetadataService.fileNameRelativeTo(playlist.outputPath, path);
-  final tracksJson = <Map<String, dynamic>>[];
+  final tracksJson = <Map<String, Object?>>[];
   for (final t in tracks) {
     final segments = segmentsByTrack[t.id] ?? const <SponsorBlockSegment>[];
     tracksJson.add({
@@ -2342,9 +2429,9 @@ String buildSidecarJson(
     });
   }
 
-  final data = {
-    'version': 2,
-    'playlist': {
+  return {
+    'version': sidecarVersion,
+    'playlist': <String, Object?>{
       'url': playlist.url,
       'name': playlist.name,
       'thumbnailUrl': playlist.thumbnailUrl,
@@ -2369,45 +2456,144 @@ String buildSidecarJson(
     },
     'tracks': tracksJson,
   };
-  return const JsonEncoder.withIndent('  ').convert(data);
 }
+
+/// Adds to [data], a sidecar this build is about to write, the keys of
+/// [existing] (the sidecar it replaces) that this build does not know: a
+/// newer app may have stored data there that an older one must not drop.
+/// Tracks are matched by video id, and by position too when a video is
+/// listed twice.
+/// Returns [data].
+Map<String, Object?> keepUnknownSidecarKeys(
+  Map<String, Object?> data,
+  Map<String, dynamic> existing,
+) {
+  void keep(
+    Map<String, Object?> into,
+    Map<dynamic, dynamic> from,
+    Set<String> known,
+  ) {
+    for (final entry in from.entries) {
+      final key = entry.key;
+      if (key is! String || known.contains(key) || into.containsKey(key)) {
+        continue;
+      }
+      into[key] = entry.value;
+    }
+  }
+
+  keep(data, existing, sidecarTopLevelKeys);
+  final playlist = data['playlist'];
+  final oldPlaylist = existing['playlist'];
+  if (playlist is Map<String, Object?> && oldPlaylist is Map) {
+    keep(playlist, oldPlaylist, sidecarPlaylistKeys);
+  }
+  final tracks = data['tracks'];
+  final oldTracks = existing['tracks'];
+  if (tracks is List && oldTracks is List) {
+    String keyOf(Map<dynamic, dynamic> track) =>
+        track['videoId'] is String && (track['videoId'] as String).isNotEmpty
+            ? 'v:${track['videoId']}'
+            : 'i:${track['index']}';
+    final oldByKey = <String, List<Map<dynamic, dynamic>>>{};
+    for (final old in oldTracks) {
+      if (old is! Map) continue;
+      if (!old.keys.any((k) => k is String && !sidecarTrackKeys.contains(k))) {
+        continue;
+      }
+      oldByKey.putIfAbsent(keyOf(old), () => []).add(old);
+    }
+    if (oldByKey.isNotEmpty) {
+      for (final track in tracks) {
+        if (track is! Map<String, Object?>) continue;
+        final matches = oldByKey[keyOf(track)];
+        if (matches == null || matches.isEmpty) continue;
+        // A video listed twice: the entry at the same position first.
+        final same = matches.indexWhere((m) => m['index'] == track['index']);
+        keep(track, matches.removeAt(same < 0 ? 0 : same), sidecarTrackKeys);
+      }
+    }
+  }
+  return data;
+}
+
+/// The format version of a sidecar, or 0 when it has none.
+int sidecarVersionOf(Map<String, dynamic> json) {
+  final version = json['version'];
+  return version is num ? version.toInt() : 0;
+}
+
+/// What [writeSidecarFiles] did.
+typedef SidecarWriteResult =
+    ({
+      /// The hash of each file's current content. A sidecar left alone
+      /// because a newer app wrote it has no hash.
+      Map<String, int> hashes,
+
+      /// The version of the sidecar left alone because a newer app wrote
+      /// it, or null.
+      int? newerVersionKept,
+    });
 
 /// Builds and writes a playlist's sidecar and `.m3u8` (see [SidecarJob]).
 /// A file whose content is unchanged is not rewritten; when its last hash
-/// is not known, the file on disk is compared. Returns the hash of each
-/// file's current content. Runs on any isolate.
-Future<Map<String, int>> writeSidecarFiles(SidecarJob job) async {
+/// is not known, the file on disk is compared. Keys a newer app added to the
+/// sidecar are kept, and a sidecar of a newer format version is not
+/// overwritten at all. Runs on any isolate.
+Future<SidecarWriteResult> writeSidecarFiles(SidecarJob job) async {
+  final data = buildSidecarData(
+    job.playlist,
+    job.tracks,
+    job.segmentsByTrack,
+    lyricsPinsByTrack: job.lyricsPinsByTrack,
+  );
   final contents = {
-    job.metaPath: buildSidecarJson(
-      job.playlist,
-      job.tracks,
-      job.segmentsByTrack,
-      lyricsPinsByTrack: job.lyricsPinsByTrack,
-    ),
+    job.metaPath: encodeSidecar(data),
     job.playlistFilePath: MetadataService.buildPlaylistFile(
       job.playlist,
       job.tracks,
     ),
   };
   final hashes = <String, int>{};
+  int? newerVersionKept;
   for (final entry in contents.entries) {
     final path = entry.key;
-    final content = entry.value;
-    final hash = contentHash(content);
+    var content = entry.value;
+    var hash = contentHash(content);
     final target = File(path);
     final known = job.knownHashes[path];
     var unchanged = false;
     if (known == hash) {
       unchanged = await target.exists();
-    } else if (known == null) {
-      // Not written by this process yet (for example after a restart):
-      // compare with what is on disk instead of rewriting every file.
+    } else {
+      // Not written by this process yet (for example after a restart), or
+      // changed: compare with what is on disk instead of rewriting every
+      // file, and keep what a newer app added to the sidecar.
+      String? existing;
       try {
-        unchanged =
-            await target.exists() && await target.readAsString() == content;
+        if (await target.exists()) existing = await target.readAsString();
       } catch (_) {
-        unchanged = false;
+        existing = null;
       }
+      if (existing != null && path == job.metaPath) {
+        Map<String, dynamic>? json;
+        try {
+          final decoded = jsonDecode(existing);
+          if (decoded is Map<String, dynamic>) json = decoded;
+        } catch (_) {
+          // Unreadable: replaced by a good one.
+        }
+        if (json != null) {
+          final version = sidecarVersionOf(json);
+          if (version > sidecarVersion) {
+            newerVersionKept = version;
+            continue;
+          }
+          content = encodeSidecar(keepUnknownSidecarKeys(data, json));
+          hash = contentHash(content);
+        }
+      }
+      unchanged = existing == content;
     }
     if (!unchanged) {
       final tmpFile = File('$path.tmp.${job.tempSuffix}');
@@ -2425,7 +2611,7 @@ Future<Map<String, int>> writeSidecarFiles(SidecarJob job) async {
     }
     hashes[path] = hash;
   }
-  return hashes;
+  return (hashes: hashes, newerVersionKept: newerVersionKept);
 }
 
 /// A content hash of [content]: two independent 30-bit hashes (FNV-1a and

@@ -1,12 +1,13 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:drift/drift.dart' show Value;
+import 'package:drift/drift.dart' hide isNull, isNotNull;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/library_layout.dart';
+import 'package:woolytube/services/log_service.dart';
 import 'package:woolytube/services/metadata_service.dart';
 
 import '../helpers/test_database.dart';
@@ -787,5 +788,197 @@ void main() {
     );
 
     expect(result.map((d) => p.basename(d.folderPath)), ['Video copy', 'New']);
+  });
+
+  group('a sidecar written by a newer app', () {
+    Future<Map<String, dynamic>> readSidecar() async =>
+        jsonDecode(
+              await File(p.join(folder, 'woolytube_meta.json')).readAsString(),
+            )
+            as Map<String, dynamic>;
+
+    Future<void> setTrack(int id, TracksCompanion fields) =>
+        (db.update(db.tracks)..where((t) => t.id.equals(id))).write(fields);
+
+    Future<void> writeSidecar(Map<String, dynamic> json) => File(
+      p.join(folder, 'woolytube_meta.json'),
+    ).writeAsString(jsonEncode(json));
+
+    test('keeps the keys this app does not know when it is rewritten, also '
+        'after a restart', () async {
+      final playlist = await insertTestPlaylist(
+        db,
+        outputPath: folder,
+        videoQuality: 720,
+      );
+      final first = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        videoId: 'a',
+        title: 'A',
+        videoQuality: 480,
+      );
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 2,
+        videoId: 'b',
+        title: 'B',
+      );
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: 3,
+        videoId: 'a',
+        title: 'A again',
+      );
+      await metadata.writeMetadataFor(playlist.id);
+
+      final json = await readSidecar();
+      json['labels'] = [
+        {'id': 'l1', 'name': 'Rock'},
+      ];
+      (json['playlist'] as Map<String, dynamic>)['coverColor'] = 'red';
+      final tracks = json['tracks'] as List<dynamic>;
+      (tracks[0] as Map<String, dynamic>)['labels'] = ['l1'];
+      (tracks[2] as Map<String, dynamic>)['labels'] = ['l2'];
+      await writeSidecar(json);
+
+      // A new run of the app has not written the file yet.
+      metadata = MetadataService(db);
+      await setTrack(
+        first.id,
+        const TracksCompanion(
+          title: Value('A renamed'),
+          videoQuality: Value(null),
+        ),
+      );
+      await db.updatePlaylistFields(
+        playlist.id,
+        const PlaylistsCompanion(videoQuality: Value(null)),
+      );
+      await metadata.writeMetadataFor(playlist.id);
+
+      var written = await readSidecar();
+      expect(written['labels'], [
+        {'id': 'l1', 'name': 'Rock'},
+      ]);
+      final writtenPlaylist = written['playlist'] as Map<String, dynamic>;
+      expect(writtenPlaylist['coverColor'], 'red');
+      // Keys this app knows follow the database, also when it cleared one.
+      expect(writtenPlaylist.containsKey('videoQuality'), isFalse);
+      var writtenTracks = (written['tracks'] as List).cast<Map>();
+      expect(writtenTracks[0]['title'], 'A renamed');
+      expect(writtenTracks[0].containsKey('videoQuality'), isFalse);
+      expect(writtenTracks[0]['labels'], ['l1']);
+      expect(writtenTracks[1].containsKey('labels'), isFalse);
+      expect(writtenTracks[2]['labels'], ['l2']);
+
+      // And again by the same run, which knows its last hash now.
+      await setTrack(
+        first.id,
+        const TracksCompanion(title: Value('A renamed twice')),
+      );
+      await metadata.writeMetadataFor(playlist.id);
+      written = await readSidecar();
+      writtenTracks = (written['tracks'] as List).cast<Map>();
+      expect(writtenTracks[0]['title'], 'A renamed twice');
+      expect(writtenTracks[0]['labels'], ['l1']);
+      expect(written['labels'], isNotNull);
+
+      // A track that left the playlist takes its keys with it.
+      await db.deleteTracks([first.id]);
+      await metadata.writeMetadataFor(playlist.id);
+      writtenTracks = ((await readSidecar())['tracks'] as List).cast<Map>();
+      expect(writtenTracks.map((t) => t['title']), ['B', 'A again']);
+      expect(writtenTracks.last['labels'], ['l2']);
+    });
+
+    test('of a newer format version is left as it is, and said once in the '
+        'log', () async {
+      final log = LogService.memoryOnly();
+      metadata = MetadataService(db, log: log);
+      final playlist = await insertTestPlaylist(db, outputPath: folder);
+      await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        title: 'Old',
+        status: 'complete',
+        filePath: p.join(folder, '00001_Old.mp3'),
+      );
+      final newer = {
+        'version': sidecarVersion + 1,
+        'playlist': {'url': playlist.url, 'name': 'Newer'},
+        'tracks': <Object?>[],
+      };
+      await writeSidecar(newer);
+
+      await metadata.writeMetadataFor(playlist.id);
+      await db.updatePlaylistFields(
+        playlist.id,
+        const PlaylistsCompanion(name: Value('Renamed')),
+      );
+      await metadata.writeMetadataFor(playlist.id);
+
+      expect(await readSidecar(), newer);
+      // The playlist file other players read is still written.
+      expect(
+        await File(MetadataService.playlistFilePath(folder)).exists(),
+        isTrue,
+      );
+      expect(
+        log.entries.where((e) => e.message.contains('newer app')),
+        hasLength(1),
+      );
+    });
+
+    test('every key this app writes is one it knows', () async {
+      final playlist = await insertTestPlaylist(
+        db,
+        outputPath: folder,
+        thumbnailPath: p.join(folder, 'cover.jpg'),
+        videoQuality: 720,
+        isTemporary: true,
+        lyricsMode: 'lyrics',
+        downloadSubtitles: true,
+        subtitleLanguages: 'en',
+        shuffleChapters: true,
+      );
+      final track = await insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        videoQuality: 480,
+        downloadedMaxHeight: 480,
+      );
+      final data = buildSidecarData(
+        playlist,
+        [track],
+        const {},
+        lyricsPinsByTrack: {
+          track.id: [
+            LyricsDoc(
+              id: 1,
+              trackId: track.id,
+              offsetMs: 0,
+              kind: 'lyrics',
+              status: 'found',
+              timeScale: 1,
+              synced: false,
+              pinned: true,
+              shiftMs: 10,
+              timingOff: true,
+              checkedAt: DateTime(2026),
+              attempts: 0,
+            ),
+          ],
+        },
+      );
+      expect(sidecarTopLevelKeys, containsAll(data.keys));
+      expect(sidecarPlaylistKeys, containsAll((data['playlist'] as Map).keys));
+      expect(
+        sidecarTrackKeys,
+        containsAll(((data['tracks'] as List).single as Map).keys),
+      );
+    });
   });
 }
