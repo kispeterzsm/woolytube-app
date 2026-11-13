@@ -1344,6 +1344,53 @@ void main() {
         );
       });
 
+      test('with keepUndo a later save keeps the first undo point', () async {
+        await service.replaceActive(track, [
+          reviewed[0].copyWith(endMs: 25000),
+          reviewed[1].copyWith(startMs: 25000),
+          reviewed[2],
+        ]);
+        // The same editing session saves again.
+        await service.replaceActive(track, [
+          reviewed[0].copyWith(endMs: 30000),
+          reviewed[1].copyWith(startMs: 30000),
+          reviewed[2],
+        ], keepUndo: true);
+        final stored = await data();
+        expect(stored.active[1].startMs, 30000);
+        expect(
+          stored.undoChapters!.map((c) => c.startMs),
+          reviewed.map((c) => c.startMs),
+        );
+        await service.undo(track);
+        expect(
+          (await data()).active.map((c) => (c.id, c.startMs, c.endMs)),
+          reviewed.map((c) => (c.id, c.startMs, c.endMs)),
+        );
+      });
+
+      test('without keepUndo each save is its own undo step', () async {
+        await service.replaceActive(track, [
+          reviewed[0].copyWith(endMs: 25000),
+          reviewed[1].copyWith(startMs: 25000),
+          reviewed[2],
+        ]);
+        await service.replaceActive(track, [
+          reviewed[0].copyWith(endMs: 30000),
+          reviewed[1].copyWith(startMs: 30000),
+          reviewed[2],
+        ]);
+        await service.undo(track);
+        expect((await data()).active[1].startMs, 25000);
+      });
+
+      test('keepUndo with no undo point makes one', () async {
+        await service.replaceActive(track, const [], keepUndo: true);
+        expect((await data()).undoChapters, hasLength(3));
+        await service.undo(track);
+        expect((await data()).active, hasLength(3));
+      });
+
       test('an unchanged list writes nothing', () async {
         final before = (await db.getTrack(track.id))!.chaptersJson;
         expect(

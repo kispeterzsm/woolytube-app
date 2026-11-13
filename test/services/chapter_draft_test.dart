@@ -280,6 +280,18 @@ void main() {
       expect(undone.undo().dirty, isTrue);
       expect(ranges(undone.undo()), ranges(d));
     });
+
+    test('markSaved with the saved list keeps later changes dirty', () {
+      final d = sample();
+      final moved = d.moveEdge(d.edges[1], 15000);
+      final saving = moved.chapters;
+      // A change made while the save was running.
+      final during = moved.moveEdge(moved.edges[1], 16000);
+      final saved = during.markSaved(saving);
+      expect(saved.dirty, isTrue);
+      expect(ranges(saved), ranges(during));
+      expect(saved.undo().dirty, isFalse);
+    });
   });
 
   group('splitAt', () {

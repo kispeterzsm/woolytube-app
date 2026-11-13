@@ -17,6 +17,10 @@ class FakePreviewPlayer implements ChapterPreviewPlayer {
   /// Makes [ensureOpen] fail like a file the player cannot open.
   bool failOpen = false;
 
+  /// While set, [ensureOpen] waits for it, like a file that takes a while
+  /// to open.
+  Completer<void>? openGate;
+
   final ranges = <PreviewRange>[];
 
   /// The rest position asked for with each of [ranges].
@@ -101,6 +105,8 @@ class FakePreviewPlayer implements ChapterPreviewPlayer {
   @override
   Future<void> ensureOpen() async {
     opens++;
+    final gate = openGate;
+    if (gate != null) await gate.future;
     if (failOpen) throw StateError('Could not open the file');
     if (_opened) return;
     _opened = true;
@@ -169,12 +175,15 @@ class FakePreviewFactory {
   final int durationMs;
   final made = <FakePreviewPlayer>[];
   bool failOpen = false;
+  Completer<void>? openGate;
 
   FakePreviewPlayer get last => made.last;
 
   ChapterPreviewPlayer call(String path) {
-    final player = FakePreviewPlayer(path, durationMs: durationMs)
-      ..failOpen = failOpen;
+    final player =
+        FakePreviewPlayer(path, durationMs: durationMs)
+          ..failOpen = failOpen
+          ..openGate = openGate;
     made.add(player);
     return player;
   }

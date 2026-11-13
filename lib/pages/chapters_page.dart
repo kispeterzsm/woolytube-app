@@ -164,8 +164,9 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
     });
   }
 
-  /// Opens the chapter editor on the current list (from any source) and
-  /// saves its result as one change that Undo takes back.
+  /// Opens the chapter editor on the current list (from any source). Its
+  /// saves (it stays open after each) are one change that Undo takes back:
+  /// to the list from before the editor opened.
   Future<void> _openEditor(Track track, {String? focusChapterId}) async {
     if (_busy) return;
     final data = ChapterData.decode(track.chaptersJson);
@@ -179,6 +180,8 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
         item != null && item.track.id == track.id
             ? item.startMs + player.position.inMilliseconds
             : null;
+    // After the first save, Undo stays on the list from before the editor.
+    var savedOnce = false;
     final saved = await Navigator.of(context, rootNavigator: true).push<bool>(
       MaterialPageRoute(
         builder:
@@ -200,7 +203,9 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                   track,
                   list,
                   durationMs: durationMs,
+                  keepUndo: savedOnce,
                 );
+                savedOnce = savedOnce || changed;
                 if (changed) {
                   try {
                     await player.trackChaptersChanged(track);

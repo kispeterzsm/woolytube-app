@@ -1021,6 +1021,45 @@ void main() {
     expect(popped, isTrue);
   });
 
+  testWidgets('a change made while saving is not taken as saved', (
+    tester,
+  ) async {
+    final saving = Completer<bool>();
+    final stored = <List<MediaChapter>>[];
+    await pumpEditor(
+      tester,
+      onSave: (list, duration) {
+        stored.add(list);
+        return saving.future;
+      },
+    );
+    await tapKey(tester, 'editor-nudge-1000');
+    await tester.pump(const Duration(milliseconds: 200));
+    await finishPreview(tester);
+    await tapKey(tester, 'editor-save');
+    await tester.pump();
+
+    // Nudged before the save finished: not in what is being saved.
+    await tapKey(tester, 'editor-nudge-100');
+    await tester.pump(const Duration(milliseconds: 200));
+    previews.last.finish();
+    saving.complete(true);
+    await tester.pumpAndSettle();
+    expect(stored.single[1].startMs, 61000);
+    expect(timeShown(tester), '1:01.100');
+    expect(saveEnabled(tester), isTrue);
+
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.text('Discard changes?'), findsOneWidget);
+    await tester.tap(find.text('Keep editing'));
+    await tester.pumpAndSettle();
+    // Undo back to what was saved is clean.
+    await tapKey(tester, 'editor-undo');
+    expect(saveEnabled(tester), isFalse);
+    await tester.pumpAndSettle();
+  });
+
   testWidgets('discarding after a save still reports the save', (tester) async {
     await pumpEditor(tester);
     await tapKey(tester, 'editor-nudge-1000');
@@ -1076,6 +1115,40 @@ void main() {
       await tapKey(tester, 'editor-set-here');
       expect(timeShown(tester), '2:15.420');
       await tester.pumpAndSettle();
+    });
+
+    testWidgets('Set here and Play use where the player is while the file '
+        'is still opening', (tester) async {
+      final opening = previews.openGate = Completer<void>();
+      await pumpEditor(tester, playingAtMs: 135420);
+      expect(previews.last.positionMs, 0);
+      expect(previews.last.seeks, isEmpty);
+      await tapKey(tester, 'editor-set-here');
+      expect(timeShown(tester), '2:15.420');
+
+      await tapKey(tester, 'editor-play-pause');
+      opening.complete();
+      await tester.pump();
+      await tester.pump();
+      expect(previews.last.seeks.last, 135420);
+      expect(previews.last.plays, 1);
+      await finishPreview(tester);
+    });
+
+    testWidgets('Retry after a failed open moves the preview to where the '
+        'player is', (tester) async {
+      previews.failOpen = true;
+      await pumpEditor(tester, playingAtMs: 135420);
+      expect(previews.last.seeks, isEmpty);
+      expect(
+        tester.widget<Text>(find.byKey(const ValueKey('editor-position'))).data,
+        '2:15.420',
+      );
+      previews.last.failOpen = false;
+      await tester.tap(find.text('Retry'));
+      await tester.pumpAndSettle();
+      expect(previews.last.seeks, [135420]);
+      expect(previews.last.positionMs, 135420);
     });
 
     testWidgets('in a gap it selects the chapter before it', (tester) async {

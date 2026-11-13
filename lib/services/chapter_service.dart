@@ -313,19 +313,22 @@ class ChapterService {
     }
   }
 
+  /// [old] with [entries] as its chapters. Undo goes back to [old]'s
+  /// chapters, or with [keepUndo] to where [old]'s Undo goes (when it has
+  /// one), so a later save of the same editing session adds no undo step.
   ChapterData _edited(
     ChapterData old,
     List<MediaChapter> entries, {
     int? durationMs,
+    bool keepUndo = false,
   }) {
     entries.sort((a, b) => a.startMs.compareTo(b.startMs));
+    final keep = keepUndo && old.undoChapters != null;
+    final undo = keep ? old.undoChapters! : old.active;
     // Skip marks follow chapter ids. Marks of chapters that are gone are
     // dropped, except those in the undo snapshot, so Undo brings a removed
     // chapter back with its mark.
-    final keptIds = {
-      for (final c in entries) c.id,
-      for (final c in old.active) c.id,
-    };
+    final keptIds = {for (final c in entries) c.id, for (final c in undo) c.id};
     // Built in full rather than with copyWith: after the file was replaced,
     // the old check time and length must not carry over, so the new file
     // still gets its chapter info fetched.
@@ -335,9 +338,10 @@ class ChapterService {
       checkedAt: old.valid ? old.checkedAt : null,
       durationMs: durationMs ?? (old.valid ? old.durationMs : null),
       shuffleChapters: old.shuffleChapters,
-      undoChapters: old.active,
+      undoChapters: undo,
       // Undo goes back to following YouTube, not to a frozen copy of it.
-      undoFollowsDownloaded: old.custom == null,
+      undoFollowsDownloaded:
+          keep ? old.undoFollowsDownloaded : old.custom == null,
       recognitionEpoch: old.recognitionEpoch,
       lastRecognitionRunId: old.lastRecognitionRunId,
       skippedChapterIds: Set.unmodifiable(
@@ -409,11 +413,14 @@ class ChapterService {
   /// changed, and the review notes that change resolves are dropped (like
   /// [save]). New ids are the user's own chapters. [durationMs] is the
   /// file's real length when known (for example from the preview player).
+  /// With [keepUndo] (a later save of an editing session that already
+  /// saved), Undo keeps going back to before the session's first save.
   /// Returns false, writing nothing, when nothing changed.
   Future<bool> replaceActive(
     Track track,
     List<MediaChapter> chapters, {
     int? durationMs,
+    bool keepUndo = false,
   }) => _change(track, (old, fresh) {
     final previous = {for (final c in old.active) c.id: c};
     final sameAsBefore =
@@ -431,7 +438,7 @@ class ChapterService {
       for (final chapter in chapters)
         _savedChapter(chapter, previous[chapter.id]),
     ];
-    return _edited(old, saved, durationMs: duration);
+    return _edited(old, saved, durationMs: duration, keepUndo: keepUndo);
   });
 
   /// [chapter] as it is stored after an edit, given the [previous] version

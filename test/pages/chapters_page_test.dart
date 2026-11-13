@@ -287,6 +287,13 @@ void main() {
     expect(find.byType(ChapterEditorPage), findsOneWidget);
     expect(find.text('Chapters saved.'), findsOneWidget);
     expect(player.chaptersChanged, [track.id]);
+
+    // A second save in the same session is part of the same change.
+    await tester.tap(find.byKey(const ValueKey('editor-nudge-1000')));
+    await finishPreview(tester);
+    await tester.tap(find.byKey(const ValueKey('editor-save')));
+    await tester.pumpAndSettle();
+    expect(player.chaptersChanged, [track.id, track.id]);
     await tester.pageBack();
     await tester.pumpAndSettle();
     expect(find.text('Discard changes?'), findsNothing);
@@ -297,15 +304,15 @@ void main() {
     );
     final saved = await storedChapters(track.id);
     expect(saved.active.map((c) => (c.id, c.startMs, c.endMs)), [
-      ('a', 0, 61000),
-      ('b', 61000, 180000),
+      ('a', 0, 62000),
+      ('b', 62000, 180000),
     ]);
     expect(saved.active.every((c) => c.manuallyEdited), isTrue);
-    expect(player.chaptersChanged, [track.id]);
     expect(previews.last.disposed, isTrue);
 
     await tester.tap(find.byKey(const ValueKey('chapters-undo')));
     await tester.pumpAndSettle();
+    // Undo goes back to before the editor: following YouTube again.
     final undone = await storedChapters(track.id);
     expect(undone.custom, isNull);
     expect(undone.active.first.endMs, 60000);

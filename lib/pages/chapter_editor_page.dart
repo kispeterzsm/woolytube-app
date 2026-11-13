@@ -140,6 +140,11 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
   bool _playing = false;
   bool _playheadKnown = false;
 
+  /// Where the playhead was put (the app player's spot on opening, or a
+  /// seek) while the preview is not there yet: until its file is open,
+  /// which can take seconds, the preview's position reads 0.
+  int? _seekPendingMs;
+
   /// The playhead, and the player's state, when a finger went down on Set
   /// here or Split here. A tap counts when the finger lifts, 60–120 ms after
   /// it touched, by when a preview may already have stopped.
@@ -218,7 +223,8 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
         // shown by _open.
         _setPlayhead(playingAt);
         _playheadKnown = true;
-        unawaited(preview.seek(playingAt).catchError((Object _) {}));
+        _seekPendingMs = playingAt;
+        unawaited(_seekToPending());
       }
     }
     _refreshQuiet();
@@ -251,6 +257,8 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
         _endedRecently = false;
         if (playing) {
           _playheadKnown = true;
+          // Playing, the preview is open and where it plays from.
+          _seekPendingMs = null;
           if (!_ticker.isActive) unawaited(_ticker.start());
         } else {
           _ticker.stop();
@@ -267,7 +275,9 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
         setState(() => _playing = playing);
       }),
       preview.positionMsStream.listen((_) {
-        if (!_playing && mounted) _setPlayhead(preview.positionMs);
+        if (!_playing && mounted) {
+          _setPlayhead(_seekPendingMs ?? preview.positionMs);
+        }
       }),
       preview.durationStream.listen(_useDuration),
       preview.activeRangeStream.listen((range) {
@@ -303,6 +313,31 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
   Future<void> _retryOpen() async {
     setState(() => _playerError = null);
     await _open();
+    if (mounted && _playerError == null) await _seekToPending();
+  }
+
+  /// Moves the preview to [_seekPendingMs]. A failed open is shown by
+  /// [_open], and Retry seeks again.
+  Future<void> _seekToPending() async {
+    final preview = _preview;
+    final at = _seekPendingMs;
+    if (preview == null || at == null) return;
+    try {
+      await preview.seek(at);
+    } catch (_) {
+      return;
+    }
+    if (mounted) _seekLanded(preview);
+  }
+
+  /// Forgets [_seekPendingMs] once the preview is there. It stays when the
+  /// seek failed or another command overtook it before the file opened.
+  void _seekLanded(ChapterPreviewPlayer preview) {
+    final at = _seekPendingMs;
+    if (at == null) return;
+    final length = preview.duration.inMilliseconds;
+    final target = length > 0 ? min(at, length) : at;
+    if ((preview.positionMs - target).abs() <= 5) _seekPendingMs = null;
   }
 
   void _useDuration(Duration duration) {
@@ -320,7 +355,8 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
 
   void _setPlayhead(int ms) => _playhead.value = ms;
 
-  int get _playheadMs => _preview?.positionMs ?? _playhead.value;
+  int get _playheadMs =>
+      _seekPendingMs ?? _preview?.positionMs ?? _playhead.value;
 
   _TapState get _tapStateNow => (
     ms: _playheadMs,
@@ -410,6 +446,7 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
     if (mode != null) _lastMode = mode;
     _playheadKnown = true;
     _playFromMs = max(0, startMs);
+    _seekPendingMs = null;
     setState(() => _activeMode = mode);
     _rangeRequests++;
     try {
@@ -471,6 +508,15 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
     }
     _requestedMode = null;
     _playheadKnown = true;
+    final pending = _seekPendingMs;
+    if (pending != null) {
+      // The preview is not where the playhead is yet (its file is still
+      // opening): Play goes on from the playhead, not from 0.
+      await _guard(() => preview.seek(pending));
+      if (!mounted) return;
+      _seekLanded(preview);
+      if (_seekPendingMs != null) return;
+    }
     _playFromMs = preview.positionMs;
     await _guard(preview.play);
   }
@@ -482,9 +528,11 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
     _requestedMode = null;
     final target = max(0, min(ms, _draft.durationMs));
     _playFromMs = target;
+    _seekPendingMs = target;
     setState(() => _playheadKnown = true);
     _setPlayhead(target);
     await _guard(() => preview.seek(target));
+    if (mounted) _seekLanded(preview);
   }
 
   // ------------------------------------------------------------ selection
@@ -615,7 +663,12 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
     }
     if (!park || _playing || _rangeRequests > 0) return;
     _setPlayhead(to);
-    unawaited(_guard(() => preview.seek(to, park: true)));
+    _seekPendingMs = to;
+    unawaited(
+      _guard(() => preview.seek(to, park: true)).then((_) {
+        if (mounted) _seekLanded(preview);
+      }),
+    );
   }
 
   void _nudge(int deltaMs) {
@@ -891,6 +944,8 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
     setState(() => _saving = true);
     try {
       unawaited(_preview?.pause());
+      // Editing goes on while saving; only this list counts as saved.
+      final saving = _draft.chapters;
       final result = _draft.toChapters();
       // 0 when the length is unknown: the stored length is kept then.
       final saved = await widget.onSave(
@@ -904,9 +959,10 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
         return;
       }
       // Stays open: what was saved is the new starting point, so back
-      // leaves without asking until the next change.
+      // leaves without asking until the next change. A change made while
+      // saving is not in it and stays unsaved.
       setState(() {
-        _draft = _draft.markSaved();
+        _draft = _draft.markSaved(saving);
         _initialById = {for (final c in result) c.id: c};
       });
       _message(saved ? 'Chapters saved.' : 'Already saved: nothing changed.');
