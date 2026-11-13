@@ -14,6 +14,7 @@ import 'package:woolytube/services/chapter_service.dart';
 import 'package:woolytube/services/app_settings_service.dart';
 import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/download_network_policy.dart';
+import 'package:woolytube/services/lyrics/lyrics_models.dart';
 import 'package:woolytube/services/playback_service.dart';
 import 'package:woolytube/services/recognition/chapter_estimator.dart';
 import 'package:woolytube/services/recognition/song_recognition_service.dart';
@@ -574,6 +575,61 @@ void main() {
         findsOneWidget,
       );
       expect(applied, isNull);
+
+      // Nothing is replaced, but a hand-trimmed end would move: Apply
+      // still asks and says so, synced lyrics of that chapter included.
+      await db.writeTrackChapters(
+        track.id,
+        const ChapterData(
+          custom: [
+            MediaChapter(
+              id: 'x',
+              title: 'Artist — A',
+              startMs: 0,
+              endMs: 85000,
+              manuallyEdited: true,
+            ),
+            MediaChapter(
+              id: 'y',
+              title: 'Artist — B',
+              startMs: 90000,
+              endMs: 180000,
+            ),
+          ],
+          durationMs: 180000,
+        ),
+      );
+      await db.replaceLyricsDoc(
+        LyricsDocDraft(
+          trackId: track.id,
+          chapterId: 'x',
+          kind: LyricsMode.lyrics,
+          status: LyricsStatus.found,
+          synced: true,
+          checkedAt: DateTime(2026),
+        ),
+      );
+      final trimmed = (await db.getTrack(track.id))!.chaptersJson;
+      await tapApply();
+      expect(find.text('Replace your chapters?'), findsOneWidget);
+      expect(
+        tester.widget<Text>(find.byKey(const ValueKey('replace-summary'))).data,
+        '1 chapter keeps its name and start but gets a new end. 1 identical '
+        'chapter stays.',
+      );
+      expect(
+        find.text('• Artist — A (0:00): ends at 1:30 instead of 1:25'),
+        findsOneWidget,
+      );
+      expect(
+        tester.widget<Text>(find.byKey(const ValueKey('replace-lyrics'))).data,
+        '1 of them has lyrics, which are removed with them.',
+      );
+      await tester.tap(find.text('Cancel'));
+      await settle(tester);
+      expect(applied, isNull);
+      expect((await db.getTrack(track.id))!.chaptersJson, trimmed);
+      await db.deleteLyricsDocs(track.id, chapterId: 'x');
 
       // Back as the scan saw it: Apply shows what it replaces and asks.
       await db.writeTrackChapters(

@@ -1012,6 +1012,10 @@ void main() {
       expect(plan.removed.map((c) => c.id), ['edited', 'youtube']);
       expect(plan.added.map((c) => c.id), ['p2-25000-60000']);
       expect(plan.kept, 1);
+      // 'mine' keeps its id but its end moves, so it is not identical.
+      expect(plan.moved.map((c) => (c.id, c.endMs)), [('mine', 20000)]);
+      expect(plan.identical, 0);
+      expect(plan.changesCurrent, isTrue);
 
       expect(
         await service.applyRecognition(
@@ -1079,6 +1083,8 @@ void main() {
         );
         expect(plan.removed.map((c) => c.id), ['old-auto']);
         expect(plan.kept, 1);
+        expect(plan.moved, isEmpty);
+        expect(plan.identical, 1);
       },
     );
 

@@ -260,7 +260,8 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
     if (fresh == null) throw StateError('The track no longer exists.');
     final run = widget.run;
     final current = ChapterData.decode(fresh.chaptersJson);
-    // Proposals are rebased onto edits made since the scan, but not onto an
+    // The reviewed set replaces the chapters, edits made since the scan
+    // included (the user is asked first). It is never applied after an
     // undo, a reset or a replaced file: those bump the epoch, and a run
     // from another file content is refused by its key inside the apply.
     // Checked before "already applied": after an undo of this very run its
@@ -288,7 +289,7 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
       durationMs: run.durationMs,
       replaceAll: true,
     );
-    if (plan.removed.isNotEmpty && !await _confirmReplace(fresh, plan)) {
+    if (plan.changesCurrent && !await _confirmReplace(fresh, plan)) {
       return;
     }
     final applied = await ref
@@ -320,21 +321,30 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
     if (mounted) Navigator.of(context).pop(plan.chapters.length);
   }
 
-  /// Shows which current chapters applying replaces, and asks.
+  /// Shows which current chapters applying replaces or gives another end,
+  /// and asks.
   Future<bool> _confirmReplace(Track track, RecognitionPlan plan) async {
     final removedIds = {for (final c in plan.removed) c.id};
+    final movedIds = {for (final c in plan.moved) c.id};
     final lyrics = [
       for (final doc in await ref
           .read(databaseProvider)
           .lyricsDocsForTrack(track.id))
-        if (removedIds.contains(doc.chapterId) &&
-            doc.status == LyricsStatus.found)
+        if (doc.status == LyricsStatus.found &&
+            (removedIds.contains(doc.chapterId) ||
+                // Synced lines no longer fit a moved end; pinned ones stay.
+                (movedIds.contains(doc.chapterId) &&
+                    doc.synced &&
+                    !doc.pinned)))
           doc,
     ];
     final pinned = lyrics.where((d) => d.pinned).length;
     if (!mounted) return false;
     const shown = 6;
     final removed = plan.removed;
+    final moved = plan.moved;
+    final newEnds = {for (final c in plan.chapters) c.id: c.endMs};
+    String count(int n, String one, String many) => n == 1 ? one : many;
     final confirmed = await showDialog<bool>(
       context: context,
       builder:
@@ -348,15 +358,23 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
                   Text(
                     key: const ValueKey('replace-summary'),
                     [
-                      '${removed.length} current '
-                          'chapter${removed.length == 1 ? '' : 's'} '
-                          '${removed.length == 1 ? 'is' : 'are'} replaced by '
-                          '${plan.added.length} new '
-                          'one${plan.added.length == 1 ? '' : 's'}.',
-                      if (plan.kept > 0)
-                        '${plan.kept} identical '
-                            'chapter${plan.kept == 1 ? '' : 's'} '
-                            '${plan.kept == 1 ? 'stays' : 'stay'}.',
+                      if (removed.isNotEmpty)
+                        '${removed.length} current '
+                            '${count(removed.length, 'chapter is', 'chapters are')} '
+                            'replaced by ${plan.added.length} new '
+                            '${count(plan.added.length, 'one', 'ones')}.'
+                      else if (plan.added.isNotEmpty)
+                        '${plan.added.length} new '
+                            '${count(plan.added.length, 'chapter is', 'chapters are')} '
+                            'added.',
+                      if (moved.isNotEmpty)
+                        '${moved.length} '
+                            '${count(moved.length, 'chapter keeps its', 'chapters keep their')} '
+                            'name and start but '
+                            '${count(moved.length, 'gets', 'get')} a new end.',
+                      if (plan.identical > 0)
+                        '${plan.identical} identical '
+                            '${count(plan.identical, 'chapter stays', 'chapters stay')}.',
                     ].join(' '),
                   ),
                   const SizedBox(height: 8),
@@ -364,6 +382,14 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
                     Text('• ${c.title} (${chapterTimestamp(c.startMs)})'),
                   if (removed.length > shown)
                     Text('…and ${removed.length - shown} more'),
+                  for (final c in moved.take(shown))
+                    Text(
+                      '• ${c.title} (${chapterTimestamp(c.startMs)}): ends at '
+                      '${chapterTimestamp(newEnds[c.id] ?? c.endMs)} instead '
+                      'of ${chapterTimestamp(c.endMs)}',
+                    ),
+                  if (moved.length > shown)
+                    Text('…and ${moved.length - shown} more'),
                   if (lyrics.isNotEmpty) ...[
                     const SizedBox(height: 8),
                     Text(

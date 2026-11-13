@@ -769,6 +769,7 @@ class ChapterService {
     };
 
     final added = <MediaChapter>[];
+    final moved = <MediaChapter>[];
     var cursor = 0;
     final ordered = [...proposals]
       ..sort((a, b) => a.startMs.compareTo(b.startMs));
@@ -781,6 +782,7 @@ class ChapterService {
         if (range.$2 - range.$1 < minimumChapterMs) continue;
         final same = reusable.remove((range.$1, proposal.title));
         if (same != null) {
+          if (same.endMs != range.$2) moved.add(same);
           added.add(same.copyWith(endMs: range.$2));
           continue;
         }
@@ -847,6 +849,7 @@ class ChapterService {
         for (final c in chapters)
           if (!oldIds.contains(c.id)) c,
       ],
+      moved: moved,
     );
   }
 
@@ -895,15 +898,27 @@ class RecognitionPlan {
   /// Chapters that are new (by id).
   final List<MediaChapter> added;
 
+  /// Current chapters (as they are now) that keep their id, start and title
+  /// but get another end. Synced lyrics that are not pinned go with the old
+  /// end.
+  final List<MediaChapter> moved;
+
   const RecognitionPlan({
     required this.chapters,
     required this.durationMs,
     required this.removed,
     required this.added,
+    this.moved = const [],
   });
 
   /// Chapters that stay exactly as they are or keep their id.
   int get kept => chapters.length - added.length;
+
+  /// Chapters that stay exactly as they are.
+  int get identical => kept - moved.length;
+
+  /// Whether applying changes any current chapter (the user is asked first).
+  bool get changesCurrent => removed.isNotEmpty || moved.isNotEmpty;
 }
 
 /// A recognition run that no longer fits the track: its chapters were
