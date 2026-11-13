@@ -55,14 +55,15 @@ _SearchEntry _entryFor(Track track) => _entries[track] ??= _SearchEntry(track);
 /// into words. Every word must match, in any order.
 class SearchQuery {
   factory SearchQuery(String raw) {
+    final typed = tokenizeFolded(foldForSearch(raw));
     final words = <String>[];
-    for (final word in tokenizeFolded(foldForSearch(raw))) {
+    for (final word in typed) {
       if (!words.contains(word)) words.add(word);
     }
-    return SearchQuery._(raw, words);
+    return SearchQuery._(raw, words, typed.join(' '));
   }
 
-  SearchQuery._(this.raw, this.words) : folded = words.join(' ');
+  SearchQuery._(this.raw, this.words, this.phrase) : folded = words.join(' ');
 
   static final empty = SearchQuery('');
 
@@ -74,6 +75,10 @@ class SearchQuery {
   /// [words] joined by single spaces.
   final String folded;
 
+  /// Every folded word as typed, repeats kept, joined by single spaces. The
+  /// lyrics search scores the words as a phrase, so it gets this.
+  final String phrase;
+
   bool get isEmpty => words.isEmpty;
 
   /// The digits when the query is just a track number (`12` or `#12`).
@@ -84,10 +89,10 @@ class SearchQuery {
 
   @override
   bool operator ==(Object other) =>
-      other is SearchQuery && other.folded == folded;
+      other is SearchQuery && other.phrase == phrase;
 
   @override
-  int get hashCode => folded.hashCode;
+  int get hashCode => phrase.hashCode;
 }
 
 /// Filters a search applies on top of its words. Only lyrics so far; label

@@ -968,7 +968,7 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
   void _scheduleLyricsSearch({bool now = false}) {
     _lyricsTimer?.cancel();
     final generation = ++_lyricsGeneration;
-    final query = _query.folded;
+    final query = _query.phrase;
     if (!widget.filters.lyrics || query.length < 2) {
       _lyricHits = const [];
       _lyricHitsQuery = '';
@@ -991,7 +991,7 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
 
   /// The current lyric hits, when they belong to the current query.
   List<LyricsHit> get _currentLyricHits =>
-      widget.filters.lyrics && _lyricHitsQuery == _query.folded
+      widget.filters.lyrics && _lyricHitsQuery == _query.phrase
           ? _lyricHits
           : const [];
 

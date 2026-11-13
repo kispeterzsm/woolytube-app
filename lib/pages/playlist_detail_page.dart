@@ -373,7 +373,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   _TrackListView _viewFor(List<Track> tracks) {
     final cached = _view;
     final lyrics =
-        _searchFilters.lyrics && _lyricHitsQuery == _query.folded
+        _searchFilters.lyrics && _lyricHitsQuery == _query.phrase
             ? _lyricHits
             : const <LyricsHit>[];
     if (cached != null &&
@@ -693,7 +693,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   void _scheduleLyricsSearch({bool now = false}) {
     _lyricsTimer?.cancel();
     final generation = ++_lyricsGeneration;
-    final query = _query.folded;
+    final query = _query.phrase;
     if (query.length < 2 ||
         !_searchFilters.lyrics ||
         _playlist?.lyricsMode == null) {

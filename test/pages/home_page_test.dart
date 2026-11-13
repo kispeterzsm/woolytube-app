@@ -553,6 +553,27 @@ void main() {
     expect(tester.widget<FilterChip>(chip).selected, isFalse);
   });
 
+  testWidgets('search: lyrics get the words as typed, repeats included', (
+    tester,
+  ) async {
+    playlists[1] = playlists[1].copyWith(lyricsMode: const Value('lyrics'));
+    await pumpHome(tester);
+    await tester.tap(find.byTooltip('Search'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'You and me');
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('search-filter-lyrics')));
+    await tester.pump();
+    await tester.pump(Duration.zero);
+    await tester.pump();
+    // Typing on with words already there searches again, as a phrase.
+    await tester.enterText(find.byType(TextField), 'You and me and you');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pump();
+    expect(lyrics.queries, ['you and me', 'you and me and you']);
+  });
+
   testWidgets('search: best matches first, the chapter found, and Play all', (
     tester,
   ) async {

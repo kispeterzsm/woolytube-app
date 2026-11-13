@@ -112,6 +112,16 @@ void main() {
     );
   });
 
+  test('a query keeps distinct words, and its phrase as typed', () {
+    final query = SearchQuery('  Ná na  NA hey ');
+    expect(query.words, ['na', 'hey']);
+    expect(query.folded, 'na hey');
+    expect(query.phrase, 'na na na hey');
+    // More of the same words is another query for the lyrics search.
+    expect(SearchQuery('na hey'), isNot(query));
+    expect(SearchQuery('NA na na hey'), query);
+  });
+
   group('searchLibrary', () {
     late AppDatabase db;
     late int playlistId;
