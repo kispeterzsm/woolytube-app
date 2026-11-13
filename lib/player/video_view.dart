@@ -106,7 +106,7 @@ class _VideoViewState extends ConsumerState<VideoView> {
   }
 
   void _bumpAutoHide() {
-    if (_overlayVisible) _scheduleAutoHide();
+    if (mounted && _overlayVisible) _scheduleAutoHide();
   }
 
   void _showOverlay() {

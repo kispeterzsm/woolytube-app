@@ -45,7 +45,9 @@ class SegmentMarkButton extends ConsumerWidget {
         } else {
           await startSkipSegment(context, ref);
         }
-        onAction?.call();
+        // The picker may outlive the video view (it opens on the root
+        // navigator); a view that is gone has nothing to keep open.
+        if (context.mounted) onAction?.call();
       },
     );
   }
