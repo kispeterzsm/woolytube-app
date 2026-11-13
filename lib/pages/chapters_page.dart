@@ -11,6 +11,7 @@ import '../services/chapters.dart';
 import '../services/playback_service.dart';
 import '../services/playlist_service.dart';
 import '../services/recognition/song_recognition_service.dart';
+import '../services/youtube_links.dart';
 import '../widgets/mobile_data_download_guard.dart';
 import '../widgets/settings_section_header.dart';
 import 'chapter_editor_page.dart';
@@ -352,6 +353,14 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
     await _afterEdit(track);
   }
 
+  Future<void> _share(Track track, MediaChapter chapter) async {
+    try {
+      await shareYouTubeChapter(track, chapter);
+    } catch (e) {
+      _showMessage('Could not share: $e');
+    }
+  }
+
   /// The per-chapter options, laid out like the track options sheet.
   void _showChapterActions(
     Track track,
@@ -419,6 +428,13 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                     close();
                     _run(() => _delete(track, chapter));
                   },
+                  onShare:
+                      hasYouTubeTimeline(track)
+                          ? () {
+                            close();
+                            unawaited(_share(track, chapter));
+                          }
+                          : null,
                   lyricsTitle: lyricsMenuTitle(lyricsMode),
                   lyricsSubtitle: lyricsMenuSubtitle(lyricsMode),
                   onLyrics: () {
@@ -1383,6 +1399,7 @@ class _ChapterActionsSheet extends StatelessWidget {
     required this.onRename,
     required this.onEditTimes,
     required this.onDelete,
+    required this.onShare,
     required this.lyricsTitle,
     required this.lyricsSubtitle,
     required this.onLyrics,
@@ -1399,6 +1416,9 @@ class _ChapterActionsSheet extends StatelessWidget {
   final VoidCallback onRename;
   final VoidCallback onEditTimes;
   final VoidCallback onDelete;
+
+  /// Null when the chapter has no YouTube moment to link to.
+  final VoidCallback? onShare;
   final String lyricsTitle;
   final String lyricsSubtitle;
   final VoidCallback onLyrics;
@@ -1533,6 +1553,17 @@ class _ChapterActionsSheet extends StatelessWidget {
                 subtitle: lyricsSubtitle,
                 onTap: onLyrics,
               ),
+              if (onShare != null)
+                tile(
+                  key: const ValueKey('chapter-actions-share'),
+                  icon: Icons.share,
+                  title: 'Share link',
+                  // The link is in whole seconds.
+                  subtitle:
+                      'Opens YouTube at '
+                      '${chapterTimestamp(chapter.startMs ~/ 1000 * 1000)}',
+                  onTap: onShare,
+                ),
               const Divider(height: 1, color: Color(0xFF3A3A3A)),
               tile(
                 key: const ValueKey('chapter-actions-adjust'),

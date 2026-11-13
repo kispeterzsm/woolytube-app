@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:woolytube/database/database.dart';
@@ -57,6 +58,7 @@ void main() {
     ChapterData? chapters,
     bool isLocalReplacement = false,
     int? durationSeconds = 180,
+    String videoId = 'video-1',
   }) async {
     final playlist = await insertTestPlaylist(db);
     await insertTestTrack(
@@ -70,6 +72,7 @@ void main() {
       db,
       playlistId: playlist.id,
       index: 2,
+      videoId: videoId,
       title: 'Long mix',
       status: 'complete',
       filePath: mediaPath,
@@ -407,6 +410,88 @@ void main() {
     expect(find.byType(ChapterEditorPage), findsNothing);
     expect(player.chaptersChanged, isEmpty);
     await unmount(tester);
+  });
+
+  group('Share link', () {
+    const channel = MethodChannel('dev.fluttercommunity.plus/share');
+    late List<Map<Object?, Object?>> shared;
+
+    setUp(() {
+      shared = [];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            shared.add(call.arguments as Map<Object?, Object?>);
+            return 'dev.fluttercommunity.plus/share/unavailable';
+          });
+    });
+
+    tearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+
+    testWidgets('shares the YouTube link to the chapter start', (tester) async {
+      final track = await addTrack(
+        chapters: const ChapterData(
+          downloaded: [
+            MediaChapter(id: 'a', title: 'Intro', startMs: 0, endMs: 61500),
+            MediaChapter(id: 'b', title: 'Song', startMs: 61500, endMs: 180000),
+          ],
+          durationMs: 180000,
+        ),
+        videoId: 'a-B_c9',
+      );
+      await pumpPage(tester, track);
+
+      await openChapterOptions(tester, 'b');
+      expect(find.text('Opens YouTube at 1:01'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('chapter-actions-share')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('chapter-actions-list')), findsNothing);
+      expect(shared, hasLength(1));
+      expect(shared.single['uri'], 'https://youtu.be/a-B_c9?t=61');
+      expect(shared.single['title'], 'Song');
+
+      await openChapterOptions(tester, 'a');
+      await tester.tap(find.byKey(const ValueKey('chapter-actions-share')));
+      await tester.pumpAndSettle();
+      expect(shared.last['uri'], 'https://youtu.be/a-B_c9?t=0');
+      await unmount(tester);
+    });
+
+    testWidgets('is not offered for a file put in place of the original', (
+      tester,
+    ) async {
+      final track = await addTrack(
+        chapters: youTubeChapters,
+        isLocalReplacement: true,
+      );
+      await pumpPage(tester, track);
+
+      await openChapterOptions(tester, 'b');
+      expect(
+        find.byKey(const ValueKey('chapter-actions-title')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('chapter-actions-share')), findsNothing);
+      await unmount(tester);
+    });
+
+    testWidgets('is not offered for an inserted local file', (tester) async {
+      final track = await addTrack(
+        chapters: youTubeChapters,
+        videoId: 'force-insert:1700000000',
+      );
+      await pumpPage(tester, track);
+
+      await openChapterOptions(tester, 'b');
+      expect(
+        find.byKey(const ValueKey('chapter-actions-title')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('chapter-actions-share')), findsNothing);
+      await unmount(tester);
+    });
   });
 
   testWidgets('Lyrics opens that chapter on the lyrics page', (tester) async {
