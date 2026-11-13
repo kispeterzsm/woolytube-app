@@ -130,7 +130,7 @@ class _TrackListView {
       };
       labelMatches = {
         for (final hit in hits)
-          if (hit.reason == SearchReason.labelName) hit.track.id: hit.labels,
+          if (hit.labels.isNotEmpty) hit.track.id: hit.labels,
       };
     }
     rowOf = {for (var i = 0; i < visible.length; i++) visible[i].id: i};
@@ -190,7 +190,7 @@ class _TrackListView {
   /// The best lyric line of each track whose lyrics match [query].
   late final Map<int, LyricsHit> lyricMatches;
 
-  /// The labels (uids) whose names found each track found only by them.
+  /// The labels (uids) whose names found each track found by them.
   late final Map<int, Set<String>> labelMatches;
   late final List<Track> visible;
   late final Map<int, int> rowOf;
@@ -1126,11 +1126,10 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
               ? null
               : PreferredSize(
                 // The chips, and while Labels is on the labels to choose
-                // under them, above 4 of padding.
+                // under them, above 4 of padding. The chips row is as tall
+                // either way, so the chips stay put when Labels opens.
                 preferredSize: Size.fromHeight(
-                  chipFilters.labelSearch
-                      ? SearchFilterChips.heightFor(context, chipFilters) + 4
-                      : 44,
+                  SearchFilterChips.heightFor(context, chipFilters) + 4,
                 ),
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),

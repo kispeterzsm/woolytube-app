@@ -1642,7 +1642,8 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    for (final scale in [1.0, 1.3]) {
+    // 2.0 stands in for a phone font wider than Roboto.
+    for (final scale in [1.0, 1.3, 2.0]) {
       testWidgets('search: 30 labels stay on one line that scrolls, and a '
           'label hit is whole, at text size $scale', (tester) async {
         tester.platformDispatcher.textScaleFactorTestValue = scale;
@@ -1677,8 +1678,12 @@ void main() {
         await tester.pumpAndSettle();
         await tester.tap(find.byTooltip('Search'));
         await tester.pumpAndSettle();
-        await tester.tap(find.byKey(const ValueKey('search-filter-labels')));
+        final labelsChip = find.byKey(const ValueKey('search-filter-labels'));
+        final chipTop = tester.getRect(labelsChip).top;
+        await tester.tap(labelsChip);
         await tester.pumpAndSettle();
+        // The label row opens under the chips, which stay put.
+        expect(tester.getRect(labelsChip).top, moreOrLessEquals(chipTop));
         await tester.enterText(find.byType(TextField), 'longer label');
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull);
@@ -1724,9 +1729,19 @@ void main() {
           greaterThan(tester.getRect(option(offered.first)).bottom),
         );
         expectNotCut(tester, find.byKey(const ValueKey('search-play-all')));
-        expectNotCut(
-          tester,
-          find.byKey(ValueKey('search-label-reason-${labelled.id}')),
+        // Both of its labels match: the first, and how many more.
+        final reason = find.byKey(
+          ValueKey('search-label-reason-${labelled.id}'),
+        );
+        expectNotCut(tester, reason);
+        expect(
+          tester
+              .widget<RichText>(
+                find.descendant(of: reason, matching: find.byType(RichText)),
+              )
+              .text
+              .toPlainText(),
+          'Label: A longer label name 1 · +1 more',
         );
         expect(
           tester

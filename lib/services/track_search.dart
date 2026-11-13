@@ -60,19 +60,13 @@ class _SearchEntry {
     }
   }
 
-  /// The active chapters, in timeline order, that carry one of [uids], and
-  /// those of [uids] they carry.
-  (List<MediaChapter>, Set<String>) chaptersWithAnyLabel(Set<String> uids) {
-    if (!_hasChapterLabels) return (const [], const {});
-    final found = <MediaChapter>[];
-    final carried = <String>{};
-    for (final chapter in _chapterData.active) {
-      final matching = _chapterData.labelsOf(chapter.id).where(uids.contains);
-      if (matching.isEmpty) continue;
-      found.add(chapter);
-      carried.addAll(matching);
-    }
-    return (found, carried);
+  /// The active chapters, in timeline order, that carry one of [uids].
+  List<MediaChapter> chaptersWithAnyLabel(Set<String> uids) {
+    if (!_hasChapterLabels) return const [];
+    return [
+      for (final chapter in _chapterData.active)
+        if (_chapterData.labelsOf(chapter.id).any(uids.contains)) chapter,
+    ];
   }
 
   /// The active chapters, in timeline order, whose own labels satisfy
@@ -230,11 +224,12 @@ enum SearchReason {
   /// Its track number.
   number,
 
-  /// Only chapter titles.
+  /// Only chapter titles (and, with the Labels chip on, maybe the names of
+  /// labels other chapters carry).
   chapter,
 
   /// Only the name of a label the file or some chapters carry (the
-  /// Labels chip is on).
+  /// Labels chip is on). A label on the file wins over chapter titles.
   labelName,
 
   /// Only a lyric or transcript line (the Lyrics filter is on).
@@ -258,13 +253,16 @@ class SearchHit {
   final Track track;
   final SearchReason reason;
 
-  /// For [SearchReason.labelName], the labels (uids) whose names match,
-  /// carried by the file or by [chapters].
+  /// The labels (uids) whose names match the search and found it: for
+  /// [SearchReason.labelName] those on the file or on [chapters], for
+  /// [SearchReason.chapter] those on the chapters found by them rather
+  /// than by their titles. Otherwise empty.
   final Set<String> labels;
 
   /// The active chapters whose titles match, in timeline order. Also set
   /// when the title matched too. With label filters, only chapters that
-  /// carry the labels (when the file itself does not). For
+  /// carry the labels (when the file itself does not). With the Labels
+  /// chip on, also the chapters that carry a label whose name matches. For
   /// [SearchReason.labelName], the chapters that carry the matching labels
   /// (empty when the file does: it is found whole).
   final List<MediaChapter> chapters;
@@ -329,13 +327,18 @@ bool matchesSearchText(String text, SearchQuery query) =>
 
 /// [track] as a search hit for [query] and the label filters of
 /// [filters], or null when it does not match. [lyric] is its best lyric
-/// line, if lyrics are searched.
+/// line, if lyrics are searched; [namedLabels] the labels whose names
+/// match [query], while the Labels chip is on.
 ///
-/// A file that carries the labels itself is found as by [query] alone. One
-/// whose chapters carry them is found through those chapters only: an
-/// empty search lists them, a title match keeps them (or those of them
-/// whose titles match too), a chapter title match keeps the matching ones
-/// that carry the labels, and a lyric line counts when its chapter does.
+/// What is found, best first: the title or number (the file whole), a
+/// label named on the file (the file whole), the chapters whose titles
+/// match or that carry a named label (those chapters, in timeline order),
+/// then a lyric line. A file that carries the chosen labels itself is
+/// found as by [query] alone. One whose chapters carry them is found
+/// through those chapters only: an empty search lists them, a title or a
+/// label named on the file keeps them (or those of them whose titles match
+/// too), and every other reason counts only in them, so the next reason
+/// is tried when one finds none of them.
 SearchHit? _hitFor(
   Track track,
   SearchQuery query,
@@ -343,71 +346,31 @@ SearchHit? _hitFor(
   SearchFilters filters = const SearchFilters(),
   Set<String> namedLabels = const {},
 ]) {
-  final hit = _textHitFor(track, query, lyric, namedLabels);
-  if (hit == null || !filters.hasLabels) return hit;
   final entry = _entryFor(track);
-  if (labelsMatch(entry.fileLabels, filters.labels, filters.labelMatch)) {
-    return query.isEmpty
-        ? SearchHit(track: track, reason: SearchReason.label)
-        : hit;
-  }
-  final labelled = entry.chaptersLabelled(filters);
-  if (labelled.isEmpty) return null;
+  // The chapters that carry the chosen labels, when the file itself does
+  // not; null when anything of the file may be found.
+  List<MediaChapter>? labelledChapters() =>
+      !filters.hasLabels ||
+              labelsMatch(entry.fileLabels, filters.labels, filters.labelMatch)
+          ? null
+          : entry.chaptersLabelled(filters);
+
   if (query.isEmpty) {
+    if (!filters.hasLabels) {
+      return SearchHit(track: track, reason: SearchReason.title);
+    }
+    final labelled = labelledChapters();
+    if (labelled == null) {
+      return SearchHit(track: track, reason: SearchReason.label);
+    }
+    if (labelled.isEmpty) return null;
     return SearchHit(
       track: track,
       reason: SearchReason.chapter,
       chapters: labelled,
     );
   }
-  final ids = {for (final chapter in labelled) chapter.id};
-  final both = [
-    for (final chapter in hit.chapters)
-      if (ids.contains(chapter.id)) chapter,
-  ];
-  switch (hit.reason) {
-    case SearchReason.lyrics:
-      final chapter = lyricsHitTarget(track, lyric!).chapter;
-      return chapter != null && ids.contains(chapter.id) ? hit : null;
-    case SearchReason.labelName:
-      if (hit.chapters.isNotEmpty && both.isEmpty) return null;
-      return SearchHit(
-        track: track,
-        reason: SearchReason.labelName,
-        chapters: hit.chapters.isEmpty ? labelled : both,
-        labels: hit.labels,
-        rank: hit.rank,
-      );
-    case SearchReason.chapter:
-      if (both.isEmpty) return null;
-      return SearchHit(
-        track: track,
-        reason: SearchReason.chapter,
-        chapters: both,
-        lyric: lyric,
-        rank: hit.rank,
-      );
-    case SearchReason.title:
-    case SearchReason.number:
-    case SearchReason.label:
-      return SearchHit(
-        track: track,
-        reason: SearchReason.chapter,
-        chapters: both.isEmpty ? labelled : both,
-        lyric: lyric,
-        rank: hit.rank,
-      );
-  }
-}
 
-SearchHit? _textHitFor(
-  Track track,
-  SearchQuery query,
-  LyricsHit? lyric, [
-  Set<String> namedLabels = const {},
-]) {
-  if (query.isEmpty) return SearchHit(track: track, reason: SearchReason.title);
-  final entry = _entryFor(track);
   var reason = SearchReason.title;
   var rank = _textRank(entry.title, query);
   final number = query.number;
@@ -425,45 +388,113 @@ SearchHit? _textHitFor(
       rank = indexRank;
     }
   }
-  final (chapters, chapterRank) = entry.chaptersMatching(query);
-  if (rank == null && chapterRank != null) {
-    reason = SearchReason.chapter;
-    rank = chapterRank <= 2 ? 4 : 5;
+  final (titled, chapterRank) = entry.chaptersMatching(query);
+  final ownNamed =
+      namedLabels.isEmpty
+          ? const <String>{}
+          : {...entry.fileLabels.where(namedLabels.contains)};
+  final namedChapters =
+      namedLabels.isEmpty
+          ? const <MediaChapter>[]
+          : entry.chaptersWithAnyLabel(namedLabels);
+  if (rank == null &&
+      titled.isEmpty &&
+      ownNamed.isEmpty &&
+      namedChapters.isEmpty &&
+      lyric == null) {
+    return null;
   }
-  if (rank == null && namedLabels.isNotEmpty) {
-    // A label whose name matches: on the file finds it whole, otherwise
-    // the chapters that carry one.
-    final own = {...entry.fileLabels.where(namedLabels.contains)};
-    if (own.isNotEmpty) {
+
+  final labelled = labelledChapters();
+  if (labelled != null && labelled.isEmpty) return null;
+  final allowed =
+      labelled == null ? null : {for (final chapter in labelled) chapter.id};
+  bool allows(MediaChapter chapter) =>
+      allowed == null || allowed.contains(chapter.id);
+
+  // The title or number: the file whole.
+  if (rank != null) {
+    if (labelled == null) {
       return SearchHit(
         track: track,
-        reason: SearchReason.labelName,
-        labels: own,
-        rank: 6,
+        reason: reason,
+        chapters: titled,
+        lyric: lyric,
+        rank: rank,
       );
     }
-    final (labelled, carried) = entry.chaptersWithAnyLabel(namedLabels);
-    if (labelled.isNotEmpty) {
-      return SearchHit(
-        track: track,
-        reason: SearchReason.labelName,
-        chapters: labelled,
-        labels: carried,
-        rank: 6,
-      );
-    }
+    final both = titled.where(allows).toList();
+    return SearchHit(
+      track: track,
+      reason: SearchReason.chapter,
+      chapters: both.isEmpty ? labelled : both,
+      lyric: lyric,
+      rank: rank,
+    );
   }
-  if (rank == null && lyric != null) {
-    reason = SearchReason.lyrics;
-    rank = 7;
+
+  // A label named on the file: the file whole, even when chapter titles
+  // match too.
+  if (ownNamed.isNotEmpty) {
+    return SearchHit(
+      track: track,
+      reason: SearchReason.labelName,
+      chapters: labelled ?? const [],
+      labels: ownNamed,
+      rank: 6,
+    );
   }
-  if (rank == null) return null;
+
+  // The chapters whose titles match or that carry a named label.
+  final byTitle = {
+    for (final chapter in titled)
+      if (allows(chapter)) chapter.id,
+  };
+  final byName = {
+    for (final chapter in namedChapters)
+      if (allows(chapter)) chapter.id,
+  };
+  if (byTitle.isNotEmpty || byName.isNotEmpty) {
+    final found = [
+      for (final (_, chapter) in entry.chapters)
+        if (byTitle.contains(chapter.id) || byName.contains(chapter.id))
+          chapter,
+    ];
+    // Only the named labels the chapters found carry.
+    final labels = {
+      for (final chapter in found)
+        if (byName.contains(chapter.id))
+          ...entry.chapterLabels(chapter.id).where(namedLabels.contains),
+    };
+    return byTitle.isNotEmpty
+        ? SearchHit(
+          track: track,
+          reason: SearchReason.chapter,
+          chapters: found,
+          labels: labels,
+          lyric: lyric,
+          rank: chapterRank! <= 2 ? 4 : 5,
+        )
+        : SearchHit(
+          track: track,
+          reason: SearchReason.labelName,
+          chapters: found,
+          labels: labels,
+          rank: 6,
+        );
+  }
+
+  // A lyric line, in a chapter that carries the chosen labels.
+  if (lyric == null) return null;
+  if (allowed != null) {
+    final chapter = lyricsHitTarget(track, lyric).chapter;
+    if (chapter == null || !allowed.contains(chapter.id)) return null;
+  }
   return SearchHit(
     track: track,
-    reason: reason,
-    chapters: chapters,
+    reason: SearchReason.lyrics,
     lyric: lyric,
-    rank: rank,
+    rank: 7,
   );
 }
 

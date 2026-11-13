@@ -1695,9 +1695,9 @@ class _SearchTrackTile extends ConsumerWidget {
             ? const <Label>[]
             : carriedLabels(allLabels, decodeLabelUids(track.labelUids));
     final named =
-        hit.reason == SearchReason.labelName
-            ? carriedLabels(allLabels, hit.labels)
-            : const <Label>[];
+        hit.labels.isEmpty
+            ? const <Label>[]
+            : carriedLabels(allLabels, hit.labels);
 
     return Material(
       color: isCurrentTrack ? const Color(0xFF2A2A2A) : Colors.transparent,
@@ -1845,18 +1845,20 @@ class _SearchTrackTile extends ConsumerWidget {
     );
   }
 
-  /// `Label: Rock` (or `Labels: Rock, Prog rock`), the names whose words
-  /// were found highlighted.
+  /// `Label: Rock`, and how many more labels matched (like the chapter
+  /// line), the words found in the name highlighted.
   TextSpan _labelLine(List<Label> named) {
-    final names = named.map((label) => label.name).join(', ');
+    final name = named.first.name;
+    final more = named.length - 1;
     return TextSpan(
       children: [
-        TextSpan(text: named.length == 1 ? 'Label: ' : 'Labels: '),
+        const TextSpan(text: 'Label: '),
         ...lyricsSpans(
-          names,
-          searchHighlights(names, query),
+          name,
+          searchHighlights(name, query),
           const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
         ),
+        if (more > 0) TextSpan(text: ' · +$more more'),
       ],
     );
   }

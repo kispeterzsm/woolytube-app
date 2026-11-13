@@ -108,8 +108,8 @@ class _TrackRow extends ConsumerWidget {
   /// The lyric line the search query matched, if any. A chapter match wins.
   final LyricsHit? lyricMatch;
 
-  /// The labels (uids) whose names the search query matched, when only
-  /// they found the track.
+  /// The labels (uids) whose names the search query matched, when they
+  /// found the track or some of its chapters.
   final Set<String>? labelMatch;
 
   /// The search, whose words are highlighted in the title.
@@ -412,7 +412,8 @@ class _TrackState {
 
 /// The one grey line under a track: its short status, or for a chapter
 /// the search matched, where that chapter starts and its title. For a
-/// track found by label names, those labels first (`Label: Rock`).
+/// track found by label names, those labels first (`Label: Rock`, or
+/// `Label: Rock · +2 more` when all of them do not fit).
 ///
 /// Longest first: when "Always skip" in front of a long status would not
 /// fit, the row says "Skip", and if even that is too long, only "Always
@@ -425,11 +426,18 @@ List<String> _rowSubtitles(
 ]) {
   if (named != null && named.isNotEmpty) {
     final names = named.map((label) => label.name).join(', ');
-    final found = [
-      named.length == 1 ? 'Label: $names' : 'Labels: $names',
-      if (chapter != null) '${_formatMs(chapter.startMs)} · ${chapter.title}',
-    ].join(' · ');
-    return [track.alwaysSkip ? 'Always skip · $found' : found];
+    final more = named.length - 1;
+    final at =
+        chapter == null
+            ? ''
+            : ' · ${_formatMs(chapter.startMs)} · ${chapter.title}';
+    String line(String found) =>
+        track.alwaysSkip ? 'Always skip · $found$at' : '$found$at';
+    return [
+      line(named.length == 1 ? 'Label: $names' : 'Labels: $names'),
+      // Too long for the row: the first, and how many more.
+      if (more > 0) line('Label: ${named.first.name} · +$more more'),
+    ];
   }
   if (chapter != null) {
     final match = '${_formatMs(chapter.startMs)} · ${chapter.title}';

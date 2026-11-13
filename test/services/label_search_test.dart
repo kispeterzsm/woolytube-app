@@ -494,6 +494,139 @@ void main() {
       expect(describe(hits), ['1 labelName', '3 labelName b', '4 labelName a']);
     });
 
+    // Named like the chapter "Rock ballad", so titles and names both match.
+    final rockNames = [
+      label(rock, 'Rock'),
+      label(live, 'Live'),
+      label(jazz, 'Rock jazz'),
+    ];
+
+    test('a label name counts when a chapter title matches too: on the '
+        'file it finds the file whole, on another chapter it adds that '
+        'chapter', () async {
+      final tracks = [
+        // The file carries Rock, chapter b is "Rock ballad".
+        await track(1, 'Album', labels: [rock], withChapters: true),
+        // Chapter b is "Rock ballad", chapter c carries Rock.
+        await track(
+          2,
+          'Mix',
+          chapterLabels: {
+            'c': [rock],
+          },
+        ),
+      ];
+      final query = SearchQuery('rock');
+      final hits = searchLibrary(
+        tracks,
+        query,
+        filters: const SearchFilters(labelSearch: true),
+        namedLabels: labelUidsNamed([rockNames.first], query),
+      );
+      expect(describe(hits), ['2 chapter b c', '1 labelName']);
+      expect(hits[0].labels, {rock});
+      expect(hits[1].labels, {rock});
+      expect(
+        searchQueueEntries(
+          hits,
+        ).map((e) => '${e.track.index} ${e.chapterIds?.join(',')}'),
+        ['2 b,c', '1 null'],
+      );
+      expect(searchLabelTargets(hits).map((item) => item.toString()), [
+        'LabelledItem(${tracks[1].id}, b)',
+        'LabelledItem(${tracks[1].id}, c)',
+        'LabelledItem(${tracks[0].id})',
+      ]);
+      // Labels off: only the chapter title.
+      expect(
+        describe(
+          searchLibrary(
+            tracks,
+            query,
+            namedLabels: labelUidsNamed(rockNames, query),
+          ),
+        ),
+        ['1 chapter b', '2 chapter b'],
+      );
+    });
+
+    test('with labels chosen, a label name still finds what a chapter '
+        'title loses, and names only the labels of what is kept', () async {
+      final tracks = [
+        // "Rock ballad" (b) is not Live; a is Live and Rock.
+        await track(
+          1,
+          'One',
+          chapterLabels: {
+            'a': [live, rock],
+            'c': [rock],
+          },
+        ),
+        // Rock jazz on a, which is not Live; Rock on c, which is.
+        await track(
+          2,
+          'Two',
+          chapterLabels: {
+            'a': [jazz],
+            'c': [rock, live],
+          },
+        ),
+      ];
+      final query = SearchQuery('rock');
+      final namedLabels = labelUidsNamed(rockNames, query);
+      expect(namedLabels, {rock, jazz});
+      final hits = searchLibrary(
+        tracks,
+        query,
+        filters: const SearchFilters(labelSearch: true, labels: {live}),
+        namedLabels: namedLabels,
+      );
+      expect(describe(hits), ['1 labelName a', '2 labelName c']);
+      expect(hits[0].labels, {rock});
+      expect(hits[1].labels, {rock});
+    });
+
+    test('with labels chosen, a lyric line counts when titles and names '
+        'find nothing that carries them', () async {
+      final tracks = [
+        // "Rock ballad" (b) and Rock on a, neither Live; the line is in c.
+        await track(
+          1,
+          'One',
+          chapterLabels: {
+            'a': [rock],
+            'c': [live],
+          },
+        ),
+      ];
+      final query = SearchQuery('rock');
+      final hits = searchLibrary(
+        tracks,
+        query,
+        filters: const SearchFilters(
+          lyrics: true,
+          labelSearch: true,
+          labels: {live},
+        ),
+        namedLabels: labelUidsNamed(rockNames, query),
+        lyricHits: [
+          LyricsHit(
+            trackId: tracks.single.id,
+            docId: 1,
+            lineId: 1,
+            lineNo: 1,
+            lineText: 'We rock',
+            highlightRanges: const [LyricsHighlight(3, 7)],
+            positionMs: 25000,
+            score: 1,
+            kind: LyricsMode.lyrics,
+          ),
+        ],
+      );
+      expect(describe(hits), ['1 lyrics']);
+      expect(searchQueueEntries(hits).single.chapterIds, {'c'});
+    });
+
     test('filters compare the Labels chip too', () {
       expect(
         const SearchFilters(labelSearch: true) == const SearchFilters(),

@@ -3123,7 +3123,7 @@ void main() {
       expect(find.byTooltip('Stop update'), findsOneWidget);
     });
 
-    for (final scale in [1.0, 1.3]) {
+    for (final scale in [1.0, 1.3, 2.0]) {
       testWidgets('30 labels stay on one line that scrolls at text size '
           '$scale', (tester) async {
         usePhoneScreen(tester);
@@ -3158,14 +3158,19 @@ void main() {
         await pumpPage(tester, tracks: [track], opened: true);
         await tester.tap(find.byTooltip('Search tracks'));
         await tester.pumpAndSettle();
-        await tester.tap(find.byKey(const ValueKey('search-filter-labels')));
+        final labelsChip = find.byKey(const ValueKey('search-filter-labels'));
+        final chipTop = tester.getRect(labelsChip).top;
+        await tester.tap(labelsChip);
         await tester.pumpAndSettle();
+        // The label row opens under the chips, which stay put.
+        expect(tester.getRect(labelsChip).top, moreOrLessEquals(chipTop));
         await tester.enterText(find.byType(TextField), 'label');
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull);
 
         Finder option(Label l) =>
             find.byKey(ValueKey('search-label-option-${l.uid}'));
+        final row = find.byKey(const ValueKey('search-label-row'));
         final bar = tester.getRect(find.byType(AppBar));
         // One line: every label at the same height, inside the bar.
         final top = tester.getRect(option(made.first)).top;
@@ -3193,11 +3198,48 @@ void main() {
         expect(tester.getRect(option(made.last)).left, greaterThan(411));
         await tester.dragUntilVisible(
           option(made.last),
-          find.byKey(const ValueKey('search-label-row')),
+          row,
           const Offset(-300, 0),
         );
         await tester.pumpAndSettle();
         expect(tester.getRect(option(made.last)).right, lessThanOrEqualTo(411));
+
+        // Chosen far along, it moves to the front, and the row with it.
+        bool chosen(Label l) => tester.widget<FilterChip>(option(l)).selected;
+        await tester.tap(option(made.last));
+        await tester.pumpAndSettle();
+        expect(chosen(made.last), isTrue);
+        var rect = tester.getRect(option(made.last));
+        expect(rect.left, greaterThanOrEqualTo(0));
+        expect(rect.right, lessThanOrEqualTo(411));
+        expect(rect.left, lessThan(tester.getRect(option(made.first)).left));
+        // A second one: the All labels switch shows beside the Labels chip,
+        // whole, and the label row does not move.
+        await tester.dragUntilVisible(
+          option(made[20]),
+          row,
+          const Offset(-300, 0),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(option(made[20]));
+        await tester.pumpAndSettle();
+        expect(chosen(made[20]), isTrue);
+        rect = tester.getRect(option(made[20]));
+        expect(rect.left, greaterThanOrEqualTo(0));
+        expect(rect.left, lessThan(411));
+        final match = find.byKey(const ValueKey('search-label-match'));
+        expectNotCut(tester, match);
+        // At a large text size the chips row scrolls to show it.
+        expect(tester.getRect(match).left, greaterThanOrEqualTo(0));
+        expect(tester.getRect(match).right, lessThanOrEqualTo(411));
+        expect(
+          tester.getRect(match).center.dy,
+          moreOrLessEquals(tester.getRect(labelsChip).center.dy),
+        );
+        expect(tester.getRect(option(made.last)).top, moreOrLessEquals(top));
+        expect(find.text('All labels'), findsOneWidget);
+        expect(tester.getRect(labelsChip).top, moreOrLessEquals(chipTop));
+
         // The results start under the bar, their count whole.
         final count = find.byKey(
           const ValueKey('playlist-search-result-count'),

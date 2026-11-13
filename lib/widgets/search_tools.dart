@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -52,14 +53,17 @@ Widget searchHighlightedText(
 
 /// The filter chips under a search field: Lyrics (shown when [lyricsLabel]
 /// is set) and Labels (shown when there are [labels]). Both are off when
-/// search opens.
+/// search opens. With two or more labels chosen, a small switch after
+/// them says whether results need all of them (the default) or any one.
 ///
 /// Labels on shows a second row, one line that scrolls sideways, with the
 /// labels to choose: the chosen ones first, then the rest in the owner's
-/// order, narrowed to those whose names match [query]. With two or more
-/// chosen, a small switch after them says whether results need all of
-/// them (the default) or any one.
-class SearchFilterChips extends StatelessWidget {
+/// order, narrowed to those whose names match [query]. A label just chosen
+/// moves to the front, so the row scrolls back there.
+///
+/// With [labels], the chips row is [rowHeight] tall whether Labels is on
+/// or not, so the chips stay put when the label row opens under them.
+class SearchFilterChips extends StatefulWidget {
   const SearchFilterChips({
     super.key,
     required this.filters,
@@ -91,17 +95,68 @@ class SearchFilterChips extends StatelessWidget {
   static double heightFor(BuildContext context, SearchFilters filters) =>
       rowHeight(context) * (filters.labelSearch ? 2 : 1);
 
+  @override
+  State<SearchFilterChips> createState() => _SearchFilterChipsState();
+}
+
+class _SearchFilterChipsState extends State<SearchFilterChips> {
+  final _chipScroll = ScrollController();
+  final _labelScroll = ScrollController();
+
+  @override
+  void didUpdateWidget(SearchFilterChips oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (_showsMatch(widget.filters) && !_showsMatch(oldWidget.filters)) {
+      // The switch is last in the chips row: with a large font it can land
+      // past the edge, so bring it in.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_chipScroll.hasClients) return;
+        final end = _chipScroll.position.maxScrollExtent;
+        if (end <= _chipScroll.offset) return;
+        unawaited(
+          _chipScroll.animateTo(
+            end,
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.easeOut,
+          ),
+        );
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _chipScroll.dispose();
+    _labelScroll.dispose();
+    super.dispose();
+  }
+
+  /// Whether the All labels / Any label switch shows.
+  bool _showsMatch(SearchFilters filters) =>
+      widget.labels.isNotEmpty &&
+      filters.labelSearch &&
+      filters.labels.length >= 2;
+
+  SearchFilters get _filters => widget.filters;
+
   void _toggleLabel(String uid, bool on) {
-    final chosen = {...filters.labels};
+    final chosen = {..._filters.labels};
     on ? chosen.add(uid) : chosen.remove(uid);
-    onChanged(filters.copyWith(labels: chosen));
+    // The chosen label moves to the front: show it there, not whatever
+    // label now sits where it was.
+    if (on && _labelScroll.hasClients) _labelScroll.jumpTo(0);
+    widget.onChanged(_filters.copyWith(labels: chosen));
   }
 
   @override
   Widget build(BuildContext context) {
-    final label = lyricsLabel;
-    final showLabels = labels.isNotEmpty;
+    final filters = _filters;
+    final onChanged = widget.onChanged;
+    final label = widget.lyricsLabel;
+    final showLabels = widget.labels.isNotEmpty;
+    final matchAll = filters.labelMatch == LabelMatch.all;
     final chips = SingleChildScrollView(
+      controller: _chipScroll,
       scrollDirection: Axis.horizontal,
       child: Row(
         spacing: 6,
@@ -149,59 +204,9 @@ class SearchFilterChips extends StatelessWidget {
                         ),
                   ),
             ),
-        ],
-      ),
-    );
-    if (!showLabels || !filters.labelSearch) return chips;
-    final height = rowHeight(context);
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        SizedBox(
-          height: height,
-          child: Align(alignment: Alignment.centerLeft, child: chips),
-        ),
-        SizedBox(
-          height: height,
-          child: Align(alignment: Alignment.centerLeft, child: _labelRow()),
-        ),
-      ],
-    );
-  }
-
-  Widget _labelRow() {
-    final query = this.query ?? SearchQuery.empty;
-    final named = labelUidsNamed(labels, query);
-    final chosen = [
-      for (final item in labels)
-        if (filters.labels.contains(item.uid)) item,
-    ];
-    final rest = [
-      for (final item in labels)
-        if (!filters.labels.contains(item.uid) &&
-            (query.isEmpty || named.contains(item.uid)))
-          item,
-    ];
-    if (chosen.isEmpty && rest.isEmpty) {
-      return const Text(
-        'No label matches',
-        key: ValueKey('search-label-none'),
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: TextStyle(color: _muted),
-      );
-    }
-    final matchAll = filters.labelMatch == LabelMatch.all;
-    return SingleChildScrollView(
-      key: const ValueKey('search-label-row'),
-      scrollDirection: Axis.horizontal,
-      child: Row(
-        spacing: 6,
-        children: [
-          for (final item in chosen) _labelChip(item, true),
-          // After the chosen ones: it is about them.
-          if (chosen.length >= 2)
+          // Beside Labels, where it shows without scrolling the labels,
+          // and last, so no chip moves when it appears.
+          if (_showsMatch(filters))
             ActionChip(
               key: const ValueKey('search-label-match'),
               avatar: Icon(
@@ -223,6 +228,61 @@ class SearchFilterChips extends StatelessWidget {
                     ),
                   ),
             ),
+        ],
+      ),
+    );
+    if (!showLabels) return chips;
+    final height = SearchFilterChips.rowHeight(context);
+    final chipsRow = SizedBox(
+      height: height,
+      child: Align(alignment: Alignment.centerLeft, child: chips),
+    );
+    if (!filters.labelSearch) return chipsRow;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        chipsRow,
+        SizedBox(
+          height: height,
+          child: Align(alignment: Alignment.centerLeft, child: _labelRow()),
+        ),
+      ],
+    );
+  }
+
+  Widget _labelRow() {
+    final labels = widget.labels;
+    final filters = _filters;
+    final query = widget.query ?? SearchQuery.empty;
+    final named = labelUidsNamed(labels, query);
+    final chosen = [
+      for (final item in labels)
+        if (filters.labels.contains(item.uid)) item,
+    ];
+    final rest = [
+      for (final item in labels)
+        if (!filters.labels.contains(item.uid) &&
+            (query.isEmpty || named.contains(item.uid)))
+          item,
+    ];
+    if (chosen.isEmpty && rest.isEmpty) {
+      return const Text(
+        'No label matches',
+        key: ValueKey('search-label-none'),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(color: _muted),
+      );
+    }
+    return SingleChildScrollView(
+      key: const ValueKey('search-label-row'),
+      controller: _labelScroll,
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        spacing: 6,
+        children: [
+          for (final item in chosen) _labelChip(item, true),
           for (final item in rest) _labelChip(item, false),
         ],
       ),
