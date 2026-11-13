@@ -957,6 +957,51 @@ void main() {
   group('with the phone font', () {
     setUpAll(loadRoboto);
 
+    testWidgets('the last card scrolls clear of the add button above the '
+        'navigation bar', (tester) async {
+      await pumpHome(tester);
+      usePhoneScreen(tester);
+      // Three-button navigation: the list runs on behind the bar, the add
+      // button floats above it.
+      const navigationBar = 48.0;
+      final bar = FakeViewPadding(
+        bottom: navigationBar * tester.view.devicePixelRatio,
+      );
+      tester.view.padding = bar;
+      tester.view.viewPadding = bar;
+      await tester.pumpAndSettle();
+      final screenHeight =
+          tester.view.physicalSize.height / tester.view.devicePixelRatio;
+      final fab = find.byKey(const ValueKey('home-add-playlist'));
+
+      Future<void> expectLastCardClear() async {
+        await tester.drag(
+          find.byType(CustomScrollView),
+          const Offset(0, -3000),
+        );
+        await tester.pumpAndSettle();
+        final settings = find.descendant(
+          of: card(5),
+          matching: find.byTooltip('Playlist settings'),
+        );
+        expect(
+          tester.getRect(settings).bottom,
+          lessThan(tester.getRect(fab).top),
+        );
+        final visibleBottom =
+            screenHeight -
+            navigationBar -
+            audioPlayerOverlayHeightNotifier.value;
+        expect(tester.getRect(card(5)).bottom, lessThan(visibleBottom));
+      }
+
+      await expectLastCardClear();
+      // And with the audio panel open over the page.
+      audioPlayerOverlayHeightNotifier.value = 300;
+      await tester.pumpAndSettle();
+      await expectLastCardClear();
+    });
+
     testWidgets('search: a long playlist name is not cut', (tester) async {
       const name = 'less socially acceptable masterpieces and other oddities';
       final long = await insertTestPlaylist(db, url: 'list-long', name: name);

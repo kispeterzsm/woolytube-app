@@ -172,7 +172,14 @@ class _HomePageState extends ConsumerState<HomePage> {
     return ValueListenableBuilder<double>(
       valueListenable: audioPlayerOverlayHeightNotifier,
       builder: (context, overlayHeight, _) {
-        final bottom = 12 + _fabClearance + overlayHeight;
+        // The list runs on behind the system navigation bar, while the
+        // add button floats above it: add the bar's height, or the last
+        // card's buttons stay under the add button.
+        final bottom =
+            12 +
+            _fabClearance +
+            overlayHeight +
+            MediaQuery.viewPaddingOf(context).bottom;
         return CustomScrollView(
           key: const PageStorageKey('home-library'),
           slivers: [
@@ -1192,7 +1199,10 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
       builder:
           (context, overlayHeight, _) => ListView.builder(
             keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-            padding: EdgeInsets.only(bottom: overlayHeight + 12),
+            padding: EdgeInsets.only(
+              bottom:
+                  overlayHeight + 12 + MediaQuery.viewPaddingOf(context).bottom,
+            ),
             itemCount: itemCount,
             itemBuilder: (context, index) {
               if (index < playlistRows) {
