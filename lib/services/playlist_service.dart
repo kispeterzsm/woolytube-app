@@ -18,6 +18,7 @@ import 'video_quality.dart';
 import 'lyrics/lyrics_models.dart';
 import 'lyrics/lyrics_service.dart'
     show dropLyricsForReplacedMedia, persistLyricsFile;
+import 'recognition/song_recognition_service.dart' show SongRecognitionService;
 
 /// Thrown by [PlaylistService.syncPlaylist] when the owner stopped the
 /// update while YouTube was being asked for the playlist.
@@ -826,8 +827,8 @@ class PlaylistService {
     for (final id in adopt) {
       await _metadata.adoptKeptFile(switched, id);
     }
-    // A reinstall imports only the new folder: the kept video info and the
-    // lyrics go along. Lyrics are written from the database, which also
+    // A reinstall imports only the new folder: the kept video info, the
+    // lyrics and the song-recognition run go along. Lyrics are written from the database, which also
     // replaces stale files left in a reused earlier folder.
     for (final track in await _db.getTracksForPlaylist(playlist.id)) {
       try {
@@ -840,6 +841,17 @@ class PlaylistService {
         await persistLyricsFile(_db, track.id);
       } catch (_) {
         // Extras; the switch itself is done.
+      }
+      try {
+        // The song-recognition run (with review edits and cached lookups)
+        // of a file the track keeps.
+        await SongRecognitionService.carryFolderCopy(
+          track,
+          oldFolder,
+          targetFolder,
+        );
+      } catch (_) {
+        // Only costs a new scan after a reinstall.
       }
     }
 

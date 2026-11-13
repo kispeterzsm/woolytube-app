@@ -15,6 +15,8 @@ import 'package:woolytube/services/lyrics/lyrics_service.dart'
     show persistLyricsFile;
 import 'package:woolytube/services/metadata_service.dart';
 import 'package:woolytube/services/playlist_service.dart';
+import 'package:woolytube/services/recognition/recognition_files.dart';
+import 'package:woolytube/services/recognition/song_recognition_service.dart';
 
 import '../helpers/fakes.dart';
 import '../helpers/test_database.dart';
@@ -482,6 +484,48 @@ void main() {
         ).existsSync(),
         isFalse,
       );
+    });
+
+    test('song-recognition runs of the files a track keeps follow the '
+        'switch; runs of other content are not carried', () async {
+      Future<void> writeRun(String folder, String videoId, String key) => write(
+        LibraryLayout.recognitionJsonPath(folder, videoId),
+        jsonEncode({
+          'version': 1,
+          'videoId': videoId,
+          'contentKey': key,
+          'run': {'edited': videoId},
+        }),
+      );
+      final mine = before['mine']!;
+      await writeRun(
+        oldFolder,
+        'mine',
+        await SongRecognitionService.fileKey(mine.filePath!),
+      );
+      // Made from content the track no longer has.
+      await writeRun(oldFolder, 'gone', 'stale');
+      // A copy already in the new folder stays when nothing valid replaces
+      // it.
+      await writeRun(newFolder, 'gone', 'earlier');
+
+      await service.updatePlaylistSettings(id: playlist.id, audioOnly: false);
+
+      final carried = await readRecognitionFile(newFolder, 'mine');
+      expect(carried?.run, {'edited': 'mine'});
+      expect(
+        carried?.contentKey,
+        await SongRecognitionService.fileKey(
+          (await tracks())['mine']!.filePath!,
+        ),
+      );
+      expect(
+        (await readRecognitionFile(newFolder, 'gone'))?.contentKey,
+        'earlier',
+      );
+      // The old folder's copies are left alone.
+      expect(await readRecognitionFile(oldFolder, 'mine'), isNotNull);
+      expect(await readRecognitionFile(oldFolder, 'gone'), isNotNull);
     });
 
     test('tracks YouTube can give again keep their file until replaced; the '

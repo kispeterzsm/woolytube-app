@@ -9,6 +9,7 @@ import 'package:path/path.dart' as p;
 
 import '../../database/database.dart';
 import '../chapters.dart';
+import '../info_files.dart';
 import '../library_layout.dart';
 import '../metadata_service.dart';
 import '../ytdlp_service.dart';
@@ -1392,6 +1393,31 @@ class SongRecognitionService {
     } on FileSystemException {
       return null;
     }
+  }
+
+  /// Copies [track]'s recognition file from the playlist folder
+  /// [fromFolder] to [toFolder] (a playlist moving to a new folder), when
+  /// the run in it was made from the content of the file [track] has now.
+  /// A copy made from other content is not carried, so it never replaces a
+  /// valid copy already in [toFolder] (an earlier file the track went back
+  /// to). The source is left in place. Returns whether it wrote.
+  static Future<bool> carryFolderCopy(
+    Track track,
+    String fromFolder,
+    String toFolder,
+  ) async {
+    if (p.equals(fromFolder, toFolder)) return false;
+    final json = await readInfoJson(
+      LibraryLayout.recognitionJsonPath(fromFolder, track.videoId),
+    );
+    final copy = recognitionFolderCopyFromJson(json);
+    if (json == null || copy == null) return false;
+    final stored = track.filePath;
+    if (stored == null) return false;
+    final path = MetadataService.resolveStoredFilePath(stored);
+    if (path == null || !await File(path).exists()) return false;
+    if (copy.contentKey != await fileKey(path)) return false;
+    return writeRecognitionFile(toFolder, track.videoId, json);
   }
 
   /// Cheap content key: size plus a hash of the first and last 256 KiB, so a
