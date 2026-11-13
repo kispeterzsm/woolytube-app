@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:math';
 
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter/services.dart';
@@ -334,6 +335,11 @@ class LoudnessService implements TrackLoudnessSource {
   /// it is done or stopped.
   var _forced = false;
 
+  /// Errors in a row without a song measured in between; each one doubles
+  /// the wait before the next try, so a lasting error does not retry (and
+  /// log) every minute all day.
+  var _errorStreak = 0;
+
   /// Starts measuring again later: to look whether the phone is charging
   /// while the library waits, or after an error.
   Timer? _wake;
@@ -495,6 +501,7 @@ class LoudnessService implements TrackLoudnessSource {
         }
         _publish(working: true);
         await _measure(job);
+        _errorStreak = 0;
         if (_pauseBetween > Duration.zero) {
           await Future<void>.delayed(_pauseBetween);
         }
@@ -503,14 +510,21 @@ class LoudnessService implements TrackLoudnessSource {
       // Started again later rather than never: the cause may well pass (a
       // busy database, a scan that failed).
       failed = true;
-      _log?.warn('loudness: measuring stopped, retrying later: $e');
-      if (!_disposed) _wakeAfter(_retryAfterError);
+      // 1, 2, 4 … up to 64 times the first wait.
+      final delay = _retryAfterError * (1 << min(_errorStreak, 6));
+      _errorStreak++;
+      _log?.warn(
+        'loudness: measuring stopped, retrying in '
+        '${delay.inMinutes} min: $e',
+      );
+      if (!_disposed) _wakeAfter(delay);
     } finally {
       _running = false;
       if (!_disposed) _publish(working: false);
     }
     // Work that arrived after the last check. After an error the retry
     // timer starts again instead, so a lasting error does not spin.
+    if (!failed) _errorStreak = 0;
     if (!failed && (_kickPending || _priority.isNotEmpty)) _kick();
   }
 

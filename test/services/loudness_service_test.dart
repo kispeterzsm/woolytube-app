@@ -405,6 +405,30 @@ void main() {
     await _until(() => service.progress.measured == 1);
   });
 
+  test('a lasting error is retried less and less often', () async {
+    await downloaded(1);
+    final failedAt = <int>[];
+    final clock = Stopwatch()..start();
+    final service = create(
+      shouldPause: () {
+        if (failedAt.length < 4) {
+          failedAt.add(clock.elapsedMilliseconds);
+          throw StateError('database busy');
+        }
+        return false;
+      },
+    );
+    service.setEnabled(true);
+    await _until(() => service.progress.measured == 1, reason: 'recovered');
+    // Waits of 50, 100 and 200 ms between the tries.
+    final gaps = [
+      for (var i = 1; i < failedAt.length; i++) failedAt[i] - failedAt[i - 1],
+    ];
+    expect(gaps[0], greaterThanOrEqualTo(50));
+    expect(gaps[1], greaterThanOrEqualTo(100));
+    expect(gaps[2], greaterThanOrEqualTo(200));
+  });
+
   test('says while it waits for the library to move files', () async {
     await downloaded(1);
     var busy = true;
