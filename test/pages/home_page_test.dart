@@ -23,6 +23,7 @@ import 'package:woolytube/services/playlist_service.dart';
 import 'package:woolytube/services/update_service.dart';
 import 'package:woolytube/widgets/playlist_card.dart';
 
+import '../helpers/real_fonts.dart';
 import '../helpers/test_database.dart';
 
 void main() {
@@ -859,6 +860,27 @@ void main() {
     );
     expect(find.byTooltip('Dismiss'), findsOneWidget);
     expect(find.text('Retry'), findsOneWidget);
+  });
+
+  group('with the phone font', () {
+    setUpAll(loadRoboto);
+
+    testWidgets('search: a long playlist name is not cut', (tester) async {
+      const name = 'less socially acceptable masterpieces and other oddities';
+      final long = await insertTestPlaylist(db, url: 'list-long', name: name);
+      playlists.add(long);
+      await pumpHome(tester);
+      usePhoneScreen(tester);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Search'));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byType(TextField), 'socially');
+      await tester.pump();
+      final title = find.text(name, findRichText: true);
+      expect(title, findsOneWidget);
+      expectNotCut(tester, title);
+    });
   });
 }
 

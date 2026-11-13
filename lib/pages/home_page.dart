@@ -1473,6 +1473,7 @@ class _PlaylistResultTile extends StatelessWidget {
       title: searchHighlightedText(
         playlist.name,
         query,
+        maxLines: 2,
         style: const TextStyle(color: Colors.white, fontSize: 14),
       ),
       subtitle: Text(
