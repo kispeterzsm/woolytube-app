@@ -420,18 +420,10 @@ class InfoBackfillService {
 
     // A description another folder already has is copied, without network.
     for (final video in videos) {
-      final source = video.existing;
-      if (source == null) continue;
+      if (video.existing == null) continue;
       if (stop()) return end(InfoBackfillEnd.stopped);
       if (_isBusy()) return end(InfoBackfillEnd.busy);
-      String content;
-      try {
-        content = await File(source).readAsString();
-        jsonDecode(content);
-      } catch (_) {
-        continue;
-      }
-      copied += await _write(video, content);
+      copied += await _copy(video);
     }
 
     final now = _clock();
@@ -464,6 +456,14 @@ class InfoBackfillService {
       if (waited != null) return end(waited);
       if (_isBusy()) return end(InfoBackfillEnd.busy);
       if (!await _onWifi()) return end(InfoBackfillEnd.noWifi);
+      // The list may be hours old: a download may have saved the file
+      // meanwhile, or an update removed the track or moved it.
+      final current = await _current(video.videoId);
+      if (current.missing.isEmpty || current.unavailable) continue;
+      if (current.existing != null) {
+        copied += await _copy(current);
+        continue;
+      }
       if (!prepared) {
         try {
           prepared = await (_prepare?.call() ?? Future.value(true));
@@ -484,7 +484,7 @@ class InfoBackfillService {
           // A playlist folder may be moving: fetched again later.
           return end(InfoBackfillEnd.busy);
         }
-        final written = await _write(video, encodeVideoInfo(info));
+        final written = await _write(video.videoId, encodeVideoInfo(info));
         if (written > 0) saved++;
         state.misses.remove(video.videoId);
         state.slowDowns = 0;
@@ -611,12 +611,29 @@ class InfoBackfillService {
     return (info: info, error: error);
   }
 
-  /// Writes [content] to every file [video] misses. Returns how many it
-  /// wrote. A folder that is gone is skipped.
-  Future<int> _write(_Video video, String content) async {
+  /// Copies the info file another folder of [video] has to the folders
+  /// that miss it. Returns how many it wrote.
+  Future<int> _copy(_Video video) async {
+    String content;
+    try {
+      content = await File(video.existing!).readAsString();
+      jsonDecode(content);
+    } catch (_) {
+      return 0;
+    }
+    return _write(video.videoId, content);
+  }
+
+  /// Writes [content] to every folder that misses [videoId]'s info file
+  /// now: never over a file saved meanwhile (by a download, which describes
+  /// the format it got), and never for a track that is gone, moved or
+  /// replaced meanwhile. Returns how many it wrote. A folder that is gone is
+  /// skipped.
+  Future<int> _write(String videoId, String content) async {
     var written = 0;
-    for (final path in video.missing) {
+    for (final path in (await _current(videoId)).missing) {
       try {
+        if (await File(path).exists()) continue;
         await writeInfoFile(path, content);
         written++;
       } catch (e) {
@@ -643,23 +660,56 @@ class InfoBackfillService {
       if (!await Directory(folder).exists()) continue;
       for (final track in await _db.getTracksForPlaylist(playlist.id)) {
         if (!keepsYouTubeInfo(track)) continue;
-        final video = byId.putIfAbsent(
-          track.videoId,
-          () => _Video(track.videoId),
+        await _addTrack(
+          byId.putIfAbsent(track.videoId, () => _Video(track.videoId)),
+          folder,
+          track,
         );
-        final path = LibraryLayout.infoJsonPath(folder, track.videoId);
-        if (await File(path).exists()) {
-          video.existing ??= path;
-        } else {
-          video.missing.add(path);
-        }
-        if (track.unavailableReason != null) video.unavailable = true;
       }
     }
     return [
       for (final video in byId.values)
         if (video.missing.isNotEmpty) video,
     ];
+  }
+
+  /// [videoId] as the library has it now, from the database and the disk.
+  Future<_Video> _current(String videoId) async {
+    final video = _Video(videoId);
+    final folders = <int, String?>{};
+    for (final track in await _db.getTracksForVideo(videoId)) {
+      if (!keepsYouTubeInfo(track)) continue;
+      final id = track.playlistId;
+      final folder =
+          folders.containsKey(id)
+              ? folders[id]
+              : folders[id] = await _folder(id);
+      if (folder == null) continue;
+      await _addTrack(video, folder, track);
+    }
+    return video;
+  }
+
+  /// The playlist's folder, or null when the playlist or its folder is gone.
+  Future<String?> _folder(int playlistId) async {
+    final playlist = await _db.getPlaylistOrNull(playlistId);
+    if (playlist == null) return null;
+    final folder = playlist.outputPath;
+    return await Directory(folder).exists() ? folder : null;
+  }
+
+  static Future<void> _addTrack(
+    _Video video,
+    String folder,
+    Track track,
+  ) async {
+    final path = LibraryLayout.infoJsonPath(folder, track.videoId);
+    if (await File(path).exists()) {
+      video.existing ??= path;
+    } else {
+      video.missing.add(path);
+    }
+    if (track.unavailableReason != null) video.unavailable = true;
   }
 }
 

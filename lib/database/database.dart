@@ -972,6 +972,16 @@ class AppDatabase extends _$AppDatabase {
   Future<Track?> getTrack(int id) =>
       (select(tracks)..where((t) => t.id.equals(id))).getSingleOrNull();
 
+  /// The tracks of [videoId], in every playlist.
+  Future<List<Track>> getTracksForVideo(String videoId) =>
+      (select(tracks)
+            ..where((t) => t.videoId.equals(videoId))
+            ..orderBy([
+              (t) => OrderingTerm.asc(t.playlistId),
+              (t) => OrderingTerm.asc(t.index),
+            ]))
+          .get();
+
   /// The playlist's tracks in order. Writes to other playlists' tracks
   /// make drift re-run the query; an unchanged result is not passed on.
   Stream<List<Track>> watchTracksForPlaylist(int playlistId) => (select(tracks)

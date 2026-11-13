@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:drift/drift.dart' show Value;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
@@ -21,6 +22,8 @@ class _Clock {
   Future<void> sleep(Duration duration) async {
     sleeps.add(duration);
     now = now.add(duration);
+    // Lets file and database work the fake yt-dlp waits for go on.
+    await Future<void>.delayed(Duration.zero);
   }
 }
 
@@ -34,10 +37,14 @@ class _YouTube {
   final fetchedAt = <DateTime>[];
   final errors = <String, String>{};
 
+  /// Runs while yt-dlp fetches a video: the library changing meanwhile.
+  Future<void> Function(String id)? whileFetching;
+
   Future<Map<String, dynamic>> fetch(String url) async {
     final id = Uri.parse(url).queryParameters['v']!;
     fetched.add(id);
     fetchedAt.add(clock.now);
+    await whileFetching?.call(id);
     final error = errors[id];
     if (error != null) {
       throw PlatformException(code: 'INFO_ERROR', message: error);
@@ -426,6 +433,103 @@ void main() {
       File(LibraryLayout.infoJsonPath(audio, 'b')).readAsStringSync(),
       contains('kept'),
     );
+  });
+
+  group('the library changing during a run', () {
+    test('a file a download saved meanwhile is neither fetched again nor '
+        'overwritten', () async {
+      final (_, folder) = await addPlaylist('Mix', ['a', 'b', 'c']);
+      const downloaded = '{"id": "a", "height": 1080}';
+      youtube.whileFetching = (id) async {
+        if (id != 'a') return;
+        // "Download again" of a and b finish while a is fetched.
+        for (final other in ['a', 'b']) {
+          await File(
+            LibraryLayout.infoJsonPath(folder, other),
+          ).writeAsString(downloaded.replaceAll('"a"', '"$other"'));
+        }
+      };
+
+      final run = await service().run();
+
+      expect(run.end, InfoBackfillEnd.done);
+      expect(youtube.fetched, ['a', 'c']);
+      expect(run.saved, 1);
+      expect(
+        File(LibraryLayout.infoJsonPath(folder, 'a')).readAsStringSync(),
+        downloaded,
+      );
+      expect(
+        File(LibraryLayout.infoJsonPath(folder, 'b')).readAsStringSync(),
+        contains('1080'),
+      );
+      expect(hasInfo(folder, 'c'), isTrue);
+    });
+
+    test('a track removed, replaced or moved meanwhile gets no file in its '
+        'old place', () async {
+      final (playlist, folder) = await addPlaylist('Mix', [
+        'a',
+        'gone',
+        'mine',
+        'moved',
+        'later',
+      ]);
+      final (other, otherFolder) = await addPlaylist('Other', const []);
+      youtube.whileFetching = (id) async {
+        if (id == 'a') {
+          // An update removes one track, moves another; the owner puts
+          // their own file in place of a third.
+          await (db.delete(db.tracks)
+            ..where((t) => t.videoId.equals('gone'))).go();
+          await (db.update(db.tracks)..where(
+            (t) => t.videoId.equals('mine'),
+          )).write(const TracksCompanion(isLocalReplacement: Value(true)));
+          await (db.update(db.tracks)..where(
+            (t) => t.videoId.equals('moved'),
+          )).write(TracksCompanion(playlistId: Value(other.id)));
+        }
+        if (id == 'later') {
+          // Removed while its own info is fetched.
+          await (db.delete(db.tracks)
+            ..where((t) => t.videoId.equals('later'))).go();
+        }
+      };
+
+      final run = await service().run();
+
+      expect(run.end, InfoBackfillEnd.done);
+      expect(youtube.fetched, ['a', 'moved', 'later']);
+      expect(hasInfo(folder, 'a'), isTrue);
+      for (final id in ['gone', 'mine', 'moved', 'later']) {
+        expect(hasInfo(folder, id), isFalse, reason: id);
+      }
+      expect(hasInfo(otherFolder, 'moved'), isTrue);
+      expect(run.saved, 2);
+      expect(playlist.id, isNot(other.id));
+    });
+
+    test('a description another folder got meanwhile is copied instead of '
+        'fetched', () async {
+      final (_, audio) = await addPlaylist('Audio', ['a', 'b']);
+      final (_, video) = await addPlaylist('Video', ['b']);
+      youtube.whileFetching = (id) async {
+        if (id == 'a') {
+          await File(
+            LibraryLayout.infoJsonPath(video, 'b'),
+          ).writeAsString('{"id": "b", "description": "downloaded"}');
+        }
+      };
+
+      final run = await service().run();
+
+      expect(youtube.fetched, ['a']);
+      expect(run.copied, 1);
+      expect(
+        File(LibraryLayout.infoJsonPath(audio, 'b')).readAsStringSync(),
+        contains('downloaded'),
+      );
+    });
   });
 
   test('never creates a playlist folder that is gone', () async {
