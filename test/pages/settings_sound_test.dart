@@ -245,13 +245,23 @@ void main() {
     expect(mode, findsOneWidget);
     expect(find.textContaining('Normal: quiet songs are turned up'), findsOne);
 
-    // Inside the switch's tile: plane mode stays right below it.
+    // A row of its own right below the switch, with plane mode below it.
     final even = find.byKey(const ValueKey('even-out-volume'));
-    expect(find.descendant(of: even, matching: mode), findsOneWidget);
+    final row = find.byKey(const ValueKey('even-out-mode-row'));
+    expect(find.descendant(of: even, matching: mode), findsNothing);
+    expect(find.descendant(of: row, matching: mode), findsOneWidget);
+    expect(tester.getTopLeft(row).dy, tester.getBottomLeft(even).dy);
     expect(
       tester.getTopLeft(find.byKey(const ValueKey('plane-mode-setting'))).dy,
-      tester.getBottomLeft(even).dy,
+      tester.getBottomLeft(row).dy,
     );
+
+    // Tapping the description leaves the switch alone.
+    await tester.tap(find.textContaining('Normal: quiet songs are turned up'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<SwitchListTile>(even).value, isTrue);
+    expect(player.settings.value.evenOutVolume, isTrue);
+    expect(mode, findsOneWidget);
 
     await tester.tap(find.text('Quiet'));
     await tester.pumpAndSettle();
@@ -260,6 +270,26 @@ void main() {
     expect(player.settings.value.evenOutVolume, isTrue, reason: 'not toggled');
     expect(await AppSettingsService().getEvenOutMode(), EvenOutMode.quiet);
   });
+
+  testWidgets(
+    'a screen reader reaches Normal and Quiet apart from the switch',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({
+        AppSettingsService.evenOutVolumeKey: true,
+      });
+      final semantics = tester.ensureSemantics();
+      await pumpSettings(tester);
+      final switchNode = tester.getSemantics(
+        find.byKey(const ValueKey('even-out-volume')),
+      );
+      expect(switchNode.label, contains('Even out volume'));
+      expect(switchNode.label, isNot(contains('Quiet')));
+      final quiet = find.bySemanticsLabel(RegExp('^Quiet'));
+      expect(quiet, findsOneWidget);
+      expect(tester.getSemantics(quiet).id, isNot(switchNode.id));
+      semantics.dispose();
+    },
+  );
 
   testWidgets('the stored level is shown', (tester) async {
     SharedPreferences.setMockInitialValues({

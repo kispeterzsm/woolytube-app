@@ -476,43 +476,46 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         key: const ValueKey('even-out-volume'),
         secondary: const Icon(Icons.equalizer),
         title: const Text('Even out volume'),
-        // The level choice belongs to this switch, and plane mode stays
-        // right below it.
-        subtitle: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Plays every song at a similar loudness, so a loud song does '
-              'not follow a quiet one.',
-            ),
-            if (_evenOutVolume) ...[
-              const SizedBox(height: 8),
-              SegmentedButton<EvenOutMode>(
-                key: const ValueKey('even-out-mode'),
-                showSelectedIcon: false,
-                segments: [
-                  for (final mode in EvenOutMode.values)
-                    ButtonSegment(value: mode, label: Text(mode.label)),
-                ],
-                selected: {_evenOutMode},
-                onSelectionChanged:
-                    saving ? null : (value) => _setEvenOutMode(value.first),
-              ),
-              const SizedBox(height: 4),
-              Text(switch (_evenOutMode) {
-                EvenOutMode.normal =>
-                  'Normal: quiet songs are turned up too; a limiter keeps '
-                      'them from clipping.',
-                EvenOutMode.quiet =>
-                  'Quiet: a lower level that leaves the sound untouched. '
-                      'Turn the phone up a little.',
-              }),
-            ],
-          ],
+        subtitle: const Text(
+          'Plays every song at a similar loudness, so a loud song does '
+          'not follow a quiet one.',
         ),
         value: _evenOutVolume,
         onChanged: saving ? null : _setEvenOutVolume,
       ),
+      // A row of its own, so tapping its text never turns the switch off
+      // and a screen reader reaches Normal and Quiet one by one.
+      if (_evenOutVolume)
+        ListTile(
+          key: const ValueKey('even-out-mode-row'),
+          // Lines the buttons up with the switch's title.
+          leading: const SizedBox(width: 24),
+          title: Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: SegmentedButton<EvenOutMode>(
+              key: const ValueKey('even-out-mode'),
+              showSelectedIcon: false,
+              segments: [
+                for (final mode in EvenOutMode.values)
+                  ButtonSegment(value: mode, label: Text(mode.label)),
+              ],
+              selected: {_evenOutMode},
+              onSelectionChanged:
+                  saving ? null : (value) => _setEvenOutMode(value.first),
+            ),
+          ),
+          subtitle: Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(switch (_evenOutMode) {
+              EvenOutMode.normal =>
+                'Normal: quiet songs are turned up too; a limiter keeps '
+                    'them from clipping.',
+              EvenOutMode.quiet =>
+                'Quiet: a lower level that leaves the sound untouched. '
+                    'Turn the phone up a little.',
+            }),
+          ),
+        ),
       _PlaneModeTile(enabled: !saving),
       ListTile(
         key: const ValueKey('plane-mode-strength'),
