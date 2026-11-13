@@ -271,9 +271,9 @@ class LibraryExportService {
     }
   }
 
-  /// Restores the app settings saved by an export, from the library's
-  /// backup folder or from [folder] (or its `.woolytube_backup`). Returns
-  /// how many settings were applied, or null when no settings file exists.
+  /// Restores the app settings saved in the library's backup folder, or in
+  /// [folder] (or its `.woolytube_backup`). Returns how many settings were
+  /// applied, or null when no settings file exists.
   Future<int?> restoreSettings({String? folder}) async {
     final candidates = [
       if (folder != null) ...[
@@ -285,28 +285,94 @@ class LibraryExportService {
     for (final path in candidates) {
       final file = File(path);
       if (!await file.exists()) continue;
-      final decoded = jsonDecode(await file.readAsString());
-      if (decoded is! Map) continue;
-      final values = decoded['settings'] is Map ? decoded['settings'] : decoded;
-      return _settings.importSettings(Map<String, Object?>.from(values as Map));
+      final values = settingsFromFile(jsonDecode(await file.readAsString()));
+      if (values == null) continue;
+      return _settings.importSettings(values);
     }
     return null;
   }
 
-  /// Writes every app setting to `.woolytube_backup/woolytube_settings.json`.
-  Future<String> writeSettingsFile() async {
-    final dir = await _prepareBackupDir();
+  /// The settings in a decoded settings file, by key, or null when it is not
+  /// one. Reads every version: version 2 lists them by section (and also
+  /// flat, for older app versions), version 1 only flat under `settings`,
+  /// and a hand-made file may list them at the top.
+  static Map<String, Object?>? settingsFromFile(Object? decoded) {
+    if (decoded is! Map) return null;
+    final flat = decoded['settings'] is Map ? decoded['settings'] : decoded;
+    final values = Map<String, Object?>.from(flat as Map);
+    final sections = decoded['sections'];
+    if (sections is Map) {
+      for (final section in sections.values) {
+        if (section is Map) values.addAll(Map<String, Object?>.from(section));
+      }
+    }
+    return values;
+  }
+
+  /// The settings file format [writeSettingsFile] writes.
+  static const settingsFileVersion = 2;
+
+  /// The hash of the settings file this run last wrote or found unchanged.
+  int? _settingsFileHash;
+
+  /// The settings file write in progress, if any.
+  Future<String>? _settingsWrite;
+
+  /// Writes the owner's settings to `.woolytube_backup/woolytube_settings.json`
+  /// and returns its path. A file whose content would not change is left
+  /// alone. Writes run one after another (the settings mirror and a library
+  /// export may ask at the same time).
+  Future<String> writeSettingsFile() {
+    final previous = _settingsWrite;
+    final next =
+        previous == null
+            ? _writeSettingsFileNow()
+            : previous.then(
+              (_) => _writeSettingsFileNow(),
+              onError: (Object _) => _writeSettingsFileNow(),
+            );
+    _settingsWrite = next;
+    next.then<void>((_) {}, onError: (Object _) {}).whenComplete(() {
+      if (identical(_settingsWrite, next)) _settingsWrite = null;
+    });
+    return next;
+  }
+
+  Future<String> _writeSettingsFileNow() async {
+    final sections = await _settings.exportSettingsBySection();
     final content = const JsonEncoder.withIndent('  ').convert({
       'app': 'WoolyTube',
-      'exportedAt': _clock().toUtc().toIso8601String(),
-      'settings': await _settings.exportSettings(),
+      'version': settingsFileVersion,
+      'sections': sections,
+      // The same settings in one list, as app versions before version 2
+      // of this file read them.
+      'settings': {for (final section in sections.values) ...section},
     });
-    final target = p.join(dir.path, settingsFileName);
+    final hash = contentHash(content);
+    final target = p.join(backupDir, settingsFileName);
+    final file = File(target);
+    if (_settingsFileHash == hash && await file.exists()) return target;
+    if (_settingsFileHash == null) {
+      try {
+        if (await file.exists() && await file.readAsString() == content) {
+          _settingsFileHash = hash;
+          return target;
+        }
+      } catch (_) {
+        // Written again below.
+      }
+    }
+    await _prepareBackupDir();
     final tmp = File('$target.partial');
     await tmp.writeAsString(content, flush: true);
     await tmp.rename(target);
+    _settingsFileHash = hash;
     return target;
   }
+
+  /// Whether a settings file exists in the library's backup folder.
+  Future<bool> settingsFileExists() =>
+      File(p.join(backupDir, settingsFileName)).exists();
 
   Future<Directory> _prepareBackupDir() async {
     final dir = Directory(backupDir);

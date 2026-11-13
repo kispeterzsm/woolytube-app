@@ -22,8 +22,8 @@ import '../widgets/plane_mode_toggle.dart';
 import '../widgets/settings_section_header.dart';
 import 'debug_log_page.dart';
 
-/// Gives the player and the loudness measuring the audio settings a restore
-/// just stored. Runs also when the page that started the restore is already
+/// Gives the player and the loudness measuring the settings a restore just
+/// stored. Runs also when the page that started the restore is already
 /// closed.
 Future<void> _applyRestoredSettings(
   AppSettingsService settings,
@@ -45,6 +45,12 @@ Future<void> _applyRestoredSettings(
     await player.setEvenOutVolume(await settings.getEvenOutVolume());
     await player.setEvenOutMode(await settings.getEvenOutMode());
     await player.setPlaneModeStrength(await settings.getPlaneModeStrength());
+  } catch (_) {
+    // Applies at the next start.
+  }
+  try {
+    // Shuffle, autoplay, audio-only and the plane mode switch.
+    await player.applyRememberedOptions();
   } catch (_) {
     // Applies at the next start.
   }
@@ -278,8 +284,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           (ctx) => AlertDialog(
             title: const Text('Restore settings?'),
             content: const Text(
-              'Replaces the playback, sound and mobile data settings with '
-              'the ones saved by the last library backup. '
+              'Replaces the playback, sound, mobile data and new playlist '
+              'settings with the ones saved in the library folder. '
               'Playlists are not changed.',
             ),
             actions: [
@@ -307,7 +313,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       final applied = await exporter.restoreSettings();
       message =
           applied == null
-              ? 'No settings backup found. Back up the library first.'
+              ? 'No settings file found in the library folder.'
               : 'Restored ${_count(applied, 'setting')}.';
       if (applied != null) {
         await _applyRestoredSettings(settings, player, loudness);
@@ -453,7 +459,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         key: const ValueKey('restore-settings'),
         leading: const Icon(Icons.settings_backup_restore),
         title: const Text('Restore settings'),
-        subtitle: const Text('From the last library backup'),
+        subtitle: const Text('From the library folder'),
         trailing:
             _isRestoringSettings
                 ? const SizedBox(
@@ -1084,8 +1090,8 @@ class _RestorePlaylistsPageState extends ConsumerState<_RestorePlaylistsPage> {
                     leading: const Icon(Icons.settings_backup_restore),
                     title: const Text('Restore settings from this folder'),
                     subtitle: const Text(
-                      'Playback, sound and mobile data settings from its '
-                      'backup',
+                      'Playback, sound, mobile data and new playlist settings '
+                      'from its backup',
                     ),
                     enabled: idle,
                     onTap: _restoreSettings,

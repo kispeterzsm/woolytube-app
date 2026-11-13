@@ -2376,6 +2376,34 @@ class PlaybackService
   Future<void> togglePlaneMode() =>
       setPlaneModePreference(!_audioSettings.value.planeMode);
 
+  /// Applies the remembered shuffle, autoplay, audio-only and plane mode
+  /// choices to the running player, after a settings restore stored new
+  /// ones. Options that already match are left alone.
+  Future<void> applyRememberedOptions() async {
+    final store = _settingsStore;
+    if (store == null) return;
+    final preferences = await store.load();
+    if (preferences.shuffle case final shuffle?
+        when shuffle != _shuffleEnabled.value) {
+      setShuffleEnabled(shuffle);
+    }
+    if (preferences.autoplay case final autoplay?
+        when autoplay != _autoplayEnabled.value) {
+      setAutoplayEnabled(autoplay);
+    }
+    // Audio-only switched on for a while (no screen) is not the owner's
+    // choice.
+    final audioOnlyChoice = _audioOnlyMode.value && !_temporaryAudioOnly;
+    if (preferences.audioOnly case final audioOnly?
+        when audioOnly != audioOnlyChoice) {
+      await setAudioOnlyPreference(audioOnly);
+    }
+    if (preferences.planeMode case final planeMode?
+        when planeMode != _audioSettings.value.planeMode) {
+      await setPlaneModePreference(planeMode);
+    }
+  }
+
   /// How hard plane mode works. Remembered by the app settings.
   Future<void> setPlaneModeStrength(PlaneModeStrength strength) =>
       _updateAudioSettings(_audioSettings.value.copyWith(strength: strength));

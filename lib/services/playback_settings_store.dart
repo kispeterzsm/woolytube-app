@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'settings_changes.dart';
+
 /// Where the player was when the app last ran, so it can come back paused.
 class PlaybackSession {
   final int playlistId;
@@ -138,20 +140,25 @@ class SharedPreferencesPlaybackSettingsStore implements PlaybackSettingsStore {
   }
 
   @override
-  Future<void> saveShuffle(bool enabled) async =>
-      (await _preferencesLoader()).setBool(shuffleKey, enabled);
+  Future<void> saveShuffle(bool enabled) => _saveOption(shuffleKey, enabled);
 
   @override
-  Future<void> saveAutoplay(bool enabled) async =>
-      (await _preferencesLoader()).setBool(autoplayKey, enabled);
+  Future<void> saveAutoplay(bool enabled) => _saveOption(autoplayKey, enabled);
 
   @override
-  Future<void> saveAudioOnly(bool enabled) async =>
-      (await _preferencesLoader()).setBool(audioOnlyKey, enabled);
+  Future<void> saveAudioOnly(bool enabled) =>
+      _saveOption(audioOnlyKey, enabled);
 
   @override
-  Future<void> savePlaneMode(bool enabled) async =>
-      (await _preferencesLoader()).setBool(planeModeKey, enabled);
+  Future<void> savePlaneMode(bool enabled) =>
+      _saveOption(planeModeKey, enabled);
+
+  /// Stores one of the owner's options, which the settings backup keeps.
+  /// The last song ([saveSession]) is not one of them.
+  Future<void> _saveOption(String key, bool enabled) async {
+    await (await _preferencesLoader()).setBool(key, enabled);
+    SettingsChanges.notify();
+  }
 
   @override
   Future<void> saveSession(PlaybackSession? session) async {

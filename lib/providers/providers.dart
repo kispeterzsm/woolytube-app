@@ -18,6 +18,7 @@ import '../services/media_thumbnail_service.dart';
 import '../services/app_settings_service.dart';
 import '../services/download_network_policy.dart';
 import '../services/library_gate.dart';
+import '../services/settings_mirror.dart';
 import '../services/sidecar_mirror.dart';
 import '../services/library_export_service.dart';
 import '../services/thumbnail_backfill_service.dart';
@@ -242,6 +243,21 @@ final libraryExportServiceProvider = Provider<LibraryExportService>((ref) {
   );
 });
 
+/// Rewrites the settings file in the library folder shortly after any
+/// setting changes, so copying the folders takes the settings along.
+final settingsMirrorProvider = Provider<SettingsMirror>((ref) {
+  final mirror = SettingsMirror(
+    ref.watch(databaseProvider),
+    ref.watch(libraryExportServiceProvider),
+    log: ref.watch(logServiceProvider),
+    // Playlists of a copied library, found at startup and not restored
+    // yet.
+    libraryWaitsForRestore: () => ref.read(pendingImportsProvider).isNotEmpty,
+  );
+  ref.onDispose(mirror.dispose);
+  return mirror;
+});
+
 /// Minimum spacing between yt-dlp self-update attempts.
 const ytDlpUpdateInterval = Duration(hours: 24);
 
@@ -452,6 +468,8 @@ class LibraryStartup {
     if (_disposed) return;
     // From now on every edit reaches the playlist folders' metadata files.
     _ref.read(sidecarMirrorProvider).start();
+    // And every settings change reaches the settings file.
+    _ref.read(settingsMirrorProvider).start();
     // Offline covers for older downloads; not urgent.
     unawaited(_backfillThumbnails());
   }

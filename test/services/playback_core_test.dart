@@ -876,6 +876,52 @@ void main() {
       expect(store.preferences.audioOnly, isTrue);
     });
 
+    test(
+      'options a settings restore stored reach the running player',
+      () async {
+        final store = MemoryPlaybackSettingsStore();
+        await playback.dispose();
+        playback = await createPlayback(store: store);
+        await settle();
+        await playback.enableTemporaryAudioOnly();
+
+        store.preferences = const PlaybackPreferences(
+          shuffle: true,
+          autoplay: false,
+          audioOnly: true,
+          planeMode: true,
+        );
+        await playback.applyRememberedOptions();
+        await settle();
+        expect(playback.shuffleEnabled, isTrue);
+        expect(playback.autoplayEnabled, isFalse);
+        expect(playback.audioOnlyMode, isTrue);
+        expect(playback.planeMode, isTrue);
+        // Audio-only is now the owner's choice, not a temporary one.
+        await playback.restoreTemporaryAudioOnly();
+        expect(playback.audioOnlyMode, isTrue);
+
+        store.preferences = const PlaybackPreferences(
+          shuffle: false,
+          autoplay: true,
+          audioOnly: false,
+          planeMode: false,
+        );
+        await playback.applyRememberedOptions();
+        await settle();
+        expect(playback.shuffleEnabled, isFalse);
+        expect(playback.autoplayEnabled, isTrue);
+        expect(playback.audioOnlyMode, isFalse);
+        expect(playback.planeMode, isFalse);
+
+        // Options the backup did not have are left as they are.
+        playback.setShuffleEnabled(true);
+        store.preferences = const PlaybackPreferences();
+        await playback.applyRememberedOptions();
+        expect(playback.shuffleEnabled, isTrue);
+      },
+    );
+
     test('temporary audio-only is neither saved nor kept', () async {
       final store = MemoryPlaybackSettingsStore();
       await playback.dispose();

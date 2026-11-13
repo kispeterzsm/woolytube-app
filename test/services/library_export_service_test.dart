@@ -190,15 +190,18 @@ void main() {
       LibraryExportService.settingsFileName,
     );
     expect(result.settingsPath, settingsPath);
-    final settings =
-        (jsonDecode(File(settingsPath).readAsStringSync())
-                as Map<String, dynamic>)['settings']
+    final file =
+        jsonDecode(File(settingsPath).readAsStringSync())
             as Map<String, dynamic>;
+    final settings = file['settings'] as Map<String, dynamic>;
     expect(settings[AppSettingsService.evenOutVolumeKey], true);
     expect(settings[AppSettingsService.planeModeStrengthKey], 'strong');
-    expect(settings[AppSettingsService.dismissedImportUrlsKey], [
-      'https://www.youtube.com/playlist?list=gone',
-    ]);
+    // App bookkeeping stays this device's own.
+    expect(
+      settings.containsKey(AppSettingsService.dismissedImportUrlsKey),
+      isFalse,
+    );
+    expect((file['sections'] as Map)[AppSettingsService.appSection], settings);
 
     expect(backupNames(), [
       '.nomedia',

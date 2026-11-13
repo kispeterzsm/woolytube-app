@@ -1,6 +1,7 @@
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../widgets/update_frequency_dropdown.dart';
+import 'settings_changes.dart';
 
 /// The options a new playlist starts with on the Add playlist page.
 class AddPlaylistOptions {
@@ -55,5 +56,6 @@ class AddPlaylistDefaults {
     await prefs.setInt(frequencyKey, options.updateFrequencyHours);
     await prefs.setBool(playChaptersKey, options.playChapters);
     await prefs.setBool(includeThumbnailsKey, options.includeThumbnails);
+    SettingsChanges.notify();
   }
 }
