@@ -253,27 +253,70 @@ class LibraryFileService {
     'labels',
   };
 
-  /// The newest library file: the one in [folder] (a copied backup the
-  /// owner picked) when it has one, else the more recent one of the two
-  /// library roots. Null when there is none or none can be read.
+  /// The library file in [folder] (a copied backup the owner picked) when
+  /// it has one, else the more recent one of the two library roots, with
+  /// the playlists only the other root's file lists added where that file
+  /// had them. Null when there is none or none can be read.
+  ///
+  /// The two roots are copied to a new phone one at a time, so the newer
+  /// file can be one written before the other root arrived; the other
+  /// root's playlists must not be lost then.
   Future<LibraryFileData?> read({String? folder}) async {
     if (folder != null) {
       final picked = await _readFile(pathIn(folder));
       if (picked != null) return picked;
     }
-    LibraryFileData? newest;
+    final found = <LibraryFileData>[];
     for (final root in roots) {
       final data = await _readFile(pathIn(root));
-      if (data == null) continue;
-      if (newest == null) {
-        newest = data;
-        continue;
-      }
+      if (data != null) found.add(data);
+    }
+    if (found.isEmpty) return null;
+    var newest = found.first;
+    for (final data in found.skip(1)) {
       final a = newest.updatedAt;
       final b = data.updatedAt;
       if (b != null && (a == null || b.isAfter(a))) newest = data;
     }
-    return newest;
+    var playlists = newest.playlists;
+    for (final other in found) {
+      if (identical(other, newest)) continue;
+      playlists = _mergePlaylists(playlists, other.playlists);
+    }
+    if (identical(playlists, newest.playlists)) return newest;
+    return LibraryFileData(
+      playlists: playlists,
+      resume: newest.resume,
+      labels: newest.labels,
+      updatedAt: newest.updatedAt,
+      raw: newest.raw,
+    );
+  }
+
+  /// [base] with the entries of [other] it does not list, each after the
+  /// entry that came before it in [other].
+  static List<LibraryPlaylistRef> _mergePlaylists(
+    List<LibraryPlaylistRef> base,
+    List<LibraryPlaylistRef> other,
+  ) {
+    bool same(LibraryPlaylistRef a, LibraryPlaylistRef b) =>
+        a.audioOnly == b.audioOnly &&
+        MetadataService.samePlaylistUrl(a.url, b.url) &&
+        a.folder.toLowerCase() == b.folder.toLowerCase();
+    List<LibraryPlaylistRef>? merged;
+    var insertAt = 0;
+    for (final ref in other) {
+      final list = merged ?? base;
+      final at = list.indexWhere((o) => same(o, ref));
+      if (at >= 0) {
+        insertAt = at + 1;
+        continue;
+      }
+      merged ??= List.of(base);
+      merged.insert(insertAt.clamp(0, merged.length), ref);
+      insertAt++;
+    }
+    return merged ?? base;
   }
 
   static Future<LibraryFileData?> _readFile(String path) async {
@@ -497,7 +540,9 @@ class LibraryFileService {
   /// From [existing], keys this app does not know are kept, and so are
   /// playlists not in the database whose folder is still there (a copied
   /// library waiting to be restored, or a folder whose import was
-  /// dismissed), each after the playlist it followed. Its "where I was"
+  /// dismissed) or whose whole library root is not on the phone (the other
+  /// root of a library copied one root at a time), each after the playlist
+  /// it followed. Its "where I was"
   /// point is kept while the player has none and its playlist is not in
   /// the database. Its labels this library has never had (by uid, and with
   /// a name no label here has) are kept after the database's: a copied
@@ -565,6 +610,7 @@ class LibraryFileService {
   ) async {
     // Insert after the entry that came before it in the previous file.
     var insertAt = 0;
+    final rootExists = <bool, bool>{};
     for (final ref in previous) {
       final match = inDatabase.where(ref.matches).firstOrNull;
       if (match != null) {
@@ -573,11 +619,16 @@ class LibraryFileService {
         continue;
       }
       if (ref.folder.isEmpty) continue;
-      final folder = p.join(
-        LibraryLayout.basePathFor(audioOnly: ref.audioOnly),
-        ref.folder,
-      );
-      if (!await File(p.join(folder, MetadataService.metaFileName)).exists()) {
+      final root = LibraryLayout.basePathFor(audioOnly: ref.audioOnly);
+      // A library root that is not on the phone (yet) has not been copied
+      // over: its playlists keep their places until it is. Within a root
+      // that is here, a playlist whose folder is gone is left out.
+      final rootHere =
+          rootExists[ref.audioOnly] ??= await Directory(root).exists();
+      if (rootHere &&
+          !await File(
+            p.join(root, ref.folder, MetadataService.metaFileName),
+          ).exists()) {
         continue;
       }
       if (order.any(

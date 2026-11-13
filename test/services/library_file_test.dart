@@ -590,6 +590,93 @@ void main() {
       await restore.importOne(found['Beta']!);
       expect(await homeOrder(db), ['Gamma', 'Beta', 'Alpha']);
     });
+
+    test('a library copied one root at a time keeps the order of the root '
+        'that comes later', () async {
+      await copiedLibrary();
+      // Only the music folder is copied at first.
+      final stash = p.join(tempDir.path, 'stash');
+      await Directory(videoBase).rename(stash);
+      final db = newDatabase();
+      final metadata = MetadataService(db);
+      var now = DateTime.utc(2030);
+      final file = LibraryFileService(
+        db,
+        playbackStore: MemoryPlaybackSettingsStore(),
+        clock: () => now,
+      );
+      final restore = LibraryRestoreService(
+        db,
+        metadata,
+        exporterFor(db),
+        file,
+        log: log,
+      );
+      final first = await restore.importAll(
+        await metadata.findUnimportedPlaylists(),
+      );
+      expect(first.imported, 2);
+      expect(await homeOrder(db), ['Beta', 'Alpha']);
+      now = now.add(const Duration(minutes: 1));
+      await file.write();
+      // The music folder's file still has the video playlist's place.
+      final music = LibraryFileData.fromJson(readJson(libraryPath(audioBase)));
+      expect(music.playlists.map((ref) => ref.folder), [
+        'Gamma',
+        'Beta',
+        'Alpha',
+      ]);
+
+      // The video folder (with its older file) arrives later.
+      await Directory(stash).rename(videoBase);
+      final second = await restore.importAll(
+        await metadata.findUnimportedPlaylists(),
+      );
+      expect(second.imported, 1);
+      expect(await homeOrder(db), ['Gamma', 'Beta', 'Alpha']);
+    });
+  });
+
+  test('read adds the playlists only the other root\'s file lists, where '
+      'that file had them', () async {
+    Future<void> put(String root, String updatedAt, List<String> names) async {
+      await Directory(root).create(recursive: true);
+      await File(libraryPath(root)).writeAsString(
+        jsonEncode({
+          'app': 'WoolyTube',
+          'version': LibraryFileService.fileVersion,
+          'updatedAt': updatedAt,
+          'playlists': [
+            for (final name in names)
+              {
+                'url': 'https://www.youtube.com/playlist?list=$name',
+                'audioOnly': name != 'v',
+                'folder': name,
+              },
+          ],
+        }),
+      );
+    }
+
+    // Written later, before the video folder was copied over.
+    await put(audioBase, '2030-01-02T00:00:00.000Z', ['b', 'c']);
+    await put(videoBase, '2030-01-01T00:00:00.000Z', ['a', 'v', 'b', 'c']);
+    final read =
+        (await LibraryFileService(
+          newDatabase(),
+          playbackStore: MemoryPlaybackSettingsStore(),
+        ).read())!;
+    expect(read.playlists.map((ref) => ref.folder), ['a', 'v', 'b', 'c']);
+    expect(read.updatedAt, DateTime.utc(2030, 1, 2));
+
+    // The newer file's order wins where both list a playlist.
+    await put(audioBase, '2030-01-03T00:00:00.000Z', ['c', 'b']);
+    final reordered =
+        (await LibraryFileService(
+          newDatabase(),
+          playbackStore: MemoryPlaybackSettingsStore(),
+        ).read())!;
+    expect(reordered.playlists.map((ref) => ref.folder), ['a', 'v', 'c', 'b']);
   });
 
   group('applyOrder', () {
