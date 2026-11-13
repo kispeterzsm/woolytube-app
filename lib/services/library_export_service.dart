@@ -89,6 +89,12 @@ class LibraryExportService {
   static const backupDirName = '.woolytube_backup';
   static const settingsFileName = 'woolytube_settings.json';
 
+  /// Where a settings file this install did not write is put aside before
+  /// the settings are written (for example one copied from another phone
+  /// over a library that was already in use). Restore settings brings it
+  /// back until it was restored once.
+  static const previousSettingsFileName = 'woolytube_settings.previous.json';
+
   /// The database copies older versions made, named by their time.
   static final databaseCopyPattern = RegExp(r'^woolytube-\d{8}-\d{4}\.sqlite$');
 
@@ -229,25 +235,58 @@ class LibraryExportService {
   }
 
   /// Restores the app settings saved in the library's backup folder, or in
-  /// [folder] (or its `.woolytube_backup`). Returns how many settings were
-  /// applied, or null when no settings file exists.
+  /// [folder] (or its `.woolytube_backup`). In the library's backup folder
+  /// a settings file put aside as [previousSettingsFileName] comes first
+  /// while it waits to be restored ([copiedSettingsWaiting]). Returns how
+  /// many settings were applied, or null when no settings file exists.
   Future<int?> restoreSettings({String? folder}) async {
+    final main = p.join(backupDir, settingsFileName);
+    final previous = p.join(backupDir, previousSettingsFileName);
     final candidates = [
       if (folder != null) ...[
         p.join(folder, backupDirName, settingsFileName),
         p.join(folder, settingsFileName),
       ],
-      p.join(backupDir, settingsFileName),
+      if (await copiedSettingsWaiting()) ...[previous, main] else main,
     ];
     for (final path in candidates) {
       final file = File(path);
       if (!await file.exists()) continue;
-      final values = settingsFromFile(jsonDecode(await file.readAsString()));
+      final content = await file.readAsString();
+      final values = settingsFromFile(jsonDecode(content));
       if (values == null) continue;
-      return _settings.importSettings(values);
+      final applied = await _settings.importSettings(values);
+      try {
+        await _settings.setRestoredSettingsFileHash(contentHash(content));
+      } catch (_) {
+        // Only decides which file a later restore offers first.
+      }
+      return applied;
     }
     return null;
   }
+
+  /// Whether a settings file that came from elsewhere was put aside as
+  /// [previousSettingsFileName] and not restored yet, while the settings
+  /// file is this install's own (or gone). Restore settings then restores
+  /// the one put aside.
+  Future<bool> copiedSettingsWaiting() async {
+    try {
+      final previous = File(p.join(backupDir, previousSettingsFileName));
+      if (!await previous.exists()) return false;
+      final restored = await _settings.getRestoredSettingsFileHash();
+      if (contentHash(await previous.readAsString()) == restored) return false;
+      final main = File(p.join(backupDir, settingsFileName));
+      if (!await main.exists()) return true;
+      return contentHash(await main.readAsString()) ==
+          await _settings.getSettingsFileHash();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// The keys around the settings in a settings file.
+  static const _settingsFileEnvelope = {'app', 'version', 'sections'};
 
   /// The settings in a decoded settings file, by key, or null when it is not
   /// one. Reads every version: version 2 lists them by section (and also
@@ -255,8 +294,13 @@ class LibraryExportService {
   /// and a hand-made file may list them at the top.
   static Map<String, Object?>? settingsFromFile(Object? decoded) {
     if (decoded is! Map) return null;
-    final flat = decoded['settings'] is Map ? decoded['settings'] : decoded;
-    final values = Map<String, Object?>.from(flat as Map);
+    final Map<String, Object?> values;
+    if (decoded['settings'] case final Map settings) {
+      values = Map<String, Object?>.from(settings);
+    } else {
+      values = Map<String, Object?>.from(decoded)
+        ..removeWhere((key, _) => _settingsFileEnvelope.contains(key));
+    }
     final sections = decoded['sections'];
     if (sections is Map) {
       for (final section in sections.values) {
@@ -279,6 +323,13 @@ class LibraryExportService {
   /// and returns its path. A file whose content would not change is left
   /// alone. Writes run one after another (the settings mirror and a library
   /// export may ask at the same time).
+  ///
+  /// A settings file there that this install did not write (its hash is not
+  /// the one remembered in [AppSettingsService.settingsFileHashKey]) and
+  /// that holds settings this phone does not have the same is never
+  /// written over: it came from elsewhere, for example copied from another
+  /// phone. It is put aside as [previousSettingsFileName] first, and
+  /// Restore settings offers it.
   Future<String> writeSettingsFile() {
     final previous = _settingsWrite;
     final next =
@@ -328,22 +379,65 @@ class LibraryExportService {
     final target = p.join(backupDir, settingsFileName);
     final file = File(target);
     if (_settingsFileHash == hash && await file.exists()) return target;
-    if (_settingsFileHash == null) {
+    final exists = await file.exists();
+    String? onDisk;
+    if (exists) {
       try {
-        if (await file.exists() && await file.readAsString() == content) {
-          _settingsFileHash = hash;
-          return target;
-        }
+        onDisk = await file.readAsString();
       } catch (_) {
-        // Written again below.
+        // Unreadable: put aside below rather than lost.
       }
     }
+    if (onDisk == content) {
+      await _rememberSettingsFile(hash);
+      return target;
+    }
     await _prepareBackupDir();
+    if (exists && !await _mayReplaceSettingsFile(onDisk)) {
+      await file.rename(p.join(backupDir, previousSettingsFileName));
+      _log.info(
+        'The settings file in the library folder was not written by this '
+        'install; kept it as $previousSettingsFileName',
+      );
+    }
     final tmp = File('$target.partial');
     await tmp.writeAsString(content, flush: true);
     await tmp.rename(target);
-    _settingsFileHash = hash;
+    await _rememberSettingsFile(hash);
     return target;
+  }
+
+  Future<void> _rememberSettingsFile(int hash) async {
+    _settingsFileHash = hash;
+    try {
+      if (await _settings.getSettingsFileHash() != hash) {
+        await _settings.setSettingsFileHash(hash);
+      }
+    } catch (_) {
+      // Without it the next run compares the settings themselves.
+    }
+  }
+
+  /// Whether the settings file content [onDisk] may be written over: this
+  /// install wrote it, or every setting in it is set the same on this phone
+  /// (nothing would be lost, for example a file of an older version of the
+  /// app on this same phone).
+  Future<bool> _mayReplaceSettingsFile(String? onDisk) async {
+    if (onDisk == null) return false;
+    try {
+      if (contentHash(onDisk) == await _settings.getSettingsFileHash()) {
+        return true;
+      }
+      final values = settingsFromFile(jsonDecode(onDisk));
+      if (values == null) return false;
+      final current = await _settings.exportSettings();
+      return values.entries.every(
+        (entry) =>
+            current.containsKey(entry.key) && current[entry.key] == entry.value,
+      );
+    } catch (_) {
+      return false;
+    }
   }
 
   /// Whether a settings file exists in the library's backup folder.

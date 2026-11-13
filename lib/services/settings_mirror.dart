@@ -18,8 +18,10 @@ import 'settings_changes.dart';
 /// from another phone with its own defaults before that library is
 /// restored: while the database has no playlist, playlists found in the
 /// folders wait to be restored ([libraryWaitsForRestore]) and a settings
-/// file is there, nothing is written. Dismissing the restore starts the
-/// mirror writing.
+/// file is there, nothing is written, so Import all restores it in place.
+/// Once the mirror writes, a settings file this install did not write is
+/// still never lost: [LibraryExportService.writeSettingsFile] puts it aside
+/// for Restore settings first.
 class SettingsMirror {
   SettingsMirror(
     this._db,

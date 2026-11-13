@@ -59,6 +59,14 @@ class AppSettingsService {
   static const loudnessOnlyWhileChargingKey = 'loudness_only_while_charging';
   static const planeModeStrengthKey = 'plane_mode_strength';
   static const planeModeTipShownKey = 'plane_mode_tip_shown';
+
+  /// Bookkeeping of the settings file in the library folder: the hash of
+  /// the content this install last wrote there (or found it already held),
+  /// and of the last settings file restored from there. A settings file
+  /// matching neither came from elsewhere (see
+  /// `LibraryExportService.writeSettingsFile`).
+  static const settingsFileHashKey = 'settings_file_hash';
+  static const restoredSettingsFileHashKey = 'restored_settings_file_hash';
   static const _backgroundChannel = MethodChannel('com.woolytube/background');
 
   /// The sections of the settings backup.
@@ -281,6 +289,31 @@ class AppSettingsService {
       lastYtDlpUpdateAttemptKey,
       at.millisecondsSinceEpoch,
     );
+  }
+
+  /// See [settingsFileHashKey]. Bookkeeping: changing it does not count as
+  /// a settings change.
+  Future<int?> getSettingsFileHash() => _getInt(settingsFileHashKey);
+
+  Future<void> setSettingsFileHash(int hash) =>
+      _setInt(settingsFileHashKey, hash);
+
+  /// See [restoredSettingsFileHashKey].
+  Future<int?> getRestoredSettingsFileHash() =>
+      _getInt(restoredSettingsFileHashKey);
+
+  Future<void> setRestoredSettingsFileHash(int hash) =>
+      _setInt(restoredSettingsFileHashKey, hash);
+
+  Future<int?> _getInt(String key) async {
+    final preferences = await _preferencesLoader();
+    final value = preferences.get(key);
+    return value is int ? value : null;
+  }
+
+  Future<void> _setInt(String key, int value) async {
+    final preferences = await _preferencesLoader();
+    await preferences.setInt(key, value);
   }
 
   /// The stored [backedUpSettings] by key, for the settings backup. A

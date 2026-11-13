@@ -50,6 +50,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   bool _isDownloadingUpdate = false;
   _BackupWork? _backupWork;
   bool _isRestoringSettings = false;
+
+  /// A settings file copied in from elsewhere waits to be restored.
+  bool _copiedSettingsWaiting = false;
   LibraryExportProgress? _backupProgress;
 
   /// The newest change to the app's files in the library folders.
@@ -64,6 +67,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     unawaited(_loadSettings());
     unawaited(_loadVersion());
     unawaited(_loadLibraryFoldersUpdated());
+    unawaited(_loadCopiedSettingsWaiting());
   }
 
   Future<void> _loadLibraryFoldersUpdated() async {
@@ -105,6 +109,18 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       );
     } finally {
       if (mounted) setState(() => _isLoadingSettings = false);
+    }
+  }
+
+  /// Whether Restore settings would bring back settings copied from
+  /// another phone. Only changes its subtitle.
+  Future<void> _loadCopiedSettingsWaiting() async {
+    try {
+      final exporter = ref.read(libraryExportServiceProvider);
+      final waiting = await exporter.copiedSettingsWaiting();
+      if (mounted) setState(() => _copiedSettingsWaiting = waiting);
+    } catch (_) {
+      // Shown as an ordinary restore.
     }
   }
 
@@ -300,6 +316,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         await applyRestoredSettings(settings, player, loudness);
         // Shows what is stored now.
         if (mounted) await _loadSettings();
+        if (mounted) await _loadCopiedSettingsWaiting();
       }
     } catch (e) {
       message = 'Could not restore settings: $e';
@@ -463,7 +480,11 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         key: const ValueKey('restore-settings'),
         leading: const Icon(Icons.settings_backup_restore),
         title: const Text('Restore settings'),
-        subtitle: const Text('From the library folder'),
+        subtitle: Text(
+          _copiedSettingsWaiting
+              ? 'Settings copied from another phone are waiting'
+              : 'From the library folder',
+        ),
         trailing:
             _isRestoringSettings
                 ? const SizedBox(
@@ -634,6 +655,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       _backupProgress = null;
     });
     unawaited(_loadLibraryFoldersUpdated());
+    unawaited(_loadCopiedSettingsWaiting());
   }
 
   /// Looks for anything missing in the library folders, without writing,

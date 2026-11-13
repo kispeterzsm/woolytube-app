@@ -42,6 +42,12 @@ void main() {
     LibraryExportService.settingsFileName,
   );
 
+  String previousPath() => p.join(
+    audioBase,
+    LibraryExportService.backupDirName,
+    LibraryExportService.previousSettingsFileName,
+  );
+
   Map<String, dynamic> readFile() =>
       jsonDecode(File(settingsPath()).readAsStringSync())
           as Map<String, dynamic>;
@@ -164,6 +170,8 @@ void main() {
   test('every key the app stores is either backed up or bookkeeping', () async {
     await chooseEverything();
     await storeBookkeeping();
+    await exporter.writeSettingsFile();
+    await exporter.restoreSettings();
     final preferences = await SharedPreferences.getInstance();
     final backedUp = {
       for (final setting in AppSettingsService.backedUpSettings) setting.key,
@@ -173,6 +181,8 @@ void main() {
       AppSettingsService.lastYtDlpUpdateAttemptKey,
       AppSettingsService.planeModeTipShownKey,
       SharedPreferencesPlaybackSettingsStore.sessionKey,
+      AppSettingsService.settingsFileHashKey,
+      AppSettingsService.restoredSettingsFileHashKey,
     };
     expect(
       preferences.getKeys(),
@@ -404,6 +414,124 @@ void main() {
       File(settingsPath()).deleteSync();
       await mirror.flush();
       expect(File(settingsPath()).existsSync(), isTrue);
+      // The empty file held nothing to lose.
+      expect(File(previousPath()).existsSync(), isFalse);
+    });
+
+    test('a copied settings file is put aside, not written over, after a '
+        'dismissed restore, and Restore settings brings it back', () async {
+      // The old phone's settings, copied into the library folder.
+      await chooseEverything();
+      await exporter.writeSettingsFile();
+      final copied = File(settingsPath()).readAsStringSync();
+
+      // A fresh install on the new phone; the restore was dismissed, then
+      // the owner turned shuffle off.
+      SharedPreferences.setMockInitialValues({});
+      final newPhone = exporterFor(db, settings, log);
+      final dismissed = SettingsMirror(
+        db,
+        newPhone,
+        libraryWaitsForRestore: () => false,
+        changes: changes.stream,
+      );
+      addTearDown(dismissed.dispose);
+      await SharedPreferencesPlaybackSettingsStore().saveShuffle(false);
+      await dismissed.flush();
+      expect(File(previousPath()).readAsStringSync(), copied);
+      expect(readFile()['settings'], {
+        SharedPreferencesPlaybackSettingsStore.shuffleKey: false,
+      });
+      expect(await newPhone.copiedSettingsWaiting(), isTrue);
+
+      // Later writes replace only this phone's own file.
+      await settings.setEvenOutVolume(false);
+      await dismissed.flush();
+      expect(File(previousPath()).readAsStringSync(), copied);
+      expect(await newPhone.copiedSettingsWaiting(), isTrue);
+
+      // Restore settings restores the old phone's settings, all of them.
+      expect(
+        await newPhone.restoreSettings(),
+        AppSettingsService.backedUpSettings.length,
+      );
+      await expectEverythingChosen();
+      expect(await newPhone.copiedSettingsWaiting(), isFalse);
+      await dismissed.flush();
+      expect(readFile(), jsonDecode(copied));
+      expect(File(previousPath()).readAsStringSync(), copied);
+
+      // Restored once: a later restore uses the file following this phone.
+      await settings.setEvenOutVolume(false);
+      await dismissed.flush();
+      expect(await newPhone.restoreSettings(), greaterThan(0));
+      expect(await settings.getEvenOutVolume(), isFalse);
+    });
+
+    test('a settings file copied over a library in use is put aside, at '
+        'start and while running', () async {
+      await settings.setEvenOutVolume(true);
+      await insertTestPlaylist(db, outputPath: p.join(audioBase, 'Mix'));
+      await exporter.writeSettingsFile();
+      final oldPhone = jsonEncode({
+        'app': 'WoolyTube',
+        'version': 2,
+        'sections': {
+          'player': {SharedPreferencesPlaybackSettingsStore.shuffleKey: true},
+        },
+        'settings': {SharedPreferencesPlaybackSettingsStore.shuffleKey: true},
+      });
+
+      // Copied in while the app was closed.
+      File(settingsPath()).writeAsStringSync(oldPhone);
+      final restarted = exporterFor(db, settings, log);
+      await SettingsMirror(db, restarted).flush();
+      expect(File(previousPath()).readAsStringSync(), oldPhone);
+      expect(readFile()['settings'], {
+        AppSettingsService.evenOutVolumeKey: true,
+      });
+      expect(await restarted.copiedSettingsWaiting(), isTrue);
+      expect(await restarted.restoreSettings(), 1);
+      expect(
+        (await SharedPreferencesPlaybackSettingsStore().load()).shuffle,
+        isTrue,
+      );
+
+      // Copied in while the app runs, then a setting changes.
+      final another = oldPhone.replaceAll('true', 'false');
+      File(settingsPath()).writeAsStringSync(another);
+      await settings.setEvenOutVolume(false);
+      await restarted.writeSettingsFile();
+      expect(File(previousPath()).readAsStringSync(), another);
+      expect(await restarted.copiedSettingsWaiting(), isTrue);
+      expect(
+        log.entries.where((e) => e.message.contains('previous.json')),
+        hasLength(2),
+      );
+    });
+
+    test('an older settings file of this phone is replaced when nothing in '
+        'it would be lost; an unreadable one is put aside', () async {
+      await settings.setEvenOutVolume(true);
+      await Directory(p.dirname(settingsPath())).create(recursive: true);
+      File(settingsPath()).writeAsStringSync(
+        jsonEncode({
+          'app': 'WoolyTube',
+          'version': 1,
+          'settings': {AppSettingsService.evenOutVolumeKey: true},
+        }),
+      );
+      await exporter.writeSettingsFile();
+      expect(readFile()['version'], LibraryExportService.settingsFileVersion);
+      expect(File(previousPath()).existsSync(), isFalse);
+
+      File(settingsPath()).writeAsStringSync('not json');
+      await settings.setEvenOutVolume(false);
+      await exporterFor(db, settings, log).writeSettingsFile();
+      expect(File(previousPath()).readAsStringSync(), 'not json');
+      expect(readFile()['settings'], {
+        AppSettingsService.evenOutVolumeKey: false,
+      });
     });
 
     test('a failing write is logged once until it works again', () async {
