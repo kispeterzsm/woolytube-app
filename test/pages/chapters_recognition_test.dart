@@ -475,7 +475,7 @@ void main() {
       expect(find.byKey(const ValueKey('recognize-songs')), findsNothing);
       await expectInMoreMenu(tester, 'Recognize again…');
       expect(find.text('Review 2 proposals'), findsOneWidget);
-      expect(find.textContaining('· Auto'), findsOneWidget);
+      expect(find.textContaining('·\u00A0Auto'), findsOneWidget);
       expect(find.textContaining('verify the identity'), findsOneWidget);
       expect(find.byKey(const ValueKey('recognition-run-hint')), findsNothing);
 
@@ -971,7 +971,7 @@ void main() {
           'older, less accurate scan of MP3 files, so their timings can be '
           'off by several seconds. Recognize again for exact timings.',
         );
-        expect(find.textContaining('· Auto'), findsNWidgets(2));
+        expect(find.textContaining('·\u00A0Auto'), findsNWidgets(2));
         final data = ChapterData.decode(
           (await db.getTrack(track.id))!.chaptersJson,
         );
