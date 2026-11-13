@@ -13,6 +13,7 @@ import '../providers/playlist_counts_provider.dart';
 import '../providers/providers.dart';
 import '../services/download_errors.dart';
 import '../services/download_service.dart';
+import '../services/labels.dart';
 import '../services/library_restore_service.dart';
 import '../services/loudness_service.dart';
 import '../services/lyrics/lyrics_models.dart';
@@ -24,6 +25,7 @@ import '../services/playback_service.dart';
 import '../services/track_search.dart';
 import '../services/track_status_labels.dart';
 import '../services/update_service.dart';
+import '../widgets/label_widgets.dart';
 import '../widgets/lyrics_line_text.dart';
 import '../widgets/mobile_data_download_guard.dart';
 import '../widgets/playlist_card.dart';
@@ -1013,22 +1015,26 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
           ? _lyricHits
           : const [];
 
-  List<SearchHit> _search(List<Track> tracks, List<Playlist> playlists) {
+  List<SearchHit> _search(
+    List<Track> tracks,
+    List<Playlist> playlists,
+    SearchFilters filters,
+  ) {
     final lyricHits = _currentLyricHits;
     if (!identical(tracks, _searchedTracks) ||
         _query != _searchedQuery ||
-        widget.filters != _searchedFilters ||
+        filters != _searchedFilters ||
         !identical(lyricHits, _searchedLyrics) ||
         !identical(playlists, _searchedPlaylists)) {
       _searchedTracks = tracks;
       _searchedQuery = _query;
-      _searchedFilters = widget.filters;
+      _searchedFilters = filters;
       _searchedLyrics = lyricHits;
       _searchedPlaylists = playlists;
       _hits = searchLibrary(
         tracks,
         _query,
-        filters: widget.filters,
+        filters: filters,
         lyricHits: lyricHits,
         playlistOrder: {
           for (var i = 0; i < playlists.length; i++) playlists[i].id: i,
@@ -1083,24 +1089,29 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
     }
 
     final query = _query;
+    final labels = ref.watch(labelsProvider).valueOrNull ?? const <Label>[];
+    // A label deleted while chosen stops filtering.
+    final filters = widget.filters.withLabelsIn({
+      for (final label in labels) label.uid,
+    });
+    final searching = !query.isEmpty || filters.hasLabels;
     final playlistsById = {for (final p in playlists) p.id: p};
     final matchingPlaylists =
-        query.isEmpty
+        query.isEmpty || filters.hasLabels
             ? const <Playlist>[]
             : [
               for (final p in visibleAsync.valueOrNull ?? playlists)
                 if (matchesSearchText(p.name, query)) p,
             ];
-    final hits = _search(tracks, playlists);
+    final hits = _search(tracks, playlists, filters);
     // Tracks found only by a lyric line show as their lines, below.
     final trackHits = [
       for (final hit in hits)
         if (hit.reason != SearchReason.lyrics) hit,
     ];
-    final lyricHits = _lyricRows(tracks);
+    final lyricHits = _lyricRows(tracks, filters);
     final lyricsLabel = _lyricsLabel(playlists);
-    final entries =
-        query.isEmpty ? const <QueueEntry>[] : searchQueueEntries(hits);
+    final entries = searching ? searchQueueEntries(hits) : const <QueueEntry>[];
 
     final Widget results;
     if (trackHits.isEmpty && matchingPlaylists.isEmpty && lyricHits.isEmpty) {
@@ -1126,11 +1137,25 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
       );
     }
 
-    final showActions = !query.isEmpty && hits.isNotEmpty;
-    final showBar = lyricsLabel != null || showActions;
+    final showActions = searching && hits.isNotEmpty;
+    // Label chips get a row of their own: beside Play all only a few would
+    // show. Lyrics alone still shares the row with it.
+    final chipsOwnRow = labels.isNotEmpty;
+    final chipsBesideActions = lyricsLabel != null && !chipsOwnRow;
+    final chips = SearchFilterChips(
+      filters: filters,
+      lyricsLabel: lyricsLabel,
+      labels: labels,
+      onChanged: widget.onFiltersChanged,
+    );
     return Column(
       children: [
-        if (showBar)
+        if (chipsOwnRow)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+            child: Align(alignment: Alignment.centerLeft, child: chips),
+          ),
+        if (chipsBesideActions || showActions)
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 4, 4),
             child: Row(
@@ -1140,17 +1165,13 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
                 Expanded(
                   child: Row(
                     children: [
-                      Flexible(
-                        child: SearchFilterChips(
-                          filters: widget.filters,
-                          lyricsLabel: lyricsLabel,
-                          onChanged: widget.onFiltersChanged,
-                        ),
-                      ),
+                      if (chipsBesideActions) Flexible(child: chips),
                       if (showActions)
                         Flexible(
                           child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            padding: EdgeInsets.symmetric(
+                              horizontal: chipsBesideActions ? 8 : 0,
+                            ),
                             child: Text(
                               hits.length == 1
                                   ? '1 track'
@@ -1178,6 +1199,16 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
                           ref.read(playbackServiceProvider),
                           entries,
                         ),
+                    onLabelAll: () {
+                      FocusManager.instance.primaryFocus?.unfocus();
+                      unawaited(
+                        showLabelAllPicker(
+                          context,
+                          ref,
+                          searchLabelTargets(hits),
+                        ),
+                      );
+                    },
                   ),
               ],
             ),
@@ -1266,8 +1297,12 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
     unawaited(ref.read(playbackServiceProvider).playEntries(entries));
   }
 
-  /// The lyric hits whose track is still in the library, with the track.
-  List<(LyricsHit, Track)> _lyricRows(List<Track> tracks) {
+  /// The lyric hits whose track is still in the library, with the track;
+  /// with label filters only lines of files or chapters that carry them.
+  List<(LyricsHit, Track)> _lyricRows(
+    List<Track> tracks,
+    SearchFilters filters,
+  ) {
     final lyricHits = _currentLyricHits;
     if (lyricHits.isEmpty) return const [];
     final wanted = {for (final hit in lyricHits) hit.trackId};
@@ -1277,7 +1312,13 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
     };
     return [
       for (final hit in lyricHits)
-        if (byId[hit.trackId] case final track?) (hit, track),
+        if (byId[hit.trackId] case final track?)
+          if (searchLabelsAllow(
+            track,
+            lyricsHitTarget(track, hit).chapter,
+            filters,
+          ))
+            (hit, track),
     ];
   }
 
@@ -1550,6 +1591,13 @@ class _SearchTrackTile extends ConsumerWidget {
         details.isEmpty ? playlistName : '$playlistName · $details';
     final thumbnailWidth =
         MediaQuery.sizeOf(context).width < 360 ? 96.0 : 112.0;
+    final labels =
+        track.labelUids == null
+            ? const <Label>[]
+            : carriedLabels(
+              ref.watch(labelsProvider).valueOrNull ?? const [],
+              decodeLabelUids(track.labelUids),
+            );
 
     return Material(
       color: isCurrentTrack ? const Color(0xFF2A2A2A) : Colors.transparent,
@@ -1593,6 +1641,15 @@ class _SearchTrackTile extends ConsumerWidget {
                               color: _accent,
                               size: 24,
                             ),
+                          ),
+                        ),
+                      if (labels.isNotEmpty)
+                        Positioned(
+                          left: 4,
+                          bottom: 4,
+                          child: LabelDots(
+                            key: ValueKey('search-track-labels-${track.id}'),
+                            labels: labels,
                           ),
                         ),
                     ],

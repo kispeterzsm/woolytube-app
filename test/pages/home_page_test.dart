@@ -15,6 +15,8 @@ import 'package:woolytube/services/chapter_playback.dart';
 import 'package:woolytube/services/download_network_policy.dart';
 import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/download_service.dart';
+import 'package:woolytube/services/label_service.dart';
+import 'package:woolytube/services/labels.dart';
 import 'package:woolytube/services/lyrics/lyrics_models.dart';
 import 'package:woolytube/services/lyrics/lyrics_search.dart';
 import 'package:woolytube/services/metadata_service.dart';
@@ -39,6 +41,10 @@ void main() {
   late StreamController<DownloadProgress> progress;
   late _Playback playback;
   late _LyricsSearch lyrics;
+
+  /// The labels in use, as the page sees them (a drift stream would leave
+  /// a timer behind).
+  late List<Label> labels;
 
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
@@ -68,6 +74,7 @@ void main() {
     progress = StreamController<DownloadProgress>.broadcast();
     playback = _Playback();
     lyrics = _LyricsSearch();
+    labels = const [];
   });
 
   tearDown(() async {
@@ -114,6 +121,7 @@ void main() {
           isPlayingProvider.overrideWith((ref) => Stream.value(true)),
           playbackServiceProvider.overrideWithValue(playback),
           lyricsSearchProvider.overrideWithValue(lyrics),
+          labelsProvider.overrideWith((ref) => Stream.value(labels)),
           ...overrides,
         ],
         child: const MaterialApp(home: HomePage()),
@@ -740,6 +748,102 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
     expect(find.text('Play all'), findsOneWidget);
+  });
+
+  testWidgets('search: label chips list everything with them, all or any, '
+      'and Play all plays files whole and chapters alone', (tester) async {
+    final service = LabelService(db);
+    final rock = await service.create('Rock', 0xFFE57373);
+    final live = await service.create('Live', 0xFF64B5F6);
+    labels = await service.labels();
+    var index = 0;
+    Future<Track> track(
+      String title, {
+      List<String> fileLabels = const [],
+      Map<String, List<String>> chapterLabels = const {},
+    }) {
+      index++;
+      return insertTestTrack(
+        db,
+        playlistId: playlists[3].id,
+        index: index,
+        videoId: 'labelled-$index',
+        title: title,
+        status: 'complete',
+        filePath: '/tmp/labelled-$index.m4a',
+        labelUids: encodeLabelUids(fileLabels),
+        chaptersJson:
+            chapterLabels.isEmpty
+                ? null
+                : ChapterData(
+                  downloaded: const [
+                    MediaChapter(id: 'a', title: 'One', startMs: 0, endMs: 1),
+                    MediaChapter(id: 'b', title: 'Two', startMs: 1, endMs: 2),
+                  ],
+                  chapterLabels: chapterLabels,
+                ).encode(),
+      );
+    }
+
+    final song = await track('Rock song', fileLabels: [rock.uid]);
+    final liveSong = await track(
+      'Live rock song',
+      fileLabels: [rock.uid, live.uid],
+    );
+    final mix = await track(
+      'A mix',
+      chapterLabels: {
+        'b': [live.uid],
+      },
+    );
+    tracks = [...tracks, song, liveSong, mix];
+    await pumpHome(tester);
+    await tester.tap(find.byTooltip('Search'));
+    await tester.pumpAndSettle();
+    Finder tile(Track t) => find.byKey(ValueKey('search-track-${t.id}'));
+
+    // With nothing typed, a label lists everything that has it.
+    await tester.tap(find.byKey(ValueKey('search-filter-label-${rock.uid}')));
+    await tester.pumpAndSettle();
+    expect(tile(song), findsOneWidget);
+    expect(tile(liveSong), findsOneWidget);
+    expect(tile(mix), findsNothing);
+    expect(tile(tracks[0]), findsNothing);
+    expect(find.text('2 tracks'), findsOneWidget);
+    expect(
+      find.byKey(ValueKey('search-track-labels-${song.id}')),
+      findsOneWidget,
+    );
+
+    // Both labels: only what has both, then what has either.
+    await tester.tap(find.byKey(ValueKey('search-filter-label-${live.uid}')));
+    await tester.pumpAndSettle();
+    expect(tile(song), findsNothing);
+    expect(tile(liveSong), findsOneWidget);
+    expect(tile(mix), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('search-label-match')));
+    await tester.pumpAndSettle();
+    expect(tile(song), findsOneWidget);
+    expect(tile(mix), findsOneWidget);
+    expect(
+      find.descendant(
+        of: tile(mix),
+        matching: find.textContaining('Chapter: Two', findRichText: true),
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Play all'));
+    await tester.pump();
+    expect(playback.playedEntries.single, [
+      QueueEntry(song),
+      QueueEntry(liveSong),
+      QueueEntry(mix, const {'b'}),
+    ]);
+
+    // The results menu labels them all.
+    await tester.tap(find.byKey(const ValueKey('search-results-menu')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('search-label-all')), findsOneWidget);
   });
 
   testWidgets('a whole-file transcript hit plays the chapter at its time', (

@@ -125,6 +125,14 @@ class _TrackRow extends ConsumerWidget {
           isPlayingProvider.select((playing) => playing.valueOrNull ?? false),
         );
     final state = _TrackState.of(track);
+    // Dots on the thumbnail: the row's text keeps all its room.
+    final labels =
+        track.labelUids == null
+            ? const <Label>[]
+            : carriedLabels(
+              ref.watch(labelsProvider).valueOrNull ?? const [],
+              decodeLabelUids(track.labelUids),
+            );
     final subtitles = _rowSubtitles(track, chapterMatch);
     final lyric = chapterMatch == null ? lyricMatch : null;
     final subtitleStyle = TextStyle(
@@ -190,6 +198,17 @@ class _TrackRow extends ConsumerWidget {
                                         ref
                                             .read(playbackServiceProvider)
                                             .togglePlayPause(),
+                              ),
+                            ),
+                          ),
+                        if (labels.isNotEmpty)
+                          Positioned(
+                            left: 4,
+                            bottom: 4,
+                            child: IgnorePointer(
+                              child: LabelDots(
+                                key: ValueKey('track-labels-${track.id}'),
+                                labels: labels,
                               ),
                             ),
                           ),

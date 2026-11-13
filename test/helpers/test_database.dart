@@ -83,6 +83,7 @@ Future<Track> insertTestTrack(
   bool? chaptersEnabled,
   int? videoQuality,
   int? downloadedMaxHeight,
+  String? labelUids,
 }) async {
   final id = await db.insertTrack(
     TracksCompanion.insert(
@@ -106,6 +107,7 @@ Future<Track> insertTestTrack(
       chaptersEnabled: Value(chaptersEnabled),
       videoQuality: Value(videoQuality),
       downloadedMaxHeight: Value(downloadedMaxHeight),
+      labelUids: Value(labelUids),
     ),
   );
   return (await db.getTracksForPlaylist(

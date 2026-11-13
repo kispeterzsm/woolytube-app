@@ -22,6 +22,7 @@ import '../services/playback_service.dart';
 import '../widgets/plane_mode_toggle.dart';
 import '../widgets/settings_section_header.dart';
 import 'debug_log_page.dart';
+import 'labels_page.dart';
 
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key, this.initialUpdate, this.onUpdateChanged});
@@ -332,11 +333,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     );
   }
 
-  /// Top to bottom: app update, downloads, backup, sound, playback, then
-  /// troubleshooting.
+  /// Top to bottom: app update, downloads, library, backup, sound,
+  /// playback, then troubleshooting.
   List<Widget> _rows() => [
     ..._updateRows(),
     ..._downloadRows(),
+    ..._libraryRows(),
     ..._backupRows(),
     ..._soundRows(),
     ..._playbackRows(),
@@ -399,6 +401,26 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               : 'Last update check: '
                   '${_dateFormat.format(_lastYtDlpUpdateCheck!)}',
         ),
+      ),
+    ];
+  }
+
+  /// Organizing the library.
+  List<Widget> _libraryRows() {
+    return [
+      const SettingsSectionHeader('Library'),
+      ListTile(
+        key: const ValueKey('settings-labels'),
+        leading: const Icon(Icons.label_outline),
+        title: const Text('Labels'),
+        subtitle: const Text(
+          'Mark files and chapters with genres, bands or anything else',
+        ),
+        trailing: const Icon(Icons.chevron_right),
+        onTap:
+            () => Navigator.of(
+              context,
+            ).push(MaterialPageRoute<void>(builder: (_) => const LabelsPage())),
       ),
     ];
   }

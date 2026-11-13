@@ -357,6 +357,18 @@ final labelServiceProvider = Provider<LabelService>(
   (ref) => LabelService(ref.watch(databaseProvider)),
 );
 
+/// The labels in use, in the owner's order. Kept while the app runs: rows
+/// all over the app show their colors.
+final labelsProvider = StreamProvider<List<Label>>(
+  (ref) => ref.watch(labelServiceProvider).watchLabels(),
+);
+
+/// The labels in use by uid, for showing what a file or chapter carries.
+final labelsByUidProvider = Provider<Map<String, Label>>((ref) {
+  final labels = ref.watch(labelsProvider).valueOrNull ?? const <Label>[];
+  return {for (final label in labels) label.uid: label};
+});
+
 /// Imports a copied library with its order, settings and last song.
 final libraryRestoreServiceProvider = Provider<LibraryRestoreService>((ref) {
   return LibraryRestoreService(

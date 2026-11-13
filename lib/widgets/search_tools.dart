@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 
+import '../database/database.dart';
 import '../services/chapter_playback.dart';
+import '../services/labels.dart';
 import '../services/lyrics/lyrics_models.dart';
 import '../services/playback_service.dart';
 import '../services/track_search.dart';
+import 'label_widgets.dart';
 import 'lyrics_line_text.dart';
 
 const _accent = Color(0xFF2196F3);
@@ -45,14 +48,17 @@ Widget searchHighlightedText(
   );
 }
 
-/// The filter chips under a search field: today only Lyrics (shown when
-/// [lyricsLabel] is set), off by default. Label filters go here too.
+/// The filter chips under a search field: Lyrics (shown when [lyricsLabel]
+/// is set), then one chip per label. All are off when search opens. With
+/// two or more labels chosen, a small switch says whether results need
+/// all of them (the default) or any one.
 class SearchFilterChips extends StatelessWidget {
   const SearchFilterChips({
     super.key,
     required this.filters,
     required this.onChanged,
     this.lyricsLabel,
+    this.labels = const [],
   });
 
   final SearchFilters filters;
@@ -61,12 +67,23 @@ class SearchFilterChips extends StatelessWidget {
   /// "Lyrics" or "Transcript"; null hides the chip (lyrics are off).
   final String? lyricsLabel;
 
+  /// The labels to offer, in the owner's order.
+  final List<Label> labels;
+
+  void _toggleLabel(String uid, bool on) {
+    final chosen = {...filters.labels};
+    on ? chosen.add(uid) : chosen.remove(uid);
+    onChanged(filters.copyWith(labels: chosen));
+  }
+
   @override
   Widget build(BuildContext context) {
     final label = lyricsLabel;
+    final matchAll = filters.labelMatch == LabelMatch.all;
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
       child: Row(
+        spacing: 6,
         children: [
           if (label != null)
             FilterChip(
@@ -85,31 +102,77 @@ class SearchFilterChips extends StatelessWidget {
               visualDensity: VisualDensity.compact,
               onSelected: (on) => onChanged(filters.copyWith(lyrics: on)),
             ),
+          for (final item in labels)
+            FilterChip(
+              key: ValueKey('search-filter-label-${item.uid}'),
+              avatar: LabelSwatch(
+                color: item.color,
+                icon: filters.labels.contains(item.uid) ? Icons.check : null,
+              ),
+              label: Text(item.name),
+              tooltip:
+                  filters.labels.contains(item.uid)
+                      ? 'Only what has "${item.name}"'
+                      : 'Show what has "${item.name}"',
+              selected: filters.labels.contains(item.uid),
+              showCheckmark: false,
+              visualDensity: VisualDensity.compact,
+              onSelected: (on) => _toggleLabel(item.uid, on),
+            ),
+          // Last, so the chips never move under the finger.
+          if (filters.labels.length >= 2)
+            ActionChip(
+              key: const ValueKey('search-label-match'),
+              avatar: Icon(
+                matchAll ? Icons.join_inner : Icons.join_full,
+                size: 18,
+              ),
+              label: Text(matchAll ? 'All labels' : 'Any label'),
+              tooltip:
+                  matchAll
+                      ? 'Showing what has all chosen labels. Tap for any of '
+                          'them'
+                      : 'Showing what has any chosen label. Tap for all of '
+                          'them',
+              visualDensity: VisualDensity.compact,
+              onPressed:
+                  () => onChanged(
+                    filters.copyWith(
+                      labelMatch: matchAll ? LabelMatch.any : LabelMatch.all,
+                    ),
+                  ),
+            ),
         ],
       ),
     );
   }
 }
 
-/// "Play all" for search results, with a menu that adds them to Up next.
+/// "Play all" for search results, with a menu that adds them to Up next
+/// and labels them all.
 class SearchPlayAllButton extends StatelessWidget {
   const SearchPlayAllButton({
     super.key,
     required this.entries,
     required this.onPlayAll,
     required this.onAddToUpNext,
+    this.onLabelAll,
     this.label = 'Play all',
   });
 
-  /// What would be queued; empty disables both actions.
+  /// What would be queued; empty disables playing and queueing.
   final List<QueueEntry> entries;
   final VoidCallback onPlayAll;
   final VoidCallback onAddToUpNext;
+
+  /// Labels every result, played or not; null leaves it out.
+  final VoidCallback? onLabelAll;
   final String label;
 
   @override
   Widget build(BuildContext context) {
     final enabled = entries.isNotEmpty;
+    final onLabelAll = this.onLabelAll;
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -122,17 +185,19 @@ class SearchPlayAllButton extends StatelessWidget {
         PopupMenuButton<String>(
           key: const ValueKey('search-results-menu'),
           tooltip: 'More for these results',
-          enabled: enabled,
+          enabled: enabled || onLabelAll != null,
           color: const Color(0xFF2A2A2A),
           icon: const Icon(Icons.more_vert, color: _muted),
           onSelected: (value) {
             if (value == 'up-next') onAddToUpNext();
+            if (value == 'label-all') onLabelAll?.call();
           },
           itemBuilder:
               (_) => [
                 PopupMenuItem(
                   key: const ValueKey('search-add-to-up-next'),
                   value: 'up-next',
+                  enabled: enabled,
                   child: ListTile(
                     leading: const Icon(Icons.queue_music),
                     title: Text(
@@ -143,6 +208,16 @@ class SearchPlayAllButton extends StatelessWidget {
                     contentPadding: EdgeInsets.zero,
                   ),
                 ),
+                if (onLabelAll != null)
+                  const PopupMenuItem(
+                    key: ValueKey('search-label-all'),
+                    value: 'label-all',
+                    child: ListTile(
+                      leading: Icon(Icons.label_outline),
+                      title: Text('Label all…'),
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                  ),
               ],
         ),
       ],

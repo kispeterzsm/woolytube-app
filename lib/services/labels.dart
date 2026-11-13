@@ -218,3 +218,31 @@ List<LabelledItem> itemsWithLabels(
   }
   return result;
 }
+
+/// Whether every one of [items] carries label [uid] (true), none does
+/// (false), or some do (null), as their rows say: a file item by the
+/// file's own labels, a chapter item by that chapter's.
+bool? labelStateOf(Iterable<LabelledItem> items, String uid) {
+  var some = false;
+  var all = true;
+  final chapterData = <int, ChapterData>{};
+  for (final item in items) {
+    final chapter = item.chapter;
+    final carried =
+        chapter == null
+            ? decodeLabelUids(item.track.labelUids)
+            : chapterData
+                .putIfAbsent(
+                  item.track.id,
+                  () => ChapterData.decode(item.track.chaptersJson),
+                )
+                .labelsOf(chapter.id);
+    if (carried.contains(uid)) {
+      some = true;
+    } else {
+      all = false;
+    }
+    if (some && !all) return null;
+  }
+  return some && all;
+}

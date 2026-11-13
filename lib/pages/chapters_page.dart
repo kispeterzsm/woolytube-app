@@ -12,6 +12,7 @@ import '../services/playback_service.dart';
 import '../services/playlist_service.dart';
 import '../services/recognition/song_recognition_service.dart';
 import '../services/youtube_links.dart';
+import '../widgets/label_widgets.dart';
 import '../widgets/mobile_data_download_guard.dart';
 import '../widgets/recognize_chapter_sheet.dart';
 import '../widgets/settings_section_header.dart';
@@ -400,6 +401,10 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
             builder: (sheetContext, setSheetState) {
               final data = ChapterData.decode(track.chaptersJson);
               final skipped = skipOverride ?? data.isSkipped(chapter.id);
+              final labels = carriedLabels(
+                ref.read(labelsProvider).valueOrNull ?? const [],
+                data.labelsOf(chapter.id),
+              );
               void close() => Navigator.pop(sheetContext);
               return ConstrainedBox(
                 constraints: BoxConstraints(
@@ -412,6 +417,13 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                       data.active.lastOrNull?.endMs,
                   skipped: skipped,
                   playable: playable,
+                  labels: labels,
+                  onLabels: () {
+                    close();
+                    unawaited(
+                      showChapterLabelPicker(context, ref, track, chapter),
+                    );
+                  },
                   onPlay: () {
                     close();
                     _run(() => _playChapter(track, chapter));
@@ -1048,6 +1060,11 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                               (playing) => playing.valueOrNull ?? false,
                             ),
                           );
+                      final allLabels =
+                          data.chapterLabels.isEmpty
+                              ? const <Label>[]
+                              : ref.watch(labelsProvider).valueOrNull ??
+                                  const <Label>[];
                       return Column(
                         children: [
                           for (final (i, chapter) in data.active.indexed)
@@ -1057,6 +1074,10 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                               chapter: chapter,
                               fileMs: fileMs,
                               skipped: data.isSkipped(chapter.id),
+                              labels: carriedLabels(
+                                allLabels,
+                                data.labelsOf(chapter.id),
+                              ),
                               playable: playable,
                               enabled: !_busy,
                               isCurrent: i == current,
@@ -1499,6 +1520,7 @@ class _ChapterRow extends StatelessWidget {
     required this.chapter,
     required this.fileMs,
     required this.skipped,
+    this.labels = const [],
     required this.playable,
     required this.enabled,
     required this.isCurrent,
@@ -1515,6 +1537,9 @@ class _ChapterRow extends StatelessWidget {
 
   /// Marked Always skip: autoplay passes over it.
   final bool skipped;
+
+  /// The chapter's labels, as dots under its number.
+  final List<Label> labels;
   final bool playable;
   final bool enabled;
 
@@ -1551,13 +1576,29 @@ class _ChapterRow extends StatelessWidget {
       tileColor: isCurrent ? const Color(0xFF2A2A2A) : null,
       leading: SizedBox(
         width: 28,
-        child: Text(
-          '$number',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: isCurrent ? _accent : const Color(0xFF999999),
-            fontWeight: weight,
-          ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              '$number',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: isCurrent ? _accent : const Color(0xFF999999),
+                fontWeight: weight,
+              ),
+            ),
+            // Under the number, so the title and times keep their room.
+            if (labels.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              LabelDots(
+                key: ValueKey('chapter-labels-${chapter.id}'),
+                labels: labels,
+                size: 6,
+                max: 3,
+              ),
+            ],
+          ],
         ),
       ),
       title: Text(
@@ -1657,6 +1698,8 @@ class _ChapterActionsSheet extends StatelessWidget {
     required this.fileMs,
     required this.skipped,
     required this.playable,
+    this.labels = const [],
+    required this.onLabels,
     required this.onPlay,
     required this.onPlayNext,
     required this.onAddToQueue,
@@ -1678,6 +1721,10 @@ class _ChapterActionsSheet extends StatelessWidget {
   final int? fileMs;
   final bool skipped;
   final bool playable;
+
+  /// The chapter's labels, as chips in the header.
+  final List<Label> labels;
+  final VoidCallback onLabels;
   final VoidCallback onPlay;
   final VoidCallback onPlayNext;
   final VoidCallback onAddToQueue;
@@ -1754,6 +1801,10 @@ class _ChapterActionsSheet extends StatelessWidget {
                       '${_time(chapter.duration.inMilliseconds)}',
                       style: _sheetSubtitleStyle,
                     ),
+                    if (labels.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      LabelChips(labels: labels),
+                    ],
                   ],
                 ),
               ),
@@ -1813,6 +1864,16 @@ class _ChapterActionsSheet extends StatelessWidget {
                 ),
                 value: skipped,
                 onChanged: onSkipChanged,
+              ),
+              tile(
+                key: const ValueKey('chapter-actions-labels'),
+                icon: Icons.label_outline,
+                title: 'Labels…',
+                subtitle:
+                    labels.isEmpty
+                        ? 'Mark this song with a genre, a band or anything'
+                        : labels.map((label) => label.name).join(', '),
+                onTap: onLabels,
               ),
               tile(
                 key: const ValueKey('chapter-actions-lyrics'),

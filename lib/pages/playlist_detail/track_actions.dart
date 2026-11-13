@@ -73,6 +73,10 @@ class _TrackActions {
                     ),
                   ) ??
                   track;
+              final labels = carriedLabels(
+                sheetRef.watch(labelsProvider).valueOrNull ?? const [],
+                decodeLabelUids(live.labelUids),
+              );
               return StatefulBuilder(
                 builder: (sheetContext, setSheetState) {
                   final alwaysSkip = alwaysSkipOverride ?? live.alwaysSkip;
@@ -83,7 +87,7 @@ class _TrackActions {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        _TrackSheetHeader(track: live),
+                        _TrackSheetHeader(track: live, labels: labels),
                         const Divider(height: 1, color: Color(0xFF3A3A3A)),
                         Flexible(
                           child: ListView(
@@ -93,6 +97,7 @@ class _TrackActions {
                             children: _trackActionTiles(
                               sheetContext,
                               live,
+                              labels: labels,
                               alwaysSkip: alwaysSkip,
                               onAlwaysSkipChanged: (value) async {
                                 setSheetState(() => alwaysSkipOverride = value);
@@ -131,6 +136,7 @@ class _TrackActions {
   List<Widget> _trackActionTiles(
     BuildContext sheetContext,
     Track track, {
+    required List<Label> labels,
     required bool alwaysSkip,
     required ValueChanged<bool> onAlwaysSkipChanged,
   }) {
@@ -282,6 +288,19 @@ class _TrackActions {
         ),
         value: alwaysSkip,
         onChanged: onAlwaysSkipChanged,
+      ),
+      tile(
+        key: const ValueKey('track-actions-labels'),
+        icon: Icons.label_outline,
+        title: 'Labels…',
+        subtitle:
+            labels.isEmpty
+                ? 'Mark it with a genre, a band or anything; search finds it'
+                : labels.map((label) => label.name).join(', '),
+        onTap: () {
+          close();
+          unawaited(showTrackLabelPicker(context, ref, track));
+        },
       ),
       // Chapters, lyrics and skip segments are about the file: a track
       // without one (not downloaded yet, failed, private, removed) gets them
@@ -1319,9 +1338,12 @@ class _SheetSection extends StatelessWidget {
 /// Artwork, title and '#index · duration · status' at the top of the
 /// track options sheet.
 class _TrackSheetHeader extends StatelessWidget {
-  const _TrackSheetHeader({required this.track});
+  const _TrackSheetHeader({required this.track, this.labels = const []});
 
   final Track track;
+
+  /// The file's labels, shown as chips under its details.
+  final List<Label> labels;
 
   @override
   Widget build(BuildContext context) {
@@ -1372,6 +1394,10 @@ class _TrackSheetHeader extends StatelessWidget {
                     fontSize: 13,
                   ),
                 ),
+                if (labels.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  LabelChips(labels: labels),
+                ],
               ],
             ),
           ),

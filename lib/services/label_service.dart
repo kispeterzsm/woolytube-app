@@ -422,6 +422,65 @@ class LabelService {
     return changed;
   }
 
+  /// Gives every one of [items] label [uid], or takes it away from all of
+  /// them: a file item on the file, a chapter item on that chapter (when
+  /// the file still shows it). One transaction, each file read fresh.
+  /// Returns how many items changed.
+  Future<int> setLabelOnItems(
+    Iterable<LabelledItem> items,
+    String uid,
+    bool on,
+  ) async {
+    final wholeFiles = <int>{};
+    final chapters = <int, Set<String>>{};
+    for (final item in items) {
+      final chapter = item.chapter;
+      if (chapter == null) {
+        wholeFiles.add(item.track.id);
+      } else {
+        chapters.putIfAbsent(item.track.id, () => {}).add(chapter.id);
+      }
+    }
+    if (wholeFiles.isEmpty && chapters.isEmpty) return 0;
+    return _db.transaction(() async {
+      if (on) await _alive(uid);
+      final inUse = await _inUseUids();
+      List<String> change(List<String> current) => [
+        for (final u in current)
+          if (u != uid && inUse.contains(u)) u,
+        if (on) uid,
+      ];
+      var changed = 0;
+      for (final trackId in {...wholeFiles, ...chapters.keys}) {
+        final fresh = await _db.getTrack(trackId);
+        if (fresh == null) continue;
+        if (wholeFiles.contains(trackId)) {
+          final current = decodeLabelUids(fresh.labelUids);
+          if (current.contains(uid) != on) {
+            await _db.setTrackLabelUids(
+              trackId,
+              encodeLabelUids(change(current)),
+            );
+            changed++;
+          }
+        }
+        final chapterIds = chapters[trackId];
+        if (chapterIds == null) continue;
+        final old = ChapterData.decode(fresh.chaptersJson);
+        var next = old;
+        for (final chapter in old.active) {
+          if (!chapterIds.contains(chapter.id)) continue;
+          final current = next.labelsOf(chapter.id);
+          if (current.contains(uid) == on) continue;
+          next = next.withChapterLabels(chapter.id, change(current));
+          changed++;
+        }
+        if (!identical(next, old)) await _db.writeTrackChapters(trackId, next);
+      }
+      return changed;
+    });
+  }
+
   /// The files and chapters of the whole library that carry [uids] under
   /// [match] (see [itemsWithLabels]), by playlist and track order. Labels
   /// not in use match nothing.

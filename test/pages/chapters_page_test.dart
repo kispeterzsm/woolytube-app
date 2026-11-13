@@ -16,6 +16,7 @@ import 'package:woolytube/providers/providers.dart';
 import 'package:woolytube/services/chapter_playback.dart';
 import 'package:woolytube/services/chapter_service.dart';
 import 'package:woolytube/services/chapters.dart';
+import 'package:woolytube/services/label_service.dart';
 import 'package:woolytube/services/playback_service.dart';
 import 'package:woolytube/services/ytdlp_service.dart';
 
@@ -559,6 +560,45 @@ void main() {
     await unmount(tester);
   });
 
+  testWidgets('a chapter gets labels from its menu; they show as dots', (
+    tester,
+  ) async {
+    final labels = LabelService(db);
+    final rock = await labels.create('Rock', 0xFFE57373);
+    final track = await addTrack(chapters: youTubeChapters);
+    await pumpPage(tester, track);
+    expect(find.byKey(const ValueKey('chapter-labels-b')), findsNothing);
+
+    await openChapterOptions(tester, 'b');
+    await tester.tap(find.byKey(const ValueKey('chapter-actions-labels')));
+    await tester.pumpAndSettle();
+    expect(find.text('Chapter labels'), findsOneWidget);
+    await tester.tap(find.byKey(ValueKey('label-picker-${rock.uid}')));
+    await tester.pumpAndSettle();
+    final stored = await storedChapters(track.id);
+    expect(stored.labelsOf('b'), [rock.uid]);
+    expect(stored.labelsOf('a'), isEmpty);
+    // A label, not an edit: the YouTube chapters are still followed.
+    expect(stored.custom, isNull);
+
+    await tester.tapAt(const Offset(400, 20));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('chapter-labels-b')), findsOneWidget);
+    expect(find.byKey(const ValueKey('chapter-labels-a')), findsNothing);
+
+    // The menu shows it as a chip and by name.
+    await openChapterOptions(tester, 'b');
+    expect(find.byKey(ValueKey('label-chip-${rock.uid}')), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('chapter-actions-labels')),
+        matching: find.text('Rock'),
+      ),
+      findsOneWidget,
+    );
+    await unmount(tester);
+  });
+
   testWidgets('Edit chapters on the file that is playing opens on the '
       'chapter it plays, with its playhead where the player is', (
     tester,
@@ -916,6 +956,53 @@ void main() {
   // Last in the file: Roboto stays loaded for the rest of the run.
   group('with the phone font on a 411 dp screen', () {
     setUpAll(loadRoboto);
+
+    testWidgets('labelled chapters keep their lines whole', (tester) async {
+      final labels = LabelService(db);
+      final uids = [
+        for (final (i, name) in ['Rock', 'Live', 'Eighties', 'Ballad'].indexed)
+          (await labels.create(name, 0xFF64B5F6 + i)).uid,
+      ];
+      const fileMs = 3900000;
+      final track = await addTrack(
+        durationSeconds: fileMs ~/ 1000,
+        chapters: const ChapterData(
+              downloaded: [
+                MediaChapter(
+                  id: 'a',
+                  title: 'A song with quite a long name, by somebody else',
+                  startMs: 0,
+                  endMs: 3753456,
+                  origin: ChapterOrigin.auto,
+                  manuallyEdited: true,
+                ),
+                MediaChapter(
+                  id: 'b',
+                  title: 'Outro',
+                  startMs: 3753456,
+                  endMs: fileMs,
+                ),
+              ],
+              durationMs: fileMs,
+            )
+            .withChapterSkip('a', true)
+            .withChapterLabels('a', uids)
+            .withChapterLabels('b', uids.take(1)),
+      );
+      await pumpPage(tester, track);
+      usePhoneScreen(tester);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+
+      for (final id in ['a', 'b']) {
+        expect(find.byKey(ValueKey('chapter-labels-$id')), findsOneWidget);
+        expectNotCut(tester, find.byKey(ValueKey('chapter-times-$id')));
+        expectNotCut(tester, find.byKey(ValueKey('chapter-length-$id')));
+      }
+      // The long title wraps to its two lines as it did without labels.
+      expectNotCut(tester, find.byKey(const ValueKey('chapter-title-a')));
+      await unmount(tester);
+    });
 
     testWidgets('Share link reads its time like the header above it', (
       tester,

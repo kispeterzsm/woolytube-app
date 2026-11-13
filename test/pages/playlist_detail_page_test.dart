@@ -14,6 +14,8 @@ import 'package:woolytube/providers/providers.dart';
 import 'package:woolytube/services/chapter_playback.dart';
 import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/download_service.dart';
+import 'package:woolytube/services/label_service.dart';
+import 'package:woolytube/services/labels.dart';
 import 'package:woolytube/services/library_gate.dart';
 import 'package:woolytube/services/lyrics/lyrics_models.dart';
 import 'package:woolytube/services/lyrics/lyrics_search.dart';
@@ -40,6 +42,12 @@ void main() {
   late BehaviorSubject<List<int>> queued;
   late BehaviorSubject<List<Track>> upNext;
 
+  /// The labels in use, as the page sees them. A drift stream would leave
+  /// a timer behind when the page goes away, so tests publish them here
+  /// ([publishLabels]).
+  late BehaviorSubject<List<Label>> labelList;
+  late LabelService labels;
+
   setUp(() async {
     resetPlaylistOpenChecks();
     db = openTestDatabase();
@@ -54,7 +62,11 @@ void main() {
     syncing = BehaviorSubject<Set<int>>.seeded(const {});
     queued = BehaviorSubject<List<int>>.seeded(const []);
     upNext = BehaviorSubject<List<Track>>.seeded(const []);
+    labelList = BehaviorSubject<List<Label>>.seeded(const []);
+    labels = LabelService(db);
   });
+
+  Future<void> publishLabels() async => labelList.add(await labels.labels());
 
   tearDown(() async {
     audioPlayerOverlayHeightNotifier.value = 0;
@@ -63,6 +75,7 @@ void main() {
     await syncing.close();
     await queued.close();
     await upNext.close();
+    await labelList.close();
     await db.close();
   });
 
@@ -83,6 +96,7 @@ void main() {
     syncingPlaylistsProvider.overrideWith((ref) => syncing.stream),
     downloadQueueProvider.overrideWith((ref) => queued.stream),
     lyricsSearchProvider.overrideWithValue(lyrics),
+    labelsProvider.overrideWith((ref) => labelList.stream),
   ];
 
   List<Override> overrides(
@@ -818,6 +832,7 @@ void main() {
       'Play next',
       'Add to queue',
       'Always skip',
+      'Labels…',
       'Chapters…',
       'Lyrics…',
       'Skip segments…',
@@ -861,6 +876,225 @@ void main() {
       find.text('Turn off Always skip to queue this track'),
       findsOneWidget,
     );
+  });
+
+  testWidgets('the track menu labels the file; New label makes one and puts '
+      'it on', (tester) async {
+    useTallScreen(tester);
+    final rock = await labels.create('Rock', 0xFFE57373);
+    await publishLabels();
+    final audio = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      title: 'Normal song',
+      status: 'complete',
+      filePath: '/tmp/normal.m4a',
+    );
+    // The video copy of the same video, elsewhere: labelled apart.
+    final videos = await insertTestPlaylist(db, url: 'videos', name: 'Videos');
+    final video = await insertTestTrack(
+      db,
+      playlistId: videos.id,
+      title: 'Normal song',
+      status: 'complete',
+      filePath: '/tmp/normal.mp4',
+    );
+    await pumpPage(tester, tracks: [audio]);
+
+    await tester.tap(find.byKey(ValueKey('track-more-${audio.id}')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('track-actions-labels')));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<Text>(find.byKey(const ValueKey('label-picker-subject')))
+          .data,
+      'Normal song',
+    );
+    await tester.tap(find.byKey(ValueKey('label-picker-${rock.uid}')));
+    await tester.pumpAndSettle();
+    expect(decodeLabelUids((await db.getTrack(audio.id))!.labelUids), [
+      rock.uid,
+    ]);
+    expect((await db.getTrack(video.id))!.labelUids, isNull);
+
+    // A new label from the picker: named, colored, and on at once.
+    await tester.tap(find.byKey(const ValueKey('label-picker-new')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('label-editor-name')),
+      'Eighties',
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('label-color-5')));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('label-editor-save')));
+    await tester.pumpAndSettle();
+    final made = (await labels.labels()).last;
+    expect((made.name, made.color), ('Eighties', 0xFF64B5F6));
+    expect(decodeLabelUids((await db.getTrack(audio.id))!.labelUids), [
+      rock.uid,
+      made.uid,
+    ]);
+
+    // Off again.
+    await tester.tap(find.byKey(ValueKey('label-picker-${rock.uid}')));
+    await tester.pumpAndSettle();
+    expect(decodeLabelUids((await db.getTrack(audio.id))!.labelUids), [
+      made.uid,
+    ]);
+
+    // A name in use is refused in the dialog.
+    await tester.tap(find.byKey(const ValueKey('label-picker-new')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('label-editor-name')),
+      'rock',
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('label-editor-save')));
+    await tester.pumpAndSettle();
+    expect(find.text('There is already a label "Rock".'), findsOneWidget);
+    expect((await labels.labels()).length, 2);
+  });
+
+  testWidgets('label chips: everything with the label, all or any, Play all '
+      'plays files whole and chapters alone, and Label all', (tester) async {
+    useTallScreen(tester);
+    final rock = await labels.create('Rock', 0xFFE57373);
+    final live = await labels.create('Live', 0xFF64B5F6);
+    final unused = await labels.create('Jazz', 0xFF81C784);
+    await publishLabels();
+    var index = 0;
+    Future<Track> track(
+      String title, {
+      List<String> fileLabels = const [],
+      Map<String, List<String>> chapterLabels = const {},
+    }) {
+      index++;
+      return insertTestTrack(
+        db,
+        playlistId: playlist.id,
+        index: index,
+        videoId: 'video-$index',
+        title: title,
+        status: 'complete',
+        filePath: '/tmp/$index.m4a',
+        labelUids: encodeLabelUids(fileLabels),
+        chaptersJson:
+            chapterLabels.isEmpty
+                ? null
+                : ChapterData(
+                  downloaded: const [
+                    MediaChapter(id: 'a', title: 'One', startMs: 0, endMs: 1),
+                    MediaChapter(id: 'b', title: 'Two', startMs: 1, endMs: 2),
+                  ],
+                  chapterLabels: chapterLabels,
+                ).encode(),
+      );
+    }
+
+    final song = await track('Rock song', fileLabels: [rock.uid]);
+    final liveSong = await track(
+      'Live rock song',
+      fileLabels: [rock.uid, live.uid],
+    );
+    final plain = await track('Plain song');
+    final mix = await track(
+      'A mix',
+      chapterLabels: {
+        'b': [rock.uid],
+      },
+    );
+    final tracks = [song, liveSong, plain, mix];
+    await pumpPage(tester, tracks: tracks);
+    Finder row(Track t) => find.byKey(ValueKey('track-row-${t.id}'));
+
+    // Dots on the labelled rows' thumbnails, none on the others.
+    expect(find.byKey(ValueKey('track-labels-${song.id}')), findsOneWidget);
+    expect(find.byKey(ValueKey('track-labels-${plain.id}')), findsNothing);
+
+    await tester.tap(find.byTooltip('Search tracks'));
+    await tester.pumpAndSettle();
+    // Only labels something here has.
+    expect(
+      find.byKey(ValueKey('search-filter-label-${unused.uid}')),
+      findsNothing,
+    );
+    await tester.tap(find.byKey(ValueKey('search-filter-label-${rock.uid}')));
+    await tester.pumpAndSettle();
+    expect(row(song), findsOneWidget);
+    expect(row(liveSong), findsOneWidget);
+    expect(row(plain), findsNothing);
+    expect(row(mix), findsOneWidget);
+    // The mix is there for its chapter.
+    expect(
+      find.descendant(of: row(mix), matching: find.textContaining('Two')),
+      findsOneWidget,
+    );
+    expect(
+      tester
+          .widget<Text>(
+            find.byKey(const ValueKey('playlist-search-result-count')),
+          )
+          .data,
+      '3 tracks',
+    );
+    await tester.tap(find.text('Play all'));
+    await tester.pump();
+    expect(playback.playedEntries.single, [
+      QueueEntry(song),
+      QueueEntry(liveSong),
+      QueueEntry(mix, const {'b'}),
+    ]);
+
+    // Two labels: both by default, either one on request.
+    expect(find.byKey(const ValueKey('search-label-match')), findsNothing);
+    await tester.tap(find.byKey(ValueKey('search-filter-label-${live.uid}')));
+    await tester.pumpAndSettle();
+    expect(row(song), findsNothing);
+    expect(row(liveSong), findsOneWidget);
+    expect(row(mix), findsNothing);
+    expect(find.text('All labels'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('search-label-match')));
+    await tester.pumpAndSettle();
+    expect(find.text('Any label'), findsOneWidget);
+    expect(row(song), findsOneWidget);
+    expect(row(liveSong), findsOneWidget);
+    expect(row(mix), findsOneWidget);
+    expect(row(plain), findsNothing);
+
+    // Words narrow the labelled results.
+    await tester.enterText(find.byType(TextField), 'live');
+    await tester.pumpAndSettle();
+    expect(row(liveSong), findsOneWidget);
+    expect(row(song), findsNothing);
+
+    // Label all: every result at once.
+    await tester.enterText(find.byType(TextField), '');
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('search-results-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('search-label-all')));
+    await tester.pumpAndSettle();
+    expect(find.text('2 files and 1 chapter'), findsOneWidget);
+    await tester.tap(find.byKey(ValueKey('label-picker-${unused.uid}')));
+    await tester.pumpAndSettle();
+    expect(
+      decodeLabelUids((await db.getTrack(song.id))!.labelUids),
+      contains(unused.uid),
+    );
+    expect(
+      decodeLabelUids((await db.getTrack(liveSong.id))!.labelUids),
+      contains(unused.uid),
+    );
+    expect(
+      ChapterData.decode(
+        (await db.getTrack(mix.id))!.chaptersJson,
+      ).labelsOf('b'),
+      [rock.uid, unused.uid],
+    );
+    expect((await db.getTrack(plain.id))!.labelUids, isNull);
   });
 
   testWidgets('a track without a file offers Download, a failed one Retry', (
@@ -2486,6 +2720,49 @@ void main() {
       await tester.pump(const Duration(milliseconds: 500));
       // The cut name and, above it, the whole one.
       expect(find.text(long), findsNWidgets(2));
+    });
+
+    testWidgets('labelled tracks keep their lines whole', (tester) async {
+      usePhoneScreen(tester);
+      final uids = [
+        for (final (i, name)
+            in ['Rock', 'Live', 'Eighties', 'Ballad', 'Synth'].indexed)
+          (await labels.create(name, 0xFF64B5F6 + i)).uid,
+      ];
+      await publishLabels();
+      final tracks = [
+        for (var i = 1; i <= 3; i++)
+          await insertTestTrack(
+            db,
+            playlistId: playlist.id,
+            index: i,
+            videoId: 'video-$i',
+            title:
+                'A song with quite a long name, by somebody with a long '
+                'name too $i',
+            status: 'complete',
+            filePath: '/tmp/$i.m4a',
+            durationSeconds: 3753,
+            labelUids: encodeLabelUids(uids.take(i * 2)),
+            alwaysSkip: i == 3,
+          ),
+      ];
+      await pumpPage(tester, tracks: tracks);
+      expect(tester.takeException(), isNull);
+      for (final track in tracks) {
+        expect(
+          find.byKey(ValueKey('track-labels-${track.id}')),
+          findsOneWidget,
+        );
+        expectNotCut(
+          tester,
+          find.byKey(ValueKey('track-subtitle-${track.id}')),
+        );
+      }
+      // Two lines of title, as without labels: the dots are on the
+      // thumbnail, not in the text.
+      final title = find.textContaining('A song with quite a long name');
+      expect(renderedLines(title.first).single, hasLength(2));
     });
 
     testWidgets('an Always skip track keeps its grey line whole', (

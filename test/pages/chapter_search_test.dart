@@ -70,6 +70,10 @@ void main() {
           ProviderScope(
             overrides: [
               databaseProvider.overrideWithValue(db),
+              // No labels; a drift stream would leave a timer behind.
+              labelsProvider.overrideWith(
+                (ref) => Stream.value(const <Label>[]),
+              ),
               metadataServiceProvider.overrideWithValue(_Metadata()),
               playlistServiceProvider.overrideWithValue(_Playlists()),
               updateServiceProvider.overrideWithValue(_Updates()),

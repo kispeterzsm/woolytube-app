@@ -3,32 +3,77 @@ import 'dart:math' as math;
 import '../database/database.dart';
 import 'chapter_playback.dart';
 import 'chapters.dart';
+import 'labels.dart';
 import 'lyrics/lyrics_models.dart';
 import 'lyrics/lyrics_text.dart';
 import 'track_title.dart';
 
 /// What a search compares against, computed once per [Track] object: the
-/// folded title (see [foldForSearch]) and the active chapters with folded
-/// titles. Track objects are immutable and the track streams only emit new
-/// ones when a track changed, so a search over a long playlist decodes no
-/// chapter JSON and folds no title on later keystrokes.
+/// folded title (see [foldForSearch]), the active chapters with folded
+/// titles and the labels. Track objects are immutable and the track streams
+/// only emit new ones when a track changed, so a search over a long
+/// playlist decodes no chapter JSON and folds no title on later keystrokes.
 class _SearchEntry {
   _SearchEntry(Track track)
     : title = foldForSearch(track.displayTitle),
       index = track.index.toString(),
-      _chaptersJson = track.chaptersJson;
+      _chaptersJson = track.chaptersJson,
+      _labelUids = track.labelUids;
 
   final String title;
   final String index;
   final String? _chaptersJson;
+  final String? _labelUids;
+  ChapterData? _data;
   List<(String, MediaChapter)>? _chapters;
+  List<String>? _fileLabels;
+
+  ChapterData get _chapterData => _data ??= ChapterData.decode(_chaptersJson);
+
+  /// Whether a chapter may carry a label, without decoding the chapters
+  /// of a file none of whose chapters does (most files).
+  late final bool _hasChapterLabels =
+      _chaptersJson != null &&
+      _chaptersJson.contains('"chapterLabels"') &&
+      _chapterData.chapterLabels.isNotEmpty;
 
   /// Active chapters in timeline order, each with its folded title.
   List<(String, MediaChapter)> get chapters =>
       _chapters ??= [
-        for (final chapter in ChapterData.decode(_chaptersJson).active)
+        for (final chapter in _chapterData.active)
           (foldForSearch(chapter.title), chapter),
       ];
+
+  /// The labels of the file itself (uids, deleted labels included).
+  List<String> get fileLabels => _fileLabels ??= decodeLabelUids(_labelUids);
+
+  /// The labels of active chapter [chapterId].
+  List<String> chapterLabels(String chapterId) =>
+      _hasChapterLabels ? _chapterData.labelsOf(chapterId) : const [];
+
+  /// Every label uid on the file or one of its active chapters.
+  Iterable<String> get allLabels sync* {
+    yield* fileLabels;
+    if (!_hasChapterLabels) return;
+    for (final chapter in _chapterData.active) {
+      yield* _chapterData.labelsOf(chapter.id);
+    }
+  }
+
+  /// The active chapters, in timeline order, whose own labels satisfy
+  /// [filters].
+  List<MediaChapter> chaptersLabelled(SearchFilters filters) {
+    if (!_hasChapterLabels) return const [];
+    return [
+      for (final chapter in _chapterData.active)
+        if (labelsMatch(
+          _chapterData.labelsOf(chapter.id),
+          filters.labels,
+          filters.labelMatch,
+        ))
+          chapter,
+    ];
+  }
 
   /// The active chapters whose titles match [query], in timeline order,
   /// and the best rank among them.
@@ -99,23 +144,55 @@ class SearchQuery {
   int get hashCode => phrase.hashCode;
 }
 
-/// Filters a search applies on top of its words. Only lyrics so far; label
-/// and playlist filters belong here too.
+/// Filters a search applies on top of its words: lyrics, and the owner's
+/// labels.
 class SearchFilters {
-  const SearchFilters({this.lyrics = false});
+  const SearchFilters({
+    this.lyrics = false,
+    this.labels = const {},
+    this.labelMatch = LabelMatch.all,
+  });
 
   /// Also match lyric and transcript lines. Off whenever search opens.
   final bool lyrics;
 
-  SearchFilters copyWith({bool? lyrics}) =>
-      SearchFilters(lyrics: lyrics ?? this.lyrics);
+  /// Only files and chapters that carry these labels (uids), the file's
+  /// own labels and each chapter's apart. Empty: no label filter.
+  final Set<String> labels;
+
+  /// Whether an item needs every label of [labels] or any one of them.
+  final LabelMatch labelMatch;
+
+  bool get hasLabels => labels.isNotEmpty;
+
+  SearchFilters copyWith({
+    bool? lyrics,
+    Set<String>? labels,
+    LabelMatch? labelMatch,
+  }) => SearchFilters(
+    lyrics: lyrics ?? this.lyrics,
+    labels: labels ?? this.labels,
+    labelMatch: labelMatch ?? this.labelMatch,
+  );
+
+  /// These filters with only the labels of [known] kept, so a label
+  /// deleted while chosen stops filtering. Returns this when all are known.
+  SearchFilters withLabelsIn(Set<String> known) {
+    if (labels.every(known.contains)) return this;
+    return copyWith(labels: labels.where(known.contains).toSet());
+  }
 
   @override
   bool operator ==(Object other) =>
-      other is SearchFilters && other.lyrics == lyrics;
+      other is SearchFilters &&
+      other.lyrics == lyrics &&
+      other.labelMatch == labelMatch &&
+      other.labels.length == labels.length &&
+      other.labels.containsAll(labels);
 
   @override
-  int get hashCode => lyrics.hashCode;
+  int get hashCode =>
+      Object.hash(lyrics, labelMatch, Object.hashAllUnordered(labels));
 }
 
 /// Why a track is in the results.
@@ -131,6 +208,9 @@ enum SearchReason {
 
   /// Only a lyric or transcript line (the Lyrics filter is on).
   lyrics,
+
+  /// The file's own labels, for an empty search with label filters.
+  label,
 }
 
 /// One track in the search results.
@@ -147,7 +227,8 @@ class SearchHit {
   final SearchReason reason;
 
   /// The active chapters whose titles match, in timeline order. Also set
-  /// when the title matched too.
+  /// when the title matched too. With label filters, only chapters that
+  /// carry the labels (when the file itself does not).
   final List<MediaChapter> chapters;
 
   /// The track's best matching lyric line, when lyrics are searched.
@@ -166,14 +247,15 @@ class SearchHit {
   /// plays it.
   bool get playable => track.status == 'complete' && !track.alwaysSkip;
 
-  /// What Play all queues for it: a file found by its title or number
-  /// whole, one found only by chapter titles just those chapters, and one
-  /// found only by a lyric line the chapter holding that line (or the
-  /// whole file without chapters).
+  /// What Play all queues for it: a file found by its title, number or
+  /// own labels whole, one found only by chapter titles or chapter labels
+  /// just those chapters, and one found only by a lyric line the chapter
+  /// holding that line (or the whole file without chapters).
   QueueEntry get queueEntry {
     switch (reason) {
       case SearchReason.title:
       case SearchReason.number:
+      case SearchReason.label:
         return QueueEntry(track);
       case SearchReason.chapter:
         return QueueEntry(track, {for (final c in chapters) c.id});
@@ -202,9 +284,70 @@ int? _textRank(String text, SearchQuery query) {
 bool matchesSearchText(String text, SearchQuery query) =>
     query.isEmpty || _textRank(foldForSearch(text), query) != null;
 
-/// [track] as a search hit for [query], or null when it does not match.
-/// [lyric] is its best lyric line, if lyrics are searched.
-SearchHit? _hitFor(Track track, SearchQuery query, LyricsHit? lyric) {
+/// [track] as a search hit for [query] and the label filters of
+/// [filters], or null when it does not match. [lyric] is its best lyric
+/// line, if lyrics are searched.
+///
+/// A file that carries the labels itself is found as by [query] alone. One
+/// whose chapters carry them is found through those chapters only: an
+/// empty search lists them, a title match keeps them (or those of them
+/// whose titles match too), a chapter title match keeps the matching ones
+/// that carry the labels, and a lyric line counts when its chapter does.
+SearchHit? _hitFor(
+  Track track,
+  SearchQuery query,
+  LyricsHit? lyric, [
+  SearchFilters filters = const SearchFilters(),
+]) {
+  final hit = _textHitFor(track, query, lyric);
+  if (hit == null || !filters.hasLabels) return hit;
+  final entry = _entryFor(track);
+  if (labelsMatch(entry.fileLabels, filters.labels, filters.labelMatch)) {
+    return query.isEmpty
+        ? SearchHit(track: track, reason: SearchReason.label)
+        : hit;
+  }
+  final labelled = entry.chaptersLabelled(filters);
+  if (labelled.isEmpty) return null;
+  if (query.isEmpty) {
+    return SearchHit(
+      track: track,
+      reason: SearchReason.chapter,
+      chapters: labelled,
+    );
+  }
+  final ids = {for (final chapter in labelled) chapter.id};
+  final both = [
+    for (final chapter in hit.chapters)
+      if (ids.contains(chapter.id)) chapter,
+  ];
+  switch (hit.reason) {
+    case SearchReason.lyrics:
+      final chapter = lyricsHitTarget(track, lyric!).chapter;
+      return chapter != null && ids.contains(chapter.id) ? hit : null;
+    case SearchReason.chapter:
+      if (both.isEmpty) return null;
+      return SearchHit(
+        track: track,
+        reason: SearchReason.chapter,
+        chapters: both,
+        lyric: lyric,
+        rank: hit.rank,
+      );
+    case SearchReason.title:
+    case SearchReason.number:
+    case SearchReason.label:
+      return SearchHit(
+        track: track,
+        reason: SearchReason.chapter,
+        chapters: both.isEmpty ? labelled : both,
+        lyric: lyric,
+        rank: hit.rank,
+      );
+  }
+}
+
+SearchHit? _textHitFor(Track track, SearchQuery query, LyricsHit? lyric) {
   if (query.isEmpty) return SearchHit(track: track, reason: SearchReason.title);
   final entry = _entryFor(track);
   var reason = SearchReason.title;
@@ -245,7 +388,9 @@ SearchHit? _hitFor(Track track, SearchQuery query, LyricsHit? lyric) {
 
 /// Searches [tracks] for [query]: titles, track numbers and chapter titles,
 /// and with [SearchFilters.lyrics] also [lyricHits] (only then are they
-/// used, so callers need not search lyrics while the filter is off).
+/// used, so callers need not search lyrics while the filter is off). With
+/// label filters only what carries the labels is found (see [_hitFor]);
+/// an empty query then lists everything that does.
 ///
 /// With [ranked], better matches come first (see [SearchHit.rank]), then
 /// by [playlistOrder] (playlist id → position on the home screen), track
@@ -267,7 +412,7 @@ List<SearchHit> searchLibrary(
   }
   final hits = <SearchHit>[
     for (final track in tracks)
-      if (_hitFor(track, query, lyrics[track.id]) case final hit?) hit,
+      if (_hitFor(track, query, lyrics[track.id], filters) case final hit?) hit,
   ];
   if (!ranked || query.isEmpty && playlistOrder.isEmpty) return hits;
   final position = {for (var i = 0; i < hits.length; i++) hits[i]: i};
@@ -288,6 +433,52 @@ List<QueueEntry> searchQueueEntries(Iterable<SearchHit> hits) => [
   for (final hit in hits)
     if (hit.playable) hit.queueEntry,
 ];
+
+/// What "Label all" labels for [hits], downloaded or not: the same files
+/// and chapters Play all would play ([SearchHit.queueEntry]): a file found
+/// whole gets the label on the file, one found through chapters on those
+/// chapters.
+List<LabelledItem> searchLabelTargets(Iterable<SearchHit> hits) {
+  final items = <LabelledItem>[];
+  for (final hit in hits) {
+    final ids = hit.queueEntry.chapterIds;
+    if (ids == null) {
+      items.add(LabelledItem(hit.track));
+      continue;
+    }
+    for (final (_, chapter) in _entryFor(hit.track).chapters) {
+      if (ids.contains(chapter.id)) items.add(LabelledItem(hit.track, chapter));
+    }
+  }
+  return items;
+}
+
+/// Whether a result for [track] (or its [chapter]) passes the label
+/// filters of [filters]: always without any; otherwise the file's own
+/// labels, or [chapter]'s.
+bool searchLabelsAllow(
+  Track track,
+  MediaChapter? chapter,
+  SearchFilters filters,
+) {
+  if (!filters.hasLabels) return true;
+  final entry = _entryFor(track);
+  if (labelsMatch(entry.fileLabels, filters.labels, filters.labelMatch)) {
+    return true;
+  }
+  return chapter != null &&
+      labelsMatch(
+        entry.chapterLabels(chapter.id),
+        filters.labels,
+        filters.labelMatch,
+      );
+}
+
+/// The label uids [tracks] (the files or their active chapters) carry, so
+/// a search offers only labels that can find something.
+Set<String> labelUidsUsedBy(Iterable<Track> tracks) => {
+  for (final track in tracks) ..._entryFor(track).allLabels,
+};
 
 /// Where the words of [query] are in raw [text], merged and in order, for
 /// highlighting.

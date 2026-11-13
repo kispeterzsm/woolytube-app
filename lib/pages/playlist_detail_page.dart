@@ -22,6 +22,7 @@ import '../services/chapter_playback.dart';
 import '../services/chapters.dart';
 import '../services/download_errors.dart';
 import '../services/download_service.dart';
+import '../services/labels.dart';
 import '../services/library_gate.dart';
 import '../services/lyrics/lyrics_models.dart';
 import '../services/media_thumbnail_service.dart';
@@ -32,6 +33,7 @@ import '../services/track_search.dart';
 import '../services/track_status_labels.dart';
 import '../services/video_quality.dart';
 import '../services/youtube_links.dart';
+import '../widgets/label_widgets.dart';
 import '../widgets/lyrics_line_text.dart';
 import '../widgets/mobile_data_download_guard.dart';
 import '../widgets/search_tools.dart';
@@ -99,7 +101,7 @@ class _TrackListView {
     this.filters = const SearchFilters(),
     this.lyricHits = const [],
   ]) {
-    if (query.isEmpty) {
+    if (!searching) {
       hits = const [];
       visible = tracks;
       chapterMatches = const {};
@@ -156,6 +158,12 @@ class _TrackListView {
   final SearchQuery query;
   final SearchFilters filters;
 
+  /// Whether the list is filtered: words typed or labels chosen.
+  bool get searching => !query.isEmpty || filters.hasLabels;
+
+  /// The labels the files and chapters of this playlist carry.
+  late final Set<String> labelsUsed = labelUidsUsedBy(tracks);
+
   /// Lyric lines matching [query], searched while the Lyrics filter is on.
   final List<LyricsHit> lyricHits;
 
@@ -164,6 +172,9 @@ class _TrackListView {
 
   /// What Play all queues for [hits].
   late final List<QueueEntry> resultEntries = searchQueueEntries(hits);
+
+  /// What "Label all" labels for [hits].
+  List<LabelledItem> get labelTargets => searchLabelTargets(hits);
 
   /// The best lyric line of each track whose lyrics match [query].
   late final Map<int, LyricsHit> lyricMatches;
@@ -432,14 +443,21 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
         _searchFilters.lyrics && _lyricHitsQuery == _query.phrase
             ? _lyricHits
             : const <LyricsHit>[];
+    // A label deleted while chosen stops filtering.
+    final filters =
+        _searchFilters.hasLabels
+            ? _searchFilters.withLabelsIn(
+              ref.read(labelsByUidProvider).keys.toSet(),
+            )
+            : _searchFilters;
     if (cached != null &&
         identical(cached.tracks, tracks) &&
         cached.query == _query &&
-        cached.filters == _searchFilters &&
+        cached.filters == filters &&
         identical(cached.lyricHits, lyrics)) {
       return cached;
     }
-    return _view = _TrackListView(tracks, _query, _searchFilters, lyrics);
+    return _view = _TrackListView(tracks, _query, filters, lyrics);
   }
 
   // ---------------------------------------------------------------------
@@ -739,8 +757,20 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   /// them at once.
   void _onFiltersChanged(SearchFilters filters) {
     final lyricsChanged = filters.lyrics != _searchFilters.lyrics;
+    final labelsChanged =
+        filters.copyWith(lyrics: _searchFilters.lyrics) != _searchFilters;
     setState(() => _searchFilters = filters);
     if (lyricsChanged) _scheduleLyricsSearch(now: true);
+    if (labelsChanged) {
+      // A new set of results starts at the top, like new words.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final position = _position;
+        if (position != null && position.pixels != 0) {
+          _listController!.jumpTo(0);
+        }
+        _updateJumpToPlaying();
+      });
+    }
   }
 
   /// Searches this playlist's lyrics for the query once typing pauses, when
@@ -836,8 +866,15 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     );
   }
 
-  /// Plays the search results: files found by title or number whole, those
-  /// found only by chapter titles just those chapters.
+  /// Labels every search result at once (see [searchLabelTargets]).
+  void _labelResults(_TrackListView view) {
+    FocusManager.instance.primaryFocus?.unfocus();
+    unawaited(showLabelAllPicker(context, ref, view.labelTargets));
+  }
+
+  /// Plays the search results: files found by title, number or own labels
+  /// whole, those found only by chapter titles or chapter labels just those
+  /// chapters.
   void _playResults(List<QueueEntry> entries) {
     FocusManager.instance.primaryFocus?.unfocus();
     _forceFollowUntil = DateTime.now().add(_forceFollowWindow);
@@ -1034,6 +1071,22 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   PreferredSizeWidget _buildAppBar(Playlist? playlist, _TrackListView? view) {
     final name = playlist?.name ?? widget.initialName ?? '';
     final lyricsLabel = _showSearch ? _lyricsFilterLabel : null;
+    final allLabels = ref.watch(labelsProvider).valueOrNull ?? const <Label>[];
+    // Only labels something here has (or that are chosen) can find
+    // anything in this playlist.
+    final used =
+        _showSearch && allLabels.isNotEmpty
+            ? view?.labelsUsed ?? const <String>{}
+            : const <String>{};
+    final filterLabels =
+        _showSearch
+            ? [
+              for (final label in allLabels)
+                if (used.contains(label.uid) ||
+                    _searchFilters.labels.contains(label.uid))
+                  label,
+            ]
+            : const <Label>[];
     // Room for two lines of the name, also with large text.
     final toolbarHeight = math.max(
       kToolbarHeight,
@@ -1045,7 +1098,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     return AppBar(
       toolbarHeight: toolbarHeight,
       bottom:
-          lyricsLabel == null
+          lyricsLabel == null && filterLabels.isEmpty
               ? null
               : PreferredSize(
                 preferredSize: const Size.fromHeight(44),
@@ -1056,6 +1109,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                     child: SearchFilterChips(
                       filters: _searchFilters,
                       lyricsLabel: lyricsLabel,
+                      labels: filterLabels,
                       onChanged: _onFiltersChanged,
                     ),
                   ),
@@ -1205,7 +1259,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   }
 
   Widget _buildHeader(_TrackListView view, Playlist? playlist) {
-    final filtering = !_query.isEmpty;
+    final filtering = view.searching;
     final entries = view.resultEntries;
     final isVideoPlaylist = playlist?.audioOnly == false;
     final playback = ref.read(playbackServiceProvider);
@@ -1235,6 +1289,10 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                                     playback,
                                     entries,
                                   ),
+                              onLabelAll:
+                                  view.hits.isEmpty
+                                      ? null
+                                      : () => _labelResults(view),
                             ),
                           )
                           : FittedBox(
@@ -1863,7 +1921,7 @@ class _SummaryLine extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final searching = !view.query.isEmpty;
+    final searching = view.searching;
     final count = view.hits.length;
     if (searching && count == 0) return const SizedBox.shrink();
     return Padding(

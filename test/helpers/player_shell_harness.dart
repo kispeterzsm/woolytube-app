@@ -271,6 +271,8 @@ Future<PlayerShellHarness> pumpPlayerShell(
             color: Colors.indigo,
           ),
         ),
+        // No labels; a drift stream would leave a timer behind.
+        labelsProvider.overrideWith((ref) => Stream.value(const <Label>[])),
         ...overrides,
       ],
       child: MaterialApp(

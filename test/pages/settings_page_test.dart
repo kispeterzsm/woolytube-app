@@ -98,6 +98,29 @@ void main() {
     expect(top(find.byKey(const ValueKey('debug-log'))), greaterThan(tops[5]));
   });
 
+  testWidgets('Labels sit under Library, between downloads and backup', (
+    tester,
+  ) async {
+    await pumpSettings(tester);
+    double top(Finder finder) => tester.getTopLeft(finder).dy;
+    final library = top(find.widgetWithText(SettingsSectionHeader, 'Library'));
+    expect(
+      library,
+      greaterThan(
+        top(
+          find.widgetWithText(SettingsSectionHeader, 'Downloads and updates'),
+        ),
+      ),
+    );
+    expect(
+      top(find.byKey(const ValueKey('settings-labels'))),
+      inExclusiveRange(
+        library,
+        top(find.widgetWithText(SettingsSectionHeader, 'Backup and restore')),
+      ),
+    );
+  });
+
   testWidgets('subtitles are a playlist setting, not an app setting', (
     tester,
   ) async {
