@@ -225,6 +225,55 @@ void main() {
       await unmount(tester);
     });
 
+    testWidgets('is greyed out with fewer than two chapters to play', (
+      tester,
+    ) async {
+      final one = await addTrack(
+        chapters: const ChapterData(
+          downloaded: [
+            MediaChapter(id: 'a', title: 'Only', startMs: 0, endMs: 180000),
+          ],
+          durationMs: 180000,
+        ),
+      );
+      await pumpPage(tester, one);
+      expect(shuffleEnabled(tester), isFalse);
+      expect(find.textContaining('only one chapter'), findsOneWidget);
+      await unmount(tester);
+
+      // Two chapters, one marked Always skip: one is left to play.
+      final skipped = await addTrack(
+        chapters: youTubeChapters.withChapterSkip('a', true),
+        videoId: 'video-2',
+      );
+      await pumpPage(tester, skipped);
+      expect(shuffleEnabled(tester), isFalse);
+      expect(
+        find.textContaining(
+          'Only one chapter of this video is not set to '
+          'Always skip',
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('"Shuffle chapters", which is'), findsNothing);
+      await tester.tap(segment('Shuffle'), warnIfMissed: false);
+      await tester.pumpAndSettle();
+      expect((await storedChapters(skipped.id)).shuffleChapters, isNull);
+
+      // Taking the mark off makes it a choice again.
+      await db.writeTrackChapters(
+        skipped.id,
+        (await storedChapters(skipped.id)).withChapterSkip('a', false),
+      );
+      await tester.pumpAndSettle();
+      expect(shuffleEnabled(tester), isTrue);
+      expect(
+        find.textContaining('"Shuffle chapters", which is'),
+        findsOneWidget,
+      );
+      await unmount(tester);
+    });
+
     testWidgets('is not shown for a file without chapters', (tester) async {
       final track = await addTrack();
       await pumpPage(tester, track);

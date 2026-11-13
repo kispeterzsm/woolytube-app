@@ -725,6 +725,23 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
       true => _ShuffleChapters.shuffle,
       false => _ShuffleChapters.noShuffle,
     };
+    // Chapters marked Always skip leave the shuffle; with fewer than two
+    // left there is nothing to mix.
+    final unskipped = data.active.where((c) => !data.isSkipped(c.id)).length;
+    final shuffleNote =
+        !chaptersOn
+            ? 'This video plays as one whole file, so its chapters can\'t '
+                'be shuffled.'
+            : data.active.length == 1
+            ? 'This video has only one chapter, so there is nothing to '
+                'shuffle.'
+            : unskipped == 0
+            ? 'All chapters of this video are set to Always skip, so there '
+                'is nothing to shuffle.'
+            : unskipped == 1
+            ? 'Only one chapter of this video is not set to Always skip, so '
+                'there is nothing to shuffle.'
+            : null;
     final durationMs = ChapterService.knownDurationMs(track);
     // Sets the clock format of the times listed (h:mm:ss for an hour or
     // more), so they all read alike.
@@ -870,9 +887,9 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                           ),
                         ],
                         selected: {shuffleMode},
-                        // A file that plays whole has no chapters to mix.
+                        // Greyed out when there is nothing to mix.
                         onSelectionChanged:
-                            _busy || !chaptersOn
+                            _busy || shuffleNote != null
                                 ? null
                                 : (selection) => _run(
                                   () => _setShuffle(track, selection.first),
@@ -883,12 +900,10 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
                     child: Text(
-                      chaptersOn
-                          ? 'Applies when shuffle is on. Default follows the '
+                      shuffleNote ??
+                          'Applies when shuffle is on. Default follows the '
                               'playlist setting "Shuffle chapters", which is '
-                              '${playlistShuffle ? 'on' : 'off'}.'
-                          : 'This video plays as one whole file, so its '
-                              'chapters can\'t be shuffled.',
+                              '${playlistShuffle ? 'on' : 'off'}.',
                       style: const TextStyle(
                         color: Color(0xFF999999),
                         fontSize: 13,
