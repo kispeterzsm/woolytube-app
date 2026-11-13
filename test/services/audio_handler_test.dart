@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:rxdart/rxdart.dart';
 import 'package:woolytube/database/database.dart';
 import 'package:woolytube/services/audio_handler.dart';
+import 'package:woolytube/services/chapters.dart';
 import 'package:woolytube/services/playback_notification_controller.dart';
 
 import '../helpers/test_database.dart';
@@ -217,6 +218,45 @@ void main() {
       Uri.parse('https://i.ytimg.com/vi/fallback-video-id/hqdefault.jpg'),
     );
     expect(await handler.getChildren('playlist:nope'), isEmpty);
+  });
+
+  test('the car browser shows a stand-in title like the app does', () async {
+    // A row that still holds the literal "null" (stored before the fix)
+    // is listed by its file name, never as "null".
+    final nullTitled = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 2,
+      videoId: 'null-video',
+      title: 'null',
+      status: 'complete',
+      filePath: '/tmp/00002_Real song.mp4',
+    );
+    // A chapter's album is the file's title, with the same fallback.
+    final withChapters = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      index: 3,
+      videoId: 'chapter-video',
+      title: 'None',
+      status: 'complete',
+      filePath: '/tmp/00003_None.mp4',
+      chaptersEnabled: true,
+      chaptersJson:
+          const ChapterData(
+            downloaded: [
+              MediaChapter(id: 'c1', title: 'Intro', startMs: 0, endMs: 1000),
+            ],
+          ).encode(),
+    );
+    final items = await handler.getChildren('playlist:${playlist.id}');
+    final byId = {for (final i in items) i.id: i};
+    final whole = byId['track:${nullTitled.id}:${playlist.id}']!;
+    expect(whole.title, 'Real song');
+    expect(whole.album, isNull);
+    final chapter = byId['chapter:${withChapters.id}:${playlist.id}:c1']!;
+    expect(chapter.title, 'Intro');
+    expect(chapter.album, 'chapter-video');
   });
 
   test('shuffle control updates both its action and system state', () async {

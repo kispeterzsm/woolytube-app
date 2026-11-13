@@ -236,8 +236,11 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
           ))
             MediaItem(
               id: item.id,
-              title: item.displayTrack.title,
-              album: item.chapter == null ? null : tracks[i].title,
+              title:
+                  item.chapter == null
+                      ? tracks[i].displayTitle
+                      : item.displayTrack.title,
+              album: item.chapter == null ? null : tracks[i].displayTitle,
               duration: item.duration,
               playable: true,
               artUri: artwork[i],

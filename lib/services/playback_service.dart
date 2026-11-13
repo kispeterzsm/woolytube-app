@@ -769,12 +769,12 @@ class PlaybackService
           groups.where((g) => g.trackId == selected.id).firstOrNull;
       if (selectedAlbum == null) {
         // It is no longer downloaded (or was reset since the list was shown).
-        reportMessage('"${selected.title}" can\'t be played right now');
+        reportMessage('"${selected.displayTitle}" can\'t be played right now');
         return;
       }
       selectedPath = _resolveTrackFile(selectedAlbum.items.first.track);
       if (selectedPath == null) {
-        reportMessage('File not found: ${selected.title}');
+        reportMessage('File not found: ${selected.displayTitle}');
         return;
       }
     }
