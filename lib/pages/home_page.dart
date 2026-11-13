@@ -30,6 +30,7 @@ import 'playlist_detail_page.dart';
 import 'playlist_settings_page.dart';
 import 'reorder_playlists_page.dart';
 import 'settings_page.dart';
+import '../services/track_title.dart';
 
 /// Room the floating "Add playlist" button needs below the last card, so it
 /// never covers that card's buttons.
@@ -1371,7 +1372,7 @@ class _LyricsResultTile extends ConsumerWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      chapter?.title ?? track.title,
+                      chapter?.title ?? track.displayTitle,
                       key: ValueKey('search-lyric-title-${track.id}'),
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
@@ -1383,7 +1384,7 @@ class _LyricsResultTile extends ConsumerWidget {
                     Text(
                       chapter == null
                           ? playlistName
-                          : '${track.title} · $playlistName',
+                          : '${track.displayTitle} · $playlistName',
                       key: ValueKey('search-lyric-source-${track.id}'),
                       style: const TextStyle(color: _muted, fontSize: 12),
                     ),
@@ -1584,7 +1585,7 @@ class _SearchTrackTile extends ConsumerWidget {
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     searchHighlightedText(
-                      track.title,
+                      track.displayTitle,
                       query,
                       style: TextStyle(
                         color: isCurrentTrack ? _accent : Colors.white,

@@ -3,6 +3,7 @@ import 'package:share_plus/share_plus.dart';
 import '../database/database.dart';
 import 'chapters.dart';
 import 'media_thumbnail_service.dart' show forcedInsertVideoIdPrefix;
+import 'track_title.dart';
 
 /// Whether a chapter time in [track] is also a time in its YouTube video, so
 /// a link to it lands on the same moment. Inserted local files have made-up
@@ -20,7 +21,10 @@ String youTubeVideoUrl(Track track) =>
 /// Opens the system share sheet with [track]'s YouTube link.
 Future<void> shareYouTubeVideo(Track track, {SharePlus? sharePlus}) async {
   await (sharePlus ?? SharePlus.instance).share(
-    ShareParams(uri: Uri.parse(youTubeVideoUrl(track)), title: track.title),
+    ShareParams(
+      uri: Uri.parse(youTubeVideoUrl(track)),
+      title: track.displayTitle,
+    ),
   );
 }
 

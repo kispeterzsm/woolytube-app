@@ -8,6 +8,7 @@ import 'ytdlp_service.dart';
 import 'library_gate.dart';
 import 'library_layout.dart';
 import 'metadata_service.dart';
+import 'track_title.dart';
 export 'metadata_service.dart' show PlaylistExistsException;
 import 'sponsorblock_service.dart';
 import 'media_thumbnail_service.dart' as media_thumbnail_service;
@@ -1113,6 +1114,20 @@ class PlaylistService {
         continue;
       }
 
+      // A title once stored as "null" (or the video id standing in for
+      // one) heals as soon as YouTube lists the video with a real title.
+      final freshTitle = freshEntry['title'] as String?;
+      final healsTitle =
+          isStandInTitle(track.title, track.videoId) &&
+          !isMissingTitle(freshTitle) &&
+          !_unavailableTitles.contains(freshTitle!.trim()) &&
+          freshTitle.trim() != track.title;
+      if (healsTitle) {
+        changes.add(
+          () => _db.updateTrackFields(track.id, title: freshTitle.trim()),
+        );
+      }
+
       final reason = _detectUnavailability(freshEntry);
 
       if (reason != null) {
@@ -1145,7 +1160,11 @@ class PlaylistService {
           changes.add(
             () => _db.updateTrackAvailable(
               track.id,
-              title: freshEntry['title'] as String? ?? 'Unknown',
+              title: resolveTrackTitle(
+                freshEntry['title'] as String?,
+                previous: track.title,
+                videoId: track.videoId,
+              ),
               thumbnailUrl: freshEntry['thumbnail'] as String?,
               durationSeconds: (freshEntry['duration'] as num?)?.toInt(),
             ),
@@ -1206,11 +1225,13 @@ class PlaylistService {
     // and some have no thumbnail; store "unknown", not "" and 0:00.
     final thumbnail = entry['thumbnail'] as String?;
     final duration = (entry['duration'] as num?)?.toInt();
+    final videoId = entry['id'] as String;
     return TracksCompanion.insert(
       playlistId: playlistId,
       index: index,
-      videoId: entry['id'] as String,
-      title: entry['title'] as String? ?? 'Unknown',
+      videoId: videoId,
+      // Private and removed videos are listed without a title.
+      title: resolveTrackTitle(entry['title'] as String?, videoId: videoId),
       thumbnailUrl: Value(
         thumbnail == null || thumbnail.isEmpty ? null : thumbnail,
       ),
@@ -1962,7 +1983,8 @@ class PlaylistService {
     if (track == null) throw StateError('The selected track no longer exists.');
     // Same title length cap as a normal download: names are limited to
     // 255 bytes and non-Latin letters take several bytes each.
-    var runes = MetadataService.sanitizeFilename(track.title).runes.toList();
+    var runes =
+        MetadataService.sanitizeFilename(track.displayTitle).runes.toList();
     while (runes.length > 1 &&
         utf8.encode(String.fromCharCodes(runes)).length > 150) {
       runes = runes.sublist(0, runes.length - 1);
@@ -2234,4 +2256,11 @@ class PlaylistService {
 
     return null;
   }
+
+  /// The titles YouTube lists in place of a video it does not show.
+  static const _unavailableTitles = {
+    '[Private video]',
+    '[Deleted video]',
+    '[Unavailable]',
+  };
 }

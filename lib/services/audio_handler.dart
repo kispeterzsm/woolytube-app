@@ -6,6 +6,7 @@ import '../database/database.dart';
 import 'playback_notification_controller.dart';
 import 'media_thumbnail_service.dart';
 import 'chapter_playback.dart';
+import 'track_title.dart';
 
 Uri? resolveNotificationArtwork({
   String? localPath,
@@ -81,7 +82,7 @@ class WoolyTubeAudioHandler extends BaseAudioHandler with SeekHandler {
         mediaItem.add(
           MediaItem(
             id: _playbackService.currentMediaId ?? track.id.toString(),
-            title: track.title,
+            title: track.displayTitle,
             duration:
                 track.durationSeconds != null
                     ? Duration(seconds: track.durationSeconds!)

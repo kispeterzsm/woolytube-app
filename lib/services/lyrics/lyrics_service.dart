@@ -17,6 +17,7 @@ import 'lyrics_matcher.dart';
 import 'lyrics_models.dart';
 import 'title_parser.dart';
 import 'ytmusic_lyrics_client.dart';
+import '../track_title.dart';
 
 /// A track's or chapter's lyrics changed (fetched, picked, cleared).
 class LyricsChange {
@@ -311,7 +312,7 @@ class LyricsService {
       } else if ((track.durationSeconds ?? 0) > 0) {
         localSeconds = track.durationSeconds!.toDouble();
       }
-      nightcore = parseSongTitle(track.title).nightcore;
+      nightcore = parseSongTitle(track.displayTitle).nightcore;
     }
     return sortCandidatesByFit([
       for (final record in records)
@@ -349,7 +350,7 @@ class LyricsService {
     final meta =
         playlist == null ? null : await _readInfo(playlist.outputPath, track);
     return parseSongTitle(
-      track.title,
+      track.displayTitle,
       meta: meta == null ? null : VideoMeta.fromInfo(meta),
     ).searchText;
   }
@@ -591,7 +592,7 @@ class LyricsService {
   List<_Slot> _slotsFor(Track track, Playlist playlist, LyricsMode mode) {
     final fileMs =
         track.durationSeconds == null ? null : track.durationSeconds! * 1000;
-    final whole = [_Slot(null, 0, fileMs, track.title)];
+    final whole = [_Slot(null, 0, fileMs, track.displayTitle)];
     if (mode == LyricsMode.transcript) return whole;
     if (!(track.chaptersEnabled ?? playlist.playChapters ?? true)) return whole;
     final chapters = ChapterData.decode(track.chaptersJson).active;
@@ -627,7 +628,7 @@ class LyricsService {
       null,
       0,
       track.durationSeconds == null ? null : track.durationSeconds! * 1000,
-      track.title,
+      track.displayTitle,
     );
   }
 
@@ -788,7 +789,9 @@ class LyricsService {
         } catch (e) {
           // Stopped (cancel or deadline): not a failed restore.
           if (stop()) break;
-          _log.warn('Lyrics: could not restore the pick of ${fresh.title}: $e');
+          _log.warn(
+            'Lyrics: could not restore the pick of ${fresh.displayTitle}: $e',
+          );
           // Keep the pin and wait before the next try. A record or captions
           // that are gone are not an outage, so they do not stop a backfill.
           await _db.markLyricsDocTried(doc.id, _clock(), doc.attempts + 1);
@@ -1127,7 +1130,7 @@ class LyricsService {
         // The user chose this record: its times are kept even when they
         // do not fit (another intro or edit), so "Timing off?" can shift
         // them. Only automatic matches drop times that do not fit.
-        final (_, scale) = _timingFor(record, slot, track.title);
+        final (_, scale) = _timingFor(record, slot, track.displayTitle);
         var synced = record.isSynced && !pick.timingOff;
         var lines =
             synced
@@ -1344,7 +1347,9 @@ class LyricsService {
       ];
       await writeLyricsFile(playlist.outputPath, track.videoId, drafts);
     } catch (e) {
-      _log.warn('Lyrics: could not save the lyrics file of ${track.title}: $e');
+      _log.warn(
+        'Lyrics: could not save the lyrics file of ${track.displayTitle}: $e',
+      );
     }
   }
 }
@@ -1441,11 +1446,11 @@ class _TrackContext {
   /// no info is kept).
   Future<SongQuery> queryFor(_Slot slot) async {
     if (slot.isChapter) {
-      return parseChapterTitle(slot.title, parentTitle: track.title);
+      return parseChapterTitle(slot.title, parentTitle: track.displayTitle);
     }
     var info = await this.info();
     var query = parseSongTitle(
-      track.title,
+      track.displayTitle,
       meta: info == null ? null : VideoMeta.fromInfo(info),
     );
     if (query.nightcore &&
@@ -1454,7 +1459,10 @@ class _TrackContext {
         !_freshInfoTried) {
       info = await captionInfo();
       if (info != null) {
-        query = parseSongTitle(track.title, meta: VideoMeta.fromInfo(info));
+        query = parseSongTitle(
+          track.displayTitle,
+          meta: VideoMeta.fromInfo(info),
+        );
       }
     }
     return query;

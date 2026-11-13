@@ -9,6 +9,7 @@ import 'chapters.dart';
 import 'library_layout.dart';
 import 'media_thumbnail_service.dart';
 import 'subtitles.dart';
+import 'track_title.dart';
 import 'video_quality.dart';
 import 'lyrics/lyrics_files.dart';
 import 'lyrics/lyrics_service.dart' show syncLyricsChapterDocs;
@@ -313,12 +314,31 @@ class MetadataService {
       final info =
           jsonDecode(await infoFile.readAsString()) as Map<String, dynamic>;
       if (info['id'] != track.videoId) return;
+      await _healTitleFromInfo(track.id, info);
       await _applyDownloadedChapters(track.id, info);
       await keepVideoInfo(folder, track.videoId, info);
       await infoFile.delete();
     } catch (_) {
       // A broken metadata sidecar must not fail a successful media download.
     }
+  }
+
+  /// Replaces a stand-in title ("null", empty or the video id) with the
+  /// real one from a downloaded video's metadata. A real title, even one
+  /// the owner changed, is never touched.
+  Future<void> _healTitleFromInfo(
+    int trackId,
+    Map<String, dynamic> info,
+  ) async {
+    final fresh = await _db.getTrack(trackId);
+    final title = info['title'];
+    if (fresh == null ||
+        title is! String ||
+        isMissingTitle(title) ||
+        !isStandInTitle(fresh.title, fresh.videoId)) {
+      return;
+    }
+    await _db.updateTrackFields(trackId, title: title.trim());
   }
 
   /// Stores YouTube's chapters for a freshly downloaded copy of a track's own
@@ -537,7 +557,8 @@ class MetadataService {
       if (relative == null) continue;
       buffer
         ..writeln(
-          '#EXTINF:${track.durationSeconds ?? -1},${_singleLine(track.title)}',
+          '#EXTINF:${track.durationSeconds ?? -1},'
+          '${_singleLine(track.displayTitle)}',
         )
         ..writeln(relative.replaceAll(r'\', '/'));
     }
@@ -1481,6 +1502,7 @@ for video) to keep a complete backup.
         final info =
             jsonDecode(await infoFile.readAsString()) as Map<String, dynamic>;
         if (info['id'] == fresh.videoId) {
+          await _healTitleFromInfo(trackId, info);
           await _applyDownloadedChapters(trackId, info, wasLocal: wasLocal);
           chaptersApplied = true;
           await keepVideoInfo(folder, fresh.videoId, info);
@@ -2061,11 +2083,16 @@ for video) to keep a complete backup.
     for (final t in tracksJson) {
       if (t is! Map<String, dynamic>) continue;
       final m = t;
+      final videoId = m['videoId'] as String? ?? '';
       tracks.add(
         DiscoveredTrack(
           index: m['index'] as int? ?? 0,
-          videoId: m['videoId'] as String? ?? '',
-          title: m['title'] as String? ?? 'Unknown',
+          videoId: videoId,
+          // Older versions could save the title "null".
+          title: resolveTrackTitle(
+            m['title'] is String ? m['title'] as String : null,
+            videoId: videoId,
+          ),
           thumbnailUrl: m['thumbnailUrl'] as String?,
           thumbnailFileName: m['thumbnailFileName'] as String?,
           durationSeconds: m['durationSeconds'] as int?,
@@ -2261,7 +2288,9 @@ String buildSidecarJson(
     tracksJson.add({
       'index': t.index,
       'videoId': t.videoId,
-      'title': t.title,
+      // Never "null": a stand-in is the video id, which an import keeps
+      // replaceable by the next real title.
+      'title': resolveTrackTitle(t.title, videoId: t.videoId),
       'thumbnailUrl': t.thumbnailUrl,
       'thumbnailFileName': relative(t.thumbnailPath),
       'durationSeconds': t.durationSeconds,

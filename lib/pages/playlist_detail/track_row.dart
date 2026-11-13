@@ -204,7 +204,7 @@ class _TrackRow extends ConsumerWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       searchHighlightedText(
-                        track.title,
+                        track.displayTitle,
                         searchQuery,
                         maxLines: 2,
                         strutStyle: _titleStrut,

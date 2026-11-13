@@ -19,6 +19,7 @@ import 'notification_service.dart';
 import 'sponsorblock_service.dart';
 import 'subtitles.dart';
 import 'video_quality.dart';
+import 'track_title.dart';
 
 /// What a running download is doing right now.
 enum DownloadPhase {
@@ -723,7 +724,7 @@ class DownloadService {
           playlist: playlist,
           track: item.track,
           totalTracks: playlistTrackCount,
-          trackLabel: '[${i + 1}/${work.length}] ${item.track.title}',
+          trackLabel: '[${i + 1}/${work.length}] ${item.track.displayTitle}',
           reuseExistingFile: !item.replace,
           replaceExisting: item.replace,
           // A quality chosen while the run goes applies to the next track.
@@ -762,7 +763,7 @@ class DownloadService {
             failures.add(
               DownloadFailure(
                 trackId: item.track.id,
-                title: item.track.title,
+                title: item.track.displayTitle,
                 error: _lastFailure ?? 'Download failed',
                 replacement: item.replace,
               ),
@@ -1019,7 +1020,7 @@ class DownloadService {
           fresh.filePath != null &&
           await File(fresh.filePath!).exists();
       _log.info(
-        '${replace ? 'Redownloading' : 'Downloading'} "${fresh.title}" '
+        '${replace ? 'Redownloading' : 'Downloading'} "${fresh.displayTitle}" '
         'from "${playlist.name}"',
       );
 
@@ -1027,7 +1028,7 @@ class DownloadService {
         playlist: playlist,
         track: fresh,
         totalTracks: totalTracks,
-        trackLabel: '[${fresh.index}/$totalTracks] ${fresh.title}',
+        trackLabel: '[${fresh.index}/$totalTracks] ${fresh.displayTitle}',
         reuseExistingFile: false,
         replaceExisting: replace,
         maxHeight: effectiveMaxHeight(playlist, fresh),
@@ -1066,7 +1067,7 @@ class DownloadService {
       await _notifications?.showDownloadComplete(
         playlist.name,
         notificationId: playlist.id,
-        trackTitle: fresh.title,
+        trackTitle: fresh.displayTitle,
         audioOnly: playlist.audioOnly,
       );
       return true;
@@ -1125,7 +1126,7 @@ class DownloadService {
 
       _workTotal = 1;
       _position = 1;
-      _currentTitle = fresh.title;
+      _currentTitle = fresh.displayTitle;
       _currentTrackId = fresh.id;
       await _startDownloadReporting(playlist);
       if (_cancelRequested) {
@@ -1137,7 +1138,7 @@ class DownloadService {
       _activeTrackId = fresh.id;
       _activeTrackIsReplacement = true;
 
-      final trackLabel = '[reupload] ${fresh.title}';
+      final trackLabel = '[reupload] ${fresh.displayTitle}';
       _log.info('$trackLabel Downloading $url');
       staging = await _metadata.prepareStagingDir(
         playlist.outputPath,
@@ -1193,7 +1194,7 @@ class DownloadService {
       await _notifications?.showDownloadComplete(
         playlist.name,
         notificationId: playlist.id,
-        trackTitle: fresh.title,
+        trackTitle: fresh.displayTitle,
         audioOnly: playlist.audioOnly,
       );
       return true;
@@ -1364,7 +1365,7 @@ class DownloadService {
     required int? maxHeight,
   }) async {
     final indexStr = MetadataService.paddedIndex(track.index, totalTracks);
-    _currentTitle = track.title;
+    _currentTitle = track.displayTitle;
     _currentTrackId = track.id;
 
     if (reuseExistingFile) {
@@ -1513,7 +1514,7 @@ class DownloadService {
         await _db.clearRemovedFromYouTube(track.id);
       }
       await _sponsorBlock?.refreshTrackSegments(updatedTrack);
-      _log.info('$trackLabel Downloaded: ${track.title}');
+      _log.info('$trackLabel Downloaded: ${track.displayTitle}');
 
       _emitRun(playlist, DownloadPhase.downloading, trackProgress: 100);
       return _TrackDownloadResult.downloaded;
@@ -1521,7 +1522,9 @@ class DownloadService {
       // Unexpected failure while publishing; the previous file, if any, was
       // not touched before the new one was in place.
       final errorMsg = _cleanErrorMessage(e);
-      _log.error('$trackLabel Could not save "${track.title}": $errorMsg');
+      _log.error(
+        '$trackLabel Could not save "${track.displayTitle}": $errorMsg',
+      );
       _lastFailure = errorMsg;
       if (!replaceExisting) {
         if (track.unavailableReason == removedFromYouTubeReason) {
@@ -1555,7 +1558,7 @@ class DownloadService {
         // update would fail forever and keep the playlist from counting as
         // updated; it stays listed as "Removed from YouTube" instead.
         await _db.markTrackRemovedFromYouTube(track.id, errorMsg);
-        _log.warn('$trackLabel Removed from YouTube: "${track.title}"');
+        _log.warn('$trackLabel Removed from YouTube: "${track.displayTitle}"');
         return _TrackDownloadResult.removed;
       }
       if (track.unavailableReason == removedFromYouTubeReason) {
@@ -1564,17 +1567,17 @@ class DownloadService {
         // updates; the caller shows this error.
         await _db.restoreRemovedFromYouTube(track.id);
         _log.error(
-          '$trackLabel Retry of removed "${track.title}" failed: $errorMsg',
+          '$trackLabel Retry of removed "${track.displayTitle}" failed: $errorMsg',
         );
         return _TrackDownloadResult.failed;
       }
       await _db.updateTrackStatus(track.id, 'error', error: errorMsg);
-      _log.error('$trackLabel Failed "${track.title}": $errorMsg');
+      _log.error('$trackLabel Failed "${track.displayTitle}": $errorMsg');
       return _TrackDownloadResult.failed;
     }
     // The existing copy is still in place and keeps playing.
     _log.error(
-      '$trackLabel Could not download a new copy of "${track.title}"; '
+      '$trackLabel Could not download a new copy of "${track.displayTitle}"; '
       'kept the existing file: $errorMsg',
     );
     // Give up the replacement only when YouTube will really never provide

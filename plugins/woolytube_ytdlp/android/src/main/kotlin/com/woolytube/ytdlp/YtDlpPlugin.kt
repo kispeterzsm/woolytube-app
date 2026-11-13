@@ -516,6 +516,14 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         return trimmed
     }
 
+    /**
+     * The string at [key], or [fallback] when it is missing or JSON null.
+     * Android's `optString` turns a JSON null into the text "null", which
+     * once became the stored title of private and removed videos.
+     */
+    private fun org.json.JSONObject.stringOrDefault(key: String, fallback: String): String =
+        if (isNull(key)) fallback else optString(key, fallback)
+
     private fun handleGetPlaylistInfo(args: Map<*, *>, result: MethodChannel.Result) {
         val url = args["url"] as? String
         if (url == null) {
@@ -540,23 +548,27 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     try {
                         val json = org.json.JSONObject(line)
                         val entry = org.json.JSONObject()
-                        entry.put("id", json.optString("id", ""))
-                        entry.put("title", json.optString("title", "Unknown"))
+                        entry.put("id", json.stringOrDefault("id", ""))
+                        // Private, deleted and terminated videos are listed
+                        // with "title": null. Leave it out (Dart falls back
+                        // to the video id) rather than send the text "null".
+                        val title = json.stringOrDefault("title", "")
+                        if (title.isNotBlank()) entry.put("title", title)
                         // Flat entries often lack a thumbnail or a duration
                         // (live streams, premieres). Leave them out so Dart
                         // stores null instead of "" and 0:00.
-                        val thumbnail = json.optString("thumbnail", "")
+                        val thumbnail = json.stringOrDefault("thumbnail", "")
                         if (thumbnail.isNotBlank()) entry.put("thumbnail", thumbnail)
                         val duration = json.optDouble("duration", Double.NaN)
                         if (!duration.isNaN() && duration > 0) {
                             entry.put("duration", Math.round(duration).toInt())
                         }
                         entry.put("playlist_index", json.optInt("playlist_index", index + 1))
-                        entry.put("availability", json.optString("availability", ""))
+                        entry.put("availability", json.stringOrDefault("availability", ""))
                         entries.put(entry)
 
                         if (playlistTitle.isEmpty()) {
-                            playlistTitle = json.optString("playlist_title", "")
+                            playlistTitle = json.stringOrDefault("playlist_title", "")
                         }
                         if (json.has("playlist_id") || json.has("playlist_title")) {
                             isPlaylistResult = true
@@ -577,7 +589,9 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 // A single-video URL has no playlist title. Never hand back an
                 // empty name: it would become an empty folder name.
                 if (playlistTitle.isBlank() && entries.length() > 0) {
-                    playlistTitle = entries.getJSONObject(0).optString("title", "")
+                    val first = entries.getJSONObject(0)
+                    playlistTitle = first.stringOrDefault("title", "")
+                        .ifBlank { first.stringOrDefault("id", "") }
                 }
                 val output = org.json.JSONObject()
                 output.put("title", playlistTitle)

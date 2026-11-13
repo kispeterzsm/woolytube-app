@@ -14,6 +14,7 @@ import 'player_layout.dart';
 import 'player_shell.dart';
 import 'player_widgets.dart';
 import 'video_view.dart';
+import '../services/track_title.dart';
 
 /// The persistent player: one widget that is the mini bar when collapsed and
 /// grows into the expanded audio panel (or full-screen video) as
@@ -124,7 +125,7 @@ class _PlayerSheetState extends ConsumerState<PlayerSheet> {
         video
             ? ref.watch(playerVideoSurfaceProvider)(BoxFit.contain)
             : _artworkFor(track);
-    final title = _SheetTitle(title: track.title);
+    final title = _SheetTitle(title: track.displayTitle);
 
     return AnimatedBuilder(
       animation: _animations,

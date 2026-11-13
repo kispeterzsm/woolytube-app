@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/playback_providers.dart';
+import '../services/track_title.dart';
 import '../widgets/chapters_button.dart';
 import '../widgets/next_file_button.dart';
 import '../widgets/player_controls.dart';
@@ -310,7 +311,9 @@ class _VideoControls extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final title = ref.watch(
-      currentTrackProvider.select((value) => value.valueOrNull?.title ?? ''),
+      currentTrackProvider.select(
+        (value) => value.valueOrNull?.displayTitle ?? '',
+      ),
     );
     final playlistName = ref.watch(
       currentPlaylistProvider.select((value) => value.valueOrNull?.name ?? ''),

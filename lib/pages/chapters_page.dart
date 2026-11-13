@@ -18,6 +18,7 @@ import '../widgets/settings_section_header.dart';
 import 'chapter_editor_page.dart';
 import 'lyrics_page.dart';
 import 'recognition_review_page.dart';
+import '../services/track_title.dart';
 
 /// How one file plays: as the playlist says, as chapters or as one track.
 enum _PlayAs { playlistDefault, chapters, wholeFile }
@@ -553,7 +554,7 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
             _showMessage(
               'Recognized ${run.proposals.length} '
               'section${run.proposals.length == 1 ? '' : 's'} in '
-              '"${track.title}".',
+              '"${track.displayTitle}".',
               action: SnackBarAction(
                 label: 'Review',
                 onPressed: () {
@@ -756,7 +757,7 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
                   child: Text(
-                    track.title,
+                    track.displayTitle,
                     style: Theme.of(context).textTheme.titleLarge,
                   ),
                 ),

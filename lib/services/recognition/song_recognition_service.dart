@@ -17,6 +17,7 @@ import 'decoder_accuracy.dart';
 import 'shazam_client.dart';
 import 'shazam_signature.dart';
 import 'silence_detector.dart';
+import '../track_title.dart';
 
 enum RecognitionPhase {
   sampling,
@@ -452,7 +453,7 @@ class SongRecognitionService {
     }
     final path = _filePath(track);
     if (path == null) {
-      throw StateError('The file for "${track.title}" was not found.');
+      throw StateError('The file for "${track.displayTitle}" was not found.');
     }
     _activeTrackId = track.id;
     _cancelRequested = false;
@@ -466,7 +467,7 @@ class SongRecognitionService {
   }
 
   Future<RecognitionRun> _scan(Track track, String path) async {
-    final label = 'songs in ${track.title}';
+    final label = 'songs in ${track.displayTitle}';
     // Read before sampling: an undo, reset or file replacement while the
     // scan runs bumps it, and the run is then not applied.
     final epoch =
@@ -808,7 +809,7 @@ class SongRecognitionService {
     }
     final path = _filePath(track);
     if (path == null) {
-      throw StateError('The file for "${track.title}" was not found.');
+      throw StateError('The file for "${track.displayTitle}" was not found.');
     }
     _activeTrackId = track.id;
     _cancelRequested = false;
@@ -1176,7 +1177,9 @@ class SongRecognitionService {
     final stored = ChapterData.decode(track.chaptersJson);
     if (stored.valid && (stored.durationMs ?? 0) > 0) return stored.durationMs!;
     if ((track.durationSeconds ?? 0) > 0) return track.durationSeconds! * 1000;
-    throw StateError('Could not determine the duration of "${track.title}".');
+    throw StateError(
+      'Could not determine the duration of "${track.displayTitle}".',
+    );
   }
 
   String? _filePath(Track track) =>

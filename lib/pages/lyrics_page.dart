@@ -13,6 +13,7 @@ import '../services/lyrics/lyrics_service.dart' show LyricsService;
 import '../widgets/lyrics_picker_sheet.dart';
 import '../widgets/lyrics_timing_sheet.dart';
 import '../widgets/mobile_data_download_guard.dart';
+import '../services/track_title.dart';
 
 const _accent = Color(0xFF2196F3);
 const _muted = Color(0xFF999999);
@@ -122,7 +123,7 @@ class _LyricsPageState extends ConsumerState<LyricsPage> {
       trackId: track.id,
       chapterId: unit.chapterId,
       mode: mode,
-      fallbackQuery: unit.chapter?.title ?? track.title,
+      fallbackQuery: unit.chapter?.title ?? track.displayTitle,
     );
     if (saved) {
       _showMessage(
@@ -277,7 +278,7 @@ class _LyricsPageState extends ConsumerState<LyricsPage> {
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
               child: Text(
-                track.title,
+                track.displayTitle,
                 style: Theme.of(context).textTheme.titleLarge,
               ),
             ),

@@ -500,7 +500,7 @@ class _TrackActions {
       SnackBar(
         content: Text(
           started
-              ? 'Playing "${track.title}"'
+              ? 'Playing "${track.displayTitle}"'
               : next
               ? 'Plays next'
               : 'Added to Up next',
@@ -572,7 +572,8 @@ class _TrackActions {
     }
 
     final currentPath = track.filePath;
-    var explanation = '"${picked.name}" becomes the file of "${track.title}".';
+    var explanation =
+        '"${picked.name}" becomes the file of "${track.displayTitle}".';
     if (currentPath != null && await File(currentPath).exists()) {
       explanation +=
           "\n\nThe current file is not deleted: it is kept in this playlist's "
@@ -663,7 +664,7 @@ class _TrackActions {
       context: context,
       builder:
           (_) => _ReuploadLinkDialog(
-            title: track.title,
+            title: track.displayTitle,
             initialUrl: prefill,
             keepsCurrentFile: hasFile,
           ),
@@ -689,7 +690,7 @@ class _TrackActions {
             ),
             content: Text(
               'The copy of this video saved by the Wayback Machine '
-              '(web.archive.org) becomes the file of "${track.title}". '
+              '(web.archive.org) becomes the file of "${track.displayTitle}". '
               'The track keeps its place and title.'
               '${hasFile ? "\n\nThe current file is not deleted: it is kept "
                       "in this playlist's replaced-files folder "
@@ -750,7 +751,7 @@ class _TrackActions {
       return;
     }
 
-    showMessage('Downloading $source of "${track.title}"');
+    showMessage('Downloading $source of "${track.displayTitle}"');
     final playlistService = ref.read(playlistServiceProvider);
     unawaited(
       downloadService
@@ -767,7 +768,7 @@ class _TrackActions {
           .then(
             (done) => showMessage(
               done
-                  ? 'Replaced "${track.title}" with $source'
+                  ? 'Replaced "${track.displayTitle}" with $source'
                   : 'Stopped; nothing was changed',
             ),
             onError:
@@ -796,7 +797,7 @@ class _TrackActions {
       context: context,
       builder:
           (_) => _TrackRenameDialog(
-            title: track.title,
+            title: track.displayTitle,
             fileName: nameWithoutPrefix,
             hasFile: hasFile,
           ),
@@ -812,7 +813,9 @@ class _TrackActions {
           .read(playlistServiceProvider)
           .overrideTrack(
             trackId: track.id,
-            title: edit.title,
+            // An untouched title stays: a stand-in for a missing one keeps
+            // healing when YouTube lists the real title.
+            title: edit.title.trim() == track.displayTitle ? null : edit.title,
             // An untouched field must not rename a file whose name the
             // sanitizer would spell differently.
             fileName:
@@ -944,9 +947,9 @@ class _TrackActions {
 
     final hadFile = track.status == 'complete' && track.filePath != null;
     if (context.mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Downloading "${track.title}"')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Downloading "${track.displayTitle}"')),
+      );
     }
 
     unawaited(
@@ -959,7 +962,7 @@ class _TrackActions {
                 SnackBar(
                   content: Text(
                     downloaded
-                        ? 'Downloaded "${track.title}"'
+                        ? 'Downloaded "${track.displayTitle}"'
                         : 'Stopped; nothing was changed',
                   ),
                 ),
@@ -973,7 +976,7 @@ class _TrackActions {
                 SnackBar(
                   content: Text(
                     hadFile
-                        ? 'Could not download a new copy of "${track.title}"; '
+                        ? 'Could not download a new copy of "${track.displayTitle}"; '
                             'the current file was kept. $reason'
                         : 'Download failed: $reason',
                   ),
@@ -997,11 +1000,11 @@ class _TrackActions {
             ),
             content: Text(
               hasFile
-                  ? 'A fresh copy of "${track.title}" is downloaded from '
+                  ? 'A fresh copy of "${track.displayTitle}" is downloaded from '
                       'YouTube. The current file is replaced only once the '
                       'new one has finished downloading. If the download '
                       'fails, nothing changes.'
-                  : '"${track.title}" will be downloaded from YouTube.',
+                  : '"${track.displayTitle}" will be downloaded from YouTube.',
               style: const TextStyle(color: Color(0xFFCCCCCC)),
             ),
             actions: [
@@ -1035,7 +1038,7 @@ class _TrackActions {
               style: TextStyle(color: Colors.white),
             ),
             content: Text(
-              '"${track.title}" is removed and its file is deleted.'
+              '"${track.displayTitle}" is removed and its file is deleted.'
               '${downloading ? ' The running download stops for a moment.' : ''}',
               style: const TextStyle(color: Color(0xFFCCCCCC)),
             ),
@@ -1059,7 +1062,7 @@ class _TrackActions {
     final messenger = ScaffoldMessenger.of(context);
     final error = await removeTemporaryVideos(ref, playlistId, {track.id});
     messenger.showSnackBar(
-      SnackBar(content: Text(error ?? 'Removed "${track.title}"')),
+      SnackBar(content: Text(error ?? 'Removed "${track.displayTitle}"')),
     );
   }
 
@@ -1129,7 +1132,7 @@ class _TrackActions {
       context,
       ref.read(downloadNetworkPolicyProvider),
     )) {
-      showMessage('"${track.title}" downloads again at the next update');
+      showMessage('"${track.displayTitle}" downloads again at the next update');
       return;
     }
     final fresh = await ref
@@ -1141,7 +1144,9 @@ class _TrackActions {
           .downloadPlaylist(fresh, sourceChecked: false)
           .catchError((Object _) => DownloadStart.started),
     );
-    showMessage('"${track.title}" downloads again after the current download');
+    showMessage(
+      '"${track.displayTitle}" downloads again after the current download',
+    );
   }
 
   Future<void> _showSkipSegments(Track track) async {
@@ -1341,7 +1346,7 @@ class _TrackSheetHeader extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  track.title,
+                  track.displayTitle,
                   key: const ValueKey('track-actions-title'),
                   style: const TextStyle(
                     color: Colors.white,

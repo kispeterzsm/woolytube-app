@@ -18,6 +18,7 @@ import 'playback_settings_store.dart';
 import 'picture_in_picture_service.dart';
 import 'sleep_timer_controller.dart';
 import 'sponsorblock_service.dart';
+import 'track_title.dart';
 
 class SegmentMarkResult {
   final bool started;
@@ -797,7 +798,7 @@ class PlaybackService
             ? selectedPath
             : _resolveTrackFile(first.track);
     if (filePath == null) {
-      _reportSkippedFiles([first.track.title]);
+      _reportSkippedFiles([first.track.displayTitle]);
       await _advance();
       return;
     }
@@ -811,7 +812,7 @@ class PlaybackService
       reportFailure: false,
     );
     if (result == _LoadResult.openFailed) {
-      reportMessage('Could not play "${first.track.title}"');
+      reportMessage('Could not play "${first.track.displayTitle}"');
       await _advance();
     }
   }
@@ -1065,7 +1066,7 @@ class PlaybackService
         if (candidate != null) {
           final filePath = _resolveTrackFile(candidate.track);
           if (filePath != null) return _Stepped(candidate, filePath);
-          missingFiles.add(candidate.track.title);
+          missingFiles.add(candidate.track.displayTitle);
         }
         item = forward ? _albumQueue.next() : _albumQueue.previous();
       }
@@ -1146,7 +1147,7 @@ class PlaybackService
         _reportFailedOpens(failedOpens);
         return _AdvanceResult.focusDenied;
       }
-      failedOpens.add(target.item.track.title);
+      failedOpens.add(target.item.track.displayTitle);
       if (++attempts >= _maxOpenAttempts) break;
       target = await _stepOrStay(forward: forward);
     }
@@ -1293,7 +1294,9 @@ class PlaybackService
       try {
         await _player.stop();
       } catch (_) {}
-      if (reportFailure) reportMessage('Could not open "${item.track.title}"');
+      if (reportFailure) {
+        reportMessage('Could not open "${item.track.displayTitle}"');
+      }
     } finally {
       _loading = false;
       final playerDuration = _player.state.duration;
@@ -1386,7 +1389,7 @@ class PlaybackService
           await _player.stop();
         } catch (_) {}
         _syncPlaying(false);
-        if (item != null) _reportFailedOpens([item.track.title]);
+        if (item != null) _reportFailedOpens([item.track.displayTitle]);
         if (autoplayEnabled) {
           if (await _advance() == _AdvanceResult.loaded) return;
         }
@@ -2059,7 +2062,7 @@ class PlaybackService
     final current = await _db.getTrack(item.track.id);
     final filePath = _resolveTrackFile(current ?? item.track);
     if (filePath == null) {
-      reportMessage('File not found: ${item.track.title}');
+      reportMessage('File not found: ${item.track.displayTitle}');
       return;
     }
     final result = await _loadAndPlay(

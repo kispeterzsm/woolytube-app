@@ -15,6 +15,7 @@ import '../services/waveform_service.dart';
 import '../widgets/chapter_editor/editor_style.dart';
 import '../widgets/chapter_editor/overview_strip.dart';
 import '../widgets/chapter_editor/waveform_lens.dart';
+import '../services/track_title.dart';
 
 /// What the listen buttons play around a boundary.
 enum _Listen { end, across, start }
@@ -1065,7 +1066,7 @@ class _ChapterEditorPageState extends ConsumerState<ChapterEditorPage>
           // bar next to the playhead it would nearly always be cut, and the
           // chapters screen one step back shows it in full.
           title: Tooltip(
-            message: widget.track.title,
+            message: widget.track.displayTitle,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,

@@ -15,6 +15,7 @@ import '../services/lyrics/lyrics_models.dart';
 import '../services/recognition/chapter_estimator.dart';
 import '../services/recognition/song_recognition_service.dart';
 import 'chapter_editor_page.dart';
+import '../services/track_title.dart';
 
 /// Lets the user check, fix and apply the chapters a recognition scan
 /// proposed. Nothing touches the track's chapters until Apply, which
@@ -470,7 +471,10 @@ class _RecognitionReviewPageState extends ConsumerState<RecognitionReviewPage> {
                     16 + (previewing ? 0 : overlay),
                   ),
                   children: [
-                    Text(widget.track.title, style: theme.textTheme.titleLarge),
+                    Text(
+                      widget.track.displayTitle,
+                      style: theme.textTheme.titleLarge,
+                    ),
                     if (outdated)
                       Padding(
                         padding: const EdgeInsets.only(top: 8),

@@ -38,6 +38,7 @@ import '../widgets/video_quality_picker.dart';
 import 'chapters_page.dart';
 import 'lyrics_page.dart';
 import 'playlist_settings_page.dart';
+import '../services/track_title.dart';
 
 part 'playlist_detail/track_row.dart';
 part 'playlist_detail/track_actions.dart';
@@ -2206,7 +2207,7 @@ class _UpNextSheetState extends ConsumerState<_UpNextSheet> {
                         ),
                       ),
                       title: Text(
-                        track.title,
+                        track.displayTitle,
                         style: const TextStyle(color: Colors.white),
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
@@ -2265,7 +2266,7 @@ Future<String> saveVideoToTemporary(
     return '"$title" is already downloaded in ${copy.name}';
   }
   final saved = await playlists.addToTemporary(entry);
-  final title = saved.track.title;
+  final title = saved.track.displayTitle;
   if (!saved.added && saved.track.status == 'complete') {
     return '"$title" is already in Temporary';
   }
@@ -2477,7 +2478,7 @@ Future<void> _resolveReplacementConflicts(
               style: TextStyle(color: Colors.white),
             ),
             content: Text(
-              '"${track.title}" is available on YouTube again. You are using '
+              '"${track.displayTitle}" is available on YouTube again. You are using '
               'a local file for it.\n\n'
               'Download Original: the YouTube version downloads with this '
               'update and replaces your file only once it has finished. Your '
@@ -2506,7 +2507,7 @@ Future<void> _resolveReplacementConflicts(
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            'Could not ask for the original of "${track.title}": '
+            'Could not ask for the original of "${track.displayTitle}": '
             '${_errorText(e)}',
           ),
         ),

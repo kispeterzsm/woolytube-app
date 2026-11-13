@@ -5,6 +5,7 @@ import 'chapter_playback.dart';
 import 'chapters.dart';
 import 'lyrics/lyrics_models.dart';
 import 'lyrics/lyrics_text.dart';
+import 'track_title.dart';
 
 /// What a search compares against, computed once per [Track] object: the
 /// folded title (see [foldForSearch]) and the active chapters with folded
@@ -13,7 +14,7 @@ import 'lyrics/lyrics_text.dart';
 /// chapter JSON and folds no title on later keystrokes.
 class _SearchEntry {
   _SearchEntry(Track track)
-    : title = foldForSearch(track.title),
+    : title = foldForSearch(track.displayTitle),
       index = track.index.toString(),
       _chaptersJson = track.chaptersJson;
 
