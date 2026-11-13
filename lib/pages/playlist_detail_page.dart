@@ -184,6 +184,74 @@ class _TrackListView {
 const _nameFontSize = 18.0;
 const _nameLineHeight = 1.2;
 
+/// The smallest size a long name shrinks to before it is cut short.
+const _minNameFontSize = 12.0;
+
+/// The playlist's name in the top bar: two lines at [_nameFontSize], or
+/// for a long name a smaller size (down to [_minNameFontSize], on three
+/// lines when they fit in [maxHeight]) instead of cutting it short. A name
+/// too long even then ends in "…" and shows whole on a tap.
+class _PlaylistName extends StatelessWidget {
+  const _PlaylistName(this.name, {required this.maxHeight});
+
+  final String name;
+
+  /// The height the bar has for the name.
+  final double maxHeight;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final scaler = MediaQuery.textScalerOf(context);
+        final base = DefaultTextStyle.of(context).style;
+        final direction = Directionality.of(context);
+        TextStyle styleOf(double size) =>
+            TextStyle(fontSize: size, height: _nameLineHeight);
+
+        int linesAt(double size) => math.max(
+          1,
+          math.min(
+            3,
+            (maxHeight / (scaler.scale(size) * _nameLineHeight)).floor(),
+          ),
+        );
+
+        bool fits(double size) {
+          final painter = TextPainter(
+            text: TextSpan(text: name, style: base.merge(styleOf(size))),
+            maxLines: linesAt(size),
+            textDirection: direction,
+            textScaler: scaler,
+          )..layout(maxWidth: constraints.maxWidth);
+          final fits = !painter.didExceedMaxLines;
+          painter.dispose();
+          return fits;
+        }
+
+        var size = _nameFontSize;
+        while (size > _minNameFontSize && !fits(size)) {
+          size -= 0.5;
+        }
+        final text = Text(
+          name,
+          key: const ValueKey('playlist-detail-name'),
+          maxLines: linesAt(size),
+          softWrap: true,
+          overflow: TextOverflow.ellipsis,
+          style: styleOf(size),
+        );
+        if (size > _minNameFontSize || fits(size)) return text;
+        return Tooltip(
+          message: name,
+          triggerMode: TooltipTriggerMode.tap,
+          child: text,
+        );
+      },
+    );
+  }
+}
+
 String _formatTotalDuration(int seconds) {
   final hours = seconds ~/ 3600;
   final minutes = (seconds % 3600) ~/ 60;
@@ -964,15 +1032,16 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   PreferredSizeWidget _buildAppBar(Playlist? playlist, _TrackListView? view) {
     final name = playlist?.name ?? widget.initialName ?? '';
     final lyricsLabel = _showSearch ? _lyricsFilterLabel : null;
+    // Room for two lines of the name, also with large text.
+    final toolbarHeight = math.max(
+      kToolbarHeight,
+      MediaQuery.textScalerOf(context).scale(_nameFontSize) *
+              _nameLineHeight *
+              2 +
+          8,
+    );
     return AppBar(
-      // Room for two lines of the name, also with large text.
-      toolbarHeight: math.max(
-        kToolbarHeight,
-        MediaQuery.textScalerOf(context).scale(_nameFontSize) *
-                _nameLineHeight *
-                2 +
-            8,
-      ),
+      toolbarHeight: toolbarHeight,
       bottom:
           lyricsLabel == null
               ? null
@@ -1022,17 +1091,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
               )
               // Two lines at a smaller size, so long names fit beside the
               // actions; the summary line is under Play and Update.
-              : Text(
-                name,
-                key: const ValueKey('playlist-detail-name'),
-                maxLines: 2,
-                softWrap: true,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: _nameFontSize,
-                  height: _nameLineHeight,
-                ),
-              ),
+              : _PlaylistName(name, maxHeight: toolbarHeight - 4),
       actions: [
         IconButton(
           icon: Icon(

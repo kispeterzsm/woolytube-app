@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rxdart/rxdart.dart';
@@ -114,7 +115,12 @@ void main() {
     String? initialName,
     bool settle = true,
     List<Override> extra = const [],
+    bool opened = false,
   }) async {
+    final page = PlaylistDetailPage(
+      playlistId: playlist.id,
+      initialName: initialName,
+    );
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -126,12 +132,17 @@ void main() {
           ),
           ...extra,
         ],
-        child: MaterialApp(
-          home: PlaylistDetailPage(
-            playlistId: playlist.id,
-            initialName: initialName,
-          ),
-        ),
+        // [opened]: opened from the home page, with a back button.
+        child:
+            opened
+                ? MaterialApp(
+                  initialRoute: '/playlist',
+                  routes: {
+                    '/': (_) => const Scaffold(),
+                    '/playlist': (_) => page,
+                  },
+                )
+                : MaterialApp(home: page),
       ),
     );
     if (settle) await tester.pumpAndSettle();
@@ -2374,6 +2385,74 @@ void main() {
         }
         await closeSheet();
       }
+    });
+
+    for (final scale in [1.0, 1.3]) {
+      testWidgets('a long name fits the top bar at text size $scale', (
+        tester,
+      ) async {
+        usePhoneScreen(tester);
+        tester.platformDispatcher.textScaleFactorTestValue = scale;
+        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+        playlist = await insertTestPlaylist(
+          db,
+          url: 'long-name',
+          name: 'less socially acceptable masterpieces',
+        );
+        final track = await insertTestTrack(db, playlistId: playlist.id);
+        // Up next has entries: its button takes room in the bar. Opened
+        // from home, so the back button takes room too, as on the phone.
+        upNext.add([track]);
+        await pumpPage(tester, tracks: [track], opened: true);
+        expect(find.byType(BackButton), findsOneWidget);
+
+        final name = find.byKey(const ValueKey('playlist-detail-name'));
+        expectNotCut(tester, name);
+        expect(renderedLines(name).single.join(), playlist.name);
+        // Smaller, but not tiny.
+        final size = tester.widget<Text>(name).style!.fontSize!;
+        expect(size, lessThan(18));
+        expect(size, greaterThanOrEqualTo(12));
+        // Inside the bar.
+        final bar = tester.getRect(find.byType(AppBar));
+        final rect = tester.getRect(name);
+        expect(rect.top, greaterThanOrEqualTo(bar.top));
+        expect(rect.bottom, lessThanOrEqualTo(bar.bottom));
+        expect(
+          rect.right,
+          lessThanOrEqualTo(
+            tester.getRect(find.byTooltip('Search tracks')).left,
+          ),
+        );
+      });
+    }
+
+    testWidgets('a name too long even when smaller shows whole on a tap', (
+      tester,
+    ) async {
+      usePhoneScreen(tester);
+      const long =
+          'less socially acceptable masterpieces, more of them, and the '
+          'ones nobody asked for but everybody secretly enjoys anyway';
+      playlist = await insertTestPlaylist(db, url: 'longer', name: long);
+      final track = await insertTestTrack(db, playlistId: playlist.id);
+      await pumpPage(tester, tracks: [track], opened: true);
+
+      final name = find.byKey(const ValueKey('playlist-detail-name'));
+      expect(tester.widget<Text>(name).style!.fontSize, 12);
+      expect(
+        tester
+            .renderObject<RenderParagraph>(
+              find.descendant(of: name, matching: find.byType(RichText)),
+            )
+            .didExceedMaxLines,
+        isTrue,
+      );
+      expect(find.text(long), findsOneWidget);
+      await tester.tap(name);
+      await tester.pump(const Duration(milliseconds: 500));
+      // The cut name and, above it, the whole one.
+      expect(find.text(long), findsNWidgets(2));
     });
 
     testWidgets('an Always skip track keeps its grey line whole', (
