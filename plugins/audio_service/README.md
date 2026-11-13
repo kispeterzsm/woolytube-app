@@ -18,10 +18,10 @@ All changes are in `android/src/main/java/com/ryanheise/audioservice/AudioServic
 3. `onCreate()` cancels notification 1124. A new service instance has posted nothing yet, so a notification with that id is an orphan of an earlier instance.
 4. While paused, the service stays in the foreground (the notification and its buttons stay, as `lib/main.dart` intends), but `exitPlayingState()` now only keeps the CPU awake for 10 s (`IDLE_WAKE_LOCK_MS`) instead of indefinitely. The grace period covers the short pause between two songs.
 5. The wake lock is no longer reference counted, so a timed acquire and an untimed one replace each other. `acquireWakeLock()` always calls `acquire()`, which also cancels a pending timed release.
-6. `onPlay`, `onPlayFromMediaId` and `onMediaButtonEvent` hold the CPU awake for 10 s when nothing is playing, so a button pressed while paused (for example a headset click with the screen off, which waits for a possible double click) is handled before the phone sleeps. Playing then takes the untimed lock.
+6. `onPlay`, `onPlayFromMediaId`, `onMediaButtonEvent` and the other transport controls (`onSkipToNext`, `onSkipToPrevious`, `onSkipToQueueItem`, `onSeekTo`, `onFastForward`, `onRewind`, `onCustomAction`) hold the CPU awake for 10 s when nothing is playing, so a button pressed while paused (for example a headset click with the screen off, which waits for a possible double click, or Next on Android Auto or the lock screen) is handled before the phone sleeps. Playing then takes the untimed lock.
 7. `enterPlayingState()` takes the wake lock before `startForegroundService`, so playback keeps the CPU awake even if that call throws.
 
-The app's handler (`lib/services/audio_handler.dart`) also overrides `onNotificationDeleted`, whose default would stop playback and forget the saved session.
+The app's handler (`lib/services/audio_handler.dart`) also overrides `onNotificationDeleted`, whose default would stop playback and forget the saved session. Android marks the foreground notification as not dismissible, so this is rare. Where a phone does let the user swipe the paused notification away, the service and the app's engine stay in the foreground without a visible notification until the next play or pause shows it again. That keeps some memory in use, but nothing breaks and the saved session is kept.
 
 ## How to test on the phone
 
@@ -54,7 +54,7 @@ If something fails, save the output of the three commands and `adb logcat -d -v 
 
 ## Updating
 
-Copy the new upstream package over this folder (without `example/` and `test/`), then re-apply the changes above. Check upstream's CHANGELOG first: if it fixes `stop()` leaving the foreground, some of them may no longer be needed.
+Copy the new upstream package over this folder, but leave out `example/`, `test/`, `analysis_options.yaml` and upstream's `README.md`: this README holds the list of changes and the exact diff below, which are needed to re-apply them. Then re-apply the changes above and update the diff (`git diff --relative=plugins/audio_service/ <vendor commit> -- plugins/audio_service/android`). Check upstream's CHANGELOG first: if it fixes `stop()` leaving the foreground, some of them may no longer be needed.
 
 ## Exact diff
 
@@ -190,4 +190,55 @@ diff --git a/android/src/main/java/com/ryanheise/audioservice/AudioService.java 
              // TODO: use typesafe version once SDK 33 is released.
              @SuppressWarnings("deprecation")
              final KeyEvent event = (KeyEvent)mediaButtonEvent.getExtras().getParcelable(Intent.EXTRA_KEY_EVENT);
+@@ -1014,36 +1054,42 @@ public class AudioService extends MediaBrowserServiceCompat {
+         @Override
+         public void onSkipToNext() {
+             if (listener == null) return;
++            holdWakeLockBriefly(); // WoolyTube
+             listener.onSkipToNext();
+         }
+ 
+         @Override
+         public void onSkipToPrevious() {
+             if (listener == null) return;
++            holdWakeLockBriefly(); // WoolyTube
+             listener.onSkipToPrevious();
+         }
+ 
+         @Override
+         public void onFastForward() {
+             if (listener == null) return;
++            holdWakeLockBriefly(); // WoolyTube
+             listener.onFastForward();
+         }
+ 
+         @Override
+         public void onRewind() {
+             if (listener == null) return;
++            holdWakeLockBriefly(); // WoolyTube
+             listener.onRewind();
+         }
+ 
+         @Override
+         public void onSkipToQueueItem(long id) {
+             if (listener == null) return;
++            holdWakeLockBriefly(); // WoolyTube
+             listener.onSkipToQueueItem(id);
+         }
+ 
+         @Override
+         public void onSeekTo(long pos) {
+             if (listener == null) return;
++            holdWakeLockBriefly(); // WoolyTube
+             listener.onSeekTo(pos);
+         }
+ 
+@@ -1080,6 +1126,7 @@ public class AudioService extends MediaBrowserServiceCompat {
+         @Override
+         public void onCustomAction(String action, Bundle extras) {
+             if (listener == null) return;
++            holdWakeLockBriefly(); // WoolyTube
+             if (CUSTOM_ACTION_STOP.equals(action)) {
+                 listener.onStop();
+             } else if (CUSTOM_ACTION_FAST_FORWARD.equals(action)) {
 ```

@@ -1054,36 +1054,42 @@ public class AudioService extends MediaBrowserServiceCompat {
         @Override
         public void onSkipToNext() {
             if (listener == null) return;
+            holdWakeLockBriefly(); // WoolyTube
             listener.onSkipToNext();
         }
 
         @Override
         public void onSkipToPrevious() {
             if (listener == null) return;
+            holdWakeLockBriefly(); // WoolyTube
             listener.onSkipToPrevious();
         }
 
         @Override
         public void onFastForward() {
             if (listener == null) return;
+            holdWakeLockBriefly(); // WoolyTube
             listener.onFastForward();
         }
 
         @Override
         public void onRewind() {
             if (listener == null) return;
+            holdWakeLockBriefly(); // WoolyTube
             listener.onRewind();
         }
 
         @Override
         public void onSkipToQueueItem(long id) {
             if (listener == null) return;
+            holdWakeLockBriefly(); // WoolyTube
             listener.onSkipToQueueItem(id);
         }
 
         @Override
         public void onSeekTo(long pos) {
             if (listener == null) return;
+            holdWakeLockBriefly(); // WoolyTube
             listener.onSeekTo(pos);
         }
 
@@ -1120,6 +1126,7 @@ public class AudioService extends MediaBrowserServiceCompat {
         @Override
         public void onCustomAction(String action, Bundle extras) {
             if (listener == null) return;
+            holdWakeLockBriefly(); // WoolyTube
             if (CUSTOM_ACTION_STOP.equals(action)) {
                 listener.onStop();
             } else if (CUSTOM_ACTION_FAST_FORWARD.equals(action)) {
