@@ -969,7 +969,7 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
     _lyricsTimer?.cancel();
     final generation = ++_lyricsGeneration;
     final query = _query.phrase;
-    if (!widget.filters.lyrics || query.length < 2) {
+    if (!widget.filters.lyrics || !_query.canSearchLyrics) {
       _lyricHits = const [];
       _lyricHitsQuery = '';
       return;
@@ -1087,7 +1087,7 @@ class _SearchResultsState extends ConsumerState<_SearchResults> {
     final Widget results;
     if (trackHits.isEmpty && matchingPlaylists.isEmpty && lyricHits.isEmpty) {
       results =
-          lyricsLabel != null && !widget.filters.lyrics && !query.isEmpty
+          lyricsLabel != null && !widget.filters.lyrics && query.canSearchLyrics
               ? SearchLyricsNudge(
                 message: 'No titles match',
                 lyricsLabel: lyricsLabel,

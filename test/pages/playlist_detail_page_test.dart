@@ -347,6 +347,37 @@ void main() {
     expect(find.text('Play'), findsOneWidget);
   });
 
+  testWidgets('offers the lyrics only for a query they can search', (
+    tester,
+  ) async {
+    playlist = await insertTestPlaylist(
+      db,
+      url: 'lyrics',
+      name: 'Songs',
+      lyricsMode: 'lyrics',
+    );
+    final track = await insertTestTrack(
+      db,
+      playlistId: playlist.id,
+      title: 'Only song',
+      status: 'complete',
+      filePath: '/tmp/only.m4a',
+    );
+    await pumpPage(tester, tracks: [track]);
+    await tester.tap(find.byTooltip('Search tracks'));
+    await tester.pumpAndSettle();
+
+    // One letter is too short for the lyrics search.
+    await tester.enterText(find.byType(TextField), 'q');
+    await tester.pumpAndSettle();
+    expect(find.text('No matching tracks'), findsOneWidget);
+    expect(find.text('Search lyrics too'), findsNothing);
+
+    await tester.enterText(find.byType(TextField), 'qu');
+    await tester.pumpAndSettle();
+    expect(find.text('Search lyrics too'), findsOneWidget);
+  });
+
   testWidgets('search adds lyric matches with a one-line subtitle', (
     tester,
   ) async {

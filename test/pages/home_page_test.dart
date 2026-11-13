@@ -553,6 +553,25 @@ void main() {
     expect(tester.widget<FilterChip>(chip).selected, isFalse);
   });
 
+  testWidgets('search: lyrics are offered only for a query they can search', (
+    tester,
+  ) async {
+    playlists[1] = playlists[1].copyWith(lyricsMode: const Value('lyrics'));
+    await pumpHome(tester);
+    await tester.tap(find.byTooltip('Search'));
+    await tester.pumpAndSettle();
+
+    // One letter is too short for the lyrics search.
+    await tester.enterText(find.byType(TextField), 'q');
+    await tester.pump();
+    expect(find.text('Nothing matches'), findsOneWidget);
+    expect(find.text('Search lyrics too'), findsNothing);
+
+    await tester.enterText(find.byType(TextField), 'qu');
+    await tester.pump();
+    expect(find.text('Search lyrics too'), findsOneWidget);
+  });
+
   testWidgets('search: lyrics get the words as typed, repeats included', (
     tester,
   ) async {

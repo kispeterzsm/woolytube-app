@@ -81,6 +81,10 @@ class SearchQuery {
 
   bool get isEmpty => words.isEmpty;
 
+  /// Long enough for the lyrics search (two letters), so offering it can
+  /// find something.
+  bool get canSearchLyrics => phrase.length >= 2;
+
   /// The digits when the query is just a track number (`12` or `#12`).
   String? get number =>
       words.length == 1 && _digits.hasMatch(words.single) ? words.single : null;

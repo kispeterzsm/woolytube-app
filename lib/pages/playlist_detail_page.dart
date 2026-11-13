@@ -694,7 +694,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     _lyricsTimer?.cancel();
     final generation = ++_lyricsGeneration;
     final query = _query.phrase;
-    if (query.length < 2 ||
+    if (!_query.canSearchLyrics ||
         !_searchFilters.lyrics ||
         _playlist?.lyricsMode == null) {
       _lyricHits = const [];
@@ -1355,7 +1355,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                   )
                 else if (view.visible.isEmpty)
                   if (_lyricsFilterLabel case final label?
-                      when !_searchFilters.lyrics)
+                      when !_searchFilters.lyrics && view.query.canSearchLyrics)
                     SearchLyricsNudge(
                       message: 'No matching tracks',
                       lyricsLabel: label,
