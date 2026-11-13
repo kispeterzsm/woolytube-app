@@ -1340,6 +1340,65 @@ void main() {
       );
       expect(tester.takeException(), isNull);
     });
+
+    testWidgets('search: a long title on a lyric line is not cut by its ⋮', (
+      tester,
+    ) async {
+      const title =
+          'Kaláka és barátai – Föl földobott kő, teljes koncert a Művészetek '
+          'Palotájából (2019)';
+      final folk = (await insertTestPlaylist(
+        db,
+        url: 'list-folk-long',
+        name: 'Hungarian folk favourites',
+      )).copyWith(lyricsMode: const Value('lyrics'));
+      playlists.add(folk);
+      final set = await insertTestTrack(
+        db,
+        playlistId: folk.id,
+        index: 7,
+        videoId: 'folk-long',
+        title: title,
+        status: 'complete',
+        filePath: '/tmp/folk-long.m4a',
+        durationSeconds: 3725,
+      );
+      tracks = [...tracks, (await db.getTrack(set.id))!];
+      lyrics.hits = [
+        LyricsHit(
+          trackId: set.id,
+          docId: 11,
+          lineId: 110,
+          lineNo: 1,
+          lineText: 'Föl földobott kő, földre esik',
+          highlightRanges: const [LyricsHighlight(4, 13)],
+          positionMs: 3605000,
+          score: 0.9,
+          kind: LyricsMode.lyrics,
+        ),
+      ];
+      await pumpHome(tester);
+      usePhoneScreen(tester);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Search'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('search-filter-lyrics')));
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), 'esik');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump();
+
+      final lyricTile = find.byKey(const ValueKey('search-lyrics-11'));
+      final more = find.byKey(const ValueKey('search-lyrics-more-11'));
+      expect(tester.getSize(more).width, greaterThanOrEqualTo(44));
+      expect(tester.getRect(more).right, lessThanOrEqualTo(411));
+      expectNotCut(
+        tester,
+        find.descendant(of: lyricTile, matching: find.byType(RichText)),
+      );
+      expect(tester.takeException(), isNull);
+    });
   });
 }
 

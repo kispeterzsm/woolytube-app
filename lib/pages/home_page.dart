@@ -1412,13 +1412,13 @@ class _LyricsResultTile extends ConsumerWidget {
         onTap: onTap,
         onLongPress: onActions,
         child: Padding(
-          // The ⋮ brings its own room on the right.
-          padding: const EdgeInsets.fromLTRB(16, 8, 0, 8),
+          // As the track results; the ⋮ brings its own room on the right.
+          padding: const EdgeInsets.fromLTRB(12, 8, 0, 8),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               SizedBox(
-                width: 32,
+                width: 24,
                 child: Icon(
                   hit.kind == LyricsMode.transcript
                       ? Icons.subtitles_outlined
@@ -1427,7 +1427,7 @@ class _LyricsResultTile extends ConsumerWidget {
                   size: 20,
                 ),
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 8),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -1435,7 +1435,7 @@ class _LyricsResultTile extends ConsumerWidget {
                     Text(
                       chapter?.title ?? track.displayTitle,
                       key: ValueKey('search-lyric-title-${track.id}'),
-                      maxLines: 2,
+                      maxLines: 3,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: isCurrentTrack ? _accent : Colors.white,
@@ -1808,9 +1808,9 @@ class _SearchTrackTile extends ConsumerWidget {
 }
 
 /// The ⋮ of a file in the search results, like the one of its row on the
-/// playlist page. It is narrower than a usual button (still a full 48 tall,
-/// at the edge of the screen), so the title loses next to none of the room
-/// it had before the ⋮ and is not cut sooner.
+/// playlist page. It is a little narrower than a usual button (44 wide, a
+/// full 48 tall, at the edge of the screen) so the title keeps most of its
+/// room, while still being easy to hit without tapping the row beside it.
 class _TrackMoreButton extends StatelessWidget {
   const _TrackMoreButton({super.key, required this.onPressed});
 
@@ -1823,8 +1823,8 @@ class _TrackMoreButton extends StatelessWidget {
       tooltip: 'Track options',
       onPressed: onPressed,
       style: IconButton.styleFrom(
-        minimumSize: const Size(36, 48),
-        padding: const EdgeInsets.symmetric(horizontal: 8),
+        minimumSize: const Size(44, 48),
+        padding: const EdgeInsets.symmetric(horizontal: 12),
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       ),
     );
