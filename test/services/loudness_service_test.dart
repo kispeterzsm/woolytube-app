@@ -22,9 +22,13 @@ class _FakeAnalyzer implements LoudnessAnalyzer {
   /// Runs during a call, before it answers.
   void Function(String path)? during;
 
+  /// Files the plugin never answers for.
+  final hanging = <String>{};
+
   @override
   Future<MeasuredLoudness> analyze(String path) async {
     calls.add(path);
+    if (hanging.contains(path)) return Completer<MeasuredLoudness>().future;
     await gate?.future;
     during?.call(path);
     final failure = failures[path];
@@ -52,15 +56,20 @@ void main() {
   LoudnessService create({
     bool Function()? shouldPause,
     Future<bool> Function()? isCharging,
+    bool onlyWhileCharging = true,
+    Duration chargerPoll = const Duration(milliseconds: 50),
   }) {
     final service = LoudnessService(
       db,
       analyzer: analyzer,
       shouldPause: shouldPause,
       isCharging: isCharging ?? () async => true,
+      onlyWhileCharging: onlyWhileCharging,
       pauseBetween: Duration.zero,
       pausePoll: const Duration(milliseconds: 20),
-      chargerPoll: const Duration(milliseconds: 50),
+      chargerPoll: chargerPoll,
+      analyzeTimeout: const Duration(milliseconds: 100),
+      retryAfterError: const Duration(milliseconds: 50),
     );
     services.add(service);
     return service;
@@ -335,6 +344,213 @@ void main() {
     await db.deleteTracks([track.id]);
     expect(await db.getLoudnessMeasurement(track.id), isNull);
     expect(await service.loudnessFor(track.id, path), isNull);
+  });
+
+  test(
+    'a file the plugin never answers for fails and the rest goes on',
+    () async {
+      final (_, stuckPath) = await downloaded(1);
+      final (other, otherPath) = await downloaded(2);
+      analyzer.hanging.add(stuckPath);
+      final service = create();
+      service.setEnabled(true);
+      await _until(
+        () => service.progress.measured == 1 && !service.progress.working,
+        reason: 'the other file measured',
+      );
+      expect(analyzer.calls, [stuckPath, otherPath]);
+      expect(service.progress.failed, 1);
+      expect(service.progress.total, 2);
+      expect(service.progress.hasWorkLeft, isTrue);
+      expect(await service.loudnessFor(other.id, otherPath), isNotNull);
+    },
+  );
+
+  test('failures are counted, and Measure now tries them again', () async {
+    final (track, brokenPath) = await downloaded(1);
+    await downloaded(2);
+    analyzer.failures[brokenPath] = PlatformException(code: 'ANALYZE_ERROR');
+    final service = create();
+    service.setEnabled(true);
+    await _until(
+      () => service.progress.measured == 1 && !service.progress.working,
+    );
+    expect(service.progress.failed, 1);
+
+    analyzer.failures.clear();
+    service.measureNow();
+    expect(service.progress.failed, 0);
+    expect(service.progress.forced, isTrue);
+    await _until(
+      () => service.progress.measured == 2 && !service.progress.forced,
+      reason: 'the broken file measured on the second try',
+    );
+    expect(analyzer.calls.where((c) => c == brokenPath), hasLength(2));
+    expect(await service.loudnessFor(track.id, brokenPath), isNotNull);
+    expect(service.progress.hasWorkLeft, isFalse);
+  });
+
+  test('measuring starts again by itself after an error', () async {
+    await downloaded(1);
+    var calls = 0;
+    final service = create(
+      shouldPause: () {
+        calls++;
+        if (calls == 1) throw StateError('database busy');
+        return false;
+      },
+    );
+    service.setEnabled(true);
+    await _until(() => analyzer.calls.length == 1, reason: 'retried');
+    await _until(() => service.progress.measured == 1);
+  });
+
+  test('says while it waits for the library to move files', () async {
+    await downloaded(1);
+    var busy = true;
+    final service = create(shouldPause: () => busy);
+    service.setEnabled(true);
+    await _until(() => service.progress.waitingForLibrary);
+    busy = false;
+    await _until(() => service.progress.measured == 1);
+    expect(service.progress.waitingForLibrary, isFalse);
+  });
+
+  test(
+    'Measure now measures the library on battery until it is done',
+    () async {
+      await downloaded(1);
+      await downloaded(2);
+      final service = create(
+        isCharging: () async => false,
+        chargerPoll: const Duration(hours: 1),
+      );
+      service.setEnabled(true);
+      await _until(() => service.progress.waitingForCharger);
+      expect(analyzer.calls, isEmpty);
+
+      service.measureNow();
+      await _until(
+        () => service.progress.measured == 2 && !service.progress.forced,
+        reason: 'all measured',
+      );
+      expect(service.progress.waitingForCharger, isFalse);
+
+      // New downloads wait for the charger again.
+      await downloaded(3);
+      service.rescan();
+      await _until(() => service.progress.waitingForCharger);
+      expect(analyzer.calls, hasLength(2));
+    },
+  );
+
+  test('Stop hands the library back to the charging rule', () async {
+    await downloaded(1);
+    await downloaded(2);
+    await downloaded(3);
+    final service = create(
+      isCharging: () async => false,
+      chargerPoll: const Duration(hours: 1),
+    );
+    analyzer.gate = Completer<void>();
+    service.setEnabled(true);
+    await _until(() => service.progress.waitingForCharger);
+    service.measureNow();
+    await _until(() => analyzer.calls.length == 1);
+    service.stopMeasuringNow();
+    expect(service.progress.forced, isFalse);
+    analyzer.gate!.complete();
+    await _until(() => service.progress.waitingForCharger);
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(analyzer.calls, hasLength(1));
+    expect(service.progress.measured, 1);
+  });
+
+  test('switching off stops Measure now', () async {
+    await downloaded(1);
+    final service = create(isCharging: () async => false);
+    service.setEnabled(true);
+    service.measureNow();
+    expect(service.progress.forced, isTrue);
+    service.setEnabled(false);
+    expect(service.progress.forced, isFalse);
+  });
+
+  test(
+    'without the charging rule the library is measured on battery',
+    () async {
+      await downloaded(1);
+      await downloaded(2);
+      final service = create(
+        isCharging: () async => false,
+        onlyWhileCharging: false,
+      );
+      service.setEnabled(true);
+      await _until(() => service.progress.measured == 2);
+      expect(service.progress.waitingForCharger, isFalse);
+
+      // Turned on again: new songs wait.
+      service.setOnlyWhileCharging(true);
+      await downloaded(3);
+      service.rescan();
+      await _until(() => service.progress.waitingForCharger);
+      expect(analyzer.calls, hasLength(2));
+
+      // Turned off while waiting: measuring goes on at once.
+      service.setOnlyWhileCharging(false);
+      await _until(() => service.progress.measured == 3);
+      expect(service.progress.waitingForCharger, isFalse);
+    },
+  );
+
+  test('tells the player about each stored measurement', () async {
+    final (track, path) = await downloaded(1);
+    final (broken, brokenPath) = await downloaded(2);
+    analyzer.failures[brokenPath] = PlatformException(code: 'ANALYZE_ERROR');
+    final service = create();
+    final measured = <LoudnessJob>[];
+    final sub = service.measuredFiles.listen(measured.add);
+    addTearDown(sub.cancel);
+    service.setEnabled(true);
+    await _until(
+      () => service.progress.failed == 1 && service.progress.measured == 1,
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(measured, [LoudnessJob(track.id, path)]);
+    expect(measured, isNot(contains(LoudnessJob(broken.id, brokenPath))));
+  });
+
+  group('plugged in', () {
+    const channel = MethodChannel('com.woolytube/ytdlp');
+    late TestDefaultBinaryMessenger messenger;
+
+    setUp(() {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    });
+
+    tearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    test('asks the plugin whether the phone is on a charger', () async {
+      final methods = <String>[];
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        methods.add(call.method);
+        return false;
+      });
+      expect(await platformIsPluggedIn(), isFalse);
+      expect(methods, ['isPluggedIn']);
+    });
+
+    test('counts as plugged in when it cannot be told', () async {
+      messenger.setMockMethodCallHandler(
+        channel,
+        (call) async => throw PlatformException(code: 'ERR'),
+      );
+      expect(await platformIsPluggedIn(), isTrue);
+      messenger.setMockMethodCallHandler(channel, (call) async => null);
+      expect(await platformIsPluggedIn(), isTrue);
+    });
   });
 
   test('reads the plugin reply leniently', () {

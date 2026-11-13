@@ -406,6 +406,12 @@ class PlaybackService
 
   /// Where measured loudness comes from; see [attachLoudness].
   TrackLoudnessSource? _loudness;
+  StreamSubscription<LoudnessJob>? _loudnessMeasured;
+
+  /// A measurement of the playing song that arrives later than this into it
+  /// waits for its next play: a level step late in a song is worse than
+  /// one more play at the old level.
+  static const _reapplyLoudnessWithin = Duration(seconds: 30);
 
   /// The filters and gain mpv has now. mpv keeps them across files.
   AudioProcessingPlan _appliedAudioPlan = AudioProcessingPlan.none;
@@ -2295,13 +2301,30 @@ class PlaybackService
     _audioSettings.value.copyWith(evenOutVolume: enabled),
   );
 
+  /// How "Even out volume" levels songs. Remembered by the app settings.
+  Future<void> setEvenOutMode(EvenOutMode mode) =>
+      _updateAudioSettings(_audioSettings.value.copyWith(evenOutMode: mode));
+
   /// Lets the player use measured loudness, and asks for the songs it
   /// plays to be measured first.
   void attachLoudness(TrackLoudnessSource source) {
+    unawaited(_loudnessMeasured?.cancel());
     _loudness = source;
+    _loudnessMeasured = source.measuredFiles.listen(_onLoudnessMeasured);
     final needed = _audioSettings.value.needsLoudness;
     source.setEnabled(needed);
     if (needed) _prioritizeLoudness();
+  }
+
+  /// The playing song was measured only after it started (it was tapped
+  /// before measuring got to it): it gets its level now, unless it has
+  /// played for a while already.
+  void _onLoudnessMeasured(LoudnessJob job) {
+    if (!_audioSettings.value.needsLoudness) return;
+    if (job.trackId != _loadedTrackId || job.path != _currentFilePath) return;
+    if (currentItem?.track.id != job.trackId) return;
+    if (_position.value > _reapplyLoudnessWithin) return;
+    unawaited(_applyAudioProcessing(job.trackId, job.path));
   }
 
   Future<void> _updateAudioSettings(AudioProcessingSettings settings) async {
@@ -2604,6 +2627,8 @@ class PlaybackService
       await sub.cancel();
     }
     _subscriptions.clear();
+    await _loudnessMeasured?.cancel();
+    _loudnessMeasured = null;
     _uiPositionTimer?.cancel();
     _cancelLoadWatch();
     _sleepTimer.dispose();

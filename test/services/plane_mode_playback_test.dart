@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -31,6 +32,11 @@ class _FakeLoudness implements TrackLoudnessSource {
 
   @override
   void setEnabled(bool enabled) => this.enabled = enabled;
+
+  final measured = StreamController<LoudnessJob>.broadcast();
+
+  @override
+  Stream<LoudnessJob> get measuredFiles => measured.stream;
 }
 
 class _RecordingAnalyzer implements LoudnessAnalyzer {
@@ -217,6 +223,104 @@ void main() {
     await playback.setPlaneMode(true);
     expect(valuesOf('af').last, startsWith('@plane:'));
     expect(valuesOf('replaygain-fallback').last, '0.00');
+  });
+
+  test('"Even out volume" lifts a quiet song with its own limiter, and '
+      'plane mode swaps it for its own chain', () async {
+    final loudness = _FakeLoudness();
+    final track = await addTrack('quiet');
+    loudness.values[track.id] = const MeasuredLoudness(
+      integratedLufs: -21,
+      cabinLufs: -23,
+      peakDb: -0.5,
+    );
+    playback.attachLoudness(loudness);
+    await playback.setEvenOutVolume(true);
+    await playback.playTrack(track, [track]);
+    expect(valuesOf('af'), [evenOutLimiterFilters(7)]);
+    expect(valuesOf('af').single, startsWith('@$evenOutFilterLabel:'));
+    expect(valuesOf('replaygain-fallback'), isEmpty);
+
+    // Plane mode replaces the whole chain: no "evenout" filter is left
+    // under it, and switching it off brings the limiter back.
+    await playback.setPlaneMode(true);
+    expect(valuesOf('af').last, startsWith('@$planeModeFilterLabel:'));
+    expect(valuesOf('af').last, isNot(contains('@$evenOutFilterLabel')));
+    await playback.setPlaneMode(false);
+    expect(valuesOf('af').last, evenOutLimiterFilters(7));
+    expect(valuesOf('replaygain-fallback'), isEmpty);
+
+    // Quiet: no limiter, only what the peaks allow.
+    await playback.setEvenOutMode(EvenOutMode.quiet);
+    expect(valuesOf('af').last, isEmpty);
+    expect(valuesOf('replaygain-fallback'), isEmpty);
+    expect(player.opened, hasLength(1), reason: 'no reopen');
+  });
+
+  test('Quiet levels to a lower target with a plain gain', () async {
+    final loudness = _FakeLoudness();
+    final track = await addTrack('loud');
+    loudness.values[track.id] = const MeasuredLoudness(
+      integratedLufs: -9,
+      peakDb: 0,
+    );
+    playback.attachLoudness(loudness);
+    await playback.setEvenOutVolume(true);
+    await playback.playTrack(track, [track]);
+    expect(valuesOf('replaygain-fallback'), ['-5.00']);
+    await playback.setEvenOutMode(EvenOutMode.quiet);
+    expect(valuesOf('replaygain-fallback'), ['-5.00', '-9.00']);
+    expect(valuesOf('af'), isEmpty);
+  });
+
+  test('the playing song gets its level when its measurement arrives early '
+      'in it', () async {
+    final loudness = _FakeLoudness();
+    final tracks = [await addTrack('new'), await addTrack('next')];
+    playback.attachLoudness(loudness);
+    await playback.setEvenOutVolume(true);
+    await playback.playTrack(tracks[0], tracks);
+    expect(sets, isEmpty, reason: 'not measured yet: left as it is');
+
+    // Another song's result changes nothing now.
+    loudness.values[tracks[1].id] = const MeasuredLoudness(
+      integratedLufs: -8,
+      peakDb: 0,
+    );
+    loudness.measured.add(LoudnessJob(tracks[1].id, tracks[1].filePath!));
+    await settle();
+    expect(sets, isEmpty);
+
+    player.tick(const Duration(seconds: 5));
+    loudness.values[tracks[0].id] = const MeasuredLoudness(
+      integratedLufs: -10,
+      peakDb: 0,
+    );
+    loudness.measured.add(LoudnessJob(tracks[0].id, tracks[0].filePath!));
+    await settle();
+    expect(valuesOf('replaygain-fallback'), ['-4.00']);
+    expect(player.opened, hasLength(1), reason: 'no reopen');
+  });
+
+  test('a measurement arriving late in the playing song waits for its next '
+      'play', () async {
+    final loudness = _FakeLoudness();
+    final track = await addTrack('long');
+    playback.attachLoudness(loudness);
+    await playback.setEvenOutVolume(true);
+    await playback.playTrack(track, [track]);
+    player.tick(const Duration(seconds: 45));
+    await settle();
+    loudness.values[track.id] = const MeasuredLoudness(
+      integratedLufs: -10,
+      peakDb: 0,
+    );
+    loudness.measured.add(LoudnessJob(track.id, track.filePath!));
+    await settle();
+    expect(sets, isEmpty);
+
+    await playback.playTrack(track, [track]);
+    expect(valuesOf('replaygain-fallback'), ['-4.00']);
   });
 
   test('the playing song and the next ones are measured first', () async {

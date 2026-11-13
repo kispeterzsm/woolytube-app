@@ -15,24 +15,35 @@ import '../services/app_settings_service.dart';
 import '../services/audio_processing.dart';
 import '../services/library_export_service.dart';
 import '../services/library_layout.dart';
+import '../services/loudness_service.dart';
 import '../services/metadata_service.dart';
 import '../services/playback_service.dart';
 import '../widgets/plane_mode_toggle.dart';
 import '../widgets/settings_section_header.dart';
 import 'debug_log_page.dart';
 
-/// Gives the player the audio setting a restore just stored. Runs also when
-/// the page that started the restore is already closed.
+/// Gives the player and the loudness measuring the audio settings a restore
+/// just stored. Runs also when the page that started the restore is already
+/// closed.
 Future<void> _applyRestoredSettings(
   AppSettingsService settings,
   PlaybackService? player,
+  LoudnessService? loudness,
 ) async {
+  try {
+    loudness?.setOnlyWhileCharging(
+      await settings.getLoudnessOnlyWhileCharging(),
+    );
+  } catch (_) {
+    // Applies at the next start.
+  }
   if (player == null) return;
   try {
     await player.setPauseOnAudioInterruption(
       await settings.getPauseOnAudioInterruption(),
     );
     await player.setEvenOutVolume(await settings.getEvenOutVolume());
+    await player.setEvenOutMode(await settings.getEvenOutMode());
     await player.setPlaneModeStrength(await settings.getPlaneModeStrength());
   } catch (_) {
     // Applies at the next start.
@@ -54,6 +65,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   bool _autoDownloadWithMobileData = false;
   bool _pauseOnAudioInterruption = true;
   bool _evenOutVolume = false;
+  EvenOutMode _evenOutMode = EvenOutMode.normal;
+  bool _loudnessOnlyWhileCharging = true;
   PlaneModeStrength _planeModeStrength = PlaneModeStrength.standard;
   DateTime? _lastYtDlpUpdateCheck;
   String? _appVersion;
@@ -84,10 +97,14 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       ]);
       final lastCheck = await settings.getLastYtDlpUpdateAttempt();
       final evenOutVolume = await settings.getEvenOutVolume();
+      final evenOutMode = await settings.getEvenOutMode();
+      final onlyWhileCharging = await settings.getLoudnessOnlyWhileCharging();
       final strength = await settings.getPlaneModeStrength();
       if (mounted) {
         setState(() {
           _evenOutVolume = evenOutVolume;
+          _evenOutMode = evenOutMode;
+          _loudnessOnlyWhileCharging = onlyWhileCharging;
           _planeModeStrength = strength;
           _autoDownloadWithMobileData = values[0];
           _pauseOnAudioInterruption = values[1];
@@ -178,6 +195,29 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     if (saved) await _tellPlayer(() => player?.setEvenOutVolume(enabled));
   }
 
+  Future<void> _setEvenOutMode(EvenOutMode mode) async {
+    final player = _playerOrNull();
+    final previous = _evenOutMode;
+    final saved = await _save(
+      apply: () => _evenOutMode = mode,
+      revert: () => _evenOutMode = previous,
+      write: () => ref.read(appSettingsServiceProvider).setEvenOutMode(mode),
+    );
+    if (saved) await _tellPlayer(() => player?.setEvenOutMode(mode));
+  }
+
+  Future<void> _setLoudnessOnlyWhileCharging(bool enabled) async {
+    final saved = await _save(
+      apply: () => _loudnessOnlyWhileCharging = enabled,
+      revert: () => _loudnessOnlyWhileCharging = !enabled,
+      write:
+          () => ref
+              .read(appSettingsServiceProvider)
+              .setLoudnessOnlyWhileCharging(enabled),
+    );
+    if (saved) _loudnessOrNull()?.setOnlyWhileCharging(enabled);
+  }
+
   Future<void> _setPlaneModeStrength(PlaneModeStrength strength) async {
     final player = _playerOrNull();
     final previous = _planeModeStrength;
@@ -219,6 +259,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     }
   }
 
+  /// Loudness measuring; there is none in some tests.
+  LoudnessService? _loudnessOrNull() => _readLoudness(ref);
+
   Future<void> _setAutoDownloadWithMobileData(bool enabled) => _save(
     apply: () => _autoDownloadWithMobileData = enabled,
     revert: () => _autoDownloadWithMobileData = !enabled,
@@ -257,6 +300,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     final exporter = ref.read(libraryExportServiceProvider);
     final settings = ref.read(appSettingsServiceProvider);
     final player = _playerOrNull();
+    final loudness = _loudnessOrNull();
     setState(() => _isRestoringSettings = true);
     String message;
     try {
@@ -266,7 +310,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               ? 'No settings backup found. Back up the library first.'
               : 'Restored ${_count(applied, 'setting')}.';
       if (applied != null) {
-        await _applyRestoredSettings(settings, player);
+        await _applyRestoredSettings(settings, player, loudness);
         // Shows what is stored now.
         if (mounted) await _loadSettings();
       }
@@ -432,9 +476,39 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         key: const ValueKey('even-out-volume'),
         secondary: const Icon(Icons.equalizer),
         title: const Text('Even out volume'),
-        subtitle: const Text(
-          'Plays every song at a similar loudness, so a loud song does not '
-          'follow a quiet one.',
+        // The level choice belongs to this switch, and plane mode stays
+        // right below it.
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Plays every song at a similar loudness, so a loud song does '
+              'not follow a quiet one.',
+            ),
+            if (_evenOutVolume) ...[
+              const SizedBox(height: 8),
+              SegmentedButton<EvenOutMode>(
+                key: const ValueKey('even-out-mode'),
+                showSelectedIcon: false,
+                segments: [
+                  for (final mode in EvenOutMode.values)
+                    ButtonSegment(value: mode, label: Text(mode.label)),
+                ],
+                selected: {_evenOutMode},
+                onSelectionChanged:
+                    saving ? null : (value) => _setEvenOutMode(value.first),
+              ),
+              const SizedBox(height: 4),
+              Text(switch (_evenOutMode) {
+                EvenOutMode.normal =>
+                  'Normal: quiet songs are turned up too; a limiter keeps '
+                      'them from clipping.',
+                EvenOutMode.quiet =>
+                  'Quiet: a lower level that leaves the sound untouched. '
+                      'Turn the phone up a little.',
+              }),
+            ],
+          ],
         ),
         value: _evenOutVolume,
         onChanged: saving ? null : _setEvenOutVolume,
@@ -468,6 +542,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         ),
       ),
       const _LoudnessProgressTile(),
+      _LoudnessOnlyWhileChargingTile(
+        value: _loudnessOnlyWhileCharging,
+        onChanged: saving ? null : _setLoudnessOnlyWhileCharging,
+      ),
     ];
   }
 
@@ -897,6 +975,7 @@ class _RestorePlaylistsPageState extends ConsumerState<_RestorePlaylistsPage> {
     try {
       player = ref.read(playbackServiceProvider);
     } catch (_) {}
+    final loudness = _readLoudness(ref);
     String message;
     try {
       final applied = await exporter.restoreSettings(folder: _source);
@@ -904,7 +983,9 @@ class _RestorePlaylistsPageState extends ConsumerState<_RestorePlaylistsPage> {
           applied == null
               ? 'No settings backup found in this folder.'
               : 'Restored ${_count(applied, 'setting')}.';
-      if (applied != null) await _applyRestoredSettings(settings, player);
+      if (applied != null) {
+        await _applyRestoredSettings(settings, player, loudness);
+      }
     } catch (e) {
       message = 'Could not restore settings: $e';
     }
@@ -1097,16 +1178,28 @@ class _PlaneModeTile extends ConsumerWidget {
   }
 }
 
-/// How many songs have their loudness measured, while measuring is on.
+/// Loudness measuring; there is none in some tests.
+LoudnessService? _readLoudness(WidgetRef ref) {
+  try {
+    return ref.read(loudnessServiceProvider);
+  } catch (_) {
+    return null;
+  }
+}
+
+/// Whether plane mode or "Even out volume" is on, so songs are measured.
+bool _watchMeasuring(WidgetRef ref) =>
+    ref.watch(audioProcessingSettingsProvider).valueOrNull?.needsLoudness ??
+    false;
+
+/// How many songs have their loudness measured, while measuring is on, and
+/// "Measure now" for the rest of the library.
 class _LoudnessProgressTile extends ConsumerWidget {
   const _LoudnessProgressTile();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final measuring =
-        ref.watch(audioProcessingSettingsProvider).valueOrNull?.needsLoudness ??
-        false;
-    if (!measuring) return const SizedBox.shrink();
+    if (!_watchMeasuring(ref)) return const SizedBox.shrink();
     final progress = ref.watch(loudnessProgressProvider).valueOrNull;
     if (progress == null) return const SizedBox.shrink();
     final String text;
@@ -1118,18 +1211,84 @@ class _LoudnessProgressTile extends ConsumerWidget {
     } else {
       text = 'Measured ${progress.measured} of ${progress.total} songs';
     }
+    final failed =
+        progress.failed > 0 ? '${progress.failed} could not be measured. ' : '';
+    final String status;
+    if (progress.waitingForLibrary) {
+      status = 'Paused while files are moved or deleted.';
+    } else if (progress.forced) {
+      status = 'Measuring the whole library now, also on battery.';
+    } else if (progress.waitingForCharger) {
+      status =
+          'The playing and next songs are measured right away; the rest '
+          'of the library while the phone charges.';
+    } else if (progress.failed > 0 && !progress.working) {
+      status = 'Measure now tries them again.';
+    } else {
+      status =
+          'Each song is measured once, in the background, while plane '
+          'mode or Even out volume is on.';
+    }
     return ListTile(
       key: const ValueKey('loudness-progress'),
       dense: true,
       leading: const SizedBox(width: 24),
       title: Text(text),
-      subtitle: Text(
-        progress.waitingForCharger
-            ? 'The playing and next songs are measured right away; the rest '
-                'of the library while the phone charges.'
-            : 'Each song is measured once, in the background, while plane '
-                'mode or Even out volume is on.',
+      subtitle: Text('$failed$status'),
+      trailing:
+          progress.forced
+              ? TextButton(
+                key: const ValueKey('loudness-measure-now'),
+                onPressed: () => _readLoudness(ref)?.stopMeasuringNow(),
+                child: const Text('Stop'),
+              )
+              : progress.hasWorkLeft
+              ? TextButton(
+                key: const ValueKey('loudness-measure-now'),
+                onPressed: () => _measureNow(context, ref),
+                child: const Text('Measure now'),
+              )
+              : null,
+    );
+  }
+
+  void _measureNow(BuildContext context, WidgetRef ref) {
+    _readLoudness(ref)?.measureNow();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Measuring all songs now. Keep WoolyTube open; it uses some '
+          'battery.',
+        ),
       ),
+    );
+  }
+}
+
+/// Whether the library is only measured while the phone is plugged in,
+/// shown while measuring is on.
+class _LoudnessOnlyWhileChargingTile extends ConsumerWidget {
+  const _LoudnessOnlyWhileChargingTile({
+    required this.value,
+    required this.onChanged,
+  });
+
+  final bool value;
+  final ValueChanged<bool>? onChanged;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (!_watchMeasuring(ref)) return const SizedBox.shrink();
+    return SwitchListTile(
+      key: const ValueKey('loudness-only-charging'),
+      secondary: const Icon(Icons.battery_charging_full),
+      title: const Text('Only measure while charging'),
+      subtitle: const Text(
+        'When off, songs are measured whenever WoolyTube is open or '
+        'playing. The playing and next songs are measured either way.',
+      ),
+      value: value,
+      onChanged: onChanged,
     );
   }
 }

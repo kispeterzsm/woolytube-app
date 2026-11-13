@@ -180,6 +180,14 @@ final loudnessServiceProvider = Provider<LoudnessService>((ref) {
     },
   );
   ref.onDispose(service.dispose);
+  // Until the setting is read, the library waits for the charger (the
+  // default); the player's own requests are measured either way.
+  unawaited(
+    ref
+        .read(appSettingsServiceProvider)
+        .getLoudnessOnlyWhileCharging()
+        .then(service.setOnlyWhileCharging, onError: (Object _) {}),
+  );
   return service;
 });
 

@@ -97,6 +97,43 @@ void main() {
     expect(await settings.getPlaneModeStrength(), PlaneModeStrength.strong);
   });
 
+  test(
+    'levelling mode and measuring rule default, persist and restore',
+    () async {
+      final settings = AppSettingsService();
+      expect(await settings.getEvenOutMode(), EvenOutMode.normal);
+      expect(await settings.getLoudnessOnlyWhileCharging(), isTrue);
+      await settings.setEvenOutMode(EvenOutMode.quiet);
+      await settings.setLoudnessOnlyWhileCharging(false);
+      final reloaded = AppSettingsService();
+      expect(await reloaded.getEvenOutMode(), EvenOutMode.quiet);
+      expect(await reloaded.getLoudnessOnlyWhileCharging(), isFalse);
+
+      // Both are in the backup...
+      final exported = await settings.exportSettings();
+      expect(exported[AppSettingsService.evenOutModeKey], 'quiet');
+      expect(
+        exported[AppSettingsService.loudnessOnlyWhileChargingKey],
+        isFalse,
+      );
+
+      // ... and come back from it.
+      SharedPreferences.setMockInitialValues({});
+      expect(await settings.importSettings(exported), 2);
+      expect(await settings.getEvenOutMode(), EvenOutMode.quiet);
+      expect(await settings.getLoudnessOnlyWhileCharging(), isFalse);
+
+      // An unknown mode in a hand-edited backup changes nothing.
+      expect(
+        await settings.importSettings({
+          AppSettingsService.evenOutModeKey: 'loud',
+        }),
+        0,
+      );
+      expect(await settings.getEvenOutMode(), EvenOutMode.quiet);
+    },
+  );
+
   test('mobile-data auto download is off by default', () async {
     final settings = AppSettingsService();
 

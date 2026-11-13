@@ -115,18 +115,21 @@ WoolyTube plays through media_kit's libmpv. Three routes were checked in source:
 - **Output level:** a typical song comes out at about −15 LUFS (Standard) or −14 LUFS (Strong). Loud recent masters (−7 to −10 LUFS) therefore get quieter when plane mode is switched on and may need the volume a little higher, while quiet recordings get louder. The first-time tips ask the listener to set the volume so the quiet parts are just clear, and no louder.
 - The limiter ceiling is −1.5 dBFS, because the sample-peak limiter misses up to about 1 dB of inter-sample peaks.
 
-**Even out volume** (Settings > Sound) brings songs to −14 LUFS with `replaygain-fallback`:
-- Cuts are at most 20 dB.
-- Boosts are at most 6 dB and never past the song's peak minus 1 dB.
+**Even out volume** (Settings > Sound) brings songs to a target loudness, with a choice of two levels:
+- **Normal** targets −14 LUFS. Cuts are at most 20 dB, boosts at most 10 dB. A boost that keeps the song's sample peak under −1 dBFS is a plain `replaygain-fallback` gain. A bigger one goes into its own filter chain, `@evenout:lavfi=[volume=+XdB,alimiter=limit=-1dB:attack=5:release=50:level=disabled]`, with no `replaygain-fallback`; nearly every commercial master peaks within 1 dB of full scale, so without the limiter quiet masters were almost never raised.
+- **Quiet** targets −18 LUFS with no limiter: cuts as above, boosts only as far as the peak minus 1 dB allows.
+- The `evenout` label is separate from plane mode's `plane`. The player sets the whole `af` chain per song and plane mode replaces "Even out volume", so the two chains are never stacked.
 - An unmeasured song stays as it is.
 
 **Measuring:**
 - Measuring runs only while plane mode or Even out volume is on.
 - The player switches measuring on and off with its settings, then asks for the playing song and the next three. Those are measured right away, even on battery.
-- The rest of the library is measured one song at a time, and only while the phone is charging. A one-time pass is about 1.5–3 s of decoding per song (estimated), which is hours of CPU for a large library. The player's look-ahead covers what is actually played.
+- The rest of the library is measured one song at a time, by default only while the phone is plugged in (**Only measure while charging**). "Plugged in" is `EXTRA_PLUGGED` or a charging/full status, not `BatteryManager.isCharging()`: that reads false while a charge limit (ASUS steady charging) holds the level. A one-time pass is about 1.5–3 s of decoding per song (estimated), which is hours of CPU for a large library. The player's look-ahead covers what is actually played.
+- **Measure now** measures the whole library regardless of the charger until it is done or stopped, and tries files that failed this session again.
+- Each analysis has a 15-minute limit in the plugin (lock wait included) and a 20-minute backstop in Dart; a file that runs out counts as failed. An error in the measuring loop restarts it after a minute. Settings shows how many files could not be measured and why measuring waits.
 - The library scan runs in a background isolate.
 - Measuring waits while the library moves or deletes files, and scans again afterwards, since paths may have changed. It looks for new songs whenever a download run ends.
-- A song is never re-levelled while it plays. One that was not measured yet keeps the typical level until its next play.
+- A song measured while it plays gets its level at once if it is still in its first 30 seconds; later, the step would be more noticeable than one more play at the old level, so it waits for the next play.
 - Results are stored in a `loudness_measurements` table with the file's path, size and modification time. A replaced file is measured again, and measurements are deleted with their track.
 
 **Unchanged:**

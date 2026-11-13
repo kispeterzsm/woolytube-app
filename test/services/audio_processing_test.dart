@@ -158,7 +158,18 @@ void main() {
   });
 
   group('even out volume', () {
-    test('turns loud songs down to the target', () {
+    const quiet = AudioProcessingSettings(
+      evenOutVolume: true,
+      evenOutMode: EvenOutMode.quiet,
+    );
+
+    test('Normal is the default mode', () {
+      expect(evenOut.evenOutMode, EvenOutMode.normal);
+      expect(EvenOutMode.normal.targetLufs, -14);
+      expect(EvenOutMode.quiet.targetLufs, -18);
+    });
+
+    test('turns loud songs down to the target with a plain gain', () {
       final plan = planAudioProcessing(
         evenOut,
         const MeasuredLoudness(integratedLufs: -8, peakDb: 0),
@@ -166,33 +177,143 @@ void main() {
       expect(plan.filters, isEmpty);
       expect(plan.gainDb, closeTo(-6, 1e-9));
       expect(plan.gainText, '-6.00');
+      expect(
+        planAudioProcessing(
+          quiet,
+          const MeasuredLoudness(integratedLufs: -8, peakDb: 0),
+        ),
+        const AudioProcessingPlan(gainDb: -10),
+      );
     });
 
-    test('turns quiet songs up only as far as their peaks allow', () {
+    test('a boost that fits under the peaks is a plain gain', () {
+      for (final mode in EvenOutMode.values) {
+        expect(
+          evenOutPlan(
+            mode,
+            MeasuredLoudness(integratedLufs: mode.targetLufs - 4, peakDb: -6),
+          ),
+          const AudioProcessingPlan(gainDb: 4),
+          reason: mode.name,
+        );
+      }
+    });
+
+    test('Normal lifts quiet songs past their peaks with a limiter', () {
+      final plan = evenOutPlan(
+        EvenOutMode.normal,
+        const MeasuredLoudness(integratedLufs: -20, peakDb: -0.2),
+      );
+      expect(plan.gainDb, 0);
       expect(
-        evenOutGainDb(const MeasuredLoudness(integratedLufs: -20, peakDb: -3)),
-        closeTo(2, 1e-9),
+        plan.filters,
+        '@evenout:lavfi=[volume=6.00dB,'
+        'alimiter=limit=-1dB:attack=5:release=50:level=disabled]',
+      );
+      expect(plan.filters, evenOutLimiterFilters(6));
+    });
+
+    test('Normal lifts by at most 10 dB', () {
+      expect(
+        evenOutPlan(
+          EvenOutMode.normal,
+          const MeasuredLoudness(integratedLufs: -40, peakDb: -1),
+        ).filters,
+        contains('volume=10.00dB'),
+      );
+      // Within the peaks a plain gain, capped the same way.
+      expect(
+        evenOutPlan(
+          EvenOutMode.normal,
+          const MeasuredLoudness(integratedLufs: -40, peakDb: -30),
+        ),
+        const AudioProcessingPlan(gainDb: 10),
+      );
+    });
+
+    test('Quiet lifts only as far as the peaks allow, never limits', () {
+      expect(
+        evenOutPlan(
+          EvenOutMode.quiet,
+          const MeasuredLoudness(integratedLufs: -24, peakDb: -3),
+        ),
+        const AudioProcessingPlan(gainDb: 2),
       );
       expect(
-        evenOutGainDb(const MeasuredLoudness(integratedLufs: -30, peakDb: -12)),
-        6,
+        evenOutPlan(
+          EvenOutMode.quiet,
+          const MeasuredLoudness(integratedLufs: -24, peakDb: 0),
+        ),
+        AudioProcessingPlan.none,
       );
       expect(
-        evenOutGainDb(const MeasuredLoudness(integratedLufs: -20, peakDb: 0)),
-        0,
+        evenOutPlan(
+          EvenOutMode.quiet,
+          const MeasuredLoudness(integratedLufs: -24),
+        ),
+        AudioProcessingPlan.none,
       );
-      expect(evenOutGainDb(const MeasuredLoudness(integratedLufs: -20)), 0);
+    });
+
+    test('a song without a known peak is limited in Normal', () {
+      expect(
+        evenOutPlan(
+          EvenOutMode.normal,
+          const MeasuredLoudness(integratedLufs: -16),
+        ).filters,
+        evenOutLimiterFilters(2),
+      );
     });
 
     test('cuts at most 20 dB', () {
-      expect(evenOutGainDb(const MeasuredLoudness(integratedLufs: 10)), -20);
+      expect(
+        evenOutPlan(
+          EvenOutMode.normal,
+          const MeasuredLoudness(integratedLufs: 10),
+        ),
+        const AudioProcessingPlan(gainDb: -20),
+      );
     });
 
     test('leaves unmeasured and silent songs as they are', () {
-      expect(evenOutGainDb(null), 0);
-      expect(evenOutGainDb(const MeasuredLoudness()), 0);
+      for (final mode in EvenOutMode.values) {
+        expect(evenOutPlan(mode, null), AudioProcessingPlan.none);
+        expect(
+          evenOutPlan(mode, const MeasuredLoudness()),
+          AudioProcessingPlan.none,
+        );
+      }
       expect(planAudioProcessing(evenOut, null), AudioProcessingPlan.none);
     });
+
+    test('its filter and plane mode\'s never share a label', () {
+      expect(evenOutFilterLabel, isNot(planeModeFilterLabel));
+      const loudness = MeasuredLoudness(
+        integratedLufs: -22,
+        cabinLufs: -24,
+        peakDb: 0,
+      );
+      final levelled = planAudioProcessing(evenOut, loudness);
+      expect(levelled.filters, startsWith('@$evenOutFilterLabel:lavfi=['));
+      expect(levelled.filters, isNot(contains('@$planeModeFilterLabel')));
+      // Plane mode replaces the whole chain, so the limiter of "Even out
+      // volume" is never stacked on plane mode's.
+      final plane = planAudioProcessing(
+        evenOut.copyWith(planeMode: true),
+        loudness,
+      );
+      expect(plane.filters, startsWith('@$planeModeFilterLabel:lavfi=['));
+      expect(plane.filters, isNot(contains('@$evenOutFilterLabel')));
+      expect(plane.gainDb, 0);
+    });
+  });
+
+  test('mode names round-trip and unknown names read as normal', () {
+    for (final mode in EvenOutMode.values) {
+      expect(EvenOutMode.fromName(mode.name), mode);
+    }
+    expect(EvenOutMode.fromName(null), EvenOutMode.normal);
+    expect(EvenOutMode.fromName('loud'), EvenOutMode.normal);
   });
 
   test('strength names round-trip and unknown names read as standard', () {

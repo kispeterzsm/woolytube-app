@@ -86,6 +86,9 @@ void main() async {
     await playbackService.setEvenOutVolume(
       await appSettingsService.getEvenOutVolume(),
     );
+    await playbackService.setEvenOutMode(
+      await appSettingsService.getEvenOutMode(),
+    );
   } catch (e) {
     debugPrint('Sound settings could not be read: $e');
   }

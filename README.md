@@ -65,9 +65,11 @@ Earbuds without noise cancelling let engine rumble through, so quiet passages di
 
 Set the volume so the quiet parts are just clear, and no louder. Loud recent songs may need it a little higher than before, quiet recordings lower. **Plane mode strength** offers Standard and Strong. A tight earbud fit (a bigger tip size, or foam tips) blocks more noise than any setting.
 
-**Even out volume** plays every song at about the level YouTube uses. Loud songs are turned down, and quiet ones are turned up as far as they can go without clipping.
+**Even out volume** plays every song at a similar loudness, at one of two levels:
+- **Normal** (the default) is about the level YouTube uses. Loud songs are turned down, and quiet ones are turned up by up to 10 dB; a limiter keeps them from clipping.
+- **Quiet** is about 4 dB lower and never needs a limiter: quiet songs are only turned up as far as their peaks allow. Turn the phone up a little.
 
-Both measure each song's loudness once, on the phone. The playing song and the next ones are measured right away; the rest of the library only while the phone is charging. Nothing is uploaded or written into your files. The research behind the settings is in [docs/research/plane-mode.md](docs/research/plane-mode.md).
+Both measure each song's loudness once, on the phone. The playing song and the next ones are measured right away; a song measured in its first 30 seconds gets its level at once, otherwise from its next play. The rest of the library is measured while the phone is plugged in, or always when **Only measure while charging** is off. **Measure now** measures the whole library at once, on battery too, and tries songs that could not be measured again. Nothing is uploaded or written into your files. The research behind the settings is in [docs/research/plane-mode.md](docs/research/plane-mode.md).
 
 ## Building from Source
 

@@ -47,6 +47,31 @@ class _Player implements PlaybackService {
       settings.add(settings.value.copyWith(strength: strength));
 
   @override
+  Future<void> setEvenOutMode(EvenOutMode mode) async =>
+      settings.add(settings.value.copyWith(evenOutMode: mode));
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// Records what the settings page asks of loudness measuring.
+class _Loudness implements LoudnessService {
+  final calls = <String>[];
+  bool? onlyWhileChargingValue;
+
+  @override
+  void measureNow() => calls.add('measureNow');
+
+  @override
+  void stopMeasuringNow() => calls.add('stop');
+
+  @override
+  void setOnlyWhileCharging(bool value) {
+    calls.add('onlyWhileCharging:$value');
+    onlyWhileChargingValue = value;
+  }
+
+  @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
@@ -54,6 +79,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const backgroundChannel = MethodChannel('com.woolytube/background');
   late _Player player;
+  late _Loudness loudness;
 
   setUp(() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -67,6 +93,7 @@ void main() {
       buildSignature: '',
     );
     player = _Player();
+    loudness = _Loudness();
   });
 
   tearDown(() {
@@ -85,6 +112,7 @@ void main() {
       ProviderScope(
         overrides: [
           playbackServiceProvider.overrideWithValue(player),
+          loudnessServiceProvider.overrideWithValue(loudness),
           loudnessProgressProvider.overrideWith(
             (ref) => Stream.value(progress),
           ),
@@ -203,5 +231,143 @@ void main() {
     );
     expect(find.text('Measured 4 of 10 songs'), findsOneWidget);
     expect(find.textContaining('while the phone charges'), findsOneWidget);
+  });
+
+  testWidgets('the level choice shows only while "Even out volume" is on', (
+    tester,
+  ) async {
+    await pumpSettings(tester);
+    final mode = find.byKey(const ValueKey('even-out-mode'));
+    expect(mode, findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('even-out-volume')));
+    await tester.pumpAndSettle();
+    expect(mode, findsOneWidget);
+    expect(find.textContaining('Normal: quiet songs are turned up'), findsOne);
+
+    // Inside the switch's tile: plane mode stays right below it.
+    final even = find.byKey(const ValueKey('even-out-volume'));
+    expect(find.descendant(of: even, matching: mode), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.byKey(const ValueKey('plane-mode-setting'))).dy,
+      tester.getBottomLeft(even).dy,
+    );
+
+    await tester.tap(find.text('Quiet'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Quiet: a lower level'), findsOneWidget);
+    expect(player.settings.value.evenOutMode, EvenOutMode.quiet);
+    expect(player.settings.value.evenOutVolume, isTrue, reason: 'not toggled');
+    expect(await AppSettingsService().getEvenOutMode(), EvenOutMode.quiet);
+  });
+
+  testWidgets('the stored level is shown', (tester) async {
+    SharedPreferences.setMockInitialValues({
+      AppSettingsService.evenOutVolumeKey: true,
+      AppSettingsService.evenOutModeKey: 'quiet',
+    });
+    await pumpSettings(tester);
+    final button = tester.widget<SegmentedButton<EvenOutMode>>(
+      find.byKey(const ValueKey('even-out-mode')),
+    );
+    expect(button.selected, {EvenOutMode.quiet});
+  });
+
+  testWidgets('"Measure now" starts measuring and turns into Stop', (
+    tester,
+  ) async {
+    await player.setEvenOutVolume(true);
+    await pumpSettings(
+      tester,
+      progress: const LoudnessProgress(
+        measured: 4,
+        total: 10,
+        waitingForCharger: true,
+      ),
+    );
+    final button = find.byKey(const ValueKey('loudness-measure-now'));
+    expect(
+      find.descendant(of: button, matching: find.text('Measure now')),
+      findsOneWidget,
+    );
+    await tester.tap(button);
+    await tester.pump();
+    expect(loudness.calls, ['measureNow']);
+    expect(find.textContaining('Keep WoolyTube open'), findsOneWidget);
+  });
+
+  testWidgets('while measuring now, Stop ends it', (tester) async {
+    await player.setEvenOutVolume(true);
+    await pumpSettings(
+      tester,
+      progress: const LoudnessProgress(
+        measured: 4,
+        total: 10,
+        working: true,
+        forced: true,
+      ),
+    );
+    expect(find.textContaining('also on battery'), findsOneWidget);
+    await tester.tap(find.text('Stop'));
+    await tester.pump();
+    expect(loudness.calls, ['stop']);
+  });
+
+  testWidgets('a measured library has no "Measure now"', (tester) async {
+    await player.setEvenOutVolume(true);
+    await pumpSettings(
+      tester,
+      progress: const LoudnessProgress(measured: 10, total: 10),
+    );
+    expect(find.byKey(const ValueKey('loudness-measure-now')), findsNothing);
+  });
+
+  testWidgets('files that could not be measured are counted and retryable', (
+    tester,
+  ) async {
+    await player.setEvenOutVolume(true);
+    await pumpSettings(
+      tester,
+      progress: const LoudnessProgress(measured: 8, total: 10, failed: 2),
+    );
+    expect(find.text('Measured 8 of 10 songs'), findsOneWidget);
+    expect(
+      find.text('2 could not be measured. Measure now tries them again.'),
+      findsOneWidget,
+    );
+    expect(find.text('Measure now'), findsOneWidget);
+  });
+
+  testWidgets('says when measuring waits for files being moved', (
+    tester,
+  ) async {
+    await player.setEvenOutVolume(true);
+    await pumpSettings(
+      tester,
+      progress: const LoudnessProgress(
+        measured: 3,
+        total: 10,
+        waitingForLibrary: true,
+      ),
+    );
+    expect(find.textContaining('Paused while files are moved'), findsOne);
+  });
+
+  testWidgets('"Only measure while charging" shows while measuring is on, '
+      'is on by default, and is saved', (tester) async {
+    await pumpSettings(tester);
+    final tile = find.byKey(const ValueKey('loudness-only-charging'));
+    expect(tile, findsNothing);
+
+    await player.setPlaneModePreference(true);
+    await tester.pumpAndSettle();
+    expect(tester.widget<SwitchListTile>(tile).value, isTrue);
+
+    await tester.ensureVisible(tile);
+    await tester.tap(tile);
+    await tester.pumpAndSettle();
+    expect(tester.widget<SwitchListTile>(tile).value, isFalse);
+    expect(loudness.calls, ['onlyWhileCharging:false']);
+    expect(await AppSettingsService().getLoudnessOnlyWhileCharging(), isFalse);
   });
 }

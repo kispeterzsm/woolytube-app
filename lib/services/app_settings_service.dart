@@ -21,6 +21,8 @@ class AppSettingsService {
   static const dismissedImportUrlsKey = 'dismissed_import_urls';
   static const lastYtDlpUpdateAttemptKey = 'last_ytdlp_update_attempt';
   static const evenOutVolumeKey = 'even_out_volume';
+  static const evenOutModeKey = 'even_out_mode';
+  static const loudnessOnlyWhileChargingKey = 'loudness_only_while_charging';
   static const planeModeStrengthKey = 'plane_mode_strength';
   static const planeModeTipShownKey = 'plane_mode_tip_shown';
   static const _backgroundChannel = MethodChannel('com.woolytube/background');
@@ -57,6 +59,30 @@ class AppSettingsService {
   Future<void> setEvenOutVolume(bool enabled) async {
     final preferences = await _preferencesLoader();
     await preferences.setBool(evenOutVolumeKey, enabled);
+  }
+
+  /// How "Even out volume" levels songs: Normal or Quiet.
+  Future<EvenOutMode> getEvenOutMode() async {
+    final preferences = await _preferencesLoader();
+    return EvenOutMode.fromName(preferences.getString(evenOutModeKey));
+  }
+
+  Future<void> setEvenOutMode(EvenOutMode mode) async {
+    final preferences = await _preferencesLoader();
+    await preferences.setString(evenOutModeKey, mode.name);
+  }
+
+  /// Whether the library's loudness is only measured while the phone is
+  /// plugged in. The songs the player is about to play are measured either
+  /// way.
+  Future<bool> getLoudnessOnlyWhileCharging() async {
+    final preferences = await _preferencesLoader();
+    return preferences.getBool(loudnessOnlyWhileChargingKey) ?? true;
+  }
+
+  Future<void> setLoudnessOnlyWhileCharging(bool enabled) async {
+    final preferences = await _preferencesLoader();
+    await preferences.setBool(loudnessOnlyWhileChargingKey, enabled);
   }
 
   Future<PlaneModeStrength> getPlaneModeStrength() async {
@@ -173,6 +199,7 @@ class AppSettingsService {
       autoDownloadWithMobileDataKey,
       pauseOnAudioInterruptionKey,
       evenOutVolumeKey,
+      loudnessOnlyWhileChargingKey,
     ]) {
       final value = values[key];
       if (value is bool) {
@@ -184,6 +211,11 @@ class AppSettingsService {
     if (strength is String &&
         PlaneModeStrength.values.any((s) => s.name == strength)) {
       await preferences.setString(planeModeStrengthKey, strength);
+      applied++;
+    }
+    final mode = values[evenOutModeKey];
+    if (mode is String && EvenOutMode.values.any((m) => m.name == mode)) {
+      await preferences.setString(evenOutModeKey, mode);
       applied++;
     }
     if (applied > 0) await scheduleAutoUpdate();

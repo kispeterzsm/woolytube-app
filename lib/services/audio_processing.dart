@@ -28,6 +28,34 @@ enum PlaneModeStrength {
   };
 }
 
+/// How "Even out volume" levels songs.
+enum EvenOutMode {
+  /// About the level YouTube and Spotify play at. Quiet songs are turned up
+  /// too; a limiter keeps them from clipping when their peaks leave no room.
+  normal,
+
+  /// A lower level that never needs a limiter: quiet songs are turned up
+  /// only as far as their peaks allow. The phone volume has to go up a bit.
+  quiet;
+
+  /// The stored name; unknown names read as [normal].
+  static EvenOutMode fromName(String? name) => EvenOutMode.values.firstWhere(
+    (m) => m.name == name,
+    orElse: () => normal,
+  );
+
+  String get label => switch (this) {
+    normal => 'Normal',
+    quiet => 'Quiet',
+  };
+
+  /// The loudness songs are brought to, LUFS.
+  double get targetLufs => switch (this) {
+    normal => -14.0,
+    quiet => -18.0,
+  };
+}
+
 /// A song's measured loudness (see the loudness analyzer in the yt-dlp
 /// plugin). Any value can be missing: a silent file has no loudness.
 class MeasuredLoudness {
@@ -64,11 +92,13 @@ class AudioProcessingSettings {
   final bool planeMode;
   final PlaneModeStrength strength;
   final bool evenOutVolume;
+  final EvenOutMode evenOutMode;
 
   const AudioProcessingSettings({
     this.planeMode = false,
     this.strength = PlaneModeStrength.standard,
     this.evenOutVolume = false,
+    this.evenOutMode = EvenOutMode.normal,
   });
 
   /// Whether songs need their loudness measured.
@@ -78,10 +108,12 @@ class AudioProcessingSettings {
     bool? planeMode,
     PlaneModeStrength? strength,
     bool? evenOutVolume,
+    EvenOutMode? evenOutMode,
   }) => AudioProcessingSettings(
     planeMode: planeMode ?? this.planeMode,
     strength: strength ?? this.strength,
     evenOutVolume: evenOutVolume ?? this.evenOutVolume,
+    evenOutMode: evenOutMode ?? this.evenOutMode,
   );
 
   @override
@@ -89,10 +121,12 @@ class AudioProcessingSettings {
       other is AudioProcessingSettings &&
       other.planeMode == planeMode &&
       other.strength == strength &&
-      other.evenOutVolume == evenOutVolume;
+      other.evenOutVolume == evenOutVolume &&
+      other.evenOutMode == evenOutMode;
 
   @override
-  int get hashCode => Object.hash(planeMode, strength, evenOutVolume);
+  int get hashCode =>
+      Object.hash(planeMode, strength, evenOutVolume, evenOutMode);
 }
 
 /// What mpv gets for one file: its audio filter chain (the `af` option) and
@@ -128,6 +162,10 @@ class AudioProcessingPlan {
 /// other filter.
 const planeModeFilterLabel = 'plane';
 
+/// mpv's label for the filter "Even out volume" uses to turn a quiet song
+/// up past its peak headroom. Never in the chain together with plane mode's.
+const evenOutFilterLabel = 'evenout';
+
 /// Loudness every song is brought to before the compressor, so its
 /// threshold means the same on every song. LUFS.
 const _compressorInputLufs = -20.0;
@@ -155,19 +193,15 @@ const _maxCabinCutDb = -3.0;
 /// room for the peaks between samples that a sample-peak limiter misses.
 const _limiterCeilingDb = -1.5;
 
-/// "Even out volume" brings songs to this loudness, LUFS: what YouTube and
-/// Spotify's normal setting play at.
-const evenOutTargetLufs = -14.0;
-
 /// "Even out volume" turns loud songs down by at most this much, dB.
 const _maxEvenOutCutDb = -20.0;
 
-/// ... and quiet songs up by at most this much, never past their peak
-/// headroom (it has no limiter). dB.
-const _maxEvenOutBoostDb = 6.0;
+/// ... and quiet songs up by at most this much, dB.
+const _maxEvenOutBoostDb = 10.0;
 
-/// Headroom kept above a song's peak when "Even out volume" turns it up, dB.
-const _evenOutPeakMarginDb = 1.0;
+/// Highest a song's samples may reach after "Even out volume" turned it up,
+/// dBFS: the peak headroom of a plain gain, and the limiter's ceiling.
+const _evenOutCeilingDb = -1.0;
 
 class _CompressorPreset {
   final double thresholdDb;
@@ -235,25 +269,48 @@ AudioProcessingPlan planAudioProcessing(
     );
   }
   if (settings.evenOutVolume) {
-    return AudioProcessingPlan(gainDb: evenOutGainDb(loudness));
+    return evenOutPlan(settings.evenOutMode, loudness);
   }
   return AudioProcessingPlan.none;
 }
 
-/// The gain "Even out volume" gives a song: down to [evenOutTargetLufs], or
-/// up towards it as far as the song's peaks allow. 0 when unmeasured.
-double evenOutGainDb(MeasuredLoudness? loudness) {
+/// What "Even out volume" does to a song: brings it to [mode]'s target.
+///
+/// Cuts, and boosts that keep the song's peaks under -1 dBFS, are a plain
+/// gain (mpv applies it with a hard clip). A bigger boost is only made in
+/// [EvenOutMode.normal], through a volume filter and a limiter that holds
+/// the peaks at -1 dBFS; [EvenOutMode.quiet] stops at the peaks instead.
+/// Unmeasured and silent songs are left as they are.
+AudioProcessingPlan evenOutPlan(EvenOutMode mode, MeasuredLoudness? loudness) {
   final integrated = loudness?.integratedLufs;
-  if (integrated == null) return 0;
-  final gain = evenOutTargetLufs - integrated;
-  if (gain <= 0) return gain < _maxEvenOutCutDb ? _maxEvenOutCutDb : gain;
-  // mpv applies this gain with a hard clip, so a song is only turned up as
-  // far as its loudest sample allows.
+  if (integrated == null) return AudioProcessingPlan.none;
+  final wanted = _clamp(
+    mode.targetLufs - integrated,
+    _maxEvenOutCutDb,
+    _maxEvenOutBoostDb,
+  );
+  if (wanted <= 0) return AudioProcessingPlan(gainDb: wanted);
   final peak = loudness!.peakDb;
-  if (peak == null) return 0;
-  final headroom = -_evenOutPeakMarginDb - peak;
-  final limit = headroom < _maxEvenOutBoostDb ? headroom : _maxEvenOutBoostDb;
-  return limit <= 0 ? 0 : _clamp(gain, 0, limit);
+  final headroom = peak == null ? 0.0 : _evenOutCeilingDb - peak;
+  if (wanted <= headroom) return AudioProcessingPlan(gainDb: wanted);
+  return switch (mode) {
+    EvenOutMode.quiet => AudioProcessingPlan(
+      gainDb: headroom > 0 ? headroom : 0,
+    ),
+    EvenOutMode.normal => AudioProcessingPlan(
+      filters: evenOutLimiterFilters(wanted),
+    ),
+  };
+}
+
+/// mpv's `af` value that turns a song up by [gainDb] and limits its peaks.
+String evenOutLimiterFilters(double gainDb) {
+  final graph = [
+    'volume=${_db(gainDb)}',
+    'alimiter=limit=${_number(_evenOutCeilingDb)}dB'
+        ':attack=5:release=50:level=disabled',
+  ].join(',');
+  return '@$evenOutFilterLabel:lavfi=[$graph]';
 }
 
 /// mpv's `af` value for plane mode on a song of [loudness].

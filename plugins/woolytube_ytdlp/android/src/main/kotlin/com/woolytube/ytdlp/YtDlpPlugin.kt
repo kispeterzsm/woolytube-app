@@ -2,6 +2,7 @@ package com.woolytube.ytdlp
 
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.BatteryManager
 import android.os.Handler
 import android.os.Looper
@@ -52,6 +53,13 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         /** How long Dart gets to stop a run cleanly before native kills it. */
         private const val CANCEL_FALLBACK_MS = 3_000L
         private const val TASK_REMOVED_FALLBACK_MS = 1_500L
+
+        /**
+         * Longest one loudness analysis may take, waiting for the lock
+         * included. A 4-minute song takes a few seconds; a multi-hour video
+         * a few minutes.
+         */
+        private const val LOUDNESS_TIMEOUT_MS = 15 * 60_000L
 
         private val activeProcessIds = ConcurrentHashMap.newKeySet<String>()
 
@@ -242,7 +250,7 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "decodeAudioWindow" -> handleDecodeAudioWindow(call.arguments as Map<*, *>, result)
             "probeMediaDurationMs" -> handleProbeMediaDuration(call.arguments as Map<*, *>, result)
             "analyzeLoudness" -> handleAnalyzeLoudness(call.arguments as? Map<*, *>, result)
-            "isCharging" -> result.success(isCharging())
+            "isPluggedIn" -> result.success(isPluggedIn())
             else -> result.notImplemented()
         }
     }
@@ -952,11 +960,32 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     }
 
     /**
-     * Whether the phone is charging. Measuring a whole library's loudness
-     * waits for this; true when it cannot be told.
+     * Whether the phone is on a charger. Measuring a whole library's
+     * loudness waits for this; true when it cannot be told.
+     *
+     * Not [BatteryManager.isCharging]: that is false while the battery level
+     * stays put on the charger, which a charge limit (ASUS steady charging,
+     * Android's adaptive charging) does for hours.
      */
-    private fun isCharging(): Boolean = try {
-        (context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager).isCharging
+    private fun isPluggedIn(): Boolean = try {
+        val battery = context.registerReceiver(
+            null,
+            IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+        )
+        if (battery == null) {
+            true
+        } else {
+            val plugged = battery.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1)
+            val status = battery.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+            when {
+                plugged > 0 -> true
+                status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                    status == BatteryManager.BATTERY_STATUS_FULL -> true
+                // Neither was reported.
+                plugged < 0 && status < 0 -> true
+                else -> false
+            }
+        }
     } catch (e: Exception) {
         Log.w(TAG, "Cannot read the charging state", e)
         true
@@ -970,10 +999,14 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         }
         scope.launch {
             try {
-                // Dart asks for one track at a time too, but the background
-                // worker's engine has its own Dart side.
-                val loudness = loudnessMutex.withLock {
-                    LoudnessAnalyzer.analyze(path) { ensureActive() }
+                // Covers waiting for the lock too, so a decode that hangs
+                // cannot hold up every later file for good.
+                val loudness = withTimeout(LOUDNESS_TIMEOUT_MS) {
+                    // Dart asks for one track at a time too, but the
+                    // background worker's engine has its own Dart side.
+                    loudnessMutex.withLock {
+                        LoudnessAnalyzer.analyze(path) { ensureActive() }
+                    }
                 }
                 withContext(Dispatchers.Main) {
                     result.success(
@@ -985,7 +1018,24 @@ class YtDlpPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                         )
                     )
                 }
+            } catch (e: TimeoutCancellationException) {
+                Log.w(TAG, "Loudness analysis timed out: $path")
+                withContext(Dispatchers.Main) {
+                    result.error(
+                        "ANALYZE_TIMEOUT",
+                        "No result after ${LOUDNESS_TIMEOUT_MS / 60_000} min",
+                        null
+                    )
+                }
             } catch (e: CancellationException) {
+                // The engine went away. Still answer, so Dart never waits
+                // for this call; it may already be gone.
+                mainHandler.post {
+                    try {
+                        result.error("CANCELLED", "Loudness analysis cancelled", null)
+                    } catch (_: Throwable) {
+                    }
+                }
                 throw e
             } catch (e: Throwable) {
                 // Also an OutOfMemoryError or a codec Error: Dart gets an
