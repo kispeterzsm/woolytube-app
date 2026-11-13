@@ -219,6 +219,32 @@ void main() {
     },
   );
 
+  test(
+    'Don\'t shuffle survives an edit, and Default clears the choice',
+    () async {
+      Future<bool?> stored() async =>
+          ChapterData.decode(
+            (await db.getTrack(track.id))!.chaptersJson,
+          ).shuffleChapters;
+      await service.refresh(track);
+      expect(await stored(), isNull);
+      await service.setShuffleChapters(track, false);
+      await service.save(
+        track,
+        const MediaChapter(
+          id: 'custom',
+          title: 'Custom',
+          startMs: 60000,
+          endMs: 90000,
+        ),
+        durationMs: 120000,
+      );
+      expect(await stored(), isFalse);
+      await service.setShuffleChapters(track, null);
+      expect(await stored(), isNull);
+    },
+  );
+
   test('rejects overlaps and out-of-file custom chapters', () async {
     await service.refresh(track);
     await expectLater(
@@ -416,8 +442,12 @@ void main() {
       await database.customStatement(
         'ALTER TABLE playlists DROP COLUMN lyrics_mode',
       );
-      // Added in schema 19.
-      for (final column in ['download_subtitles', 'subtitle_languages']) {
+      // Added in schemas 19 and 20.
+      for (final column in [
+        'download_subtitles',
+        'subtitle_languages',
+        'shuffle_chapters',
+      ]) {
         await database.customStatement(
           'ALTER TABLE playlists DROP COLUMN $column',
         );

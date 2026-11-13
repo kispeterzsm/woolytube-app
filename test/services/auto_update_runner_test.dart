@@ -40,6 +40,7 @@ Playlist _playlist(
   sortOrder: id,
   isTemporary: false,
   downloadSubtitles: false,
+  shuffleChapters: false,
 );
 
 /// yt-dlp that starts without a platform channel and counts the start.

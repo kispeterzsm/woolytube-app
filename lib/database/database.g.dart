@@ -293,6 +293,21 @@ class $PlaylistsTable extends Playlists
         type: DriftSqlType.string,
         requiredDuringInsert: false,
       );
+  static const VerificationMeta _shuffleChaptersMeta = const VerificationMeta(
+    'shuffleChapters',
+  );
+  @override
+  late final GeneratedColumn<bool> shuffleChapters = GeneratedColumn<bool>(
+    'shuffle_chapters',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("shuffle_chapters" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
   @override
   List<GeneratedColumn> get $columns => [
     playChapters,
@@ -318,6 +333,7 @@ class $PlaylistsTable extends Playlists
     lyricsMode,
     downloadSubtitles,
     subtitleLanguages,
+    shuffleChapters,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -516,6 +532,15 @@ class $PlaylistsTable extends Playlists
         ),
       );
     }
+    if (data.containsKey('shuffle_chapters')) {
+      context.handle(
+        _shuffleChaptersMeta,
+        shuffleChapters.isAcceptableOrUnknown(
+          data['shuffle_chapters']!,
+          _shuffleChaptersMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -632,6 +657,11 @@ class $PlaylistsTable extends Playlists
         DriftSqlType.string,
         data['${effectivePrefix}subtitle_languages'],
       ),
+      shuffleChapters:
+          attachedDatabase.typeMapping.read(
+            DriftSqlType.bool,
+            data['${effectivePrefix}shuffle_chapters'],
+          )!,
     );
   }
 
@@ -689,6 +719,10 @@ class Playlist extends DataClass implements Insertable<Playlist> {
   /// matches en-US and en-GB); null = English. See
   /// `normalizeSubtitleLanguages`.
   final String? subtitleLanguages;
+
+  /// When shuffle is on, play each file's chapters in random order. A file
+  /// can choose for itself (`ChapterData.shuffleChapters`).
+  final bool shuffleChapters;
   const Playlist({
     this.playChapters,
     required this.id,
@@ -713,6 +747,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     this.lyricsMode,
     required this.downloadSubtitles,
     this.subtitleLanguages,
+    required this.shuffleChapters,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -758,6 +793,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     if (!nullToAbsent || subtitleLanguages != null) {
       map['subtitle_languages'] = Variable<String>(subtitleLanguages);
     }
+    map['shuffle_chapters'] = Variable<bool>(shuffleChapters);
     return map;
   }
 
@@ -810,6 +846,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
           subtitleLanguages == null && nullToAbsent
               ? const Value.absent()
               : Value(subtitleLanguages),
+      shuffleChapters: Value(shuffleChapters),
     );
   }
 
@@ -854,6 +891,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
       subtitleLanguages: serializer.fromJson<String?>(
         json['subtitleLanguages'],
       ),
+      shuffleChapters: serializer.fromJson<bool>(json['shuffleChapters']),
     );
   }
   @override
@@ -887,6 +925,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
       'lyricsMode': serializer.toJson<String?>(lyricsMode),
       'downloadSubtitles': serializer.toJson<bool>(downloadSubtitles),
       'subtitleLanguages': serializer.toJson<String?>(subtitleLanguages),
+      'shuffleChapters': serializer.toJson<bool>(shuffleChapters),
     };
   }
 
@@ -914,6 +953,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     Value<String?> lyricsMode = const Value.absent(),
     bool? downloadSubtitles,
     Value<String?> subtitleLanguages = const Value.absent(),
+    bool? shuffleChapters,
   }) => Playlist(
     playChapters: playChapters.present ? playChapters.value : this.playChapters,
     id: id ?? this.id,
@@ -947,6 +987,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
         subtitleLanguages.present
             ? subtitleLanguages.value
             : this.subtitleLanguages,
+    shuffleChapters: shuffleChapters ?? this.shuffleChapters,
   );
   Playlist copyWithCompanion(PlaylistsCompanion data) {
     return Playlist(
@@ -1014,6 +1055,10 @@ class Playlist extends DataClass implements Insertable<Playlist> {
           data.subtitleLanguages.present
               ? data.subtitleLanguages.value
               : this.subtitleLanguages,
+      shuffleChapters:
+          data.shuffleChapters.present
+              ? data.shuffleChapters.value
+              : this.shuffleChapters,
     );
   }
 
@@ -1042,7 +1087,8 @@ class Playlist extends DataClass implements Insertable<Playlist> {
           ..write('isTemporary: $isTemporary, ')
           ..write('lyricsMode: $lyricsMode, ')
           ..write('downloadSubtitles: $downloadSubtitles, ')
-          ..write('subtitleLanguages: $subtitleLanguages')
+          ..write('subtitleLanguages: $subtitleLanguages, ')
+          ..write('shuffleChapters: $shuffleChapters')
           ..write(')'))
         .toString();
   }
@@ -1072,6 +1118,7 @@ class Playlist extends DataClass implements Insertable<Playlist> {
     lyricsMode,
     downloadSubtitles,
     subtitleLanguages,
+    shuffleChapters,
   ]);
   @override
   bool operator ==(Object other) =>
@@ -1100,7 +1147,8 @@ class Playlist extends DataClass implements Insertable<Playlist> {
           other.isTemporary == this.isTemporary &&
           other.lyricsMode == this.lyricsMode &&
           other.downloadSubtitles == this.downloadSubtitles &&
-          other.subtitleLanguages == this.subtitleLanguages);
+          other.subtitleLanguages == this.subtitleLanguages &&
+          other.shuffleChapters == this.shuffleChapters);
 }
 
 class PlaylistsCompanion extends UpdateCompanion<Playlist> {
@@ -1127,6 +1175,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
   final Value<String?> lyricsMode;
   final Value<bool> downloadSubtitles;
   final Value<String?> subtitleLanguages;
+  final Value<bool> shuffleChapters;
   const PlaylistsCompanion({
     this.playChapters = const Value.absent(),
     this.id = const Value.absent(),
@@ -1151,6 +1200,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     this.lyricsMode = const Value.absent(),
     this.downloadSubtitles = const Value.absent(),
     this.subtitleLanguages = const Value.absent(),
+    this.shuffleChapters = const Value.absent(),
   });
   PlaylistsCompanion.insert({
     this.playChapters = const Value.absent(),
@@ -1176,6 +1226,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     this.lyricsMode = const Value.absent(),
     this.downloadSubtitles = const Value.absent(),
     this.subtitleLanguages = const Value.absent(),
+    this.shuffleChapters = const Value.absent(),
   }) : url = Value(url),
        name = Value(name),
        createdAt = Value(createdAt),
@@ -1204,6 +1255,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     Expression<String>? lyricsMode,
     Expression<bool>? downloadSubtitles,
     Expression<String>? subtitleLanguages,
+    Expression<bool>? shuffleChapters,
   }) {
     return RawValuesInsertable({
       if (playChapters != null) 'play_chapters': playChapters,
@@ -1233,6 +1285,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
       if (lyricsMode != null) 'lyrics_mode': lyricsMode,
       if (downloadSubtitles != null) 'download_subtitles': downloadSubtitles,
       if (subtitleLanguages != null) 'subtitle_languages': subtitleLanguages,
+      if (shuffleChapters != null) 'shuffle_chapters': shuffleChapters,
     });
   }
 
@@ -1260,6 +1313,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     Value<String?>? lyricsMode,
     Value<bool>? downloadSubtitles,
     Value<String?>? subtitleLanguages,
+    Value<bool>? shuffleChapters,
   }) {
     return PlaylistsCompanion(
       playChapters: playChapters ?? this.playChapters,
@@ -1287,6 +1341,7 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
       lyricsMode: lyricsMode ?? this.lyricsMode,
       downloadSubtitles: downloadSubtitles ?? this.downloadSubtitles,
       subtitleLanguages: subtitleLanguages ?? this.subtitleLanguages,
+      shuffleChapters: shuffleChapters ?? this.shuffleChapters,
     );
   }
 
@@ -1366,6 +1421,9 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
     if (subtitleLanguages.present) {
       map['subtitle_languages'] = Variable<String>(subtitleLanguages.value);
     }
+    if (shuffleChapters.present) {
+      map['shuffle_chapters'] = Variable<bool>(shuffleChapters.value);
+    }
     return map;
   }
 
@@ -1394,7 +1452,8 @@ class PlaylistsCompanion extends UpdateCompanion<Playlist> {
           ..write('isTemporary: $isTemporary, ')
           ..write('lyricsMode: $lyricsMode, ')
           ..write('downloadSubtitles: $downloadSubtitles, ')
-          ..write('subtitleLanguages: $subtitleLanguages')
+          ..write('subtitleLanguages: $subtitleLanguages, ')
+          ..write('shuffleChapters: $shuffleChapters')
           ..write(')'))
         .toString();
   }
@@ -5480,6 +5539,7 @@ typedef $$PlaylistsTableCreateCompanionBuilder =
       Value<String?> lyricsMode,
       Value<bool> downloadSubtitles,
       Value<String?> subtitleLanguages,
+      Value<bool> shuffleChapters,
     });
 typedef $$PlaylistsTableUpdateCompanionBuilder =
     PlaylistsCompanion Function({
@@ -5506,6 +5566,7 @@ typedef $$PlaylistsTableUpdateCompanionBuilder =
       Value<String?> lyricsMode,
       Value<bool> downloadSubtitles,
       Value<String?> subtitleLanguages,
+      Value<bool> shuffleChapters,
     });
 
 final class $$PlaylistsTableReferences
@@ -5653,6 +5714,11 @@ class $$PlaylistsTableFilterComposer
 
   ColumnFilters<String> get subtitleLanguages => $composableBuilder(
     column: $table.subtitleLanguages,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get shuffleChapters => $composableBuilder(
+    column: $table.shuffleChapters,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -5805,6 +5871,11 @@ class $$PlaylistsTableOrderingComposer
     column: $table.subtitleLanguages,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<bool> get shuffleChapters => $composableBuilder(
+    column: $table.shuffleChapters,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$PlaylistsTableAnnotationComposer
@@ -5919,6 +5990,11 @@ class $$PlaylistsTableAnnotationComposer
     builder: (column) => column,
   );
 
+  GeneratedColumn<bool> get shuffleChapters => $composableBuilder(
+    column: $table.shuffleChapters,
+    builder: (column) => column,
+  );
+
   Expression<T> tracksRefs<T extends Object>(
     Expression<T> Function($$TracksTableAnnotationComposer a) f,
   ) {
@@ -5997,6 +6073,7 @@ class $$PlaylistsTableTableManager
                 Value<String?> lyricsMode = const Value.absent(),
                 Value<bool> downloadSubtitles = const Value.absent(),
                 Value<String?> subtitleLanguages = const Value.absent(),
+                Value<bool> shuffleChapters = const Value.absent(),
               }) => PlaylistsCompanion(
                 playChapters: playChapters,
                 id: id,
@@ -6021,6 +6098,7 @@ class $$PlaylistsTableTableManager
                 lyricsMode: lyricsMode,
                 downloadSubtitles: downloadSubtitles,
                 subtitleLanguages: subtitleLanguages,
+                shuffleChapters: shuffleChapters,
               ),
           createCompanionCallback:
               ({
@@ -6048,6 +6126,7 @@ class $$PlaylistsTableTableManager
                 Value<String?> lyricsMode = const Value.absent(),
                 Value<bool> downloadSubtitles = const Value.absent(),
                 Value<String?> subtitleLanguages = const Value.absent(),
+                Value<bool> shuffleChapters = const Value.absent(),
               }) => PlaylistsCompanion.insert(
                 playChapters: playChapters,
                 id: id,
@@ -6072,6 +6151,7 @@ class $$PlaylistsTableTableManager
                 lyricsMode: lyricsMode,
                 downloadSubtitles: downloadSubtitles,
                 subtitleLanguages: subtitleLanguages,
+                shuffleChapters: shuffleChapters,
               ),
           withReferenceMapper:
               (p0) =>

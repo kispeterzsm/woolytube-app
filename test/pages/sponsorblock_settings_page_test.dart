@@ -184,6 +184,7 @@ class _Playlists implements PlaylistService {
     bool? audioOnly,
     bool? autoUpdate,
     bool? playChapters,
+    bool? shuffleChapters,
     int? updateFrequencyHours,
     bool? includeThumbnails,
     bool? sponsorBlockEnabled,

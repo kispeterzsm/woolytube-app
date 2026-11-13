@@ -69,6 +69,11 @@ class Playlists extends Table {
   /// matches en-US and en-GB); null = English. See
   /// `normalizeSubtitleLanguages`.
   TextColumn get subtitleLanguages => text().nullable()();
+
+  /// When shuffle is on, play each file's chapters in random order. A file
+  /// can choose for itself (`ChapterData.shuffleChapters`).
+  BoolColumn get shuffleChapters =>
+      boolean().withDefault(const Constant(false))();
 }
 
 class Tracks extends Table {
@@ -281,7 +286,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 19;
+  int get schemaVersion => 20;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -416,6 +421,13 @@ class AppDatabase extends _$AppDatabase {
       if (from < 19) {
         await migrator.addColumn(playlists, playlists.downloadSubtitles);
         await migrator.addColumn(playlists, playlists.subtitleLanguages);
+        await customStatement(
+          'DROP TRIGGER IF EXISTS trg_rev_playlists_update',
+        );
+        await _createRevisionTracking();
+      }
+      if (from < 20) {
+        await migrator.addColumn(playlists, playlists.shuffleChapters);
         await customStatement(
           'DROP TRIGGER IF EXISTS trg_rev_playlists_update',
         );

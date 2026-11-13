@@ -90,7 +90,8 @@ class ChapterService {
     await persist(track.playlistId);
   }
 
-  Future<void> setShuffleChapters(Track track, bool enabled) async {
+  /// [enabled] null follows the playlist's "Shuffle chapters".
+  Future<void> setShuffleChapters(Track track, bool? enabled) async {
     final fresh = await db.getTrack(track.id);
     if (fresh == null) return;
     await _writeChapters(

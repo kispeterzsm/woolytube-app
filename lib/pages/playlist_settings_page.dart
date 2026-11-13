@@ -997,6 +997,29 @@ class _PlaylistSettingsPageState extends ConsumerState<PlaylistSettingsPage> {
                               ),
                             ),
                   ),
+                  // Stays usable with chapters off: videos set to play as
+                  // chapters on their Chapters page still follow it.
+                  SwitchListTile(
+                    key: const ValueKey('playlist-shuffle-chapters'),
+                    secondary: const SizedBox(width: 24),
+                    title: const Text('Shuffle chapters'),
+                    subtitle: const Text(
+                      'When shuffle is on, the chapters of a video also play '
+                      'in random order. A video can choose for itself on its '
+                      'Chapters page',
+                    ),
+                    value: playlist.shuffleChapters,
+                    onChanged:
+                        busy
+                            ? null
+                            : (value) => _update(
+                              playlist.copyWith(shuffleChapters: value),
+                              (playlists) => playlists.updatePlaylistSettings(
+                                id: playlist.id,
+                                shuffleChapters: value,
+                              ),
+                            ),
+                  ),
                   SwitchListTile(
                     key: const ValueKey('playlist-sponsorblock'),
                     secondary: const Icon(Icons.fast_forward_outlined),

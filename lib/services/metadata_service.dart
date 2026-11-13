@@ -171,6 +171,9 @@ class DiscoveredPlaylist {
   /// `Playlists.subtitleLanguages`: tidied codes, or null (English).
   final String? subtitleLanguages;
 
+  /// `Playlists.shuffleChapters`.
+  final bool shuffleChapters;
+
   DiscoveredPlaylist({
     required this.folderPath,
     required this.url,
@@ -193,6 +196,7 @@ class DiscoveredPlaylist {
     this.lyricsMode,
     this.downloadSubtitles = false,
     this.subtitleLanguages,
+    this.shuffleChapters = false,
   });
 }
 
@@ -1856,6 +1860,7 @@ for video) to keep a complete backup.
           lyricsMode: Value(discovered.lyricsMode),
           downloadSubtitles: Value(discovered.downloadSubtitles),
           subtitleLanguages: Value(discovered.subtitleLanguages),
+          shuffleChapters: Value(discovered.shuffleChapters),
         ),
       );
 
@@ -2124,6 +2129,7 @@ for video) to keep a complete backup.
       downloadSubtitles: pl['downloadSubtitles'] == true,
       // A hand-edited list must not reach yt-dlp unchecked.
       subtitleLanguages: subtitleLanguagesOrNull(pl['subtitleLanguages']),
+      shuffleChapters: pl['shuffleChapters'] == true,
     );
   }
 
@@ -2330,6 +2336,7 @@ String buildSidecarJson(
       if (playlist.downloadSubtitles) 'downloadSubtitles': true,
       if (playlist.subtitleLanguages != null)
         'subtitleLanguages': playlist.subtitleLanguages,
+      if (playlist.shuffleChapters) 'shuffleChapters': true,
     },
     'tracks': tracksJson,
   };

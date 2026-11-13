@@ -664,6 +664,66 @@ void main() {
       },
     );
 
+    test('a file follows the playlist\'s Shuffle chapters unless it '
+        'chose for itself', () async {
+      final ten = ChapterData(
+        downloaded: [
+          for (var i = 0; i < 10; i++)
+            MediaChapter(
+              id: 'c$i',
+              title: 'Song $i',
+              startMs: i * 6000,
+              endMs: (i + 1) * 6000,
+            ),
+        ],
+      );
+      final inOrder = [for (var i = 0; i < 10; i++) 'Song $i'];
+      final album = await addTrack('album', chapters: ten);
+      final first = await addTrack('first');
+      playback.setShuffleEnabled(true);
+      await settle();
+
+      // The playlist default is off: the tapped file plays in order.
+      await playback.playTrack(album, [album]);
+      expect(playback.queue.map((t) => t.title), inOrder);
+
+      await db.updatePlaylistFields(
+        playlist.id,
+        const PlaylistsCompanion(shuffleChapters: Value(true)),
+      );
+      await playback.playTrack(album, [album]);
+      expect(playback.queue.map((t) => t.title), isNot(inOrder));
+      expect(playback.queue.map((t) => t.title), unorderedEquals(inOrder));
+
+      // Don't shuffle on the file wins over the playlist.
+      await db.writeTrackChapters(album.id, ten.withShuffleChapters(false));
+      final ordered = (await db.getTrack(album.id))!;
+      await playback.playTrack(ordered, [ordered]);
+      expect(playback.queue.map((t) => t.title), inOrder);
+
+      // Back to Default; a change reaches a file that has not started.
+      await db.writeTrackChapters(album.id, ten);
+      await db.updatePlaylistFields(
+        playlist.id,
+        const PlaylistsCompanion(shuffleChapters: Value(false)),
+      );
+      await playback.playTrack(first, [first, album]);
+      await db.updatePlaylistFields(
+        playlist.id,
+        const PlaylistsCompanion(shuffleChapters: Value(true)),
+      );
+      await playback.playlistSettingsChanged(playlist.id);
+      await playback.next();
+      await settle();
+      expect(playback.currentTrack!.id, album.id);
+      final played = [
+        for (final t in playback.queue)
+          if (t.id == album.id) t.title,
+      ];
+      expect(played, unorderedEquals(inOrder));
+      expect(played, isNot(inOrder));
+    });
+
     test('continuing chapters change without reopening the file', () async {
       final album = await addTrack('album', chapters: _threeChapters);
       await playback.playTrack(album, [album]);

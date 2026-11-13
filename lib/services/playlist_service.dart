@@ -624,6 +624,7 @@ class PlaylistService {
     bool? audioOnly,
     bool? autoUpdate,
     bool? playChapters,
+    bool? shuffleChapters,
     int? updateFrequencyHours,
     bool? includeThumbnails,
     bool? sponsorBlockEnabled,
@@ -662,6 +663,10 @@ class PlaylistService {
       autoUpdate: autoUpdate != null ? Value(autoUpdate) : const Value.absent(),
       playChapters:
           playChapters != null ? Value(playChapters) : const Value.absent(),
+      shuffleChapters:
+          shuffleChapters != null
+              ? Value(shuffleChapters)
+              : const Value.absent(),
       updateFrequencyHours:
           updateFrequencyHours != null
               ? Value(updateFrequencyHours)

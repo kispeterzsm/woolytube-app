@@ -46,6 +46,70 @@ void main() {
     });
   });
 
+  group('shuffle chapters', () {
+    test('Default, Shuffle and Don\'t shuffle round-trip', () {
+      for (final value in [null, true, false]) {
+        final data = ChapterData(
+          downloaded: youtube,
+        ).withShuffleChapters(value);
+        expect(data.shuffleChapters, value);
+        final back = ChapterData.decode(data.encode());
+        expect(back.shuffleChapters, value, reason: '$value');
+        expect(back.encode(), data.encode());
+      }
+    });
+
+    test('older versions still read the bool they know', () {
+      Map<String, dynamic> json(bool? value) =>
+          ChapterData(shuffleChapters: value).toJson();
+      expect(json(null)['shuffleChapters'], isFalse);
+      expect(json(null).containsKey('shuffleChaptersMode'), isFalse);
+      expect(json(true)['shuffleChapters'], isTrue);
+      expect(json(true)['shuffleChaptersMode'], 'shuffle');
+      expect(json(false)['shuffleChapters'], isFalse);
+      expect(json(false)['shuffleChaptersMode'], 'noShuffle');
+    });
+
+    test('data from older versions: on is Shuffle, off is Default', () {
+      expect(
+        ChapterData.decode('{"shuffleChapters":true}').shuffleChapters,
+        isTrue,
+      );
+      expect(
+        ChapterData.decode('{"shuffleChapters":false}').shuffleChapters,
+        isNull,
+      );
+      expect(ChapterData.decode('{"downloaded":[]}').shuffleChapters, isNull);
+      // The new key wins over the bool.
+      expect(
+        ChapterData.decode(
+          '{"shuffleChapters":false,"shuffleChaptersMode":"noShuffle"}',
+        ).shuffleChapters,
+        isFalse,
+      );
+      expect(
+        ChapterData.decode(
+          '{"shuffleChapters":false,"shuffleChaptersMode":"shuffle"}',
+        ).shuffleChapters,
+        isTrue,
+      );
+      // An unknown mode falls back to the bool.
+      expect(
+        ChapterData.decode(
+          '{"shuffleChapters":true,"shuffleChaptersMode":"sometimes"}',
+        ).shuffleChapters,
+        isTrue,
+      );
+    });
+
+    test('the choice is kept through copyWith and invalidate', () {
+      const off = ChapterData(shuffleChapters: false);
+      expect(off.copyWith(valid: false).shuffleChapters, isFalse);
+      expect(off.invalidate().shuffleChapters, isFalse);
+      expect(off.copyWith(shuffleChapters: null).shuffleChapters, isNull);
+    });
+  });
+
   test('every recognition field survives a round trip', () {
     final data = ChapterData(
       downloaded: youtube,

@@ -176,6 +176,34 @@ void main() {
     expect(find.text('detail marker'), findsOneWidget);
   });
 
+  testWidgets('Shuffle chapters is off by default, saves at once and stays '
+      'usable with chapters off', (tester) async {
+    final playlist = await insertTestPlaylist(
+      db,
+      outputPath: tempDir.path,
+      playChapters: false,
+    );
+    await pumpStack(tester, playlist.id);
+
+    final row = find.byKey(const ValueKey('playlist-shuffle-chapters'));
+    expect(tester.widget<SwitchListTile>(row).value, isFalse);
+    // Videos set to play as chapters still follow it.
+    expect(tester.widget<SwitchListTile>(row).onChanged, isNotNull);
+    expect(
+      find.descendant(
+        of: row,
+        matching: find.textContaining('When shuffle is on'),
+      ),
+      findsOneWidget,
+    );
+
+    await tapRow(tester, 'playlist-shuffle-chapters');
+    expect((await db.getPlaylist(playlist.id)).shuffleChapters, isTrue);
+    expect(playlists.calls.single, {'shuffleChapters': true});
+    expect(player.settingsChanged, [playlist.id]);
+    expect(tester.widget<SwitchListTile>(row).value, isTrue);
+  });
+
   testWidgets('a failed save puts the switch back and says why', (
     tester,
   ) async {
@@ -1169,6 +1197,7 @@ class _Playlists implements PlaylistService {
     bool? audioOnly,
     bool? autoUpdate,
     bool? playChapters,
+    bool? shuffleChapters,
     int? updateFrequencyHours,
     bool? includeThumbnails,
     bool? sponsorBlockEnabled,
@@ -1185,6 +1214,7 @@ class _Playlists implements PlaylistService {
       if (audioOnly != null) 'audioOnly': audioOnly,
       if (autoUpdate != null) 'autoUpdate': autoUpdate,
       if (playChapters != null) 'playChapters': playChapters,
+      if (shuffleChapters != null) 'shuffleChapters': shuffleChapters,
       if (updateFrequencyHours != null)
         'updateFrequencyHours': updateFrequencyHours,
       if (includeThumbnails != null) 'includeThumbnails': includeThumbnails,
@@ -1210,6 +1240,7 @@ class _Playlists implements PlaylistService {
             includeThumbnails: includeThumbnails,
             sponsorBlockEnabled: sponsorBlockEnabled,
             downloadSubtitles: downloadSubtitles,
+            shuffleChapters: shuffleChapters,
             sponsorBlockCategoryActions:
                 sponsorBlockCategoryActions == null
                     ? null

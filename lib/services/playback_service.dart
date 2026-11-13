@@ -841,7 +841,9 @@ class PlaybackService
       }
       // Every chapter of it is marked Always skip.
       if (items.isEmpty) continue;
-      groups.add(PlaybackAlbum(items));
+      groups.add(
+        PlaybackAlbum(items, playlistShuffleChapters: playlist.shuffleChapters),
+      );
     }
     return groups;
   }
@@ -897,7 +899,10 @@ class PlaybackService
     if (items.isEmpty) return false;
     // A step that is rolled back meanwhile keeps this (see
     // [AlbumPlaybackQueue.restore]).
-    _albumQueue.enqueue(PlaybackAlbum(items), first: first);
+    _albumQueue.enqueue(
+      PlaybackAlbum(items, playlistShuffleChapters: playlist.shuffleChapters),
+      first: first,
+    );
     _publishQueue();
     return true;
   }
@@ -1700,7 +1705,10 @@ class PlaybackService
       if (track.playlistId != playlistId) return null;
       final row = fresh[track.id];
       if (row == null) return null;
-      return PlaybackAlbum(chapterPlaybackItems(row, playlist));
+      return PlaybackAlbum(
+        chapterPlaybackItems(row, playlist),
+        playlistShuffleChapters: playlist.shuffleChapters,
+      );
     });
     _publishQueue();
   });

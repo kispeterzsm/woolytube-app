@@ -847,9 +847,13 @@ void main() {
     );
     await old.customStatement('ALTER TABLE lyrics_docs DROP COLUMN shift_ms');
     await old.customStatement('ALTER TABLE lyrics_docs DROP COLUMN timing_off');
-    // Added in schema 19, with the trigger that names them.
+    // Added in schemas 19 and 20, with the trigger that names them.
     await old.customStatement('DROP TRIGGER trg_rev_playlists_update');
-    for (final column in ['download_subtitles', 'subtitle_languages']) {
+    for (final column in [
+      'download_subtitles',
+      'subtitle_languages',
+      'shuffle_chapters',
+    ]) {
       await old.customStatement('ALTER TABLE playlists DROP COLUMN $column');
     }
     await old.customStatement('PRAGMA user_version = 16');

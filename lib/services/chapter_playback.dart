@@ -91,13 +91,22 @@ List<PlaybackItem> chapterPlaybackItems(
 /// without items: [trackId] reads the first.
 class PlaybackAlbum {
   final List<PlaybackItem> items;
-  PlaybackAlbum(Iterable<PlaybackItem> items) : items = List.of(items);
+
+  /// The playlist's "Shuffle chapters" (`Playlist.shuffleChapters`), which
+  /// a file without its own choice follows.
+  final bool playlistShuffleChapters;
+  PlaybackAlbum(
+    Iterable<PlaybackItem> items, {
+    this.playlistShuffleChapters = false,
+  }) : items = List.of(items);
   int get trackId => items.first.track.id;
 
-  /// Read once per album; a single-item album has nothing to shuffle.
+  /// Read once per album; a single-item album (a file played whole) has
+  /// nothing to shuffle.
   late final bool shuffleChapters =
       items.length > 1 &&
-      ChapterData.decode(items.first.track.chaptersJson).shuffleChapters;
+      (ChapterData.decode(items.first.track.chaptersJson).shuffleChapters ??
+          playlistShuffleChapters);
 }
 
 /// An opaque copy of an [AlbumPlaybackQueue]'s position, used to undo a step

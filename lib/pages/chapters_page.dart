@@ -23,6 +23,10 @@ import 'recognition_review_page.dart';
 /// How one file plays: as the playlist says, as chapters or as one track.
 enum _PlayAs { playlistDefault, chapters, wholeFile }
 
+/// Whether one file's chapters shuffle (when shuffle is on): as the
+/// playlist says, always or never.
+enum _ShuffleChapters { playlistDefault, shuffle, noShuffle }
+
 /// A video's chapters: how it plays, the chapter list, per-chapter queueing
 /// and Always skip, and editing them in the chapter editor while listening.
 class ChaptersPage extends ConsumerStatefulWidget {
@@ -351,8 +355,12 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
     await _afterEdit(track);
   }
 
-  Future<void> _setShuffle(Track track, bool enabled) async {
-    await _chapters.setShuffleChapters(track, enabled);
+  Future<void> _setShuffle(Track track, _ShuffleChapters mode) async {
+    await _chapters.setShuffleChapters(track, switch (mode) {
+      _ShuffleChapters.playlistDefault => null,
+      _ShuffleChapters.shuffle => true,
+      _ShuffleChapters.noShuffle => false,
+    });
     await _afterEdit(track);
   }
 
@@ -495,7 +503,9 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                 'itself is never changed.\n\n'
                 'With shuffle on, all chapters of a video play before the '
                 'next video is picked. Shuffle chapters mixes their order '
-                'too.\n\n'
+                'too. Default follows the playlist\'s "Shuffle chapters" '
+                'setting; Shuffle and Don\'t shuffle decide for this video '
+                'alone.\n\n'
                 'Edit chapters opens the editor: pick a boundary, listen on '
                 'both sides of it and drag the waveform or nudge it until it '
                 'sits exactly where the song changes. Split here adds a '
@@ -612,6 +622,7 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
               context,
               track,
               playlistChapters,
+              playlistSnapshot.data?.shuffleChapters ?? false,
               playlistSnapshot.data?.lyricsMode,
             );
           },
@@ -624,6 +635,7 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
     BuildContext context,
     Track track,
     bool playlistChapters,
+    bool playlistShuffle,
     String? lyricsMode,
   ) {
     final data = ChapterData.decode(track.chaptersJson);
@@ -638,6 +650,11 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
       false => _PlayAs.wholeFile,
     };
     final chaptersOn = track.chaptersEnabled ?? playlistChapters;
+    final shuffleMode = switch (data.shuffleChapters) {
+      null => _ShuffleChapters.playlistDefault,
+      true => _ShuffleChapters.shuffle,
+      false => _ShuffleChapters.noShuffle,
+    };
     final durationMs = ChapterService.knownDurationMs(track);
 
     return Scaffold(
@@ -753,21 +770,56 @@ class _ChaptersPageState extends ConsumerState<ChaptersPage> {
                     ),
                   ),
                 ),
-                if (data.active.isNotEmpty)
-                  SwitchListTile(
-                    key: const ValueKey('chapters-shuffle'),
-                    title: const Text('Shuffle chapters'),
-                    subtitle: const Text(
-                      'When shuffle is on, play this video\'s chapters in '
-                      'random order',
+                if (data.active.isNotEmpty) ...[
+                  const SettingsSectionHeader('Shuffle chapters'),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                    child: SizedBox(
+                      width: double.infinity,
+                      child: SegmentedButton<_ShuffleChapters>(
+                        key: const ValueKey('chapters-shuffle'),
+                        showSelectedIcon: false,
+                        segments: const [
+                          ButtonSegment(
+                            value: _ShuffleChapters.playlistDefault,
+                            label: Text('Default'),
+                          ),
+                          ButtonSegment(
+                            value: _ShuffleChapters.shuffle,
+                            label: Text('Shuffle'),
+                          ),
+                          ButtonSegment(
+                            value: _ShuffleChapters.noShuffle,
+                            label: Text('Don\'t shuffle'),
+                          ),
+                        ],
+                        selected: {shuffleMode},
+                        // A file that plays whole has no chapters to mix.
+                        onSelectionChanged:
+                            _busy || !chaptersOn
+                                ? null
+                                : (selection) => _run(
+                                  () => _setShuffle(track, selection.first),
+                                ),
+                      ),
                     ),
-                    value: data.shuffleChapters,
-                    onChanged:
-                        _busy
-                            ? null
-                            : (enabled) =>
-                                _run(() => _setShuffle(track, enabled)),
                   ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+                    child: Text(
+                      chaptersOn
+                          ? 'Applies when shuffle is on. Default follows the '
+                              'playlist setting "Shuffle chapters", which is '
+                              '${playlistShuffle ? 'on' : 'off'}.'
+                          : 'This video plays as one whole file, so its '
+                              'chapters can\'t be shuffled.',
+                      style: const TextStyle(
+                        color: Color(0xFF999999),
+                        fontSize: 13,
+                      ),
+                    ),
+                  ),
+                ],
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 20, 4, 0),
                   child: Row(

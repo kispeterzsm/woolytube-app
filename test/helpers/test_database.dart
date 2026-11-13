@@ -30,6 +30,7 @@ Future<Playlist> insertTestPlaylist(
   String? lyricsMode,
   bool downloadSubtitles = false,
   String? subtitleLanguages,
+  bool shuffleChapters = false,
 }) async {
   final id = await db.insertPlaylist(
     PlaylistsCompanion.insert(
@@ -54,6 +55,7 @@ Future<Playlist> insertTestPlaylist(
       lyricsMode: Value(lyricsMode),
       downloadSubtitles: Value(downloadSubtitles),
       subtitleLanguages: Value(subtitleLanguages),
+      shuffleChapters: Value(shuffleChapters),
     ),
   );
   return db.getPlaylist(id);

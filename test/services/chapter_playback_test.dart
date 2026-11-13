@@ -251,6 +251,7 @@ void main() {
   });
 
   test('chapter shuffle is opt-in and only applies with playlist shuffle', () {
+    // Don't shuffle stays in order even when the playlist would shuffle.
     final source = albums.first.items.first.track;
     final ordered = PlaybackAlbum(
       chapterPlaybackItems(
@@ -263,6 +264,7 @@ void main() {
         ),
         playlist,
       ),
+      playlistShuffleChapters: true,
     );
     final shuffledOrders = <String>{};
     for (var seed = 0; seed < 30; seed++) {
@@ -284,6 +286,71 @@ void main() {
       expect(linear.next()!.id, albums.first.items[1].id);
     }
     expect(shuffledOrders.length, greaterThan(1));
+  });
+
+  test('a file without its own choice follows the playlist', () {
+    final source = albums.first.items.first.track;
+    Track withChoice(bool? value) => source.copyWith(
+      chaptersJson: Value(
+        ChapterData.decode(
+          source.chaptersJson,
+        ).withShuffleChapters(value).encode(),
+      ),
+    );
+    bool shuffles(Track track, Playlist playlist) =>
+        PlaybackAlbum(
+          chapterPlaybackItems(track, playlist),
+          playlistShuffleChapters: playlist.shuffleChapters,
+        ).shuffleChapters;
+    for (final playlistDefault in [false, true]) {
+      final p = playlist.copyWith(shuffleChapters: playlistDefault);
+      expect(shuffles(withChoice(null), p), playlistDefault);
+      expect(shuffles(withChoice(true), p), isTrue);
+      expect(shuffles(withChoice(false), p), isFalse);
+    }
+    // Without the playlist's choice an album does not shuffle on its own.
+    expect(
+      PlaybackAlbum(
+        chapterPlaybackItems(withChoice(null), playlist),
+      ).shuffleChapters,
+      isFalse,
+    );
+
+    // A file played whole has nothing to shuffle, whatever is chosen.
+    final both = playlist.copyWith(shuffleChapters: true);
+    for (final whole in [
+      withChoice(true).copyWith(chaptersEnabled: const Value(false)),
+      withChoice(null).copyWith(chaptersEnabled: const Value(false)),
+    ]) {
+      expect(shuffles(whole, both), isFalse);
+    }
+    expect(
+      shuffles(
+        withChoice(true),
+        both.copyWith(playChapters: const Value(false)),
+      ),
+      isFalse,
+    );
+    expect(
+      PlaybackAlbum(
+        chapterPlaybackItems(withChoice(true), both, whole: true),
+        playlistShuffleChapters: true,
+      ).shuffleChapters,
+      isFalse,
+    );
+
+    // The playlist default really mixes a file's chapters in the queue.
+    final orders = <String>{};
+    for (var seed = 0; seed < 30; seed++) {
+      final q = AlbumPlaybackQueue(random: Random(seed));
+      final album = PlaybackAlbum(
+        chapterPlaybackItems(withChoice(null), both),
+        playlistShuffleChapters: true,
+      );
+      final first = q.start([album], shuffled: true)!;
+      orders.add([first.id, q.next()!.id, q.next()!.id].join(','));
+    }
+    expect(orders.length, greaterThan(1));
   });
 
   test(

@@ -155,7 +155,10 @@ class ChapterData {
   final DateTime? checkedAt;
   final int? durationMs;
   final bool valid;
-  final bool shuffleChapters;
+
+  /// Shuffle this file's chapters when shuffle is on: null follows the
+  /// playlist's "Shuffle chapters" (`Playlists.shuffleChapters`).
+  final bool? shuffleChapters;
   final List<MediaChapter>? undoChapters;
 
   /// True when the state [undoChapters] was taken from followed the
@@ -177,7 +180,7 @@ class ChapterData {
     this.checkedAt,
     this.durationMs,
     this.valid = true,
-    this.shuffleChapters = false,
+    this.shuffleChapters,
     this.undoChapters,
     this.undoFollowsDownloaded = false,
     this.recognitionEpoch = 0,
@@ -207,7 +210,9 @@ class ChapterData {
 
   ChapterData withCustom(List<MediaChapter>? chapters) =>
       copyWith(custom: chapters);
-  ChapterData withShuffleChapters(bool enabled) =>
+
+  /// null goes back to the playlist's choice.
+  ChapterData withShuffleChapters(bool? enabled) =>
       copyWith(shuffleChapters: enabled);
   static const _unset = Object();
   ChapterData copyWith({
@@ -216,7 +221,7 @@ class ChapterData {
     DateTime? checkedAt,
     int? durationMs,
     bool? valid,
-    bool? shuffleChapters,
+    Object? shuffleChapters = _unset,
     Object? undoChapters = _unset,
     bool? undoFollowsDownloaded,
     int? recognitionEpoch,
@@ -229,7 +234,10 @@ class ChapterData {
     checkedAt: checkedAt ?? this.checkedAt,
     durationMs: durationMs ?? this.durationMs,
     valid: valid ?? this.valid,
-    shuffleChapters: shuffleChapters ?? this.shuffleChapters,
+    shuffleChapters:
+        identical(shuffleChapters, _unset)
+            ? this.shuffleChapters
+            : shuffleChapters as bool?,
     undoChapters:
         identical(undoChapters, _unset)
             ? this.undoChapters
@@ -278,7 +286,11 @@ class ChapterData {
       'checkedAt': checkedAt?.toUtc().toIso8601String(),
       'durationMs': durationMs,
       'valid': valid,
-      'shuffleChapters': shuffleChapters,
+      // What versions without a playlist default read: only "Shuffle"
+      // shuffles there.
+      'shuffleChapters': shuffleChapters == true,
+      if (shuffleChapters != null)
+        'shuffleChaptersMode': shuffleChapters! ? 'shuffle' : 'noShuffle',
       if (undoChapters != null) 'undoChapters': edited(undoChapters!),
       if (undoChapters != null && undoFollowsDownloaded)
         'undoFollowsDownloaded': true,
@@ -335,7 +347,13 @@ class ChapterData {
       durationMs:
           value['durationMs'] is int ? value['durationMs'] as int : null,
       valid: value['valid'] != false,
-      shuffleChapters: value['shuffleChapters'] == true,
+      shuffleChapters: switch (value['shuffleChaptersMode']) {
+        'shuffle' => true,
+        'noShuffle' => false,
+        // Older versions always wrote the bool, so false cannot tell "off
+        // on purpose" from "never touched"; it follows the playlist.
+        _ => value['shuffleChapters'] == true ? true : null,
+      },
       undoChapters:
           value['undoChapters'] == null
               ? null

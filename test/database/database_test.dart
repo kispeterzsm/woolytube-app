@@ -9,6 +9,65 @@ import 'package:woolytube/services/sponsorblock_categories.dart';
 import '../helpers/test_database.dart';
 
 void main() {
+  group('playlist shuffle chapters', () {
+    test('an existing database gets the column, off, on upgrade', () async {
+      final dir = await Directory.systemTemp.createTemp('woolytube-db19-');
+      addTearDown(() => dir.delete(recursive: true));
+      final file = File('${dir.path}/library.sqlite');
+      final fresh = AppDatabase.forTesting(NativeDatabase(file));
+      final playlist = await insertTestPlaylist(
+        fresh,
+        name: 'Mix',
+        downloadSubtitles: true,
+      );
+      const chapters =
+          '{"downloaded":[],"custom":null,"valid":true,'
+          '"shuffleChapters":true}';
+      final track = await insertTestTrack(
+        fresh,
+        playlistId: playlist.id,
+        chaptersJson: chapters,
+      );
+      // Make it look like a version 19 database: no shuffle_chapters, and
+      // the playlist trigger made without it.
+      final trigger = (await fresh
+              .customSelect(
+                'SELECT sql FROM sqlite_master '
+                "WHERE name = 'trg_rev_playlists_update'",
+              )
+              .getSingle())
+          .read<String>('sql');
+      expect(trigger, contains('"shuffle_chapters"'));
+      await fresh.customStatement('DROP TRIGGER trg_rev_playlists_update');
+      await fresh.customStatement(
+        'ALTER TABLE playlists DROP COLUMN shuffle_chapters',
+      );
+      await fresh.customStatement(
+        trigger.replaceAll(', "shuffle_chapters"', ''),
+      );
+      await fresh.customStatement('PRAGMA user_version = 19');
+      await fresh.close();
+
+      final upgraded = AppDatabase.forTesting(NativeDatabase(file));
+      addTearDown(upgraded.close);
+      final mix = await upgraded.getPlaylist(playlist.id);
+      expect(mix.shuffleChapters, isFalse);
+      expect(mix.name, 'Mix');
+      expect(mix.downloadSubtitles, isTrue);
+      // The file's own choice is left exactly as it was.
+      expect((await upgraded.getTrack(track.id))!.chaptersJson, chapters);
+
+      // The metadata file follows a change of the new column.
+      final revision = await upgraded.playlistRevision(playlist.id);
+      await upgraded.updatePlaylistFields(
+        playlist.id,
+        const PlaylistsCompanion(shuffleChapters: Value(true)),
+      );
+      expect(await upgraded.playlistRevision(playlist.id), revision + 1);
+      expect((await upgraded.getPlaylist(playlist.id)).shuffleChapters, isTrue);
+    });
+  });
+
   group('playlist subtitles', () {
     test('an existing database gets the columns, off, on upgrade', () async {
       final dir = await Directory.systemTemp.createTemp('woolytube-db18-');
@@ -22,8 +81,9 @@ void main() {
         name: 'Songs',
         audioOnly: true,
       );
-      // Make it look like a version 18 database: no subtitle columns, and
-      // the playlist trigger made without them.
+      // Make it look like a version 18 database: no subtitle columns (nor
+      // version 20's shuffle_chapters), and the playlist trigger made
+      // without them.
       final trigger = (await fresh
               .customSelect(
                 'SELECT sql FROM sqlite_master '
@@ -32,15 +92,21 @@ void main() {
               .getSingle())
           .read<String>('sql');
       await fresh.customStatement('DROP TRIGGER trg_rev_playlists_update');
-      for (final column in ['download_subtitles', 'subtitle_languages']) {
+      for (final column in [
+        'download_subtitles',
+        'subtitle_languages',
+        'shuffle_chapters',
+      ]) {
         await fresh.customStatement(
           'ALTER TABLE playlists DROP COLUMN $column',
         );
       }
       final oldTrigger = trigger
           .replaceAll(', "download_subtitles"', '')
-          .replaceAll(', "subtitle_languages"', '');
+          .replaceAll(', "subtitle_languages"', '')
+          .replaceAll(', "shuffle_chapters"', '');
       expect(oldTrigger, isNot(contains('subtitle')));
+      expect(oldTrigger, isNot(contains('shuffle')));
       await fresh.customStatement(oldTrigger);
       await fresh.customStatement('PRAGMA user_version = 18');
       await fresh.close();
@@ -113,9 +179,13 @@ void main() {
       );
       // Make it look like a version 17 (release 1.5.2) database.
       await fresh.customStatement('DROP TABLE loudness_measurements');
-      // Version 19 added the subtitle columns (and remade the trigger).
+      // Versions 19 and 20 added playlist columns (and remade the trigger).
       await fresh.customStatement('DROP TRIGGER trg_rev_playlists_update');
-      for (final column in ['download_subtitles', 'subtitle_languages']) {
+      for (final column in [
+        'download_subtitles',
+        'subtitle_languages',
+        'shuffle_chapters',
+      ]) {
         await fresh.customStatement(
           'ALTER TABLE playlists DROP COLUMN $column',
         );

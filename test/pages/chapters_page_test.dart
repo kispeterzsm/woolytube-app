@@ -133,6 +133,105 @@ void main() {
     await unmount(tester);
   });
 
+  group('Shuffle chapters', () {
+    Finder segment(String label) => find.descendant(
+      of: find.byKey(const ValueKey('chapters-shuffle')),
+      matching: find.text(label),
+    );
+    bool shuffleEnabled(WidgetTester tester) =>
+        (tester.widget(find.byKey(const ValueKey('chapters-shuffle')))
+                as dynamic)
+            .onSelectionChanged !=
+        null;
+
+    testWidgets('saves Default, Shuffle or Don\'t shuffle and names the '
+        'playlist setting', (tester) async {
+      final track = await addTrack(chapters: youTubeChapters);
+      await pumpPage(tester, track);
+
+      expect(shuffleEnabled(tester), isTrue);
+      expect(
+        find.textContaining('"Shuffle chapters", which is off'),
+        findsOneWidget,
+      );
+      expect((await storedChapters(track.id)).shuffleChapters, isNull);
+
+      await tester.tap(segment('Shuffle'));
+      await tester.pumpAndSettle();
+      expect((await storedChapters(track.id)).shuffleChapters, isTrue);
+      await tester.tap(segment('Don\'t shuffle'));
+      await tester.pumpAndSettle();
+      expect((await storedChapters(track.id)).shuffleChapters, isFalse);
+      await tester.tap(segment('Default'));
+      await tester.pumpAndSettle();
+      expect((await storedChapters(track.id)).shuffleChapters, isNull);
+      expect(player.chaptersChanged, [track.id, track.id, track.id]);
+
+      await db.updatePlaylistFields(
+        track.playlistId,
+        const PlaylistsCompanion(shuffleChapters: Value(true)),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('"Shuffle chapters", which is on'),
+        findsOneWidget,
+      );
+      await unmount(tester);
+    });
+
+    testWidgets('is greyed out while the file plays as a whole file', (
+      tester,
+    ) async {
+      final track = await addTrack(
+        chapters: youTubeChapters.withShuffleChapters(true),
+      );
+      await pumpPage(tester, track);
+      expect(shuffleEnabled(tester), isTrue);
+
+      await tester.tap(find.text('Whole file'));
+      await tester.pumpAndSettle();
+      expect(shuffleEnabled(tester), isFalse);
+      expect(find.textContaining('can\'t be shuffled'), findsOneWidget);
+      // A tap does nothing; the stored choice stays for later.
+      await tester.tap(segment('Don\'t shuffle'), warnIfMissed: false);
+      await tester.pumpAndSettle();
+      expect((await storedChapters(track.id)).shuffleChapters, isTrue);
+
+      // Default, with a playlist that plays whole files, is the same.
+      await db.updatePlaylistFields(
+        track.playlistId,
+        const PlaylistsCompanion(playChapters: Value(false)),
+      );
+      await tester.tap(
+        find.descendant(
+          of: find.byKey(const ValueKey('chapters-play-as')),
+          matching: find.text('Default'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(shuffleEnabled(tester), isFalse);
+
+      await tester.tap(
+        find.descendant(
+          of: find.byKey(const ValueKey('chapters-play-as')),
+          matching: find.text('Chapters'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect((await db.getTrack(track.id))!.chaptersEnabled, isTrue);
+      expect(shuffleEnabled(tester), isTrue);
+      expect(find.textContaining('can\'t be shuffled'), findsNothing);
+      await unmount(tester);
+    });
+
+    testWidgets('is not shown for a file without chapters', (tester) async {
+      final track = await addTrack();
+      await pumpPage(tester, track);
+      expect(find.byKey(const ValueKey('chapters-shuffle')), findsNothing);
+      await unmount(tester);
+    });
+  });
+
   testWidgets('deleting a chapter can be undone', (tester) async {
     final track = await addTrack(chapters: youTubeChapters);
     await pumpPage(tester, track);

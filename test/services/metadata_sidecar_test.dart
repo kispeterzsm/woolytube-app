@@ -86,6 +86,7 @@ void main() {
       videoQuality: 480,
       downloadSubtitles: true,
       subtitleLanguages: 'en.*,hu',
+      shuffleChapters: true,
     );
     final chapters =
         ChapterData(
@@ -454,6 +455,75 @@ void main() {
     (off['playlist'] as Map)['lyricsMode'] = 'karaoke';
     await file.writeAsString(jsonEncode(off));
     expect((await metadata.readFolder(folder))!.lyricsMode, isNull);
+  });
+
+  test('Shuffle chapters round-trips for the playlist and each file', () async {
+    final source = await insertTestPlaylist(
+      db,
+      outputPath: folder,
+      shuffleChapters: true,
+    );
+    const chapter = MediaChapter(id: 'a', title: 'A', startMs: 0, endMs: 1000);
+    final choices = {'default': null, 'shuffle': true, 'ordered': false};
+    var index = 1;
+    for (final entry in choices.entries) {
+      await insertTestTrack(
+        db,
+        playlistId: source.id,
+        index: index++,
+        videoId: entry.key,
+        title: entry.key,
+        chaptersJson:
+            const ChapterData(
+              downloaded: [chapter],
+            ).withShuffleChapters(entry.value).encode(),
+      );
+    }
+    await metadata.writeMetadata(
+      source,
+      await db.getTracksForPlaylist(source.id),
+    );
+    final file = File(p.join(folder, 'woolytube_meta.json'));
+    final sidecar =
+        jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+    expect((sidecar['playlist'] as Map)['shuffleChapters'], isTrue);
+    final written = {
+      for (final t in sidecar['tracks'] as List)
+        (t as Map)['videoId']: t['chapters'] as Map,
+    };
+    // Older versions read the bool: only Shuffle shuffles there.
+    expect(written['default']!['shuffleChapters'], isFalse);
+    expect(written['default']!.containsKey('shuffleChaptersMode'), isFalse);
+    expect(written['shuffle']!['shuffleChapters'], isTrue);
+    expect(written['ordered']!['shuffleChaptersMode'], 'noShuffle');
+
+    final fresh = openTestDatabase();
+    addTearDown(fresh.close);
+    final restore = MetadataService(fresh);
+    final id = await restore.importPlaylist(
+      (await restore.readFolder(folder))!,
+    );
+    expect((await fresh.getPlaylist(id)).shuffleChapters, isTrue);
+    final imported = {
+      for (final t in await fresh.getTracksForPlaylist(id))
+        t.videoId: ChapterData.decode(t.chaptersJson).shuffleChapters,
+    };
+    expect(imported, choices);
+
+    // Off is left out, and a sidecar without the key (an older version's)
+    // imports as off.
+    await db.updatePlaylistFields(
+      source.id,
+      const PlaylistsCompanion(shuffleChapters: Value(false)),
+    );
+    await metadata.writeMetadata(await db.getPlaylist(source.id), const []);
+    final off = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+    expect((off['playlist'] as Map).containsKey('shuffleChapters'), isFalse);
+    expect((await metadata.readFolder(folder))!.shuffleChapters, isFalse);
+    // Only true turns it on.
+    (off['playlist'] as Map)['shuffleChapters'] = 'yes';
+    await file.writeAsString(jsonEncode(off));
+    expect((await metadata.readFolder(folder))!.shuffleChapters, isFalse);
   });
 
   test('the subtitle choice round-trips and is left out when off', () async {
