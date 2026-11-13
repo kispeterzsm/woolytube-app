@@ -86,6 +86,7 @@ void main() {
   Future<void> pumpHome(
     WidgetTester tester, {
     List<Override> overrides = const [],
+    Stream<List<Track>> Function()? allTracks,
   }) async {
     tester.view.physicalSize = const Size(411 * 3, 800 * 3);
     tester.view.devicePixelRatio = 3;
@@ -97,7 +98,9 @@ void main() {
           playlistsProvider.overrideWith(
             (ref) => Stream.value(listed ?? playlists),
           ),
-          allTracksProvider.overrideWith((ref) => Stream.value(tracks)),
+          allTracksProvider.overrideWith(
+            (ref) => allTracks?.call() ?? Stream.value(tracks),
+          ),
           playlistTrackCountsStreamProvider.overrideWith(
             (ref) => Stream.value({
               playlists[0].id: const PlaylistCounts(
@@ -132,6 +135,30 @@ void main() {
 
   Finder card(int i) =>
       find.byKey(ValueKey('playlist-card-${playlists[i].id}'));
+
+  /// What the track options sheet needs: each playlist's tracks, from the
+  /// library the search shows.
+  final sheetOverrides = <Override>[
+    tracksProvider.overrideWith((ref, playlistId) {
+      final all = ref.watch(allTracksProvider).valueOrNull ?? const <Track>[];
+      return Stream.value([
+        for (final track in all)
+          if (track.playlistId == playlistId) track,
+      ]);
+    }),
+  ];
+
+  /// The title at the top of the open track options sheet.
+  String? sheetTitle(WidgetTester tester) =>
+      tester
+          .widget<Text>(find.byKey(const ValueKey('track-actions-title')))
+          .data;
+
+  Future<void> closeSheet(WidgetTester tester) async {
+    await tester.tapAt(const Offset(200, 20));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('track-actions-list')), findsNothing);
+  }
 
   testWidgets('cards show counts, the playing playlist and the queue', (
     tester,
@@ -1058,6 +1085,205 @@ void main() {
     expect(find.text('Retry'), findsOneWidget);
   });
 
+  testWidgets('search: a file found has the ⋮ of its playlist row, also '
+      'on a long press, and a chapter found opens the file', (tester) async {
+    final mix = await insertTestTrack(
+      db,
+      playlistId: playlists[0].id,
+      videoId: 'mix',
+      title: 'Vibe mix',
+      status: 'complete',
+      filePath: '/tmp/mix.m4a',
+    );
+    await db.writeTrackChapters(
+      mix.id,
+      const ChapterData(
+        downloaded: [
+          MediaChapter(id: 'intro', title: 'Intro', startMs: 0, endMs: 60000),
+          MediaChapter(
+            id: 'ko',
+            title: 'Föl földobott kő',
+            startMs: 60000,
+            endMs: 120000,
+          ),
+        ],
+      ),
+    );
+    tracks = [...tracks, (await db.getTrack(mix.id))!];
+    await pumpHome(tester, overrides: sheetOverrides);
+    await tester.tap(find.byTooltip('Search'));
+    await tester.pumpAndSettle();
+
+    // Every file listed has one.
+    await tester.enterText(find.byType(TextField), 'song');
+    await tester.pump();
+    for (final track in tracks.take(2)) {
+      final more = find.byKey(ValueKey('search-track-more-${track.id}'));
+      expect(
+        find.descendant(
+          of: find.byKey(ValueKey('search-track-${track.id}')),
+          matching: more,
+        ),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<IconButton>(
+              find.descendant(of: more, matching: find.byType(IconButton)),
+            )
+            .tooltip,
+        'Track options',
+      );
+    }
+
+    // Found by a chapter: the menu is the file's.
+    await tester.enterText(find.byType(TextField), 'foldobott');
+    await tester.pump();
+    final mixTile = find.byKey(ValueKey('search-track-${mix.id}'));
+    expect(
+      find.descendant(of: mixTile, matching: find.textContaining('Chapter: ')),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(ValueKey('search-track-more-${mix.id}')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('track-actions-list')), findsOneWidget);
+    expect(sheetTitle(tester), 'Vibe mix');
+    expect(playback.played, isNull);
+    await closeSheet(tester);
+
+    // A long press opens it too, as on the playlist page.
+    await tester.longPress(mixTile);
+    await tester.pumpAndSettle();
+    expect(sheetTitle(tester), 'Vibe mix');
+    expect(playback.played, isNull);
+    await closeSheet(tester);
+
+    // Playlists found keep their own settings, not a file's menu.
+    await tester.enterText(find.byType(TextField), 'playlist 1');
+    await tester.pump();
+    expect(find.text('Playlist 1', findRichText: true), findsOneWidget);
+    expect(find.byTooltip('Track options'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('search: a lyric line has the ⋮ of its file', (tester) async {
+    await db.writeTrackChapters(
+      tracks.first.id,
+      const ChapterData(
+        downloaded: [
+          MediaChapter(id: 'ch1', title: 'Opener', startMs: 0, endMs: 600000),
+          MediaChapter(
+            id: 'ch2',
+            title: 'Hey Brother',
+            startMs: 600000,
+            endMs: 900000,
+          ),
+        ],
+      ),
+    );
+    tracks = [(await db.getTrack(tracks.first.id))!, tracks.last];
+    playlists[1] = playlists[1].copyWith(lyricsMode: const Value('lyrics'));
+    lyrics.hits = [
+      LyricsHit(
+        trackId: tracks.first.id,
+        chapterId: 'ch2',
+        docId: 7,
+        lineId: 70,
+        lineNo: 1,
+        lineText: "There's an endless road to rediscover",
+        highlightRanges: const [LyricsHighlight(11, 18)],
+        positionMs: 605000,
+        score: 0.95,
+        kind: LyricsMode.lyrics,
+      ),
+    ];
+    await pumpHome(tester, overrides: sheetOverrides);
+    await tester.tap(find.byTooltip('Search'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('search-filter-lyrics')));
+    await tester.pump();
+    await tester.enterText(find.byType(TextField), 'endless road');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pump();
+
+    final tile = find.byKey(const ValueKey('search-lyrics-7'));
+    expect(
+      find.descendant(of: tile, matching: find.text('Hey Brother')),
+      findsOneWidget,
+    );
+    final more = find.descendant(
+      of: tile,
+      matching: find.byKey(const ValueKey('search-lyrics-more-7')),
+    );
+    expect(
+      tester
+          .widget<IconButton>(
+            find.descendant(of: more, matching: find.byType(IconButton)),
+          )
+          .tooltip,
+      'Track options',
+    );
+    await tester.tap(more);
+    await tester.pumpAndSettle();
+    // The file's menu, not the chapter's.
+    expect(sheetTitle(tester), 'Morning song');
+    expect(playback.played, isNull);
+    await closeSheet(tester);
+
+    await tester.longPress(tile);
+    await tester.pumpAndSettle();
+    expect(sheetTitle(tester), 'Morning song');
+    expect(playback.played, isNull);
+    await closeSheet(tester);
+  });
+
+  testWidgets('search: the ⋮ menu keeps working when its result goes away', (
+    tester,
+  ) async {
+    final library = StreamController<List<Track>>.broadcast();
+    addTearDown(library.close);
+    var current = tracks;
+    Stream<List<Track>> allTracks() async* {
+      yield current;
+      yield* library.stream;
+    }
+
+    await pumpHome(tester, overrides: sheetOverrides, allTracks: allTracks);
+    await tester.tap(find.byTooltip('Search'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'morning');
+    await tester.pump();
+    final morning = tracks.first;
+    await tester.tap(find.byKey(ValueKey('search-track-more-${morning.id}')));
+    await tester.pumpAndSettle();
+    expect(sheetTitle(tester), 'Morning song');
+
+    // Renamed while the sheet is open: the result no longer matches and
+    // goes; the sheet shows the new title.
+    current = [morning.copyWith(title: 'Sunrise'), tracks.last];
+    library.add(current);
+    await tester.pumpAndSettle();
+    expect(sheetTitle(tester), 'Sunrise');
+    await tester.tap(find.byKey(const ValueKey('track-actions-play-next')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('track-actions-list')), findsNothing);
+    expect(find.byKey(ValueKey('search-track-${morning.id}')), findsNothing);
+    expect(find.text('Nothing matches'), findsOneWidget);
+    // Its action still finishes, with its message.
+    expect(playback.playedNext, [morning.id]);
+    expect(find.text('Plays next'), findsOneWidget);
+
+    // Back under its new name, with its ⋮.
+    await tester.enterText(find.byType(TextField), 'sunrise');
+    await tester.pump();
+    expect(
+      find.byKey(ValueKey('search-track-more-${morning.id}')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   group('with the phone font', () {
     setUpAll(loadRoboto);
 
@@ -1122,6 +1348,161 @@ void main() {
       expect(title, findsOneWidget);
       expectNotCut(tester, title);
     });
+
+    testWidgets('search: the ⋮ of a file leaves its texts whole', (
+      tester,
+    ) async {
+      const title = 'Kaláka – Föl földobott kő (live at the Palace of Arts)';
+      final folk = (await insertTestPlaylist(
+        db,
+        url: 'list-folk',
+        name: 'Hungarian folk favourites',
+      )).copyWith(lyricsMode: const Value('lyrics'));
+      playlists.add(folk);
+      final set = await insertTestTrack(
+        db,
+        playlistId: folk.id,
+        index: 664,
+        videoId: 'folk',
+        title: title,
+        status: 'complete',
+        filePath: '/tmp/folk.m4a',
+        durationSeconds: 3725,
+        unavailableReason: 'private',
+      );
+      await db.writeTrackChapters(
+        set.id,
+        const ChapterData(
+          downloaded: [
+            MediaChapter(
+              id: 'a',
+              title: 'Föl földobott kő',
+              startMs: 0,
+              endMs: 300000,
+            ),
+            MediaChapter(
+              id: 'b',
+              title: 'Földobott kő (reprise)',
+              startMs: 300000,
+              endMs: 600000,
+            ),
+          ],
+        ),
+      );
+      tracks = [...tracks, (await db.getTrack(set.id))!];
+      lyrics.hits = [
+        LyricsHit(
+          trackId: set.id,
+          docId: 9,
+          lineId: 90,
+          lineNo: 1,
+          lineText: 'Föl földobott kő, földre esik',
+          highlightRanges: const [LyricsHighlight(4, 13)],
+          positionMs: 65000,
+          score: 0.9,
+          kind: LyricsMode.lyrics,
+        ),
+      ];
+      await pumpHome(tester);
+      usePhoneScreen(tester);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Search'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('search-filter-lyrics')));
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), 'földobott');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump();
+
+      final tile = find.byKey(ValueKey('search-track-${set.id}'));
+      final more = find.byKey(ValueKey('search-track-more-${set.id}'));
+      expect(tester.getRect(more).right, lessThanOrEqualTo(411));
+      expect(tester.getSize(more).height, greaterThanOrEqualTo(48));
+      expect(tester.getRect(more).left, greaterThan(tester.getRect(tile).left));
+      final texts = find.descendant(of: tile, matching: find.byType(RichText));
+      // Number, title, chapter line and playlist · status, all whole.
+      expectNotCut(tester, texts);
+      final titleLines = renderedLines(
+        find.descendant(
+          of: tile,
+          matching: find.text(title, findRichText: true),
+        ),
+      );
+      expect(titleLines.single, hasLength(2));
+
+      final lyricTile = find.byKey(const ValueKey('search-lyrics-9'));
+      expect(
+        tester
+            .getRect(find.byKey(const ValueKey('search-lyrics-more-9')))
+            .right,
+        lessThanOrEqualTo(411),
+      );
+      expectNotCut(
+        tester,
+        find.descendant(of: lyricTile, matching: find.byType(RichText)),
+      );
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('search: a long title on a lyric line is not cut by its ⋮', (
+      tester,
+    ) async {
+      const title =
+          'Kaláka és barátai – Föl földobott kő, teljes koncert a Művészetek '
+          'Palotájából (2019)';
+      final folk = (await insertTestPlaylist(
+        db,
+        url: 'list-folk-long',
+        name: 'Hungarian folk favourites',
+      )).copyWith(lyricsMode: const Value('lyrics'));
+      playlists.add(folk);
+      final set = await insertTestTrack(
+        db,
+        playlistId: folk.id,
+        index: 7,
+        videoId: 'folk-long',
+        title: title,
+        status: 'complete',
+        filePath: '/tmp/folk-long.m4a',
+        durationSeconds: 3725,
+      );
+      tracks = [...tracks, (await db.getTrack(set.id))!];
+      lyrics.hits = [
+        LyricsHit(
+          trackId: set.id,
+          docId: 11,
+          lineId: 110,
+          lineNo: 1,
+          lineText: 'Föl földobott kő, földre esik',
+          highlightRanges: const [LyricsHighlight(4, 13)],
+          positionMs: 3605000,
+          score: 0.9,
+          kind: LyricsMode.lyrics,
+        ),
+      ];
+      await pumpHome(tester);
+      usePhoneScreen(tester);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Search'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('search-filter-lyrics')));
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), 'esik');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump();
+
+      final lyricTile = find.byKey(const ValueKey('search-lyrics-11'));
+      final more = find.byKey(const ValueKey('search-lyrics-more-11'));
+      expect(tester.getSize(more).width, greaterThanOrEqualTo(44));
+      expect(tester.getRect(more).right, lessThanOrEqualTo(411));
+      expectNotCut(
+        tester,
+        find.descendant(of: lyricTile, matching: find.byType(RichText)),
+      );
+      expect(tester.takeException(), isNull);
+    });
   });
 }
 
@@ -1131,6 +1512,13 @@ class _Playback implements PlaybackService {
   Duration? playedStartAt;
   final playedEntries = <List<QueueEntry>>[];
   final enqueuedEntries = <List<QueueEntry>>[];
+  final playedNext = <int>[];
+
+  @override
+  Future<bool> playNext(Track track, {String? chapterId}) async {
+    playedNext.add(track.id);
+    return true;
+  }
 
   @override
   Future<void> playEntries(List<QueueEntry> entries) async =>
