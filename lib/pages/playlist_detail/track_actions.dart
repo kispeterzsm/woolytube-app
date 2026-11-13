@@ -283,40 +283,46 @@ class _TrackActions {
         value: alwaysSkip,
         onChanged: onAlwaysSkipChanged,
       ),
-      tile(
-        key: const ValueKey('track-actions-chapters'),
-        icon: Icons.list_alt,
-        title: 'Chapters…',
-        subtitle: 'Play, edit and skip chapters',
-        onTap: () {
-          close();
-          Navigator.of(
-            context,
-          ).push(MaterialPageRoute(builder: (_) => ChaptersPage(track: track)));
-        },
-      ),
-      tile(
-        key: const ValueKey('track-actions-lyrics'),
-        icon: Icons.lyrics_outlined,
-        title: lyricsMenuTitle(playlist?.lyricsMode),
-        subtitle: lyricsMenuSubtitle(playlist?.lyricsMode),
-        onTap: () {
-          close();
-          Navigator.of(
-            context,
-          ).push(MaterialPageRoute(builder: (_) => LyricsPage(track: track)));
-        },
-      ),
-      tile(
-        key: const ValueKey('track-actions-skip-segments'),
-        icon: Icons.bookmarks,
-        title: 'Skip segments…',
-        subtitle: 'See, edit or hide the parts that are skipped',
-        onTap: () {
-          close();
-          unawaited(_showSkipSegments(track));
-        },
-      ),
+      // Chapters, lyrics and skip segments are about the file: a track
+      // without one (not downloaded yet, failed, private, removed) gets them
+      // once it is downloaded.
+      if (isDownloaded)
+        tile(
+          key: const ValueKey('track-actions-chapters'),
+          icon: Icons.list_alt,
+          title: 'Chapters…',
+          subtitle: 'Play, edit and skip chapters',
+          onTap: () {
+            close();
+            Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => ChaptersPage(track: track)),
+            );
+          },
+        ),
+      if (isDownloaded)
+        tile(
+          key: const ValueKey('track-actions-lyrics'),
+          icon: Icons.lyrics_outlined,
+          title: lyricsMenuTitle(playlist?.lyricsMode),
+          subtitle: lyricsMenuSubtitle(playlist?.lyricsMode),
+          onTap: () {
+            close();
+            Navigator.of(
+              context,
+            ).push(MaterialPageRoute(builder: (_) => LyricsPage(track: track)));
+          },
+        ),
+      if (isDownloaded)
+        tile(
+          key: const ValueKey('track-actions-skip-segments'),
+          icon: Icons.bookmarks,
+          title: 'Skip segments…',
+          subtitle: 'See, edit or hide the parts that are skipped',
+          onTap: () {
+            close();
+            unawaited(_showSkipSegments(track));
+          },
+        ),
       const _SheetSection('File'),
       tile(
         key: const ValueKey('track-actions-rename'),

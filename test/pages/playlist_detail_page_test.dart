@@ -2265,6 +2265,117 @@ void main() {
       expectNotCut(tester, problems);
     });
 
+    testWidgets('a track without a file offers no file actions', (
+      tester,
+    ) async {
+      usePhoneScreen(tester);
+      var index = 0;
+      Future<Track> track(
+        String status, {
+        String? unavailableReason,
+        String? lastError,
+      }) {
+        index++;
+        return insertTestTrack(
+          db,
+          playlistId: playlist.id,
+          index: index,
+          videoId: 'video-$index',
+          title: 'Song $index',
+          status: status,
+          filePath: status == 'complete' ? '/tmp/$index.m4a' : null,
+          unavailableReason: unavailableReason,
+          lastError: lastError,
+        );
+      }
+
+      final failed = await track(
+        'error',
+        lastError: 'ERROR: [youtube] x: HTTP Error 403: Forbidden',
+      );
+      final private = await track('unavailable', unavailableReason: 'private');
+      final removed = await track(
+        'unavailable',
+        unavailableReason: removedFromYouTubeReason,
+      );
+      final pending = await track('pending');
+      final downloaded = await track('complete');
+      final keptRemoved = await track(
+        'complete',
+        unavailableReason: removedFromYouTubeReason,
+      );
+      await pumpPage(
+        tester,
+        tracks: [failed, private, removed, pending, downloaded, keptRemoved],
+      );
+
+      const fileActions = [
+        'track-actions-chapters',
+        'track-actions-lyrics',
+        'track-actions-skip-segments',
+      ];
+      Future<void> openSheet(Track track) async {
+        final more = find.byKey(ValueKey('track-more-${track.id}'));
+        await tester.scrollUntilVisible(more, 200);
+        await tester.tap(more);
+        await tester.pumpAndSettle();
+      }
+
+      Future<void> closeSheet() async {
+        await tester.tapAt(const Offset(200, 40));
+        await tester.pumpAndSettle();
+      }
+
+      Future<void> scrollSheetTo(String key) => tester.scrollUntilVisible(
+        find.byKey(ValueKey(key)),
+        200,
+        scrollable: find.descendant(
+          of: find.byType(BottomSheet),
+          matching: find.byType(Scrollable),
+        ),
+      );
+
+      for (final track in [failed, private, removed, pending]) {
+        await openSheet(track);
+        for (final key in fileActions) {
+          expect(find.byKey(ValueKey(key)), findsNothing, reason: key);
+        }
+        // What still makes sense stays.
+        await scrollSheetTo('track-actions-open-youtube');
+        expect(
+          find.byKey(const ValueKey('track-actions-open-youtube')),
+          findsOneWidget,
+        );
+        await closeSheet();
+      }
+
+      // Retry and its reason, whole on a 411 dp phone.
+      await openSheet(failed);
+      final retry = find.byKey(const ValueKey('track-actions-download'));
+      expect(
+        find.descendant(of: retry, matching: find.text('Retry download')),
+        findsOneWidget,
+      );
+      expectNotCut(tester, retry);
+      await closeSheet();
+      await openSheet(removed);
+      expect(
+        find.byKey(const ValueKey('track-actions-retry-removed-now')),
+        findsOneWidget,
+      );
+      await closeSheet();
+
+      // A track with a file keeps them, a kept removed one too.
+      for (final track in [downloaded, keptRemoved]) {
+        await openSheet(track);
+        for (final key in fileActions) {
+          await scrollSheetTo(key);
+          expect(find.byKey(ValueKey(key)), findsOneWidget, reason: key);
+        }
+        await closeSheet();
+      }
+    });
+
     testWidgets('an Always skip track keeps its grey line whole', (
       tester,
     ) async {
