@@ -963,7 +963,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                         (tracks) => Column(
                           children: [
                             _buildHeader(_viewFor(tracks), playlist),
-                            _SummaryLine(_viewFor(tracks).summary),
+                            _SummaryLine(_viewFor(tracks)),
                             _RunStatus(playlistId: widget.playlistId),
                             Expanded(child: _buildTrackList(_viewFor(tracks))),
                           ],
@@ -1804,21 +1804,31 @@ class _UpdateControl extends ConsumerWidget {
 }
 
 /// "669 tracks · all downloaded · 41 h 12 min" under Play and Update, the
-/// full width of the page, so it is never cut.
+/// full width of the page, so it is never cut. While searching it counts
+/// the results instead ("3 tracks", like the library search), so the line
+/// under Play all never describes the whole playlist; nothing when no
+/// track matches (the list says so).
 class _SummaryLine extends StatelessWidget {
-  const _SummaryLine(this.summary);
+  const _SummaryLine(this.view);
 
-  final String summary;
+  final _TrackListView view;
 
   @override
   Widget build(BuildContext context) {
+    final searching = !view.query.isEmpty;
+    final count = view.hits.length;
+    if (searching && count == 0) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
       child: Align(
         alignment: Alignment.centerLeft,
         child: Text(
-          summary,
-          key: const ValueKey('playlist-detail-summary'),
+          searching ? (count == 1 ? '1 track' : '$count tracks') : view.summary,
+          key: ValueKey(
+            searching
+                ? 'playlist-search-result-count'
+                : 'playlist-detail-summary',
+          ),
           style: const TextStyle(color: _muted, fontSize: 12),
         ),
       ),

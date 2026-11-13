@@ -288,6 +288,7 @@ void main() {
       filePath: '/tmp/other.m4a',
     );
     await pumpPage(tester, tracks: [album, other]);
+    expect(find.text('2 tracks · all downloaded'), findsOneWidget);
 
     await tester.tap(find.byTooltip('Search tracks'));
     await tester.pumpAndSettle();
@@ -295,6 +296,24 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Another file'), findsNothing);
     expect(find.textContaining('1:20 · Hidden Melody'), findsOneWidget);
+    // Under Play all: the results, not the whole playlist.
+    expect(find.byKey(const ValueKey('playlist-detail-summary')), findsNothing);
+    expect(
+      tester
+          .widget<Text>(
+            find.byKey(const ValueKey('playlist-search-result-count')),
+          )
+          .data,
+      '1 track',
+    );
+    await tester.enterText(find.byType(TextField), 'nothing like this');
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('playlist-search-result-count')),
+      findsNothing,
+    );
+    await tester.enterText(find.byType(TextField), 'melody');
+    await tester.pumpAndSettle();
     // Play all plays only the chapter found, not the whole album.
     await tester.tap(find.text('Play all'));
     await tester.pump();
