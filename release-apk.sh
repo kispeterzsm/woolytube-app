@@ -72,7 +72,11 @@ if [[ "$CURRENT_BRANCH" == "HEAD" ]]; then
 fi
 
 IFS=. read -r MAJOR MINOR PATCH <<<"$VERSION"
-BUILD_NUMBER=$((10#$MAJOR * 10000 + 10#$MINOR * 100 + 10#$PATCH))
+# Android only installs an update with a higher build number. Up to 1.6.0
+# this was MAJOR*10000 + MINOR*100 + PATCH (1.5.3 = 10503), which local
+# builds numbered 12503 had already passed; from 1.6.0 it is
+# MAJOR*100000 + MINOR*1000 + PATCH (1.6.0 = 106000), above all of those.
+BUILD_NUMBER=$((10#$MAJOR * 100000 + 10#$MINOR * 1000 + 10#$PATCH))
 if (( BUILD_NUMBER <= 0 )); then
   BUILD_NUMBER=1
 fi
